@@ -72,6 +72,18 @@ only when the unit file itself changed.
 Every commit, push, tag and GitHub write is `b10x-bot[bot]` through `b10x-gates bot --repository
 beyond10x/slot` and `b10x-gates api`. Never push, tag or write to GitHub as a person.
 
+`main` takes changes only through a pull request whose required checks passed
+(`common / Security and privacy`, `gate`, `Build documentation`); a direct push is refused.
+
+1. Push a branch as the bot and open the PR with `b10x-gates gh --repo . --repository
+   beyond10x/slot -- pr create --base main --head <branch> --title … --body-file <file>`.
+2. `gh pr checks <n> -R beyond10x/slot --required --watch`.
+3. Merge as the bot with a merge commit through the API: `{"merge_method":"merge","sha":"<head>"}`
+   to `PUT /repos/beyond10x/slot/pulls/<n>/merge` with `b10x-gates api`. `gh pr merge` refuses
+   (it reads the merge state without the bot's bypass), and a rebase merge makes GitHub the
+   committer, which the identity ruleset rejects.
+4. Tags go on the merge commit on `main`, pushed as the bot.
+
 ## Release
 
 Bare SemVer tags (`0.1.0`).
