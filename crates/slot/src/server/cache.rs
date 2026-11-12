@@ -312,9 +312,9 @@ mod tests {
     fn nothing_is_evicted_under_budget_and_floor() {
         let (_d, c) = cache();
         make(&c, "a", "r", 1, 10);
-        assert!(
-            c.evict_with(100, 1, &HashSet::new(), || Some(50))
-                .is_empty()
+        assert_eq!(
+            c.evict_with(100, 1, &HashSet::new(), || Some(50)),
+            Vec::new()
         );
         assert_eq!(c.evict_with(0, 0, &HashSet::new(), || Some(0)), Vec::new());
     }
