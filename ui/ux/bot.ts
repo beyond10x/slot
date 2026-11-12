@@ -95,6 +95,16 @@ export async function play(page: Page, run: Opened, task: Task, mode: Mode): Pro
     const shown = task.expect.every((e) => text.includes(e));
     r.done = shown;
     if (!shown) r.notes.push(`pane lacks: ${task.expect.filter((e) => !text.includes(e)).join(', ')}`);
+    // The control the user clicked should stay in sight next to its output, not under the pane or the header.
+    const hidden = await target.evaluate((el) => {
+      const b = el.getBoundingClientRect();
+      const x = b.left + b.width / 2;
+      const y = b.top + b.height / 2;
+      if (y < 0 || y > innerHeight) return true;
+      const hit = document.elementFromPoint(x, y);
+      return !hit || !(hit === el || el.contains(hit) || hit.contains(el));
+    });
+    if (hidden) r.notes.push(`job ${id}: its control is out of sight once the output opens`);
     return r;
   }
 
@@ -138,6 +148,22 @@ export async function play(page: Page, run: Opened, task: Task, mode: Mode): Pro
     return r;
   }
 
+  if (task.kind === 'see') {
+    const found = page.getByText(task.expect, { exact: false }).first();
+    if ((await found.count()) === 0) {
+      r.notes.push(`no text "${task.expect}" on the page`);
+      return r;
+    }
+    const g = await glance(found);
+    r.looks += g;
+    if (g === 3) {
+      await found.scrollIntoViewIfNeeded();
+      r.actions++;
+      r.time_to_act_steps++;
+    }
+    r.done = true;
+    return r;
+  }
   const id = String(task.job);
   const row = page
     .getByRole('row')

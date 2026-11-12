@@ -84,6 +84,9 @@ onUnmounted(() => ro?.disconnect());
       title="Call mode: a call uses the microphone or the camera, so the headroom is raised; it goes back 2 min after the call. Moving the slider now keeps your value.">
       call · {{ store.callApps.join(', ') }}</span>
     <span v-if="store.headroomError" class="bad">{{ store.headroomError }}</span>
+    <span v-if="store.upgrade" class="upgrade" data-ux-region="upgrade" role="status"
+      title="The daemon re-executes a new binary at the first moment no job runs; until then it may hold new jobs.">
+      {{ store.upgrade }}</span>
     <span>running <b>{{ running }}</b></span>
     <span data-ux-region="queue">queue <b>{{ queue.length }}</b> · longest wait <b>{{ fmtDur(queue.longestS) }}</b></span>
     <span :title="`slot wait (start - enqueue) of ${waits.n} jobs finished in the last 60 min; gave up = cancelled while queued`">
@@ -115,6 +118,7 @@ b { font-variant-numeric: tabular-nums; }
 .headroom label { display: inline-flex; gap: 6px; align-items: center; }
 .headroom input { width: 110px; }
 .call { padding: 1px 7px; border-radius: 9px; background: #e6f0ff; color: #1d4f91; }
+.upgrade { padding: 1px 7px; border-radius: 9px; background: #fff3d6; color: #6b4500; }
 .presets { display: inline-flex; gap: 2px; }
 .presets button { min-width: 24px; min-height: 24px; padding: 0 6px; border: 1px solid #bbb; border-radius: 3px; background: #fff;
   color: var(--fg); cursor: pointer; font-variant-numeric: tabular-nums; }

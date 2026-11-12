@@ -16,7 +16,7 @@ const MAX_ACTIONS_PER_FIX = 2;
 for (const sc of SCENARIOS) {
   const task = sc.task;
   if (!task) continue;
-  for (const vp of VIEWPORTS.filter((v) => v.gating)) {
+  for (const vp of VIEWPORTS.filter((v) => v.gating || process.env.UX_ALL)) {
     for (const mode of MODES) {
       test(`screen-only ${sc.name} @ ${vpName(vp)} by ${mode}`, async ({ page, baseURL }) => {
         await page.setViewportSize({ width: vp.width, height: vp.height });
@@ -28,6 +28,7 @@ for (const sc of SCENARIOS) {
         expect(r.completion_miss, 'completion_miss').toBe(false);
         expect(r.false_complete, 'false_complete').toBe(false);
         if (mode === 'pointer') expect(r.actions, 'actions per fix').toBeLessThanOrEqual(MAX_ACTIONS_PER_FIX);
+        expect(r.notes.filter((n) => n.includes('out of sight')), 'the opening control stays in sight').toEqual([]);
       });
     }
   }

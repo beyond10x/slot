@@ -191,6 +191,10 @@ pub enum Event {
         jobs: Vec<LiveJob>,
         /// Every build process on the host, run by slot or not.
         census: HostCensus,
+        /// A pending upgrade, as one line; empty when none, and from a daemon
+        /// that does not send it.
+        #[serde(default)]
+        upgrade: String,
     },
 }
 
@@ -301,10 +305,17 @@ mod tests {
         assert_eq!(s.cpu_quota_percent, None);
         let tick = r#"{"type":"tick","t":1,"tokens":4,"free":3,"waiting":0,"sys_cpu":0.1,
             "job_cores":0.0,"jobs":[],"census":{"host_cores":1.0}}"#;
-        let Event::Tick { limit, census, .. } = serde_json::from_str(tick).unwrap() else {
+        let Event::Tick {
+            limit,
+            census,
+            upgrade,
+            ..
+        } = serde_json::from_str(tick).unwrap()
+        else {
             panic!("not a tick");
         };
         assert_eq!(limit, 0);
+        assert_eq!(upgrade, "");
         assert_eq!(census.host_cores, 1.0);
         assert_eq!(census.classes.len(), 0);
     }

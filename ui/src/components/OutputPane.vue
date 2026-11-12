@@ -4,7 +4,7 @@ import type { Chunk } from '../generated/types.ts';
 import { Terminal, lineHtml, lineIsErr } from '../lib/ansi.ts';
 import type { Segment } from '../lib/ansi.ts';
 import { cmdText, isActive } from '../lib/job.ts';
-import { atBottom } from '../lib/scroll.ts';
+import { atBottom, revealDelta } from '../lib/scroll.ts';
 import { jobs, select, store } from '../store.ts';
 
 /** Most lines kept in the pane; older ones are dropped and counted. */
@@ -122,7 +122,22 @@ function endMessage(data: string): string {
   }
 }
 
+const paneEl = useTemplateRef<HTMLElement>('paneEl');
+
+/** As a bottom sheet (narrow windows) the pane can cover the control that opened it: scroll that control above the sheet. */
+function keepOpenerInSight(): void {
+  const pane = paneEl.value;
+  const opener = document.activeElement;
+  if (!pane || !(opener instanceof HTMLElement) || opener === document.body || pane.contains(opener)) return;
+  if (getComputedStyle(pane).position !== 'fixed') return;
+  const hdr = document.querySelector('header')?.getBoundingClientRect().bottom ?? 0;
+  const r = opener.getBoundingClientRect();
+  const dy = revealDelta(r.top, r.bottom, hdr, pane.getBoundingClientRect().top);
+  if (dy) window.scrollBy(0, dy);
+}
+
 onMounted(() => {
+  keepOpenerInSight();
   const src = new EventSource(`api/jobs/${props.id}/output`);
   es = src;
   src.onopen = () => {
@@ -149,7 +164,7 @@ onUnmounted(() => es?.close());
 </script>
 
 <template>
-  <aside class="pane">
+  <aside ref="paneEl" class="pane">
     <div class="bar">
       <b class="title" :title="title">{{ title }}</b>
       <span class="status" :class="stream">{{ status }}</span>
@@ -167,6 +182,10 @@ onUnmounted(() => es?.close());
 <style scoped>
 .pane { border-left: 1px solid var(--line); background: var(--panel); height: calc(100vh - var(--hdr)); position: sticky;
   top: var(--hdr); display: flex; flex-direction: column; overflow: hidden; }
+@media (max-width: 1099px) {
+  .pane { position: fixed; top: auto; left: 0; right: 0; bottom: 0; height: 45vh; z-index: 1; border-left: 0;
+    border-top: 1px solid var(--line); box-shadow: 0 -2px 6px rgb(0 0 0 / 8%); }
+}
 .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
 .title { flex: 1 1 12em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status { font-size: 12px; white-space: nowrap; color: var(--mute); }

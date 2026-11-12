@@ -14,7 +14,9 @@ export interface Step {
 export type Task =
   | { kind: 'open-output'; job: number; expect: string[] }
   | { kind: 'set-headroom'; percent: number; expect: string; fails?: boolean }
-  | { kind: 'queue-position'; job: number; position: number };
+  | { kind: 'queue-position'; job: number; position: number }
+  /** Read a state off the screen: `expect` is visible in the viewport. */
+  | { kind: 'see'; expect: string };
 
 export interface Scenario {
   name: string;
@@ -110,7 +112,7 @@ function tick(
   return {
     type: 'tick', t, tokens, limit, headroom_percent: headroom, call_apps: callApps, free: Math.max(0, limit - used), waiting,
     sys_cpu: 0.55 + (k % 4) * 0.05, job_cores: live.reduce((a, l) => a + l.cores, 0), jobs: live,
-    census: census(running, k),
+    census: census(running, k), upgrade: '',
   };
 }
 
@@ -247,6 +249,22 @@ function callMode(): Scenario {
   };
 }
 
+function upgradePending(): Scenario {
+  const running = [job(140), job(141), job(142)];
+  const waiting = [queued(143, -40), queued(144, -30), queued(145, -12)];
+  const finished = Array.from({ length: 5 }, (_, i) => done(130 + i, -300 + i * 40));
+  const line = 'upgrade pending: no new job starts for 42s, re-executing once none runs';
+  const st = { ...state([...running, ...waiting], finished, 20, 0), upgrade: line };
+  const t = (sec: number, k: number) => ({ ...tick(s(sec), running, 20, 20, 0, 3, k), upgrade: line });
+  return {
+    name: 'upgrade-pending', anchor: false,
+    card: 'Three builds wait although slots are free. Find out why.',
+    state: st, history: history(running, 20, 20, 0, 3).map((h) => ({ ...h, upgrade: line })),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [t(1, 1)] }, { moment: 'still held', dt_s: 1, events: [t(2, 2)] }],
+    output: {}, task: { kind: 'see', expect: 'upgrade pending' },
+  };
+}
+
 function idle(): Scenario {
   const finished = Array.from({ length: 3 }, (_, i) => done(1 + i, -600 + i * 60));
   const st = state([], finished, 20, 0);
@@ -259,7 +277,7 @@ function idle(): Scenario {
 }
 
 export const SCENARIOS: Scenario[] = [
-  busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), crowded(), callMode(), idle(),
+  busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), crowded(), callMode(), upgradePending(), idle(),
 ];
 
 /** Scenarios whose output pane is open from the start. */
