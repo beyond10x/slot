@@ -288,3 +288,62 @@ Not built yet:
   `slot proxy` and rsync.
 - `.slot.toml` per-repo config (tests that must run `--local`).
 - Memory limit per job exists as `--memory-max` (systemd scope) but is off by default and untested.
+
+## 11. Measuring the whole host, and an adaptive pool
+
+A fixed pool of one slot per core is right only when slot runs every build. During adoption it
+does not, and even afterwards some build work (test binaries, vitest workers, container builds)
+runs outside the jobserver. The daemon therefore measures the whole host, not only its jobs.
+
+### 11.1 Census
+
+Every second the daemon already reads `/proc/*/stat`. `crates/slot/src/census.rs` classifies each
+process into a tool family from its `comm` and command line: `rust-compile` (any process with
+`--crate-name`, including sccache clients), `rust-build-script`, `rust-test` (binaries under
+`target/*/deps/`), `go-compile` (`$GOROOT/pkg/tool/*`), `go-test` (`*.test`), `node-test`
+(vitest, jest), `node-typecheck` (tsc, vue-tsc), `node-lint`, `node-build`, `node-e2e`
+(Playwright), `link`, `native` (C compilers), `helm`, `container-build`. A process inside a slot
+job's tree, or compile-server work attributed to one through `SLOT_JOB`, is *managed*; the rest is
+*unmanaged*. Each build process is attributed to the agent session in its environment
+(`CLAUDE_CODE_SESSION_ID`, `CODEX_SESSION_ID`).
+
+Alongside it the daemon reads pressure stall information (`/proc/pressure/{cpu,memory,io}`,
+`some avg10`) and the one-minute load average. PSI is the signal that matters for interactive
+use: it is the share of time at least one runnable task waited for a CPU, which is what a
+browser tab feels, where load average only counts queue length.
+
+Per second the census goes into the UI tick and `/metrics` (`slot_build_cores{class,managed}`,
+`slot_unmanaged_build_cores`, `slot_pressure_some_avg10{resource}`, `slot_host_cores`). Every
+10 s a line with the window's means is appended to `<state-dir>/census.jsonl`: host cores, PSI,
+load, slots in use, waiters, cores per class (managed classes suffixed `@slot`), cores per session
+(total and unmanaged), and the controller's recommendation.
+
+### 11.2 Controller (observe mode)
+
+`crates/slot/src/policy.rs` recommends a pool size each second:
+
+    recommended = clamp(cores − reserve − ewma(unmanaged build cores) − trim, min, --tokens)
+
+- `reserve` (2 cores) stays free for interactive work.
+- `ewma` smooths builds outside slot with weight 0.2 per sample, so a burst of one second does
+  not shrink the pool and a sustained unmanaged build does within about 10 s.
+- `trim` grows by one slot per second while CPU PSI is above 40 % and shrinks by one while it is
+  below 20 %, which catches load the census does not classify.
+
+The recommendation is logged and shown; it is not enforced. Enforcement means the daemon holds
+`--tokens − recommended` tokens itself, which removes them from the FIFO without touching running
+jobs. It is switched on once `census.jsonl` shows, over at least a day of normal work, that the
+recommendation stays within a few slots of what the host could take (PSI near the threshold while
+the queue is non-empty) and does not oscillate.
+
+### 11.3 Questions the census is collected to answer
+
+1. Which tool families take the CPU when PSI is high: is it Rust compilation, test binaries,
+   linkers, or node tooling? That decides which families slot must confine and which can run
+   beside the pool.
+2. How much build work stays unmanaged after a session adopts slot (test threads, vitest), and so
+   how large the reserve must be.
+3. Whether queue order should move from FIFO to shortest-predicted-first, using each command's
+   history in `jobs.jsonl` (median CPU seconds and run time per repository and argv prefix), so
+   short checks are not stuck behind release builds.
+4. Whether memory, not CPU, is the binding limit for parallel link and test phases.

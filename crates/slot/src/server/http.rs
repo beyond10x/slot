@@ -25,6 +25,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/events", get(events))
         .route("/api/jobs/{id}/output", get(output))
         .route("/metrics", get(metrics))
+        .route("/api/history", get(history))
         .fallback(get(asset))
         .with_state(s);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -43,6 +44,13 @@ async fn metrics(State(s): State<Arc<Server>>) -> impl IntoResponse {
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         s.metrics_text(),
+    )
+}
+
+async fn history(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        s.history_json(),
     )
 }
 

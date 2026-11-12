@@ -150,6 +150,100 @@ now_ms: number,
  */
 toolchains: Array<string>, };
 
+export type CensusClass = { 
+/**
+ * Tool family, for example `rust-compile`, `go-test`, `node-test`.
+ */
+class: string, 
+/**
+ * Whether slot runs these processes.
+ */
+managed: boolean, 
+/**
+ * Cores over the last second.
+ */
+cores: number, 
+/**
+ * Resident memory, bytes.
+ */
+rss: number, 
+/**
+ * Processes.
+ */
+procs: number, };
+
+export type CensusSession = { 
+/**
+ * Session id from the process environment; empty when none.
+ */
+session: string, 
+/**
+ * Session title when it can be resolved locally; empty otherwise.
+ */
+title: string, 
+/**
+ * Cores over the last second.
+ */
+cores: number, 
+/**
+ * Cores of processes slot does not run.
+ */
+unmanaged_cores: number, 
+/**
+ * Resident memory, bytes.
+ */
+rss: number, 
+/**
+ * Processes.
+ */
+procs: number, };
+
+export type HostCensus = { 
+/**
+ * Cores used by every process on the host.
+ */
+host_cores: number, 
+/**
+ * Cores used by build processes.
+ */
+build_cores: number, 
+/**
+ * Cores used by build processes slot does not run.
+ */
+unmanaged_cores: number, 
+/**
+ * CPU pressure, `some avg10`, percent.
+ */
+psi_cpu: number, 
+/**
+ * Memory pressure, `some avg10`, percent.
+ */
+psi_memory: number, 
+/**
+ * IO pressure, `some avg10`, percent.
+ */
+psi_io: number, 
+/**
+ * One-minute load average.
+ */
+load1: number, 
+/**
+ * By tool family and managed flag, busiest first.
+ */
+classes: Array<CensusClass>, 
+/**
+ * By session, busiest first.
+ */
+sessions: Array<CensusSession>, 
+/**
+ * Pool size the adaptive controller recommends (observe mode: not enforced).
+ */
+recommended_tokens: number, 
+/**
+ * Smoothed cores of builds slot does not run, as the controller sees them.
+ */
+unmanaged_smoothed: number, };
+
 export type Event = { "type": "job", 
 /**
  * The job.
@@ -182,7 +276,11 @@ job_cores: number,
 /**
  * Running jobs.
  */
-jobs: Array<LiveJob>, };
+jobs: Array<LiveJob>, 
+/**
+ * Every build process on the host, run by slot or not.
+ */
+census: HostCensus, };
 
 export type Chunk = { 
 /**

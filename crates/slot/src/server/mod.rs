@@ -24,12 +24,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as Tokio
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::census;
 use crate::jobserver::Pool;
+use crate::policy;
 use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
 use crate::rewrite::Rewriter;
 use crate::toolchain::{self, Context};
-use crate::types::{Event, Job, JobState, LiveJob, State, Unit};
+use crate::types::{Event, HostCensus, Job, JobState, LiveJob, State, Unit};
 
 pub use ring::Ring;
 
@@ -107,6 +109,12 @@ pub const JOB_ENV: &str = "SLOT_JOB";
 /// Process names of compile servers whose children are attributed by tag.
 pub const COMPILE_SERVERS: &[&str] = &["sccache"];
 
+/// Samples averaged into one census log line (one per second).
+const CENSUS_WINDOW: u32 = 10;
+
+/// Ticks kept for `GET /api/history` (one per second).
+const HISTORY_TICKS: usize = 900;
+
 /// Work units per job sent in each tick.
 const MAX_UNITS: usize = 12;
 
@@ -145,6 +153,13 @@ struct Inner {
     sys_cpu: f64,
     job_cores: f64,
     metrics: metrics::Metrics,
+    census: census::Census,
+    window: census::Window,
+    census_log: File,
+    titles: HashMap<String, String>,
+    title_pending: HashSet<String>,
+    last_census: HostCensus,
+    controller: policy::Controller,
 }
 
 /// The daemon.
@@ -153,6 +168,7 @@ pub struct Server {
     pool: Arc<Pool>,
     inner: Mutex<Inner>,
     events: broadcast::Sender<String>,
+    history: Mutex<VecDeque<String>>,
     host: String,
     cores: u32,
 }
@@ -189,12 +205,19 @@ impl Server {
             .append(true)
             .open(&log_path)
             .with_context(|| format!("open {}", log_path.display()))?;
+        let census_path = cfg.state_dir.join("census.jsonl");
+        let census_log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&census_path)
+            .with_context(|| format!("open {}", census_path.display()))?;
         let (events, _) = broadcast::channel(1024);
         let host = nix::unistd::gethostname()
             .ok()
             .and_then(|h| h.into_string().ok())
             .unwrap_or_default();
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+        let pool_size = cfg.tokens;
         Ok(Arc::new(Self {
             cfg,
             pool,
@@ -208,8 +231,19 @@ impl Server {
                 sys_cpu: 0.0,
                 job_cores: 0.0,
                 metrics: metrics::Metrics::default(),
+                census: census::Census::default(),
+                window: census::Window::default(),
+                census_log,
+                titles: HashMap::new(),
+                title_pending: HashSet::new(),
+                last_census: HostCensus::default(),
+                controller: policy::Controller::new(policy::Settings::new(
+                    cores as usize,
+                    pool_size,
+                )),
             }),
             events,
+            history: Mutex::new(VecDeque::new()),
             host,
             cores,
         }))
@@ -250,10 +284,38 @@ impl Server {
             self.cfg.tokens,
             self.pool.path().display()
         );
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         loop {
-            let (stream, _) = listener.accept().await?;
-            let s = Arc::clone(&self);
-            tokio::spawn(async move { s.handle(stream).await });
+            tokio::select! {
+                r = listener.accept() => {
+                    let (stream, _) = r?;
+                    let s = Arc::clone(&self);
+                    tokio::spawn(async move { s.handle(stream).await });
+                }
+                _ = term.recv() => break,
+            }
+        }
+        self.drain(listener).await;
+        Ok(())
+    }
+
+    /// Stops taking jobs and waits for running and queued ones to end.
+    /// Clients that connect meanwhile find no socket and run locally.
+    async fn drain(&self, listener: UnixListener) {
+        drop(listener);
+        let _ = std::fs::remove_file(&self.cfg.socket);
+        let mut last = usize::MAX;
+        loop {
+            let n = self.inner.lock().expect("server lock").active.len();
+            if n == 0 {
+                eprintln!("slot: drained, exiting");
+                return;
+            }
+            if n != last {
+                eprintln!("slot: draining, {n} job(s) still running or queued");
+                last = n;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
 
@@ -621,8 +683,30 @@ impl Server {
 
     fn send(&self, e: &Event) {
         if let Ok(s) = serde_json::to_string(e) {
+            if matches!(e, Event::Tick { .. }) {
+                let mut h = self.history.lock().expect("history lock");
+                h.push_back(s.clone());
+                while h.len() > HISTORY_TICKS {
+                    h.pop_front();
+                }
+            }
             let _ = self.events.send(s);
         }
+    }
+
+    /// The last ticks as one JSON array, oldest first (`GET /api/history`).
+    pub fn history_json(&self) -> String {
+        let h = self.history.lock().expect("history lock");
+        let mut out = String::with_capacity(h.iter().map(String::len).sum::<usize>() + h.len() + 2);
+        out.push('[');
+        for (i, t) in h.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(t);
+        }
+        out.push(']');
+        out
     }
 
     async fn sampler(self: Arc<Self>) {
@@ -637,6 +721,7 @@ impl Server {
             else {
                 continue;
             };
+            let mut new_ids = Vec::new();
             let event = {
                 let mut g = self.inner.lock().expect("server lock");
                 let (pb, pt) = g.sys_prev;
@@ -678,6 +763,39 @@ impl Server {
                     });
                 }
                 g.job_cores = total;
+                let mut managed: HashSet<i32> = HashSet::new();
+                for l in g.active.values() {
+                    if let Some(pid) = l.pid {
+                        managed.extend(snap.tree(pid).iter().map(|p| p.pid));
+                    }
+                }
+                for procs in extra.values() {
+                    managed.extend(procs.iter().map(|p| p.pid));
+                }
+                let sample = g.census.sample(&snap, &managed, dt);
+                let used = self.cfg.tokens.saturating_sub(self.pool.free());
+                let waiting = self.pool.waiting();
+                g.window.add(now_ms(), &sample, used, waiting);
+                if g.window.len() >= CENSUS_WINDOW {
+                    let line = g.window.flush();
+                    if let Ok(mut b) = serde_json::to_vec(&line) {
+                        b.push(b'\n');
+                        let _ = g.census_log.write_all(&b);
+                    }
+                }
+                for id in sample.sessions.keys() {
+                    if !id.is_empty()
+                        && !g.titles.contains_key(id)
+                        && g.title_pending.insert(id.clone())
+                    {
+                        new_ids.push(id.clone());
+                    }
+                }
+                let mut census = census::view(&sample, &g.titles);
+                census.recommended_tokens = g.controller.step(&census) as u32;
+                census.unmanaged_smoothed = g.controller.unmanaged();
+                g.window.recommend(census.recommended_tokens);
+                g.last_census = census.clone();
                 Event::Tick {
                     t: now_ms(),
                     tokens: self.cfg.tokens as u32,
@@ -686,9 +804,19 @@ impl Server {
                     sys_cpu: g.sys_cpu,
                     job_cores: total,
                     jobs,
+                    census,
                 }
             };
             self.send(&event);
+            for id in new_ids {
+                let s = Arc::clone(&self);
+                tokio::task::spawn_blocking(move || {
+                    let title = census::session_title(&id);
+                    let mut g = s.inner.lock().expect("server lock");
+                    g.title_pending.remove(&id);
+                    g.titles.insert(id, title);
+                });
+            }
         }
     }
 
@@ -701,6 +829,7 @@ impl Server {
             waiting: self.pool.waiting(),
             job_cores: g.job_cores,
             sys_cpu: g.sys_cpu,
+            census: g.last_census.clone(),
             ..metrics::Gauges::default()
         };
         for tc in toolchain::names() {

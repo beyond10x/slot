@@ -5,6 +5,8 @@ Description=slot build daemon
 ExecStart=%h/.local/bin/slot serve
 Restart=on-failure
 CPUWeight=20
+KillMode=mixed
+TimeoutStopSec=2h
 Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]

@@ -20,6 +20,8 @@ pub struct Proc {
     pub rss: u64,
     /// Command name (`comm`).
     pub comm: String,
+    /// Start time in clock ticks after boot; with `pid` it identifies a process.
+    pub start: u64,
 }
 
 /// Parses one `/proc/<pid>/stat` line.
@@ -34,6 +36,7 @@ pub fn parse_stat(pid: i32, s: &str) -> Option<Proc> {
     let ppid = f[1].parse().ok()?;
     let ut: u64 = f[11].parse().ok()?;
     let st: u64 = f[12].parse().ok()?;
+    let start: u64 = f[19].parse().ok()?;
     let rss: u64 = f[21].parse().ok()?;
     Some(Proc {
         pid,
@@ -41,6 +44,7 @@ pub fn parse_stat(pid: i32, s: &str) -> Option<Proc> {
         ticks: ut + st,
         rss: rss * PAGE,
         comm,
+        start,
     })
 }
 
@@ -84,6 +88,11 @@ impl Snapshot {
             }
         }
         s
+    }
+
+    /// Every process.
+    pub fn procs(&self) -> impl Iterator<Item = &Proc> {
+        self.procs.values()
     }
 
     /// Adds a process (used by tests).
@@ -323,6 +332,7 @@ mod tests {
             ticks,
             rss: 10,
             comm: "x".into(),
+            start: 0,
         }
     }
 

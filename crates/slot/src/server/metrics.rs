@@ -88,6 +88,7 @@ pub struct Gauges {
     pub running: BTreeMap<String, usize>,
     pub job_cores: f64,
     pub sys_cpu: f64,
+    pub census: crate::types::HostCensus,
 }
 
 impl Metrics {
@@ -155,6 +156,47 @@ impl Metrics {
             "Busy fraction of all host CPUs over the last second.",
             g.sys_cpu,
         );
+        let c = &g.census;
+        gauge(
+            &mut s,
+            "slot_host_cores",
+            "Cores used by every process on the host.",
+            c.host_cores,
+        );
+        gauge(
+            &mut s,
+            "slot_host_load1",
+            "One-minute load average.",
+            c.load1,
+        );
+        gauge(
+            &mut s,
+            "slot_unmanaged_build_cores",
+            "Cores used by build processes slot does not run.",
+            c.unmanaged_cores,
+        );
+        let _ = writeln!(
+            s,
+            "# HELP slot_pressure_some_avg10 Pressure stall information, some avg10, percent.\n# TYPE slot_pressure_some_avg10 gauge"
+        );
+        for (r, v) in [
+            ("cpu", c.psi_cpu),
+            ("memory", c.psi_memory),
+            ("io", c.psi_io),
+        ] {
+            let _ = writeln!(s, "slot_pressure_some_avg10{{resource=\"{r}\"}} {v}");
+        }
+        let _ = writeln!(
+            s,
+            "# HELP slot_build_cores Cores of build processes on the host by tool family.\n# TYPE slot_build_cores gauge"
+        );
+        for k in &c.classes {
+            let _ = writeln!(
+                s,
+                "slot_build_cores{{class=\"{}\",managed=\"{}\"}} {}",
+                k.class, k.managed, k.cores
+            );
+        }
         for (name, help, map) in [
             ("slot_jobs_queued", "Jobs waiting for slots.", &g.queued),
             ("slot_jobs_running", "Jobs running.", &g.running),

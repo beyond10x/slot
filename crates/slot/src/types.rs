@@ -155,7 +155,70 @@ pub enum Event {
         job_cores: f64,
         /// Running jobs.
         jobs: Vec<LiveJob>,
+        /// Every build process on the host, run by slot or not.
+        census: HostCensus,
     },
+}
+
+/// Build processes of one tool family.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+pub struct CensusClass {
+    /// Tool family, for example `rust-compile`, `go-test`, `node-test`.
+    pub class: String,
+    /// Whether slot runs these processes.
+    pub managed: bool,
+    /// Cores over the last second.
+    pub cores: f64,
+    /// Resident memory, bytes.
+    #[ts(type = "number")]
+    pub rss: u64,
+    /// Processes.
+    pub procs: u32,
+}
+
+/// Build processes of one agent session.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+pub struct CensusSession {
+    /// Session id from the process environment; empty when none.
+    pub session: String,
+    /// Session title when it can be resolved locally; empty otherwise.
+    pub title: String,
+    /// Cores over the last second.
+    pub cores: f64,
+    /// Cores of processes slot does not run.
+    pub unmanaged_cores: f64,
+    /// Resident memory, bytes.
+    #[ts(type = "number")]
+    pub rss: u64,
+    /// Processes.
+    pub procs: u32,
+}
+
+/// Host-wide view of build work.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+pub struct HostCensus {
+    /// Cores used by every process on the host.
+    pub host_cores: f64,
+    /// Cores used by build processes.
+    pub build_cores: f64,
+    /// Cores used by build processes slot does not run.
+    pub unmanaged_cores: f64,
+    /// CPU pressure, `some avg10`, percent.
+    pub psi_cpu: f64,
+    /// Memory pressure, `some avg10`, percent.
+    pub psi_memory: f64,
+    /// IO pressure, `some avg10`, percent.
+    pub psi_io: f64,
+    /// One-minute load average.
+    pub load1: f64,
+    /// By tool family and managed flag, busiest first.
+    pub classes: Vec<CensusClass>,
+    /// By session, busiest first.
+    pub sessions: Vec<CensusSession>,
+    /// Pool size the adaptive controller recommends (observe mode: not enforced).
+    pub recommended_tokens: u32,
+    /// Smoothed cores of builds slot does not run, as the controller sees them.
+    pub unmanaged_smoothed: f64,
 }
 
 /// One chunk on `GET /api/jobs/{id}/output`.
