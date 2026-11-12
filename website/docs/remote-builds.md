@@ -32,7 +32,9 @@ slot cargo test -p foo
    private git dependencies or Go modules.
 5. Check the disk floor. A job waits while its filesystem has less than `--min-free-disk`
    (default 25 GB) free, and the client prints why. A server with a smaller disk needs a lower
-   value, for example `slot serve --min-free-disk 5`.
+   value, for example `slot serve --min-free-disk 5`. The memory floor works the same way:
+   `--min-free-memory` (default 4 GB) plus a job's expected peak must be available, so on an 8 GB
+   server a second large build waits for the first; lower it there.
 
 Jobs on the server start from the daemon's own environment (its `PATH`, `HOME` and toolchain
 installs), not from the workstation's. With the systemd unit, that is the unit's `PATH`.
@@ -106,9 +108,30 @@ export SLOT_SSH="ssh -p 2222 -o ConnectTimeout=3"
 
 ## When the server is unreachable
 
-If the sync fails (the host is down, ssh is refused), `slot` runs the command locally and prints
-`slot: daemon unreachable (…), ran locally` on stderr. If the connection drops while the job runs,
-`slot` prints `slot: connection to daemon lost` and exits with 3; the daemon cancels the job.
+If the remote job cannot start (the host is down, ssh is refused, the sync fails, for example
+because the server disk is full), `slot` sends the job to this machine's daemon instead and prints
+`slot: remote build on <host> did not start (…); running it on this machine's daemon`. The job
+then waits for slots in the local pool like any other. Before 0.8.0 it ran the command directly,
+outside the pool. If the connection drops while the job runs, `slot` prints `slot: connection to
+daemon lost` and exits with 3; the daemon cancels the job.
+
+## Fetch build output back
+
+Build output stays on the server. `--fetch PATH` copies a path back into the checkout after the
+job exits 0:
+
+```console
+slot --fetch target/debug/mytool cargo build -p mytool
+./target/debug/mytool --version
+```
+
+`PATH` is relative to the repository root. A path under `target/` is read from the job's target
+directory on the server (the server sets `CARGO_TARGET_DIR` per workspace); any other path from
+the server's copy of the repository, for output a build writes into the source tree. Repeat
+`--fetch` for more paths. A failed copy prints `slot: fetch …` and makes the exit code 1. With no
+`SLOT_HOST`, or for a command `.slot.toml` keeps local, the output is already here and `--fetch`
+does nothing. Fetching from `target/` needs slot 0.8.0 or later on the server, which reports the
+target directory when the job starts.
 
 ## Tests that need local services
 
@@ -133,8 +156,6 @@ key can run.
 
 ## Not built yet
 
-- **Fetching artifacts back.** Build outputs stay on the server. `cargo build` of a binary you
-  then want to run locally needs `--local`, or a copy by hand.
 - **Target directory seeding and eviction.** A new worktree starts with an empty target
   directory on the server, and old target directories are never deleted automatically. Watch the
   disk under the cache root.

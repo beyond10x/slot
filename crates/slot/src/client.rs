@@ -85,6 +85,9 @@ pub struct Settings {
     pub extra_env: HashSet<String>,
     /// Local daemon socket.
     pub socket: PathBuf,
+    /// `--fetch` paths, relative to the repository root, copied back from
+    /// the server after a remote job exits 0.
+    pub fetch: Vec<String>,
 }
 
 impl Settings {
@@ -126,6 +129,7 @@ impl Settings {
                 })
                 .unwrap_or_default(),
             socket: var("SLOT_SOCKET").map_or_else(paths::default_socket, PathBuf::from),
+            fetch: Vec::new(),
         }
     }
 }
@@ -154,16 +158,105 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         .filter(|_| !listed_local(top.as_deref(), argv))
     {
         return match remote(host, top.as_deref(), &cwd, &mut req, s) {
-            Ok(c) => talk(c, &req).code(),
+            Ok(c) => {
+                let code = talk(c, &req).code();
+                match (&req.workspace, top.as_deref()) {
+                    (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
+                        fetch(host, top, &ws.id, s)
+                    }
+                    _ => code,
+                }
+            }
             Err(e) => {
-                eprintln!("slot: daemon unreachable ({e:#}), ran locally");
-                run_local(argv)
+                eprintln!(
+                    "slot: remote build on {host} did not start ({e:#}); running it on this machine's daemon"
+                );
+                req.workspace = None;
+                req.cwd = cwd.to_string_lossy().into_owned();
+                req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+                submit_local(&s.socket, &req, UPGRADE_WAIT)
             }
         };
     }
     req.cwd = cwd.to_string_lossy().into_owned();
     req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
     submit_local(&s.socket, &req, UPGRADE_WAIT)
+}
+
+/// The job's target directory on the server, from its `start` frame.
+static JOB_TARGET: Mutex<String> = Mutex::new(String::new());
+
+/// Where `slot --fetch <path>` reads `path` on the server: under the job's
+/// target directory for `target` and `target/…`, under the workspace mirror
+/// for anything else. `None` with the reason when the path cannot be fetched.
+pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String, String> {
+    let p = Path::new(path);
+    if path.is_empty() || p.is_absolute() {
+        return Err(format!(
+            "`{path}`: name a path relative to the repository root"
+        ));
+    }
+    if p.components()
+        .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!("`{path}`: `.` and `..` are not allowed"));
+    }
+    let mut parts = p.components();
+    let first = parts
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned());
+    if first.as_deref() == Some("target") {
+        if target_dir.is_empty() {
+            return Err(format!(
+                "`{path}`: the server did not report its target directory (slot 0.8.0 or later needed there)"
+            ));
+        }
+        let rest = parts.as_path().to_string_lossy().into_owned();
+        return Ok(if rest.is_empty() {
+            target_dir.to_string()
+        } else {
+            format!("{target_dir}/{rest}")
+        });
+    }
+    Ok(format!("{mirror}/{path}"))
+}
+
+/// Copies every `--fetch` path back from `host` into the repository at
+/// `top`. Returns 0, or 1 after printing which path failed.
+fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
+    let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
+    let mirror = format!("{}/{id}", s.ws_root);
+    let mut code = 0;
+    for path in &s.fetch {
+        let src = match fetch_source(path, &mirror, &target_dir) {
+            Ok(src) => src,
+            Err(e) => {
+                eprintln!("slot: fetch {e}");
+                code = 1;
+                continue;
+            }
+        };
+        let dst = top.join(path);
+        let parent = dst.parent().unwrap_or(top);
+        let st = Command::new("rsync")
+            .args(["-a", "--mkpath", "-e"])
+            .arg(s.ssh.join(" "))
+            .arg(format!("{host}:{src}"))
+            .arg(format!("{}/", parent.display()))
+            .status();
+        match st {
+            Ok(st) if st.success() => eprintln!("slot: fetched {path}"),
+            Ok(st) => {
+                eprintln!("slot: fetch `{path}`: rsync exited with {st}");
+                code = 1;
+            }
+            Err(e) => {
+                eprintln!("slot: fetch `{path}`: rsync: {e}");
+                code = 1;
+            }
+        }
+    }
+    code
 }
 
 /// Whether the repository's `.slot.toml` lists `argv` under `local`, so it
@@ -487,7 +580,12 @@ fn talk(conn: Conn, req: &Request) -> Ended {
                 started = true;
                 let _ = stderr.write_all(b.as_bytes());
             }
-            Ok(Frame::Start { .. }) => started = true,
+            Ok(Frame::Start { target_dir, .. }) => {
+                started = true;
+                if let Ok(mut t) = JOB_TARGET.lock() {
+                    *t = target_dir;
+                }
+            }
             Ok(Frame::Info { msg }) => eprintln!("{msg}"),
             Ok(Frame::Exit { code }) => {
                 drop(writer);
@@ -507,6 +605,27 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn fetch_source_maps_target_to_the_job_target_dir() {
+        let t = "/srv/cache/target/abc";
+        let m = "ws/abc";
+        assert_eq!(
+            fetch_source("target/debug/ess", m, t),
+            Ok("/srv/cache/target/abc/debug/ess".into())
+        );
+        assert_eq!(fetch_source("target", m, t), Ok(t.into()));
+        assert_eq!(fetch_source("bin/tool", m, t), Ok("ws/abc/bin/tool".into()));
+        assert_eq!(
+            fetch_source("targets/x", m, t),
+            Ok("ws/abc/targets/x".into())
+        );
+        for bad in ["", "/etc/passwd", "../x", "target/../../x", "./x"] {
+            assert!(fetch_source(bad, m, t).is_err(), "{bad}");
+        }
+        let old = fetch_source("target/debug/ess", m, "").unwrap_err();
+        assert!(old.contains("0.8.0"), "{old}");
+    }
 
     /// A fake daemon: for each script, accepts one connection, reads the
     /// request, reports it, writes the script's frames and closes. Between
@@ -562,7 +681,13 @@ mod tests {
             socket.clone(),
             vec![
                 vec![queued],
-                vec![Frame::Start { id: 1 }, Frame::Exit { code: 7 }],
+                vec![
+                    Frame::Start {
+                        id: 1,
+                        target_dir: String::new(),
+                    },
+                    Frame::Exit { code: 7 },
+                ],
             ],
             Duration::from_millis(800),
         );
@@ -582,7 +707,13 @@ mod tests {
         let socket = dir.path().join("s");
         let rx = fake_daemon(
             socket.clone(),
-            vec![vec![Frame::Start { id: 1 }], vec![Frame::Exit { code: 0 }]],
+            vec![
+                vec![Frame::Start {
+                    id: 1,
+                    target_dir: String::new(),
+                }],
+                vec![Frame::Exit { code: 0 }],
+            ],
             Duration::from_millis(100),
         );
         assert_eq!(

@@ -895,7 +895,15 @@ impl Server {
             }
         }
         self.publish(id);
-        let _ = tx.send(Frame::Start { id });
+        let target_dir = req.workspace.as_ref().map_or_else(String::new, |w| {
+            self.cfg
+                .cache_root
+                .join("target")
+                .join(&w.id)
+                .to_string_lossy()
+                .into_owned()
+        });
+        let _ = tx.send(Frame::Start { id, target_dir });
 
         let pipes: Vec<std::thread::JoinHandle<()>> = [
             child

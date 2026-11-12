@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0 — 2026-11-12
+
+- `slot --fetch PATH <command…>`: with `SLOT_HOST` set, copies PATH back from the build server
+  after the job exits 0. PATH is relative to the repository root; `target/…` is read from the
+  job's target directory on the server, which the daemon now reports in the job's `start` frame.
+  Repeatable; a failed copy makes the exit code 1.
+- A remote job that does not start (host down, ssh refused, sync failed) now goes to this
+  machine's daemon and waits in the local pool. Before, the command ran directly, outside the
+  pool: a full disk on a test server sent a 100-crate build to the workstation unpooled.
+
 ## 0.7.0 — 2026-11-12
 
 - Remote mode no longer sends credentials to the build server. The rust toolchain admitted every
