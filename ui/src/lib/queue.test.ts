@@ -8,7 +8,7 @@ function job(over: Partial<Job>): Job {
   return {
     id: 1, argv: ['cargo', 'build'], cwd: '/w', repo: 'r', session: '', client: '', toolchain: 'rust', remote: false,
     tokens: 1, state: 'queued', enqueued_ms: 1000, started_ms: 0, ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, ...over,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', ...over,
   };
 }
 

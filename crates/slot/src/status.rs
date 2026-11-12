@@ -160,7 +160,7 @@ fn line(j: &Job, now: i64) -> String {
     if cmd.chars().count() > 60 {
         cmd = cmd.chars().take(59).collect::<String>() + "…";
     }
-    format!(
+    let mut s = format!(
         "#{:<5} {:<7} {:<9} {:>2} slot(s) {:>7}  {}  {}",
         j.id,
         state,
@@ -169,7 +169,12 @@ fn line(j: &Job, now: i64) -> String {
         secs(now - since),
         j.repo,
         cmd
-    )
+    );
+    if !j.wait_reason.is_empty() {
+        s.push_str("\n       waiting: ");
+        s.push_str(&j.wait_reason);
+    }
+    s
 }
 
 /// `sccache: 2 server(s), 0 short of tokens, refills since start: 1 (18 tokens, last 4m10s ago)`.
@@ -253,6 +258,7 @@ mod tests {
             cpu_s: 0.0,
             compile_server_cpu_s: 0.0,
             peak_rss: 0,
+            wait_reason: String::new(),
         }
     }
 

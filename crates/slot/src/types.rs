@@ -72,6 +72,9 @@ pub struct Job {
     /// Highest sampled resident memory, bytes.
     #[ts(type = "number")]
     pub peak_rss: u64,
+    /// Why a queued job waits besides slots (disk space, memory); empty otherwise.
+    #[serde(default)]
+    pub wait_reason: String,
 }
 
 /// Live numbers of one running job.

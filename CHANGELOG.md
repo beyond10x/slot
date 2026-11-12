@@ -12,6 +12,14 @@
   user and writes back the tokens a server lost, once for 60 s it had none free, fewer compiles
   than its pool, a waiting client and under 5 % CPU. Each refill goes to the journal and
   `census.jsonl`; `slot status` shows the count. `--sccache-watch false` turns it off.
+- Admission by disk and memory: a job waits before taking slots while the filesystem of its
+  directory or `CARGO_TARGET_DIR` has under 25 GB free (`--min-free-disk`), or while available
+  memory does not cover its expected peak (90th percentile of earlier runs of the same command)
+  plus 4 GB (`--min-free-memory`). A job is never held for memory while no other job runs. The
+  client prints `slot: job N waiting: …`; `slot status` and the web UI queue show the reason
+  (`wait_reason` on the job).
+- Jobs under `--memory-max` run in `slot.slice`, and the headroom's CPU quota is set there too;
+  before, they ran outside the quota.
 - The design document records the measurement behind not coalescing identical concurrent jobs:
   0 overlapping pairs from different sessions in 740 jobs.
 

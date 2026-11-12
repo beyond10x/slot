@@ -112,6 +112,15 @@ pub struct ServeArgs {
     /// `false` turns the watchdog off.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub sccache_watch: bool,
+    /// A job waits while the filesystem of its directory or of
+    /// `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off.
+    #[arg(long, default_value_t = 25.0, value_name = "GB")]
+    pub min_free_disk: f64,
+    /// A job waits while available memory, less what jobs that started in
+    /// the last 30 s still take, is below its expected peak (from earlier
+    /// runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway.
+    #[arg(long, default_value_t = 4.0, value_name = "GB")]
+    pub min_free_memory: f64,
 }
 
 /// `slot proxy` options.
@@ -179,6 +188,15 @@ pub enum HookCmd {
     ClaudePreToolUse,
 }
 
+/// Gigabytes (10⁹ bytes) to bytes; negative or not a number is 0.
+fn gb_bytes(gb: f64) -> u64 {
+    if gb.is_finite() && gb > 0.0 {
+        (gb * crate::admission::GB as f64) as u64
+    } else {
+        0
+    }
+}
+
 fn default_tokens() -> usize {
     crate::procstat::host_cpus()
 }
@@ -215,6 +233,10 @@ impl ServeArgs {
             call_off_after: std::time::Duration::from_secs(self.call_off_after),
             call_ignore: self.call_ignore.clone(),
             sccache_watch: self.sccache_watch,
+            admission: crate::admission::Limits {
+                min_free_memory: gb_bytes(self.min_free_memory),
+                min_free_disk: gb_bytes(self.min_free_disk),
+            },
         })
     }
 }

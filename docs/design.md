@@ -449,9 +449,11 @@ Two limits, because neither is enough alone:
   (`headroom 40%: 7 of 12 tokens, cpu quota 720%`, 2026-11-12). Each upgrade under a headroom
   would have shrunk both again. Fixed in 0.4.1.
 
-Gaps: jobs under `--memory-max` run in their own `systemd-run --scope` units outside
-`slot.service`, so the quota does not reach them; a daemon not under systemd gets the token limit
-only. Disk IO is not limited: the user manager delegates only `cpu memory pids` to user units, so
+Jobs under `--memory-max` run in their own `systemd-run --scope` units outside `slot.service`.
+Since 0.5.0 those scopes go into `slot.slice` (`--slice`) and the quota is set on `slot.slice` as
+well (checked 2026-11-12: a scope in a slice with `CPUQuota=100%` reads `cpu.max` `100000
+100000`). The daemon's unit and the slice each get the full quota; the daemon's own CPU is small,
+so builds stay under it. Gap: a daemon not under systemd gets the token limit only. Disk IO is not limited: the user manager delegates only `cpu memory pids` to user units, so
 `IOWeight` on `slot.service` has no effect without an `io` delegation drop-in for
 `user@.service`.
 
@@ -485,3 +487,32 @@ Change control: `PUT /api/limits` changes how the whole machine behaves, so it r
 content type (a cross-site form post cannot send one without a CORS preflight, which the daemon
 does not answer) and an `Origin` that is absent or the daemon's own `http://127.0.0.1:<port>` or
 `http://localhost:<port>`.
+
+
+## 14. Admission by disk and memory (0.5.0)
+
+Need: the workspace rule says no build starts under 25 GB free, and a build that runs out of disk
+or memory fails late and takes others with it. Slots count CPU only.
+
+Before a job takes slots, `Server::short_of` checks, in this order:
+
+- **Disk.** `statvfs` of the job's directory and of its `CARGO_TARGET_DIR` (relative to the
+  directory when relative), at the nearest existing ancestor. Under `--min-free-disk` (GB,
+  default 25, 0 off) the job waits. Disk does not come back by waiting for other jobs, so a job
+  alone waits too, until space is freed.
+- **Memory.** `MemAvailable` less a reservation must cover the job's expected peak plus
+  `--min-free-memory` (GB, default 4, 0 off). The reservation is, for each job that started in the
+  last 30 s, its expected peak less its sampled memory: a burst of jobs admitted together would
+  otherwise each see the same free memory. Jobs running longer than that are counted by
+  `MemAvailable` itself; summing every job's 90th percentile would hold builds back that fit in
+  practice. With no other job running the check is skipped, so memory never stalls the queue.
+
+Expected peak (`admission::History`): the 90th percentile of `peak_rss` of the last 20 runs of
+the same `(repo, argv)` with at least 3, else of the last 200 runs of the toolchain with at least
+5, else 1 GB. It is loaded from `jobs.jsonl` at start (1,152 of 1,241 jobs on 2026-11-12 had a
+sample) and updated as jobs end. Toolchain 90th percentiles then: rust 3.9 GiB, other 3.5 GiB,
+node-test 1.8 GiB, go 0.8 GiB.
+
+The check repeats every 2 s and once more after the slots are granted: a job that finds memory
+gone gives its slots back and waits again. The client gets one `slot: job N waiting: …` line per
+kind of reason; the job carries `wait_reason` for `slot status` and the UI.

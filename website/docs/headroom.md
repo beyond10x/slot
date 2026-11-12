@@ -72,7 +72,8 @@ Two limits, both lifted again at 0 %:
   unit to `(100 − headroom) × cores` percent, where cores are the CPUs online on the host
   (`/sys/devices/system/cpu/online`), never the quota in force. Every job runs inside that unit's
   cgroup, so the quota caps all builds together, including test binaries and anything else a job
-  starts that the jobserver does not see. The kernel enforces it immediately.
+  starts that the jobserver does not see. The kernel enforces it immediately. With
+  `--memory-max`, jobs run in scopes under `slot.slice` instead, and the same quota is set there.
 
 The slot count shapes the queue; the quota is what holds the CPU free.
 
@@ -80,8 +81,6 @@ The slot count shapes the queue; the quota is what holds the CPU free.
 
 - Builds that do not run through slot. The web UI shows them as unmanaged cores in the host
   census.
-- Jobs started with `slot serve --memory-max`: each runs in its own `systemd-run --scope` unit,
-  outside the daemon's unit, so the quota does not reach them. The slot limit still does.
 - A daemon not started by systemd: only the slot limit applies, and `slot headroom` says
   `cpu quota not applied: not running in a systemd user unit`.
 - Memory and disk IO. The headroom limits CPU only.

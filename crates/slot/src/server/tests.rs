@@ -14,6 +14,10 @@ struct Fixture {
 }
 
 fn start(tokens: usize) -> Fixture {
+    start_with(tokens, crate::admission::Limits::default())
+}
+
+fn start_with(tokens: usize, admission: crate::admission::Limits) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let cfg = Config {
@@ -33,6 +37,7 @@ fn start(tokens: usize) -> Fixture {
         call_off_after: Duration::from_secs(120),
         call_ignore: Vec::new(),
         sccache_watch: false,
+        admission,
     };
     let server = Server::new(cfg.clone()).unwrap();
     let s = Arc::clone(&server);
@@ -306,6 +311,7 @@ fn history_survives_restart() {
         call_off_after: Duration::from_secs(120),
         call_ignore: Vec::new(),
         sccache_watch: false,
+        admission: crate::admission::Limits::default(),
     })
     .unwrap();
     let st = again.state();
@@ -336,6 +342,78 @@ fn headroom_lowers_the_limit_and_is_saved() {
     assert_eq!(limits::load(&f.root.join("state")).headroom_percent, 50);
     let v = rt.block_on(Arc::clone(&f.server).set_headroom(0));
     assert_eq!(v.effective_tokens, 2);
+}
+
+/// Reads frames until an `info` frame contains `needle`.
+fn read_info_until(c: &UnixStream, needle: &str) -> String {
+    let mut seen = String::new();
+    for line in BufReader::new(c.try_clone().unwrap()).lines() {
+        let Ok(line) = line else { break };
+        if let Frame::Info { msg } = serde_json::from_str::<Frame>(&line).unwrap() {
+            seen += &msg;
+            if msg.contains(needle) {
+                break;
+            }
+        }
+    }
+    seen
+}
+
+#[test]
+fn a_job_waits_while_the_disk_is_short_and_can_be_cancelled() {
+    let f = start_with(
+        2,
+        crate::admission::Limits {
+            min_free_memory: 0,
+            min_free_disk: u64::MAX,
+        },
+    );
+    let c = send(&f.socket, sh(&f.root, "echo ran"));
+    let info = read_info_until(&c, "waiting:");
+    assert!(info.contains("free on the filesystem of"), "{info}");
+    let st = f.server.state();
+    assert_eq!(st.active.len(), 1);
+    assert_eq!(st.active[0].state, JobState::Queued);
+    assert!(st.active[0].wait_reason.contains("builds need"), "{st:?}");
+    drop(c);
+    for _ in 0..100 {
+        if f.server.state().active.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let st = f.server.state();
+    assert!(st.active.is_empty(), "{st:?}");
+    assert_eq!(st.done.last().unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn memory_short_holds_a_job_only_while_another_runs() {
+    let f = start_with(
+        2,
+        crate::admission::Limits {
+            min_free_memory: u64::MAX / 4,
+            min_free_disk: 0,
+        },
+    );
+    let alone = run(&f, sh(&f.root, "echo alone"));
+    assert_eq!(
+        (alone.code, alone.out.as_str()),
+        (0, "alone\n"),
+        "alone: runs"
+    );
+    let first = send(&f.socket, sh(&f.root, "sleep 1.5"));
+    std::thread::sleep(Duration::from_millis(300));
+    let t0 = Instant::now();
+    let second = run(&f, sh(&f.root, "echo second"));
+    assert_eq!(second.code, 0);
+    assert!(second.info.contains("memory available"), "{}", second.info);
+    assert!(
+        t0.elapsed() >= Duration::from_millis(900),
+        "ran beside the first: {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(collect(first).code, 0);
 }
 
 #[test]

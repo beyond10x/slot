@@ -70,7 +70,11 @@ compile_server_cpu_s: number,
 /**
  * Highest sampled resident memory, bytes.
  */
-peak_rss: number, };
+peak_rss: number, 
+/**
+ * Why a queued job waits besides slots (disk space, memory); empty otherwise.
+ */
+wait_reason: string, };
 
 export type Unit = { 
 /**

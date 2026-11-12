@@ -26,6 +26,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::admission;
 use crate::call;
 use crate::census;
 use crate::jobserver::Pool;
@@ -85,7 +86,20 @@ pub struct Config {
     pub call_ignore: Vec<String>,
     /// Watch sccache servers and give back jobserver tokens they lost.
     pub sccache_watch: bool,
+    /// Free memory and disk a job needs before it may start; 0 turns one off.
+    pub admission: admission::Limits,
 }
+
+/// systemd slice the scopes of jobs under `--memory-max` run in; the
+/// headroom's CPU quota is set on it too.
+pub const JOB_SLICE: &str = "slot.slice";
+
+/// How often a job that waits for disk or memory looks again.
+const RESOURCE_POLL: Duration = Duration::from_secs(2);
+
+/// Jobs that started this recently count as still growing towards their
+/// expected peak memory.
+const STARTING_MS: i64 = 30_000;
 
 /// Interval between two call probes.
 const CALL_PROBE: Duration = Duration::from_secs(5);
@@ -150,6 +164,8 @@ struct Live {
     cores: f64,
     rss: u64,
     procs: usize,
+    /// Peak memory the job is expected to reach, from earlier runs.
+    expect_rss: u64,
 }
 
 struct Done {
@@ -180,6 +196,8 @@ struct Inner {
     title_pending: HashSet<String>,
     last_census: HostCensus,
     controller: policy::Controller,
+    /// Peak memory of finished jobs, for admission.
+    memory: admission::History,
 }
 
 /// The daemon.
@@ -231,10 +249,12 @@ impl Server {
         let log_path = cfg.state_dir.join("jobs.jsonl");
         let mut done = VecDeque::new();
         let mut next_id = 0;
+        let mut memory = admission::History::default();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
+                    memory.record(&job);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
@@ -285,6 +305,7 @@ impl Server {
                     cores as usize,
                     pool_size,
                 )),
+                memory,
             }),
             events,
             history: Mutex::new(VecDeque::new()),
@@ -539,6 +560,7 @@ impl Server {
             let mut g = self.inner.lock().expect("server lock");
             g.next_id += 1;
             let id = g.next_id;
+            let expect_rss = g.memory.expected(&req.repo, &req.argv, tc.name());
             let job = Job {
                 id,
                 argv: req.argv.clone(),
@@ -557,6 +579,7 @@ impl Server {
                 cpu_s: 0.0,
                 compile_server_cpu_s: 0.0,
                 peak_rss: 0,
+                wait_reason: String::new(),
             };
             g.active.insert(
                 id,
@@ -569,6 +592,7 @@ impl Server {
                     cores: 0.0,
                     rss: 0,
                     procs: 0,
+                    expect_rss,
                 },
             );
             id
@@ -584,8 +608,16 @@ impl Server {
                 ),
             });
         }
+        let mut disks = vec![cwd.clone()];
+        if let Some(t) = toolchain::get(&req.env, "CARGO_TARGET_DIR").filter(|t| !t.is_empty()) {
+            disks.push(cwd.join(t));
+        }
         let held = loop {
             if !self.admission_open(gone.clone()).await {
+                self.finish(id, JobState::Cancelled, -1, None);
+                return (130, None);
+            }
+            if !self.resources_ready(id, &disks, &tx, gone.clone()).await {
                 self.finish(id, JobState::Cancelled, -1, None);
                 return (130, None);
             }
@@ -603,6 +635,12 @@ impl Server {
             // Granted after an upgrade was requested: give the slots back
             // and wait with the other queued jobs.
             if *self.upgrading.borrow() {
+                self.pool.release(waiter.held());
+                continue;
+            }
+            // Memory may have gone while the job waited for slots: give
+            // them back and wait for memory first.
+            if self.short_of(id, &disks).is_some() {
                 self.pool.release(waiter.held());
                 continue;
             }
@@ -646,6 +684,8 @@ impl Server {
                 "--scope",
                 "--quiet",
                 "--collect",
+                "--slice",
+                JOB_SLICE,
                 "-p",
             ]
             .iter()
@@ -770,6 +810,82 @@ impl Server {
         (code, msg)
     }
 
+    /// Why job `id` may not start now: its filesystems (`disks`) are short
+    /// of space, or memory is short and another job runs. `(kind, text)`.
+    fn short_of(&self, id: i64, disks: &[PathBuf]) -> Option<(&'static str, String)> {
+        let limits = self.cfg.admission;
+        let free: Vec<(String, u64)> = disks
+            .iter()
+            .filter_map(|p| admission::disk_free(p).map(|f| (p.display().to_string(), f)))
+            .collect();
+        if let Some(r) = admission::disk_wait(&free, limits) {
+            return Some(("disk", r));
+        }
+        if limits.min_free_memory == 0 {
+            return None;
+        }
+        let available = admission::mem_available()?;
+        let now = now_ms();
+        let (expected, reserved, others) = {
+            let g = self.inner.lock().expect("server lock");
+            let expected = g.active.get(&id).map_or(0, |l| l.expect_rss);
+            let mut reserved = 0;
+            let mut others = false;
+            for (other, l) in &g.active {
+                if *other == id || l.pid.is_none() {
+                    continue;
+                }
+                others = true;
+                if now - l.job.started_ms < STARTING_MS {
+                    reserved += l.expect_rss.saturating_sub(l.rss);
+                }
+            }
+            (expected, reserved, others)
+        };
+        admission::memory_wait(available, reserved, expected, limits, others).map(|r| ("memory", r))
+    }
+
+    /// Waits until job `id` may start as far as disk and memory go, telling
+    /// the client why it waits; false when the client went away first.
+    async fn resources_ready(
+        &self,
+        id: i64,
+        disks: &[PathBuf],
+        tx: &mpsc::UnboundedSender<Frame>,
+        gone: watch::Receiver<bool>,
+    ) -> bool {
+        let mut told = "";
+        loop {
+            let short = self.short_of(id, disks);
+            let reason = short.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+            let changed = {
+                let mut g = self.inner.lock().expect("server lock");
+                g.active.get_mut(&id).is_some_and(|l| {
+                    let c = l.job.wait_reason != reason;
+                    l.job.wait_reason.clone_from(&reason);
+                    c
+                })
+            };
+            if changed {
+                self.publish(id);
+            }
+            let Some((kind, text)) = short else {
+                return true;
+            };
+            if kind != told {
+                let _ = tx.send(Frame::Info {
+                    msg: format!("slot: job {id} waiting: {text}"),
+                });
+                eprintln!("slot: job {id} waiting: {text}");
+                told = kind;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(RESOURCE_POLL) => {}
+                () = client_gone(gone.clone()) => return false,
+            }
+        }
+    }
+
     fn set_held(&self, id: i64, n: usize) {
         let mut g = self.inner.lock().expect("server lock");
         if let Some(l) = g.active.get_mut(&id) {
@@ -787,6 +903,7 @@ impl Server {
             live.job.cpu_s = live.job.compile_server_cpu_s + cpu.unwrap_or(0.0);
             let job = live.job.clone();
             g.metrics.record(&job);
+            g.memory.record(&job);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -1206,10 +1323,20 @@ impl Server {
             self.save_limits();
         }
         let quota = limits::cpu_quota_percent(self.cores, percent);
+        let slice = self.cfg.memory_max.is_some();
         let applied = if self.cfg.cpu_quota {
-            tokio::task::spawn_blocking(move || limits::apply_quota(own_unit().as_deref(), quota))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
+            tokio::task::spawn_blocking(move || {
+                let unit = own_unit();
+                limits::apply_quota(unit.as_deref(), quota)?;
+                // Jobs under --memory-max run in scopes in JOB_SLICE, outside
+                // the daemon's unit: the same quota covers them there.
+                if slice && unit.is_some() {
+                    limits::apply_quota(Some(JOB_SLICE), quota)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
         } else {
             Err("cpu quota disabled (--cpu-quota false)".into())
         };
