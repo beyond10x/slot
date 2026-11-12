@@ -652,4 +652,15 @@ Found against the real server, missed by the ssh stand-in:
    to 135.6 s, but the copy itself took 36.2 s on ext4; the gain is the 24 s only when the copy is
    a reflink (btrfs, xfs). Seeding therefore uses `cp --reflink=always` and is skipped where that
    fails.
+5. **A full server disk sent the build out of the pool.** With the guest disk full, the sync
+   failed (`mkdir … No space left on device`) and the client fell back to running the command
+   directly on the workstation, outside the pool: 100 crates compiled unpooled next to a full
+   local queue. From 0.8.0 a remote job that does not start goes to the local daemon instead.
+6. **The memory floor serializes jobs on a small server.** On the 8 GB guest a cold ess build
+   expects 3.6 GB peak, and `--min-free-memory` keeps 4 GB free, so a second job waits until the
+   first ends (it runs at once only when it is alone in the pool). Lower the floor on a small
+   server.
+7. **A deleted mirror under a queued job.** Removing a workspace mirror by hand while a job for it
+   was queued left the job without a working directory. Eviction of server target directories skips every workspace
+   with a queued or running job for this reason.
 

@@ -14,7 +14,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Cmd::Serve(args) => serve(&args).map(|()| 0),
         Cmd::Proxy(args) => proxy(&args.socket),
-        Cmd::Run(args) => Ok(build(&args.command, cli.local)),
+        Cmd::Run(args) => Ok(build(&args.command, cli.local, &cli.fetch)),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
             0
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
                 .into_iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            Ok(build(&argv, cli.local))
+            Ok(build(&argv, cli.local, &cli.fetch))
         }
     };
     match result {
@@ -53,11 +53,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn build(argv: &[String], local: bool) -> i32 {
+fn build(argv: &[String], local: bool, fetch: &[String]) -> i32 {
     if local {
         return client::run_local(argv);
     }
-    client::run(argv, &Settings::from_env())
+    let mut s = Settings::from_env();
+    s.fetch = fetch.to_vec();
+    client::run(argv, &s)
 }
 
 fn serve(args: &slot::cli::ServeArgs) -> Result<()> {

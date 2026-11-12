@@ -65,6 +65,11 @@ pub enum Frame {
         /// Job id.
         #[serde(default)]
         id: i64,
+        /// For a synced workspace: the job's target directory on the server
+        /// (`CARGO_TARGET_DIR`), where `slot --fetch target/…` reads from.
+        /// Empty for local jobs and from daemons older than 0.8.0.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        target_dir: String,
     },
     /// A message from the daemon for the client's stderr.
     Info {

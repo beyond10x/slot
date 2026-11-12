@@ -17,6 +17,7 @@ slot [OPTIONS]
 ```
 
 - `--local`: Run the command here, without the daemon (default `false`)
+- `--fetch`: With `SLOT_HOST` set: after the job exits 0, copy PATH back from the build server into the checkout. PATH is relative to the repository root; `target/…` is read from the job's target directory on the server. Repeat for more paths. Without `SLOT_HOST` the output is already here and this does nothing
 
 ### `slot serve`
 
