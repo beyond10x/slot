@@ -44,6 +44,12 @@ slot replaces those workarounds with one scheduler that owns every CPU slot on t
   it holds and which variables it gets. See [Toolchains](toolchains.md).
 - **A remote mode.** With `SLOT_HOST` set, the repository is synced to a build server and the
   build runs there. See [Remote builds](remote-builds.md).
+- **Headroom.** `slot headroom 40` keeps 40 % of the CPU out of builds, and call mode raises it
+  while a call uses the microphone or camera. See [Headroom](headroom.md).
+- **Admission by disk and memory.** A job waits while its filesystem is nearly full or memory
+  would run short. See [How it works](how-it-works.md#waiting-for-disk-and-memory).
+- **An agent plugin.** A Claude Code hook refuses builds that bypass the pool. See
+  [Claude Code plugin](claude-code-plugin.md).
 
 ## What it is not
 
@@ -56,5 +62,7 @@ slot replaces those workarounds with one scheduler that owns every CPU slot on t
 ## Next
 
 - [Getting started](getting-started.md): install, run the daemon, run a first build.
+- [Headroom](headroom.md): keep CPU free for your desktop and calls.
 - [Agent integration](agent-integration.md): the one line to add to a repository's `AGENTS.md`.
+- [Claude Code plugin](claude-code-plugin.md): the hook and the warden for agent sessions.
 - [CLI reference](reference/cli.md): every command and option.

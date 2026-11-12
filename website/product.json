@@ -3,7 +3,7 @@
   "product": {
     "name": "slot",
     "mark": "sl",
-    "eyebrow": "Shared build slots · 0.1.0",
+    "eyebrow": "Shared build slots",
     "promise": [
       "One pool of build slots for every build on a machine.",
       "Builds queue instead of oversubscribing the CPU."
@@ -19,6 +19,10 @@
       {
         "label": "How it works",
         "href": "/docs/how-it-works"
+      },
+      {
+        "label": "Headroom",
+        "href": "/docs/headroom"
       },
       {
         "label": "Agent integration",
@@ -102,6 +106,24 @@
           "href": "/docs/how-it-works#web-ui"
         },
         {
+          "title": "Headroom for your desktop",
+          "description": "slot headroom 40 or one slider keeps 40 % of the CPU out of builds. While a call uses the microphone or camera, the daemon raises it to the call value and puts the old value back 2 minutes after.",
+          "status": "shipped",
+          "href": "/docs/headroom"
+        },
+        {
+          "title": "Waits for disk and memory",
+          "description": "A job queues while its filesystem has under 25 GB free or memory would run short, and slot status says why.",
+          "status": "shipped",
+          "href": "/docs/how-it-works#waiting-for-disk-and-memory"
+        },
+        {
+          "title": "Claude Code plugin",
+          "description": "A hook refuses a build an agent starts outside the pool and names the slot command to run instead; the warden lists sessions that still build outside it.",
+          "status": "shipped",
+          "href": "/docs/claude-code-plugin"
+        },
+        {
           "title": "Remote build server",
           "description": "Set SLOT_HOST and builds run on another machine; the repository is synced with rsync and target directories stay there.",
           "status": "shipped",
@@ -118,7 +140,7 @@
     {
       "kind": "status",
       "eyebrow": "Status",
-      "title": "0.1.0. What exists and what does not.",
+      "title": "What exists and what does not.",
       "lede": "Shipped means in the code and covered by tests. Planned means not built.",
       "items": "data/status.json"
     }

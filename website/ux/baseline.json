@@ -1,0 +1,456 @@
+{
+  "about": "UX ratchet of the slot docs site at 1366x768, light and dark summed: lower is better for every key. Written by ux/ratchet.ts --update.",
+  "tolerances": {
+    "counts": "0",
+    "layout_shift.per_load": "0, compared only in a round (host fonts)",
+    "screen_only.keyboard_tabs": "0, compared only in a round (moves whenever a page gains a heading or link)"
+  },
+  "scenarios": {
+    "page:docs": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_agent-integration": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_claude-code-plugin": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_getting-started": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_headroom": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_how-it-works": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_reference_cli": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_reference_environment": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_remote-builds": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:docs_toolchains": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:landing": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "page:search": {
+      "layout.doc_hscroll": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.past_box": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "layout.scroll_boxes": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "always_visible.hidden": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "axe.serious": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:cancel": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 100,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:disk": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 5,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:headroom": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 13,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:install": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 80,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:plugin": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 38,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 6,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:remote-env": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 106,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 5,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "task:upgrade": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 94,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
+    }
+  }
+}

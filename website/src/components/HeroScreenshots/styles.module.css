@@ -99,7 +99,7 @@
 
 .dots {
   display: inline-flex;
-  gap: 0.4rem;
+  gap: 0;
 }
 
 .dot,
@@ -110,14 +110,26 @@
   cursor: pointer;
 }
 
+/* The button is a 24 px target (WCAG 2.5.8); the dot it shows stays small. */
 .dot {
-  width: 0.7rem;
-  height: 0.7rem;
+  display: inline-grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
   padding: 0;
+  border: 0;
   border-radius: 50%;
 }
 
-.dotCurrent {
+.dot::before {
+  content: '';
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1px solid var(--ifm-color-emphasis-600);
+  border-radius: 50%;
+}
+
+.dotCurrent::before {
   background: var(--b10x-product-hue, var(--ifm-color-primary));
   border-color: var(--b10x-product-hue, var(--ifm-color-primary));
 }
@@ -137,7 +149,7 @@
 }
 
 .arrow:hover,
-.dot:hover {
+.dot:hover::before {
   border-color: var(--ifm-color-primary);
 }
 

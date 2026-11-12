@@ -7,3 +7,6 @@
 /ui/ux/out/
 /ui/test-results/
 /ui/playwright-report/
+/website/ux/out/
+/website/test-results/
+/website/playwright-report/

@@ -56,6 +56,8 @@ tasks:
       - task: ui-check
       - task: ui
       - task: ui-ux
+      - task: site
+      - task: site-ux
       - cargo fmt --all -- --check
       - cargo clippy --workspace --all-targets --locked -- -D warnings
       - cargo test --workspace --locked
@@ -82,3 +84,22 @@ tasks:
     cmds:
       - npm ci
       - npm run build
+
+  site-ux:
+    desc: Run the docs UX gates and the docs ratchet against the built site (website/ux).
+    dir: website
+    cmds:
+      - node --test --disable-warning=ExperimentalWarning "ux/*.test.ts"
+      - npx tsc --noEmit -p ux/tsconfig.json
+      - npx playwright test
+      - node ux/ratchet.ts
+
+  site-ux-round:
+    desc: 'Measure a docs UX round at every size and write its report: task site-ux-round -- D-nn'
+    dir: website
+    env:
+      UX_ALL: '1'
+    cmds:
+      - rm -rf ux/out
+      - npx playwright test || true
+      - node ux/round.ts {{.CLI_ARGS}}
