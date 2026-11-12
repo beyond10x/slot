@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2 — 2026-11-12
+
+- A client that gets SIGINT, SIGTERM or SIGHUP cancels its job and exits with 128 + the signal;
+  it no longer sends the job again. Closing the connection on the signal looked to the client
+  like a daemon upgrade, so a queued job was sent a second time, which the job log kept as a
+  second job (18 of 60 queued jobs under `timeout` in a test against 0.5.1). A job is still
+  sent again when the daemon closed the connection before the job started and no signal came.
+
 ## 0.5.1 — 2026-11-12
 
 - Upgrades no longer stop every build behind one long job. After `systemctl --user reload

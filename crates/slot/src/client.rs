@@ -11,6 +11,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
 use std::fmt::Write as _;
@@ -28,6 +30,44 @@ pub const UPGRADE_WAIT: Duration = Duration::from_secs(600);
 
 /// Interval between connection attempts while the daemon upgrades.
 const UPGRADE_POLL: Duration = Duration::from_millis(500);
+
+/// The signal that ended this client (SIGINT, SIGTERM or SIGHUP), 0 while none.
+static SIGNALLED: AtomicI32 = AtomicI32::new(0);
+
+/// Closes the current connection to the daemon, so it cancels the job.
+type Closer = Box<dyn FnMut() + Send>;
+static CLOSER: Mutex<Option<Closer>> = Mutex::new(None);
+
+/// The signal that ended this client, if one did.
+fn signalled() -> Option<i32> {
+    match SIGNALLED.load(Ordering::SeqCst) {
+        0 => None,
+        s => Some(s),
+    }
+}
+
+/// Installs, once per process, the thread that handles SIGINT, SIGTERM and
+/// SIGHUP: it records the signal, then closes the current connection (the
+/// daemon cancels the job), then exits with 128 + signal. The record comes
+/// first, so the main thread, which sees the connection close, never takes
+/// that for a daemon upgrade and never sends the job again.
+fn handle_signals() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP]) else {
+            return;
+        };
+        std::thread::spawn(move || {
+            if let Some(sig) = signals.forever().next() {
+                SIGNALLED.store(sig, Ordering::SeqCst);
+                if let Some(close) = CLOSER.lock().ok().as_mut().and_then(|c| c.as_mut()) {
+                    close();
+                }
+                std::process::exit(128 + sig);
+            }
+        });
+    });
+}
 
 /// Client settings, read from `SLOT_*` variables.
 #[derive(Debug, Clone, Default)]
@@ -160,7 +200,8 @@ pub fn cancel(id: i64, s: &Settings) -> i32 {
 /// Runs `req` through the daemon at `socket`. An upgrading daemon drops the
 /// connections of jobs it has not started and re-executes; such a job is
 /// sent again, once, as soon as the socket is back, for up to `wait`.
-/// A job whose process had started is not sent again.
+/// A job whose process had started is not sent again, nor one whose client
+/// got a signal: the signal cancelled it.
 pub fn submit_local(socket: &Path, req: &Request, wait: Duration) -> i32 {
     let conn = match local(socket) {
         Ok(c) => c,
@@ -173,9 +214,15 @@ pub fn submit_local(socket: &Path, req: &Request, wait: Duration) -> i32 {
         Ended::Lost { started: false } => {}
         ended => return ended.code(),
     }
+    if let Some(sig) = signalled() {
+        return 128 + sig;
+    }
     eprintln!("slot: daemon upgrading, resubmitting job");
     let deadline = Instant::now() + wait;
     loop {
+        if let Some(sig) = signalled() {
+            return 128 + sig;
+        }
         match local(socket) {
             Ok(c) => return talk(c, req).code(),
             Err(_) if Instant::now() < deadline => std::thread::sleep(UPGRADE_POLL),
@@ -355,6 +402,8 @@ enum Ended {
     /// The connection closed without an exit frame. `started` is whether
     /// the job's process had started (a start, output or error frame came).
     Lost { started: bool },
+    /// The client got this signal; the job was cancelled.
+    Signalled(i32),
 }
 
 impl Ended {
@@ -362,6 +411,7 @@ impl Ended {
     fn code(self) -> i32 {
         match self {
             Self::Exit(code) => code,
+            Self::Signalled(sig) => 128 + sig,
             Self::Lost { .. } => {
                 eprintln!("slot: connection to daemon lost");
                 3
@@ -374,7 +424,7 @@ fn talk(conn: Conn, req: &Request) -> Ended {
     let Conn {
         reader,
         mut writer,
-        mut closer,
+        closer,
     } = conn;
     let mut line = match serde_json::to_vec(req) {
         Ok(b) => b,
@@ -390,13 +440,12 @@ fn talk(conn: Conn, req: &Request) -> Ended {
     }
     // The writer stays open until the job ends: closing it tells the daemon
     // the client is gone, and the daemon cancels the job.
-    if let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP]) {
-        std::thread::spawn(move || {
-            if let Some(sig) = signals.forever().next() {
-                closer();
-                std::process::exit(128 + sig);
-            }
-        });
+    if let Ok(mut c) = CLOSER.lock() {
+        *c = Some(closer);
+    }
+    handle_signals();
+    if let Some(sig) = signalled() {
+        return Ended::Signalled(sig);
     }
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
@@ -421,6 +470,9 @@ fn talk(conn: Conn, req: &Request) -> Ended {
             }
             Err(_) => {}
         }
+    }
+    if let Some(sig) = signalled() {
+        return Ended::Signalled(sig);
     }
     Ended::Lost { started }
 }

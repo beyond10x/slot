@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.5.1
+version=0.5.2
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -96,8 +96,9 @@ When a job waited two seconds or more for a slot, `slot` prints one line on stde
 slot: job 3 waited 5s for a build slot, ran 0s
 ```
 
-Ctrl-C, or any signal that ends `slot`, cancels the job: the daemon kills the job's process group
-and returns its slots to the pool. From another shell, `slot cancel 3` does the same for job 3, if
+Ctrl-C, SIGTERM or SIGHUP (from `timeout`, for example) cancels the job and `slot` exits with
+128 + the signal: the daemon kills the job's process group and returns its slots to the pool. The
+job is not sent again. From another shell, `slot cancel 3` does the same for job 3, if
 you submitted it; the job's own `slot` exits with 130.
 
 A command that is not on `PATH` is refused before it is queued:
