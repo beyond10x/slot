@@ -64,7 +64,7 @@ confirm it prints the usual output and exits with the usual code. From now on fo
 
 - One repository: add to its `AGENTS.md` *Build through slot: prefix builds with `slot`
   (`slot cargo test …`); `slot --local` bypasses the daemon.*
-- Every agent session: the `cargo` and `go` PATH shim from
+- Every agent session: the `cargo`, `go` and `ignite` PATH shim from
   <https://beyond10x.github.io/slot/docs/agent-integration> sends their build subcommands through
   slot without a prefix, for agent shells only.
 - Claude Code: this plugin's `PreToolUse` hook refuses a Bash command that builds or tests outside

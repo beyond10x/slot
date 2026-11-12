@@ -27,6 +27,8 @@ pub struct Env {
     pub cargo_shim: bool,
     /// `go` already goes through slot.
     pub go_shim: bool,
+    /// `ignite` already goes through slot.
+    pub ignite_shim: bool,
 }
 
 impl Env {
@@ -50,6 +52,7 @@ impl Env {
         Self {
             cargo_shim: shim("cargo"),
             go_shim: shim("go"),
+            ignite_shim: shim("ignite"),
         }
     }
 }
@@ -207,16 +210,37 @@ fn check_command(words: &[String], env: &Env, depth: usize) -> Verdict {
             Some("build" | "test" | "vet" | "install") => refuse(&line, None),
             _ => Verdict::Allow,
         },
+        "ignite" if !env.ignite_shim => match first_word(args) {
+            Some("build" | "test" | "conformance") => refuse(&line, None),
+            _ => Verdict::Allow,
+        },
+        "zig" | "zig.sh" => zig(args, &line),
+        "mvn" | "mvnw" | "gradle" | "gradlew" => {
+            if !watches_or_prints(args)
+                && targets(args, &["-f", "--file", "-p", "--project-dir", "-pl", "-D"])
+                    .any(|t| is_build_target(t) || matches!(t, "package" | "assemble"))
+            {
+                refuse(&line, None)
+            } else {
+                Verdict::Allow
+            }
+        }
+        "pytest" | "py.test" if !watches_or_prints(args) => refuse(&line, None),
+        p if p.starts_with("python") => match args {
+            [m, t, ..] if m == "-m" && t == "pytest" && !watches_or_prints(args) => {
+                refuse(&line, None)
+            }
+            _ => Verdict::Allow,
+        },
         "npx" | "bunx" => match first_word(args) {
             Some(r) => runner(r, args, &line),
             None => Verdict::Allow,
         },
         "yarn" | "pnpm" | "npm" => package_manager(prog, args, &line),
-        "node" => match first_word(args) {
-            Some(r) if r.contains("node_modules/") => runner(r, args, &line),
-            _ => Verdict::Allow,
-        },
-        "playwright" | "vitest" | "jest" => runner(&cmd[0], args, &line),
+        "node" => node(args, &line),
+        "playwright" | "vitest" | "jest" | "tsc" | "vue-tsc" | "eslint" => {
+            runner(&cmd[0], args, &line)
+        }
         "make" | "gmake" => {
             const QUIET: &[&str] = &[
                 "-n",
@@ -377,11 +401,99 @@ fn package_manager(prog: &str, args: &[String], line: &str) -> Verdict {
     }
 }
 
-/// A JavaScript test runner word (`vitest`, `node_modules/.bin/jest`, …).
+/// Words of a package.json script name that mean it compiles or runs tests.
+/// Narrower than [`BUILD_WORDS`]: `install`, `ci`, `all` and `generate` are
+/// package-manager commands or code generators there.
+const SCRIPT_WORDS: &[&str] = &[
+    "bench",
+    "build",
+    "check",
+    "compile",
+    "cov",
+    "coverage",
+    "e2e",
+    "gate",
+    "lint",
+    "test",
+    "tests",
+    "typecheck",
+    "verify",
+];
+
+/// Whether a package.json script, or the subcommand of a repository's node
+/// script, compiles or runs tests (`build`, `test:unit`, `ux:gate`), judged
+/// by its words; never one that starts a server or a watcher.
+fn is_build_script(name: &str) -> bool {
+    let words: Vec<String> = name
+        .split([':', '-', '_', '.', '/'])
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words.iter().any(|w| SCRIPT_WORDS.contains(&w.as_str()))
+        && !words.iter().any(|w| OTHER_WORDS.contains(&w.as_str()))
+}
+
+/// Flags that make a tool watch, serve or only print something.
+fn watches_or_prints(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--watch" | "-w" | "--help" | "-h" | "--version" | "-v" | "-V" | "--list" | "serve"
+        )
+    })
+}
+
+/// `zig build`, `zig test`, `zig build-exe|lib|obj`, also behind a
+/// repository's `zig.sh` wrapper; a `zig build run` step starts the program.
+fn zig(args: &[String], line: &str) -> Verdict {
+    match first_word(args) {
+        Some("build") if !args.iter().any(|a| a == "run") => refuse(line, None),
+        Some("test" | "build-exe" | "build-lib" | "build-obj") => refuse(line, None),
+        _ => Verdict::Allow,
+    }
+}
+
+/// `node --test`, a runner under `node_modules/`, or a repository script
+/// called with a build or test subcommand (`node tools/ux.mjs gate`).
+fn node(args: &[String], line: &str) -> Verdict {
+    if args.iter().any(|a| a == "--test") {
+        return refuse(line, None);
+    }
+    let Some(script) = first_word(args) else {
+        return Verdict::Allow;
+    };
+    if script.contains("node_modules/") {
+        return runner(script, args, line);
+    }
+    let rest = args
+        .iter()
+        .skip_while(|a| a.as_str() != script)
+        .skip(1)
+        .filter(|a| !a.starts_with('-') && !a.contains(['=', '/', '.', '$']));
+    if !watches_or_prints(args) && rest.take(2).any(|a| is_build_script(a)) {
+        return refuse(line, None);
+    }
+    Verdict::Allow
+}
+
+/// A JavaScript test runner, compiler or linter word (`vitest`,
+/// `node_modules/.bin/jest`, `tsc`), or a package.json script name.
 fn runner(word: &str, args: &[String], line: &str) -> Verdict {
     let flag = match base(word) {
         "playwright" if args.iter().any(|a| a == "test") => "--workers=2",
         "vitest" | "jest" => "--maxWorkers=4",
+        "tsc" | "vue-tsc" | "eslint" if !watches_or_prints(args) => return refuse(line, None),
+        "vite" | "docusaurus" | "webpack" | "next" | "nuxt" | "astro" | "rollup" | "esbuild"
+            if args.iter().any(|a| a == "build") =>
+        {
+            return refuse(line, None);
+        }
+        "playwright" | "tsc" | "vue-tsc" | "eslint" | "vite" | "docusaurus" | "webpack"
+        | "next" | "nuxt" | "astro" | "rollup" | "esbuild" => {
+            return Verdict::Allow;
+        }
+        w if !word.contains('/') && is_build_script(w) && !watches_or_prints(args) => {
+            return refuse(line, None);
+        }
         _ => return Verdict::Allow,
     };
     let has_flag = args.iter().any(|a| {
@@ -577,7 +689,84 @@ mod tests {
         Env {
             cargo_shim: true,
             go_shim: true,
+            ignite_shim: true,
         }
+    }
+
+    #[test]
+    fn refuses_the_other_toolchains_outside_the_pool() {
+        for cmd in [
+            "ignite build x.ignite --release",
+            "~/.local/bin/ignite test a.ignite --target all",
+            "ignite conformance a.ignite",
+            "zig build -Doptimize=ReleaseSafe",
+            "scripts/zig.sh build test",
+            "./scripts/zig.sh test src/main.zig",
+            "zig build-exe main.zig",
+            "pytest -q tests",
+            "python3 -m pytest -x",
+            "mvn -q clean package",
+            "./mvnw verify -pl core",
+            "./gradlew test",
+            "gradle assemble",
+            "npx tsc -p tsconfig.json --noEmit",
+            "pnpm exec vue-tsc --noEmit",
+            "npx eslint .",
+            "yarn typecheck",
+            "pnpm build",
+            "npm run build",
+            "pnpm run test:unit",
+            "pnpm lint",
+            "npx vite build",
+            "npx docusaurus build",
+            "node --test tests/",
+            "node tools/ux/ux.mjs gate",
+            "node scripts/run.mjs check --strict",
+        ] {
+            assert!(refused(cmd, &bare()), "should refuse: {cmd}");
+        }
+        for cmd in [
+            "ignite check a.ignite",
+            "ignite emit a.ignite",
+            "ignite run a.ignite --clock manual",
+            "ignite host --state s",
+            "ignite --version",
+            "zig fmt src",
+            "zig version",
+            "scripts/zig.sh fetch",
+            "zig build run",
+            "python3 -m http.server 8000",
+            "mvn spring-boot:run",
+            "mvn dependency:tree",
+            "./gradlew tasks",
+            "./gradlew --version",
+            "python3 scripts/report.py",
+            "npx tsc --watch",
+            "npx tsc --version",
+            "pnpm dev",
+            "pnpm build --watch",
+            "pnpm run test:watch",
+            "pnpm add -D vitest",
+            "pnpm generate",
+            "yarn",
+            "npx vite",
+            "npx docusaurus start",
+            "node server.js",
+            "node scripts/build-report.mjs --port 3000 serve",
+            "node -e 'console.log(1)'",
+            "node tools/ux/ux.mjs serve",
+            "node recount.mjs ../../review-coverage/out.txt",
+            "node lib/seed.mjs $WK seed-test.tsv",
+            "node suite.mjs build/review/probe.json",
+            "python3 -m pytest --version",
+        ] {
+            assert_eq!(verdict(cmd, &bare()), Verdict::Allow, "should allow: {cmd}");
+        }
+        assert_eq!(
+            verdict("ignite test a.ignite", &shimmed()),
+            Verdict::Allow,
+            "the shim covers ignite"
+        );
     }
 
     fn refused(cmd: &str, env: &Env) -> bool {

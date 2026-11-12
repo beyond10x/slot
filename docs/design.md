@@ -719,3 +719,59 @@ forward through the key failed with `administratively prohibited`. The rsync cli
 sends `-logDtpre.iLsfxCIvu`: the `e` before `.` marks protocol capabilities, so `slot shell`
 accepts `e` only there; the first unit tests had refused every sync for it.
 
+## 17. Which toolchains run outside the pool (measured 2026-11-12)
+
+Question: with the `cargo` and `go` PATH shim and the Claude Code hook installed, what still
+compiles or tests on the host without slot, and which of it belongs in the pool?
+
+Sources, all on one 20-core workstation with about 15 agent sessions:
+
+- The census (§ 11), 3,980 samples over 11.1 h: core-hours per class, inside a slot job
+  (`@slot`) or not.
+- A 10 min sampler of every `rustc`, `clang`, `ld.lld`, `zig` and `node` process: CPU time, whether
+  its environment has `SLOT_JOB`, and its parent chain.
+- The Bash commands of every agent session over 3 days (8,490 build or test commands of the
+  tools below), with and without a `slot` prefix. `cargo` (1,584) and `go` (912) are not counted
+  as outside: the shim sends their build subcommands through slot since the shim was installed.
+- A probe: `env` of a test binary under `slot cargo test` shows `SLOT_JOB` and
+  `CARGO_MAKEFLAGS=… --jobserver-auth=fifo:…`, so a tool a test starts inherits the pool.
+
+Census, core-hours outside the pool in 11.1 h (inside in brackets): rust-compile 7.18 (25.81),
+node 3.55 (7.25), link 0.39 (0.06), rust-test 0.12 (1.98), go-compile 0.09 (0.44), helm 0.05
+(0.04), native 0.05 (0.66), container-build 0.01 (0.00). Peak outside: node 10.6 cores, rust-compile
+12.7.
+
+rust-compile outside the pool is the sccache server's compilers: in the 10 min sample every
+`rustc` (879 CPU-seconds) had `SLOT_JOB` in its environment and sccache as its parent. sccache
+runs them outside the job's process tree, so the census does not count them as `@slot`, but the
+job log does (`compile_server_cpu_s`, 12.7 core-hours in the same 11 h). Nothing to change for rust.
+
+Node outside the pool in the same 10 min: 80 CPU-seconds in a container (docker), 62 directly from
+agent shells or with no parent; more than 1,000 inside slot jobs.
+
+Per tool, the decision:
+
+| tool | seen in 3 days (with `slot`) | evidence of CPU outside | decision |
+|---|---|---|---|
+| `ignite build` / `test` / `conformance` | 62 (4) / 126 (8) / – | the LLVM target runs `clang` once per compile and link, which reads no jobserver; the test runner starts one test job per core by default | toolchain `ignite` and PATH shim; the hook when the shim is missing |
+| `ignite check`, `emit`, `plan` | 353, 80, 10 | front end only | direct |
+| `ignite build --target rust` inside `cargo test` | – | cargo sets `CARGO=/usr/bin/cargo` for test binaries, so the shim is skipped; but the job's `SLOT_JOB` and jobserver are inherited (probe above) | covered |
+| vitest, jest, playwright | 529, 17, 164 | node-test 1.05, node-e2e 1.58 core-h outside | hook (unchanged), toolchain `node-test` |
+| `tsc`, `vue-tsc`, `eslint` | 119, 87, 120 | node-typecheck 0.38, node-lint 0.16 core-h outside | hook |
+| package.json scripts `build`, `typecheck`, `lint`, … | 173 (5) | node-build 0.38 core-h outside | hook, by the script name's words; not shimmed, since `npm`, `pnpm` and `yarn` also start dev servers and watchers |
+| `node <script> gate` and the like | 829 node scripts, 12 with `slot` | part of node above | hook when the first or second argument is a build word, and `node --test` |
+| `zig build` / `test` | 11 | not on `PATH` here; repositories call it through a `zig.sh` wrapper, which a PATH shim does not see | hook, also for `zig.sh`; census class `zig-compile` |
+| `pytest` | 78 (10) | no census class before | hook; census class `python-test` |
+| `mvn`, `gradle` | 14 | no census class before | hook for goals that compile or test; census class `jvm-build` |
+| `docker build` | 97 in 10 sessions | runs in the container daemon, outside the job's process tree and cgroup; container-build 0.01 core-h | out: slot can neither count nor cap it |
+| `helm template`, `lint` | 290, 62 | 0.05 core-h, peak 0.6 cores | out |
+| `clang` called directly | 71 | native 0.05 core-h outside | out; `ignite` covers the compiler's own calls |
+| `valgrind` | 19 | profiles a program's run time | out |
+
+`ignite test` holds one slot per test job, `--jobs` or 4, and sets `IGNITE_TEST_JOBS` to the slots
+held. Ignite 0.16.3 reads that variable as the default of `--jobs`; an older ignite inside slot
+uses `available_parallelism`, which in `slot.service` is the CPU quota, not the core count.
+
+Measured after: rerun the census and the 3-day count a week after the release; the hook's refusals
+on the same 3 days of commands are in the pull request.
+

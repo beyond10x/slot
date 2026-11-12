@@ -40,9 +40,23 @@ newlines and parentheses; inside `bash -c '…'` too) and checks each:
   has `deploy`, `dev`, `up`, `watch`, `serve`, `start`, `push` or `merge`;
 - `npm test`, `yarn test`, `pnpm test` and `run test`;
 - vitest, jest and `playwright test`, through `npx`, `bunx`, `yarn`, `pnpm`, `node` or
-  `node_modules/.bin`.
+  `node_modules/.bin`;
+- `tsc`, `vue-tsc` and `eslint`, and `vite`, `docusaurus`, `webpack`, `next`, `nuxt`, `astro`,
+  `rollup` or `esbuild` with `build`;
+- package.json scripts run through `npm run`, `yarn` or `pnpm` whose name has a word such as
+  `build`, `test`, `typecheck`, `lint`, `check`, `e2e` or `gate`, with the same exceptions as
+  `task` targets (`pnpm build`, `yarn typecheck`; not `pnpm dev`, `npm run test:watch`);
+- `node --test`, and `node <script>` called with such a word as its first or second argument
+  (`node tools/ux/ux.mjs gate`);
+- `zig build`, `zig test` and `zig build-exe|lib|obj`, also through a repository's `zig.sh`;
+  not `zig build run`;
+- `pytest` and `python -m pytest`;
+- `mvn`, `mvnw`, `gradle` and `gradlew` with a goal or task such as `test`, `verify`, `install`,
+  `package`, `build`, `check` or `assemble`;
+- `ignite build`, `test` and `conformance`.
 
-A match is refused: the hook exits 2 and Claude Code shows the agent one line, for example
+A command that watches, serves or only prints passes (`--watch`, `serve`, `--help`,
+`--version`). A match is refused: the hook exits 2 and Claude Code shows the agent one line, for example
 
 ```text
 slot: `npx vitest run` compiles or runs tests outside the shared build pool. Run `slot npx vitest run --maxWorkers=4` instead (the job holds one slot per worker, so name the worker count).
@@ -53,7 +67,7 @@ These pass:
 - anything that starts with `slot`, or has `SLOT_SHIM_OFF=1` in front;
 - every command inside a slot job (`SLOT_JOB` set), so `slot task check` is not refused for the
   cargo calls inside it;
-- `cargo` and `go` when the [PATH shim](agent-integration.md#make-it-the-default-the-path-shim)
+- `cargo`, `go` and `ignite` when the [PATH shim](agent-integration.md#make-it-the-default-the-path-shim)
   is installed in `~/.local/share/slot/shims`, since the shim sends them through slot;
 - quoted text, comments and heredoc bodies (`git commit -m "cargo test"`, `cat <<'EOF' … EOF`);
 - dry runs and listings: `make -n`, `task --list`, `cargo --version`, `cargo fmt`, `cargo run`,
