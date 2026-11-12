@@ -45,4 +45,5 @@ pool.
 
 A local job otherwise gets the caller's full environment. A remote job starts from the server
 daemon's environment, plus the variables its [toolchain](../toolchains.md) admits and the names
-in `SLOT_ENV`.
+in `SLOT_ENV`. A name that looks like a credential (it contains `TOKEN`, `SECRET`, `PASSWORD`,
+`PASSWD`, `CREDENTIAL`, `_KEY` or `AUTH`) crosses only when `SLOT_ENV` names it.

@@ -136,6 +136,25 @@ fn with_jobserver(c: &Context, env: Vec<String>) -> Vec<String> {
     env
 }
 
+/// Whether a variable name looks like a credential (`CARGO_REGISTRY_TOKEN`,
+/// `CARGO_REGISTRIES_X_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_KEY`). Such a
+/// variable never crosses to a remote host through a toolchain's prefix
+/// rule; naming it in `SLOT_ENV` still forwards it.
+pub fn credential(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "_KEY",
+        "AUTH",
+    ]
+    .iter()
+    .any(|w| n.contains(w))
+}
+
 fn common_client_env(name: &str) -> bool {
     matches!(
         name,
@@ -545,5 +564,27 @@ mod tests {
         }
         assert!(Cargo.client_env("RUSTFLAGS"));
         assert!(Go { parallel: 1 }.client_env("GOFLAGS"));
+    }
+
+    #[test]
+    fn credentials_are_held_back_even_under_a_toolchain_prefix() {
+        for name in [
+            "CARGO_REGISTRY_TOKEN",
+            "CARGO_REGISTRIES_PRIV_TOKEN",
+            "CARGO_REGISTRIES_PRIV_CREDENTIAL_PROVIDER",
+            "GOPRIVATE_AUTH",
+            "RUST_SECRET",
+            "NEXTEST_API_KEY",
+        ] {
+            assert!(credential(name), "{name}");
+        }
+        for name in [
+            "RUSTFLAGS",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "GOFLAGS",
+            "CARGO_TERM_COLOR",
+        ] {
+            assert!(!credential(name), "{name}");
+        }
     }
 }

@@ -599,3 +599,57 @@ reloads with a job printing a counter every 10 ms and checks no line is lost or 
 code reaches the client, and the pool returns to `size` free; and a fault test per fallback path.
 
 Out of scope: `systemctl restart`, which ends the process and all its children by design.
+
+## 16. Remote mode against a real server (measured 2026-11-12)
+
+Until 0.6.0, remote mode had run only against a local stand-in for ssh. This section is the
+first run against a second machine: a KVM guest on the 20-core workstation, Debian 13 cloud
+image, 4 vCPUs, 8 GB RAM, 25 GB ext4 disk, qemu user-mode network with ssh forwarded to a
+localhost port, rustc 1.100.0, sccache 0.18.0, slot 0.6.0 from the release archive under the
+shipped systemd user unit. The client is slot 0.6.0 on the workstation with `SLOT_SSH` naming a
+separate ssh config and the default control-connection options.
+
+Test repositories: slot itself (100 crates) and ess (66 workspace crates, 9,199 tracked files,
+132 MB synced, two git dependencies), `cargo build -p ess-cli`.
+
+| step | result |
+|---|---|
+| first sync of ess (empty mirror) plus `slot cargo --version` | 1.75 s wall |
+| same again, nothing changed | 0.29 s |
+| one file touched | 0.29 s |
+| `cargo build -p ess-cli`, cold, sccache empty, 4 slots | 160.7 s wall, 160.3 s run, 426 s CPU, peak RSS 3.6 GB, target dir 4.0 GB |
+| same, nothing changed | 0.61 s wall (cargo 0.14 s) |
+| same, one line appended to `ess-cli/src/main.rs` | 4.5 s wall, 1 unit |
+| same build on the workstation through its own pool, sccache off, 5 to 12 other jobs in the pool | 308 s run after 124 s in the queue, 372 s CPU |
+| slot itself, `cargo build -p b10x-slot-cli`, cold | 31.8 s, 100 units |
+| ess in a second clone (new workspace id), sccache warm from the first | 159.8 s, 204 units compiled, 30 sccache hits, 256 misses |
+| ess in a third clone, target dir copied from the first before the build | 135.6 s, 31 units compiled (the workspace's own crates) |
+| copying the 4.0 GB target dir (7,568 files), `cp -a` on ext4 | 36.2 s |
+
+Output streams line by line (202 lines of `Compiling` 8 s into the cold build), and compiler
+paths come back rewritten to the workstation's checkout. Exit codes pass through (`sh -c 'exit
+7'` gives 7). `slot cancel <id>` with `SLOT_HOST` set cancels the server job in 0.12 s and the
+client exits 130. SIGTERM to the client exits 143 and leaves no process on the server. Killing the
+ssh connection mid-job prints `slot: connection to daemon lost`, exits 3, and the server cancels
+the job (no `sleep` left on the server two seconds later).
+
+Found against the real server, missed by the ssh stand-in:
+
+1. **Credentials crossed.** `CARGO_REGISTRY_TOKEN` and `CARGO_REGISTRIES_<name>_TOKEN` reached
+   the job's environment on the server: the rust toolchain admits every `CARGO_*` name. The
+   stand-in ran on the same host with the same environment, so no test looked at what arrived.
+   Fixed in 0.7.0: `toolchain::credential` holds back names that look like credentials unless
+   `SLOT_ENV` names them.
+2. **The disk floor stops every job on a small server.** The 25 GB default of `--min-free-disk`
+   (§14) is larger than the whole guest disk, so the first job waited with `22.8 GB free …
+   builds need 25.0 GB`. The client showed the reason. The setup steps now say to lower it.
+3. **`slot` is not on `PATH` over ssh.** Debian puts `~/.local/bin` on `PATH` in login shells
+   only; `ssh host slot proxy` is not one, so `SLOT_REMOTE` must name the full path.
+4. **A seeded target dir pays only with reflinks.** sccache gave 30 hits in 286 compiles to a
+   second workspace id (not analysed; the different target dir in each rustc command line is the
+   likely cause), so a new worktree on the server
+   rebuilds nearly everything. Copying the first worktree's target dir cut the build from 159.8 s
+   to 135.6 s, but the copy itself took 36.2 s on ext4; the gain is the 24 s only when the copy is
+   a reflink (btrfs, xfs). Seeding therefore uses `cp --reflink=always` and is skipped where that
+   fails.
+

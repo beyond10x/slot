@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.0 — 2026-11-12
+
+- Remote mode no longer sends credentials to the build server. The rust toolchain admitted every
+  `CARGO_*` variable, so `CARGO_REGISTRY_TOKEN` and `CARGO_REGISTRIES_<name>_TOKEN` reached the
+  job on the server. A name that contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`,
+  `_KEY` or `AUTH` now crosses only when `SLOT_ENV` names it.
+- `.slot.toml` at the repository root: `local = ["cargo test -p integration", …]` lists command
+  prefixes that run on this machine's daemon while `SLOT_HOST` sends every other build to the
+  server, for tests that need docker, a database or a local port. slot prints one line when it
+  applies, and reports and ignores a file that does not parse.
+- Remote mode measured against a real server for the first time (a KVM guest, 4 vCPUs): sync,
+  build, streaming, exit codes, cancel and a dropped connection, in `docs/design.md` § 16. The
+  remote-builds page now covers the disk floor on a small server and `slot` missing from `PATH`
+  over ssh.
+
 ## 0.6.0 — 2026-11-12
 
 - Web UI: buttons 0 %, 20 % and 40 % beside the headroom slider set the headroom in one click.

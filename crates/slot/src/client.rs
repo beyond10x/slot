@@ -23,6 +23,7 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
+use crate::repo_config::{self, RepoConfig};
 use crate::toolchain;
 
 /// How long a queued job waits for an upgrading daemon to come back.
@@ -147,7 +148,11 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         }),
         ..Request::default()
     };
-    if let Some(host) = &s.host {
+    if let Some(host) = s
+        .host
+        .as_ref()
+        .filter(|_| !listed_local(top.as_deref(), argv))
+    {
         return match remote(host, top.as_deref(), &cwd, &mut req, s) {
             Ok(c) => talk(c, &req).code(),
             Err(e) => {
@@ -159,6 +164,26 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     req.cwd = cwd.to_string_lossy().into_owned();
     req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
     submit_local(&s.socket, &req, UPGRADE_WAIT)
+}
+
+/// Whether the repository's `.slot.toml` lists `argv` under `local`, so it
+/// runs on this machine's daemon although `SLOT_HOST` is set. Says so on
+/// stderr; a `.slot.toml` that does not parse is reported and ignored.
+fn listed_local(top: Option<&Path>, argv: &[String]) -> bool {
+    let Some(top) = top else { return false };
+    match RepoConfig::load(top) {
+        Ok(c) => c.local_match(argv).is_some_and(|p| {
+            eprintln!(
+                "slot: {} lists `{p}` as local: running on this machine",
+                repo_config::FILE
+            );
+            true
+        }),
+        Err(e) => {
+            eprintln!("slot: {e}; ignored");
+            false
+        }
+    }
 }
 
 /// `slot cancel <id>`: asks the daemon to cancel job `id`. With `SLOT_HOST`
@@ -365,7 +390,7 @@ fn remote(
         bail!("rsync exited with {st}");
     }
     for (k, v) in std::env::vars() {
-        if tc.client_env(&k) || s.extra_env.contains(&k) {
+        if (tc.client_env(&k) && !toolchain::credential(&k)) || s.extra_env.contains(&k) {
             req.env.push(format!("{k}={v}"));
         }
     }

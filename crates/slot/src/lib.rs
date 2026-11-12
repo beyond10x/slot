@@ -16,6 +16,7 @@ pub mod paths;
 pub mod policy;
 pub mod procstat;
 pub mod proto;
+pub mod repo_config;
 pub mod rewrite;
 pub mod sccache;
 pub mod server;
