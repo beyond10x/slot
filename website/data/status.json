@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-12",
-  "source": "CHANGELOG.md 0.1.0 and docs/design.md section 10",
+  "source": "CHANGELOG.md 0.1.0 to 0.10.0 and docs/design.md sections 10 and 16",
   "items": [
     {
       "area": "Pool",
@@ -48,29 +48,29 @@
     {
       "area": "Remote",
       "label": "Fetch artifacts back",
-      "status": "planned",
-      "detail": "Copy named build outputs from the server to the client after a successful build.",
-      "href": "/docs/remote-builds#not-built-yet"
+      "status": "shipped",
+      "detail": "slot --fetch PATH copies named build outputs from the server into the checkout after the job exits 0 (0.8.0).",
+      "href": "/docs/remote-builds#fetch-build-output-back"
     },
     {
       "area": "Remote",
       "label": "Target directory seeding and eviction",
-      "status": "planned",
-      "detail": "Seed a new workspace's target directory from the same repository, and delete old target directories under a disk budget.",
-      "href": "/docs/remote-builds#not-built-yet"
+      "status": "shipped",
+      "detail": "A new worktree starts from a reflink copy of the same repository's latest target directory; least recently used ones are deleted over --cache-budget or the disk floor (0.9.0).",
+      "href": "/docs/remote-builds#target-directories-on-the-server"
     },
     {
       "area": "Remote",
       "label": "Restricted ssh command",
-      "status": "planned",
-      "detail": "An authorized_keys forced command that accepts only the sync and run steps.",
-      "href": "/docs/remote-builds#not-built-yet"
+      "status": "shipped",
+      "detail": "slot shell, an authorized_keys forced command that runs only the sync, fetch, proxy and cancel steps (0.10.0).",
+      "href": "/docs/remote-builds#restrict-the-key-to-slot"
     },
     {
       "area": "Configuration",
       "label": "Per-repository configuration",
-      "status": "planned",
-      "detail": "A file in the repository listing tests that must run with --local.",
+      "status": "shipped",
+      "detail": ".slot.toml lists command prefixes that run on the local daemon while SLOT_HOST sends the rest to the server (0.7.0).",
       "href": "/docs/agent-integration#tests-that-need-local-services"
     }
   ]
