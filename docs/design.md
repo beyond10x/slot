@@ -368,8 +368,10 @@ Findings:
   input files", 475 "crate-type": proc macros, binaries and test harnesses, which sccache never
   caches).
 - 304 of 4262 sampled compiles (excluding these experiments) ran with `RUSTC_WRAPPER=""`, sccache
-  switched off by the session. One session gave its reason: the shared sccache server hung on
-  2026-11-10 and 2026-11-11. A hung sccache server stalls every build that uses it, so a health
+  switched off. Both sources had a reason. 116 came from one ess task whose consumer-coverage
+  check records the compiler profile and accepts the wrappers only when they are empty; that is
+  correct and stays. 39 came from a release build pinned to how the previous release was built,
+  after the shared sccache server hung on 2026-11-10 and 2026-11-11. A hung sccache server stalls every build that uses it, so a health
   check (`sccache --show-stats` answering within a few seconds) belongs next to idea 1.
 - One worktree's target directory held 11 builds of `reqwest` (3 feature sets, 2 profile hashes)
   and 10 of `syn` (7 feature sets, 2 profile hashes). Feature sets differ because resolver 2
