@@ -121,6 +121,42 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     submit_local(&s.socket, &req, UPGRADE_WAIT)
 }
 
+/// `slot cancel <id>`: asks the daemon to cancel job `id`. With `SLOT_HOST`
+/// set, runs `slot cancel` on that host over ssh.
+pub fn cancel(id: i64, s: &Settings) -> i32 {
+    if let Some(host) = &s.host {
+        let Some((ssh, args)) = s.ssh.split_first() else {
+            eprintln!("slot: SLOT_SSH is empty");
+            return 2;
+        };
+        return match Command::new(ssh)
+            .args(args)
+            .arg(host)
+            .arg(&s.remote_slot)
+            .arg("cancel")
+            .arg(id.to_string())
+            .status()
+        {
+            Ok(st) => st.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("slot: {ssh}: {e}");
+                3
+            }
+        };
+    }
+    let req = Request {
+        cancel: Some(id),
+        ..Request::default()
+    };
+    match local(&s.socket) {
+        Ok(c) => talk(c, &req).code(),
+        Err(e) => {
+            eprintln!("slot: daemon unreachable ({e:#})");
+            3
+        }
+    }
+}
+
 /// Runs `req` through the daemon at `socket`. An upgrading daemon drops the
 /// connections of jobs it has not started and re-executes; such a job is
 /// sent again, once, as soon as the socket is back, for up to `wait`.

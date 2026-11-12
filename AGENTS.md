@@ -63,8 +63,11 @@ with `worktree finish --discard-cache --archive` when the change is merged.
 ## Upgrading a running daemon
 
 Install the new binary over the old path, then `systemctl --user reload slot`. Reload sends
-SIGHUP: the daemon admits no new job (new and queued jobs stay queued), waits until no job runs,
-then re-executes the new binary, same pid. Queued jobs are dropped with their connections; the
+SIGHUP: the daemon re-executes the new binary, same pid, at the first moment no job runs. It holds
+admission for at most `--upgrade-hold` (60 s) to get there; if a job still runs, admission opens
+again and the next hold starts when every running job's predicted end (p90 of the same repo and
+argv) is within the hold, or the pool is idle (`server/upgrade.rs`). `slot status` shows
+`upgrade pending: …` until then. Queued jobs are dropped with their connections; the
 client (0.3.1 and later) sees the connection close before a `start` frame, waits up to 10 min for
 the socket and resubmits the same request once. A job that had started is never resubmitted.
 `systemctl --user restart slot` instead drains: the socket disappears, new `slot` calls run

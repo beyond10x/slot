@@ -26,6 +26,11 @@ pub struct Request {
     /// `host:pid` of the client's parent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client: String,
+    /// `slot cancel`: cancel this job instead of running `argv`. Only the
+    /// user who submitted the job may. Daemons older than 0.5.1 answer
+    /// "empty command".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<i64>,
 }
 
 /// A repository synced to the server.

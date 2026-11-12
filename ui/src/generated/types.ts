@@ -200,7 +200,11 @@ toolchains: Array<string>,
 /**
  * The sccache watchdog.
  */
-sccache: SccacheWatch, };
+sccache: SccacheWatch, 
+/**
+ * A pending upgrade, as one line; empty when none.
+ */
+upgrade: string, };
 
 export type CensusClass = { 
 /**

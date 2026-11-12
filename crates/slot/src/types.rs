@@ -147,6 +147,9 @@ pub struct State {
     /// The sccache watchdog.
     #[serde(default)]
     pub sccache: SccacheWatch,
+    /// A pending upgrade, as one line; empty when none.
+    #[serde(default)]
+    pub upgrade: String,
 }
 
 /// One message on `GET /api/events`.

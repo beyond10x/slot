@@ -63,7 +63,9 @@ slot: job 3 waited 5s for a build slot, ran 0s
 ```
 
 When the client goes away (Ctrl-C, a killed agent, a closed ssh connection), the daemon cancels
-the job: it kills the job's process group and returns the job's slots.
+the job: it kills the job's process group and returns the job's slots. `slot cancel <id>` does the
+same from another shell. Only the user who submitted the job may cancel it: the daemon compares
+the user id of the two socket connections (`SO_PEERCRED`).
 
 After a normal exit the daemon does not kill the process group. An sccache server that the job
 started lives in that group and serves later builds.

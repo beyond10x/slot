@@ -5,6 +5,7 @@ mod http;
 pub mod limits;
 mod metrics;
 mod ring;
+mod upgrade;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -88,6 +89,8 @@ pub struct Config {
     pub sccache_watch: bool,
     /// Free memory and disk a job needs before it may start; 0 turns one off.
     pub admission: admission::Limits,
+    /// Longest time an upgrade stops admission while jobs run; zero never stops it.
+    pub upgrade_hold: Duration,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -166,6 +169,19 @@ struct Live {
     procs: usize,
     /// Peak memory the job is expected to reach, from earlier runs.
     expect_rss: u64,
+    /// How `slot cancel` stops the job.
+    stop: Option<Stop>,
+}
+
+/// The submitter of a job and the means to stop it.
+#[derive(Clone)]
+struct Stop {
+    /// User id of the client that submitted the job; `None` when unknown.
+    uid: Option<u32>,
+    /// Set to `true` to cancel, as when the client goes away.
+    gone: Arc<watch::Sender<bool>>,
+    /// The submitting client's frames.
+    frames: mpsc::UnboundedSender<Frame>,
 }
 
 struct Done {
@@ -210,8 +226,10 @@ pub struct Server {
     host: String,
     cores: u32,
     headroom: Mutex<Headroom>,
-    /// True once an upgrade is pending: no job is admitted from then on.
+    /// True while an upgrade holds admission: no job is admitted.
     upgrading: watch::Sender<bool>,
+    /// A pending upgrade and its admission hold.
+    upgrade: Mutex<upgrade::Plan>,
     sccache: Mutex<SccacheWatch>,
 }
 
@@ -282,6 +300,7 @@ impl Server {
         let pool_size = cfg.tokens;
         let call_headroom = cfg.call_headroom;
         let sccache_watch = cfg.sccache_watch;
+        let upgrade_hold = cfg.upgrade_hold;
         Ok(Arc::new(Self {
             cfg,
             pool,
@@ -322,6 +341,7 @@ impl Server {
                 ..Headroom::default()
             }),
             upgrading: watch::Sender::new(false),
+            upgrade: Mutex::new(upgrade::Plan::new(upgrade_hold)),
             sccache: Mutex::new(SccacheWatch {
                 enabled: sccache_watch,
                 ..SccacheWatch::default()
@@ -334,6 +354,64 @@ impl Server {
     /// daemon re-executes; the queued clients resubmit to the new process.
     pub(crate) fn hold_admission(&self) {
         self.upgrading.send_replace(true);
+    }
+
+    /// Admits jobs again after a hold that ran out.
+    fn open_admission(&self) {
+        self.upgrading.send_replace(false);
+    }
+
+    /// The longest predicted time left of the running jobs; `None` when one
+    /// has no prediction or has run past it.
+    fn predicted_remaining(&self) -> Option<Duration> {
+        let g = self.inner.lock().expect("server lock");
+        let now = now_ms();
+        let mut longest = 0u64;
+        for l in g.active.values() {
+            if l.pid.is_none() && l.held == 0 {
+                continue;
+            }
+            let expected = g.memory.expected_runtime(&l.job.repo, &l.job.argv)?;
+            let elapsed = if l.job.started_ms > 0 {
+                (now - l.job.started_ms).max(0) as u64
+            } else {
+                0
+            };
+            if elapsed >= expected {
+                return None;
+            }
+            longest = longest.max(expected - elapsed);
+        }
+        Some(Duration::from_millis(longest))
+    }
+
+    /// Carries out an upgrade step; `true` when it is time to re-execute.
+    fn upgrade_step(&self, step: upgrade::Step) -> bool {
+        match step {
+            upgrade::Step::Reexec => return true,
+            upgrade::Step::Hold => {
+                self.hold_admission();
+                eprintln!(
+                    "slot: upgrade pending; admitting no new job for up to {}s",
+                    self.cfg.upgrade_hold.as_secs()
+                );
+            }
+            upgrade::Step::Release => {
+                let running = {
+                    let g = self.inner.lock().expect("server lock");
+                    g.active.values().filter(|l| l.pid.is_some()).count()
+                };
+                self.open_admission();
+                eprintln!(
+                    "slot: upgrade pending; {running} job(s) still running after {}s, admitting jobs \
+                     again; holding again once they are expected to end within {}s or none runs",
+                    self.cfg.upgrade_hold.as_secs(),
+                    self.cfg.upgrade_hold.as_secs()
+                );
+            }
+            upgrade::Step::Wait => {}
+        }
+        false
     }
 
     /// Waits until admission is open; false when the client went away first.
@@ -415,11 +493,23 @@ impl Server {
                 _ = term.recv() => break,
                 _ = hup.recv() => {
                     upgrade = true;
-                    self.hold_admission();
-                    eprintln!("slot: upgrade requested; admitting no new job, re-executing once no job runs");
+                    eprintln!("slot: upgrade requested; re-executing once no job runs");
+                    let idle = self.nothing_running();
+                    let step = self.upgrade.lock().expect("upgrade lock").request(Instant::now(), idle);
+                    if self.upgrade_step(step) {
+                        drop(listener);
+                        return Err(self.reexec());
+                    }
                 }
                 _ = idle_check.tick(), if upgrade => {
-                    if self.nothing_running() {
+                    let idle = self.nothing_running();
+                    let remaining = if idle { None } else { self.predicted_remaining() };
+                    let step = self
+                        .upgrade
+                        .lock()
+                        .expect("upgrade lock")
+                        .step(Instant::now(), idle, remaining);
+                    if self.upgrade_step(step) {
                         drop(listener);
                         return Err(self.reexec());
                     }
@@ -471,6 +561,7 @@ impl Server {
     }
 
     async fn handle(self: Arc<Self>, stream: UnixStream) {
+        let uid = stream.peer_cred().ok().map(|c| c.uid());
         let (rd, mut wr) = stream.into_split();
         let mut rd = TokioBufReader::new(rd);
         let mut line = String::new();
@@ -480,11 +571,26 @@ impl Server {
         let Ok(req) = serde_json::from_str::<Request>(&line) else {
             return;
         };
+        if let Some(id) = req.cancel {
+            let (code, msg) = self.cancel(id, uid).await;
+            let mut out = Vec::new();
+            for f in [Frame::Info { msg }, Frame::Exit { code }] {
+                if let Ok(b) = serde_json::to_vec(&f) {
+                    out.extend(b);
+                    out.push(b'\n');
+                }
+            }
+            let _ = wr.write_all(&out).await;
+            let _ = wr.shutdown().await;
+            return;
+        }
         let (gone_tx, gone_rx) = watch::channel(false);
+        let gone_tx = Arc::new(gone_tx);
+        let reader_gone = Arc::clone(&gone_tx);
         tokio::spawn(async move {
             let mut sink = [0u8; 256];
             while rd.read(&mut sink).await.unwrap_or(0) > 0 {}
-            let _ = gone_tx.send(true);
+            reader_gone.send_replace(true);
         });
         let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
         let writer = tokio::spawn(async move {
@@ -502,13 +608,66 @@ impl Server {
             }
             let _ = wr.shutdown().await;
         });
-        let (code, msg) = self.run_job(req, tx.clone(), gone_rx).await;
+        let stop = Stop {
+            uid,
+            gone: gone_tx,
+            frames: tx.clone(),
+        };
+        let (code, msg) = self.run_job(req, tx.clone(), gone_rx, Some(stop)).await;
         if let Some(msg) = msg {
             let _ = tx.send(Frame::Info { msg });
         }
         let _ = tx.send(Frame::Exit { code });
         drop(tx);
         let _ = writer.await;
+    }
+
+    /// The job's environment before the toolchain adds to it.
+    fn base_env(req: &Request) -> Vec<String> {
+        if req.workspace.is_none() {
+            return req.env.clone();
+        }
+        // Remote clients send only allowlisted variables; PATH, HOME and
+        // the toolchain installs are the server's own.
+        std::env::vars()
+            .map(|(k, v)| format!("{k}={v}"))
+            .chain(req.env.iter().cloned())
+            .collect()
+    }
+
+    /// `slot cancel <id>` from a client with user id `uid`: stops a queued
+    /// or running job the same way as its client going away (a running job's
+    /// process group gets SIGTERM, then SIGKILL after 5 s). Waits up to 10 s
+    /// for the job to end.
+    async fn cancel(&self, id: i64, uid: Option<u32>) -> (i32, String) {
+        let stop = {
+            let g = self.inner.lock().expect("server lock");
+            let Some(l) = g.active.get(&id) else {
+                return (1, format!("slot: job {id} is not queued or running"));
+            };
+            match &l.stop {
+                Some(s) if uid.is_some() && s.uid == uid => s.clone(),
+                _ => return (1, format!("slot: job {id} belongs to another user")),
+            }
+        };
+        let _ = stop.frames.send(Frame::Info {
+            msg: format!("slot: job {id} cancelled by `slot cancel`"),
+        });
+        stop.gone.send_replace(true);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if !self
+                .inner
+                .lock()
+                .expect("server lock")
+                .active
+                .contains_key(&id)
+            {
+                return (0, format!("slot: job {id} cancelled"));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        (1, format!("slot: job {id} still stopping after 10s"))
     }
 
     fn resolve(&self, req: &Request) -> Result<(PathBuf, String, String)> {
@@ -545,6 +704,7 @@ impl Server {
         req: Request,
         tx: mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
+        stop: Option<Stop>,
     ) -> (i32, Option<String>) {
         if req.argv.is_empty() {
             return (2, Some("slot: empty command".into()));
@@ -553,6 +713,14 @@ impl Server {
             Ok(v) => v,
             Err(e) => return (2, Some(format!("slot: {e}"))),
         };
+        // A mistyped subcommand (`slot cancle 12`) would otherwise wait in
+        // the queue for slots and fail only when it starts.
+        let base = Self::base_env(&req);
+        if !req.argv[0].contains('/')
+            && let Err(e) = look_path(&req.argv[0], &base)
+        {
+            return (127, Some(format!("slot: {e}; not queued")));
+        }
         let tc = toolchain::for_argv(&req.argv, self.cfg.go_tokens);
         let tokens = tc.tokens().clamp(1, self.pool.size());
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
@@ -593,6 +761,7 @@ impl Server {
                     rss: 0,
                     procs: 0,
                     expect_rss,
+                    stop,
                 },
             );
             id
@@ -664,15 +833,6 @@ impl Server {
                 .map(|w| w.id.clone())
                 .unwrap_or_default(),
         };
-        let mut base = req.env.clone();
-        if req.workspace.is_some() {
-            // Remote clients send only allowlisted variables; PATH, HOME and
-            // the toolchain installs are the server's own.
-            base = std::env::vars()
-                .map(|(k, v)| format!("{k}={v}"))
-                .chain(base)
-                .collect();
-        }
         let mut env = tc.env(&ctx, base);
         env.push(format!("{JOB_ENV}={id}"));
 
@@ -1374,6 +1534,11 @@ impl Server {
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),
             sccache: self.sccache.lock().expect("sccache lock").clone(),
+            upgrade: self
+                .upgrade
+                .lock()
+                .expect("upgrade lock")
+                .describe(Instant::now()),
         }
     }
 
