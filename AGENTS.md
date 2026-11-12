@@ -49,8 +49,28 @@ slot grows a multi-tenant service surface.
 ## Gate
 
 `task check` is the complete offline gate: `cargo fmt --check`, `cargo clippy -D warnings`,
-`cargo test`, the UI's typecheck, tests and build, and the drift checks of the generated CLI
-reference and UI types. CI runs it in `.github/workflows/gate.yml`.
+`cargo test`, the UI's typecheck, tests and build, the UX gates (`task ui-ux`), and the drift
+checks of the generated CLI reference and UI types. CI runs it in `.github/workflows/gate.yml`.
+
+## UX gates and rounds
+
+`ui/ux/` holds the UI iteration loop. Every merge: `ui/ux/gates.spec.ts` (no sideways page scroll,
+no scrolling element but the output text, the `data-ux-region` header marks fully in view,
+axe-core 0 serious or critical) and `ui/ux/screen-only.spec.ts` (every scenario task done by
+pointer and by keyboard, at most 2 actions, no `false_complete`) at 1366x768 and 1280x720, against
+the built `ui/dist` with every API answered from `ui/ux/scenarios.ts`; then `node ux/ratchet.ts`
+against `ui/ux/baseline.json`. Playwright's Chromium headless shell must be installed
+(`pnpm exec playwright install --only-shell chromium` in `ui/`), and the DejaVu Sans font: the
+harness renders every page in it, so the gates measure the same layout on every host.
+
+- A change that improves a metric runs `node ux/ratchet.ts --update` and commits the new baseline
+  in the same change. A baseline made worse names a decision id in that entry (`decision`).
+- A round: `task ux-round -- R-nn` measures every size and writes `ui/ux/rounds/R-nn/report.md`;
+  then `triage.md` (priority = severity × frequency × confidence ÷ cost, at most 5 changes) and,
+  for one layout or interaction change, `decision.md`. Every finding is a
+  `ui/ux/findings/UXF-nnn.md`; a closed S1 or S2 names its regression asset
+  (`ui/ux/findings.test.ts`). The change set is one task under the standing UX story in `.engineering/planning/story/`.
+- A new UI state or task gets a scenario in `ui/ux/scenarios.ts` before the change that adds it.
 
 Tests use `tempfile` directories, never a fixed path under `/tmp`.
 

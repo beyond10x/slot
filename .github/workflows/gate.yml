@@ -28,4 +28,7 @@ jobs:
       - uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install the browser for the UX gates
+        working-directory: ui
+        run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps --only-shell chromium && sudo apt-get install -y fonts-dejavu-core
       - run: task check

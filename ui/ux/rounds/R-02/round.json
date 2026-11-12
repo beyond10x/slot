@@ -1,0 +1,30 @@
+{
+  "id": "R-02",
+  "note": "Written by hand from the run's spec outputs; crowded not measured, queue-position bot not run (see measure.md).",
+  "metrics": {
+    "busy-failed": {
+      "gates.problems": 0,
+      "layout_shift.per_minute": 0.138,
+      "screen_only.actions": 2,
+      "screen_only.keyboard_tabs": 23,
+      "screen_only.keyboard_failed": 0,
+      "screen_only.failed": 0
+    },
+    "idle": { "gates.problems": 0, "layout_shift.per_minute": 0.137 },
+    "queue-position": { "gates.problems": 0, "layout_shift.per_minute": 0.138 },
+    "video-call": {
+      "gates.problems": 0,
+      "layout_shift.per_minute": 0.532,
+      "screen_only.actions": 9,
+      "screen_only.keyboard_failed": 0,
+      "screen_only.failed": 1
+    },
+    "video-call-old-daemon": {
+      "gates.problems": 0,
+      "layout_shift.per_minute": 0.532,
+      "screen_only.actions": 9,
+      "screen_only.keyboard_failed": 0,
+      "screen_only.failed": 1
+    }
+  }
+}

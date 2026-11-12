@@ -41,8 +41,8 @@ const SHOTS: Shot[] = [
   },
   {
     src: '/img/ui-job-output.png',
-    alt: 'slot web UI: the output of a finished cargo build in a side panel, beside the running and finished jobs with wait, duration, CPU seconds and peak memory.',
-    caption: 'Output of any job, live or finished, with its wait, CPU seconds and peak memory.',
+    alt: 'slot web UI: the compile error of a failed cargo build in a side panel, beside the queued, running and finished jobs with exit code, wait, duration and CPU seconds.',
+    caption: 'Output of any job, live or finished, beside its exit code, wait and CPU seconds.',
   },
 ];
 
