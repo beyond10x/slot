@@ -78,7 +78,10 @@ Bare SemVer tags (`0.1.0`).
 
 1. Bump `version` in `[workspace.package]` of `Cargo.toml`, let `cargo build` update
    `Cargo.lock`, and move the `CHANGELOG.md` entries under `## <version> — <YYYY-MM-DD>`.
-   `task check` green on that commit.
+   Update the docs in the same commit: `version=` in `website/docs/getting-started.md`
+   (`crates/slot-docs/tests/docs_version.rs` fails otherwise), and every page that describes
+   what the release changes (`toolchains.md`, `reference/environment.md`, `agent-integration.md`,
+   `task generate` for the CLI reference). `task check` green on that commit.
 2. Annotated tag on `main`, created and pushed as the bot.
 3. The tag push runs `.github/workflows/release.yml` (contents: read): `task check`; tag,
    `Cargo.toml` and `CHANGELOG.md` agree; two Linux targets built and smoke-tested (x86_64 and
