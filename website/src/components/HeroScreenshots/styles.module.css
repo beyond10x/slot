@@ -1,0 +1,149 @@
+.carousel {
+  min-width: 0;
+  margin: 0;
+}
+
+.frame {
+  border: 1px solid var(--b10x-color-hairline, var(--b10x-color-line, rgba(127, 127, 127, 0.3)));
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--ifm-background-surface-color, #fff);
+  box-shadow: var(--b10x-card-shadow, 0 10px 30px rgba(0, 0, 0, 0.12));
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.45rem 0.75rem;
+  border-bottom: 1px solid var(--b10x-color-hairline, var(--b10x-color-line, rgba(127, 127, 127, 0.3)));
+  font-size: 0.75rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+.lights {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.lights i {
+  display: block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--ifm-color-emphasis-300);
+}
+
+.address {
+  font-family: var(--ifm-font-family-monospace);
+}
+
+.viewport {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  background: #fff;
+}
+
+.slide {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 400ms ease, visibility 0s linear 400ms;
+}
+
+.slide img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+}
+
+.slide a {
+  display: block;
+  height: 100%;
+  cursor: zoom-in;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.current {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 400ms ease, visibility 0s;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+}
+
+.caption {
+  flex: 1;
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--ifm-color-emphasis-700);
+  min-width: 0;
+}
+
+.dots {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.dot,
+.arrow {
+  border: 1px solid var(--ifm-color-emphasis-400);
+  background: transparent;
+  color: var(--ifm-font-color-base);
+  cursor: pointer;
+}
+
+.dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.dotCurrent {
+  background: var(--b10x-product-hue, var(--ifm-color-primary));
+  border-color: var(--b10x-product-hue, var(--ifm-color-primary));
+}
+
+.arrow {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.dot:focus-visible,
+.arrow:focus-visible {
+  outline: 2px solid var(--ifm-color-primary);
+  outline-offset: 2px;
+}
+
+.arrow:hover,
+.dot:hover {
+  border-color: var(--ifm-color-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slide,
+  .current {
+    transition: none;
+  }
+}

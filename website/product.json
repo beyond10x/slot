@@ -30,11 +30,6 @@
       }
     ],
     "meta": "One Rust binary · Linux x86_64 and aarch64 · Apache-2.0",
-    "art": {
-      "kind": "terminal",
-      "session": "data/terminal.json",
-      "caption": "Recorded against a daemon with a pool of four slots."
-    },
     "kpis": [
       "shipped",
       "planned"
@@ -68,6 +63,13 @@
           "description": "stdout and stderr stream back to the caller, the exit code is passed through, and the job log records the run."
         }
       ]
+    },
+    {
+      "kind": "terminal",
+      "eyebrow": "Try it",
+      "title": "Two jobs on a pool of four slots.",
+      "lede": "A go job holds all four slots. A second job queues, runs when a slot is free, and keeps its exit code.",
+      "session": "data/terminal.json"
     },
     {
       "kind": "features",
