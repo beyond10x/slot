@@ -46,6 +46,7 @@ slot serve [OPTIONS]
 - `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off (default `25`)
 - `--min-free-memory`: A job waits while available memory, less what jobs that started in the last 30 s still take, is below its expected peak (from earlier runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway (default `4`)
 - `--upgrade-hold`: After `systemctl --user reload slot`, the longest time no new job starts while jobs still run, seconds. Then jobs start again, and the next hold begins when the running jobs are expected to end within it (from earlier runs of the same command) or none runs. 0 never holds (default `60`)
+- `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
 
 ### `slot proxy`
 

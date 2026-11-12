@@ -39,6 +39,7 @@ fn start_with(tokens: usize, admission: crate::admission::Limits) -> Fixture {
         sccache_watch: false,
         admission,
         upgrade_hold: Duration::from_secs(60),
+        cache_budget: 0,
     };
     let server = Server::new(cfg.clone()).unwrap();
     let s = Arc::clone(&server);
@@ -398,6 +399,7 @@ fn history_survives_restart() {
         sccache_watch: false,
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
+        cache_budget: 0,
     })
     .unwrap();
     let st = again.state();

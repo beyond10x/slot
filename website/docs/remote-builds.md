@@ -115,6 +115,24 @@ then waits for slots in the local pool like any other. Before 0.8.0 it ran the c
 outside the pool. If the connection drops while the job runs, `slot` prints `slot: connection to
 daemon lost` and exits with 3; the daemon cancels the job.
 
+## Target directories on the server
+
+Each worktree has its own target directory on the server, `<cache-root>/target/<workspace-id>`,
+next to a record `<workspace-id>.json` of its repository, last use and size.
+
+- **Seeding.** The first job of a new worktree starts from a copy of the most recently used
+  target directory of another worktree of the same repository, so dependencies are not compiled
+  again. The copy is a reflink (`cp --reflink=always`): instant, and sharing blocks until cargo
+  rewrites them. Where the filesystem has no reflinks (ext4), nothing is copied: a plain copy of
+  a 4 GB target directory took longer than the compile time it saved. Put the cache root on btrfs
+  or xfs to get seeding; the journal says `target directory not seeded: no reflink copy …`
+  otherwise.
+- **Eviction.** Before a remote job queues, the daemon deletes target directories and their
+  source copies, least recently used first, while together they take more than `slot serve
+  --cache-budget` GB, or while the disk has less than `--min-free-disk` free. A worktree with a
+  queued or running job is never deleted. The job's stderr and the journal name every deleted
+  workspace. `--cache-budget 0` (the default) leaves only the disk floor.
+
 ## Fetch build output back
 
 Build output stays on the server. `--fetch PATH` copies a path back into the checkout after the
@@ -156,9 +174,6 @@ key can run.
 
 ## Not built yet
 
-- **Target directory seeding and eviction.** A new worktree starts with an empty target
-  directory on the server, and old target directories are never deleted automatically. Watch the
-  disk under the cache root.
 - **A restricted ssh command.** An `authorized_keys` forced command that accepts only the sync and
   run steps.
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0 — 2026-11-12
+
+- Build servers seed a new worktree's target directory from the most recently used one of the
+  same repository by reflink, so dependencies are not compiled again; on a filesystem without
+  reflinks (ext4) nothing is copied. Tested on xfs: the second worktree of ess built in 1 s
+  after a 0.4 s reflink, against 140 s cold.
+- `slot serve --cache-budget GB`: before a remote job, target directories and their source
+  copies are deleted, least recently used first, while together they take more than the budget
+  or the disk is under `--min-free-disk`. A worktree with a queued or running job is kept.
+  Every deletion and seed is printed on the job's stderr and in the journal.
+
 ## 0.8.0 — 2026-11-12
 
 - `slot --fetch PATH <command…>`: with `SLOT_HOST` set, copies PATH back from the build server
