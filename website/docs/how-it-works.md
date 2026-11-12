@@ -74,6 +74,15 @@ When no job runs and none waits, every token must be back in the FIFO. The daemo
 restores tokens that a killed process took with it, or removes surplus ones, and logs
 `slot: jobserver reconciled by <n> tokens`.
 
+A busy pool is never idle, so the daemon also checks every 15 seconds while jobs wait and the FIFO
+is empty. If no process but the daemon has the FIFO open, every token must be in the FIFO, held
+back for headroom, granted to a running job, or taken by the first queued request; what is missing
+was taken by a compiler that was killed (a cancel, a `timeout`). The daemon writes the smaller of
+two shortfalls 15 seconds apart back and logs
+`slot: <n> jobserver token(s) were lost … wrote them back`; `/metrics` counts them in
+`slot_tokens_restored_total`. While any process has the FIFO open (a compiler, or a cargo nested in
+a job that inherited the jobserver) it cannot tell a lost token from one in use, so it waits.
+
 ## sccache watchdog
 
 An sccache server limits its own compiles with a private jobserver: a pipe that starts with one

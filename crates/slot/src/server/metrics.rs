@@ -84,6 +84,8 @@ pub struct Gauges {
     pub tokens: usize,
     pub free: usize,
     pub waiting: usize,
+    /// Lost tokens written back since the daemon started.
+    pub restored: u64,
     pub queued: BTreeMap<String, usize>,
     pub running: BTreeMap<String, usize>,
     pub job_cores: f64,
@@ -143,6 +145,12 @@ impl Metrics {
             "slot_waiters",
             "Requests waiting for slots in the jobserver pool.",
             g.waiting as f64,
+        );
+        let _ = writeln!(
+            s,
+            "# HELP slot_tokens_restored_total Lost slots written back to the pool.\n\
+             # TYPE slot_tokens_restored_total counter\nslot_tokens_restored_total {}",
+            g.restored
         );
         gauge(
             &mut s,

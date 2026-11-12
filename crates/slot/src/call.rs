@@ -67,21 +67,40 @@ fn int(props: &Value, key: &str) -> Option<i64> {
     }
 }
 
-/// `/proc/<pid>/comm` of a process.
-pub fn comm(pid: i64) -> Option<String> {
-    let s = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    Some(s.trim().to_string()).filter(|s| !s.is_empty())
+/// Names a process goes by: its `/proc/<pid>/comm` first, then each
+/// component of its executable path. A program installed per version runs
+/// as `…/claude/versions/2.1.322`, so its `comm` is the version and only the
+/// path names it. Empty when the process is gone.
+pub fn names(pid: i64) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|s| s.trim().to_string())
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        out.extend(path_names(&exe.to_string_lossy()));
+    }
+    out
+}
+
+/// The components of an executable path, without a trailing ` (deleted)`.
+fn path_names(exe: &str) -> Vec<String> {
+    exe.trim_end_matches(" (deleted)")
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Names of the applications that capture from a microphone or a camera in
-/// a `pw-dump` document, sorted, without duplicates. `comm_of` names the
-/// process behind a client pid: an ALSA client calls itself `PipeWire ALSA
-/// [<binary>]`, so its process name is what the ignore list and the shown
-/// name use.
+/// a `pw-dump` document, sorted, without duplicates. `names_of` gives the
+/// names of the process behind a client pid ([`names`]): an ALSA client
+/// calls itself `PipeWire ALSA [<binary>]`, so the ignore list matches any
+/// of them and the first is the name shown.
 pub fn capturing_apps(
     dump: &Value,
     ignore: &[String],
-    comm_of: &dyn Fn(i64) -> Option<String>,
+    names_of: &dyn Fn(i64) -> Vec<String>,
 ) -> Vec<String> {
     let Some(objects) = dump.as_array() else {
         return Vec::new();
@@ -131,10 +150,14 @@ pub fn capturing_apps(
             let binary = prop(props, "application.process.binary").unwrap_or("");
             let pid = int(props, "application.process.id")
                 .or_else(|| int(props, "client.id").and_then(|c| client_pid.get(&c).copied()));
-            let process = pid.and_then(comm_of).unwrap_or_default();
-            if !ignored(&[app, binary, &process], ignore) {
-                let shown = if app.starts_with("PipeWire ALSA") && !process.is_empty() {
-                    process
+            let process = pid.map(names_of).unwrap_or_default();
+            let mut all: Vec<&str> = vec![app, binary];
+            all.extend(process.iter().map(String::as_str));
+            if !ignored(&all, ignore) {
+                let shown = if app.starts_with("PipeWire ALSA")
+                    && let Some(p) = process.first()
+                {
+                    p.clone()
                 } else {
                     app.to_string()
                 };
@@ -187,12 +210,15 @@ pub fn camera_users(ignore: &[String]) -> Vec<String> {
         if !holds {
             continue;
         }
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        let comm = comm.trim();
-        if comm.is_empty() || CAMERA_SERVICES.contains(&comm) || ignored(&[comm], ignore) {
+        let all = pid.parse().map(names).unwrap_or_default();
+        let Some(comm) = all.first() else {
+            continue;
+        };
+        let refs: Vec<&str> = all.iter().map(String::as_str).collect();
+        if CAMERA_SERVICES.contains(&comm.as_str()) || ignored(&refs, ignore) {
             continue;
         }
-        out.insert(comm.to_string());
+        out.insert(comm.clone());
     }
     out.into_iter().collect()
 }
@@ -231,7 +257,7 @@ pub fn pw_dump(deadline: Duration) -> Option<Value> {
 /// holders, sorted, without duplicates.
 pub fn probe(ignore: &[String]) -> Vec<String> {
     let mut apps: BTreeSet<String> = pw_dump(Duration::from_secs(3))
-        .map(|d| capturing_apps(&d, ignore, &comm))
+        .map(|d| capturing_apps(&d, ignore, &names))
         .unwrap_or_default()
         .into_iter()
         .collect();
@@ -371,16 +397,22 @@ mod tests {
         DEFAULT_IGNORE.iter().map(|s| (*s).to_string()).collect()
     }
 
-    fn no_comm(_: i64) -> Option<String> {
-        None
+    fn no_comm(_: i64) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn named(comm: &str, exe: &str) -> Vec<String> {
+        let mut v = vec![comm.to_string()];
+        v.extend(path_names(exe));
+        v
     }
 
     #[test]
     fn dictation_into_claude_code_is_no_call_and_alsa_clients_go_by_process() {
         let comm_of = |pid: i64| match pid {
-            4100 => Some("claude".to_string()),
-            4200 => Some("zoom".to_string()),
-            _ => None,
+            4100 => named("claude", "/usr/bin/claude"),
+            4200 => named("zoom", "/opt/zoom/zoom"),
+            _ => Vec::new(),
         };
         assert_eq!(
             capturing_apps(&fixture("pw-alsa.json"), &defaults(), &comm_of),
@@ -389,6 +421,24 @@ mod tests {
         assert_eq!(
             capturing_apps(&fixture("pw-alsa.json"), &[], &comm_of),
             vec!["claude".to_string(), "zoom".to_string()]
+        );
+    }
+
+    #[test]
+    fn claude_code_installed_per_version_is_ignored_by_its_path() {
+        let comm_of = |pid: i64| match pid {
+            4100 => named("2.1.322", "/opt/claude/versions/2.1.322 (deleted)"),
+            4200 => named("zoom", "/opt/zoom/zoom"),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            capturing_apps(&fixture("pw-alsa.json"), &defaults(), &comm_of),
+            vec!["zoom".to_string()],
+            "comm is the version; the path names claude"
+        );
+        assert_eq!(
+            capturing_apps(&fixture("pw-alsa.json"), &[], &comm_of),
+            vec!["2.1.322".to_string(), "zoom".to_string()]
         );
     }
 

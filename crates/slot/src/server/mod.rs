@@ -38,7 +38,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::admission;
 use crate::call;
 use crate::census;
-use crate::jobserver::{Pool, WaiterHandle};
+use crate::jobserver::{self, Pool, WaiterHandle};
 use crate::policy;
 use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
@@ -173,6 +173,9 @@ const MAX_UNITS: usize = 12;
 const OUTPUT_KEEP: usize = 256 << 10;
 const DONE_OUTPUT_KEEP: usize = 50;
 
+/// How often [`Server::token_watch`] looks for lost jobserver tokens.
+const TOKEN_WATCH: Duration = Duration::from_secs(15);
+
 struct Live {
     job: Job,
     pid: Option<i32>,
@@ -288,6 +291,8 @@ pub struct Server {
     pause_pumps: Arc<AtomicBool>,
     /// What a handover passed to this process, until `run` takes it.
     inherited: Mutex<Option<handover::Inherited>>,
+    /// Lost jobserver tokens written back since start.
+    restored: AtomicU64,
 }
 
 /// The headroom in force, whether its CPU quota is applied, and call mode.
@@ -446,6 +451,7 @@ impl Server {
             next_conn: AtomicU64::new(1),
             pause_pumps: Arc::new(AtomicBool::new(false)),
             inherited: Mutex::new(inherited),
+            restored: AtomicU64::new(0),
         }))
     }
 
@@ -571,6 +577,7 @@ impl Server {
             eprintln!("slot: {msg}");
         }
         tokio::spawn(Arc::clone(&self).call_watch());
+        tokio::spawn(Arc::clone(&self).token_watch());
         if self.cfg.sccache_watch {
             tokio::spawn(Arc::clone(&self).sccache_watch());
         }
@@ -1993,6 +2000,7 @@ impl Server {
             tokens: self.cfg.tokens,
             free: self.pool.free(),
             waiting: self.pool.waiting(),
+            restored: self.restored.load(Ordering::Relaxed),
             job_cores: g.job_cores,
             sys_cpu: g.sys_cpu,
             census: g.last_census.clone(),
@@ -2099,6 +2107,66 @@ impl Server {
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
             eprintln!("slot: save {}: {e}", limits::FILE);
+        }
+    }
+
+    /// Every 15 s while requests wait, writes back jobserver tokens that a
+    /// process took and never returned (a compiler killed by a cancel or a
+    /// `timeout`). The idle-time reconcile cannot do it on a pool that is
+    /// never idle. It counts only while no process but the daemon has the
+    /// FIFO open, so no token can be in a live process, and acts on the
+    /// smaller of two shortfalls 15 s apart, so a token the reader thread
+    /// is booking at that moment is not counted as lost.
+    async fn token_watch(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(TOKEN_WATCH);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last: Option<usize> = None;
+        loop {
+            tick.tick().await;
+            if self.pool.waiting() == 0 || self.pool.free() > 0 {
+                last = None;
+                continue;
+            }
+            let path = self.pool.path().to_path_buf();
+            let Ok(others) =
+                tokio::task::spawn_blocking(move || jobserver::holders(&path, std::process::id()))
+                    .await
+            else {
+                continue;
+            };
+            if !others.is_empty() {
+                last = None;
+                continue;
+            }
+            let granted: usize = {
+                let g = self.inner.lock().expect("server lock");
+                g.active.values().map(|l| l.held).sum()
+            };
+            let missing = self.pool.missing(granted);
+            let n = last.map_or(0, |prev| prev.min(missing));
+            last = (missing > 0).then_some(missing);
+            if n == 0 {
+                continue;
+            }
+            self.pool.restore(n);
+            self.restored.fetch_add(n as u64, Ordering::Relaxed);
+            last = None;
+            eprintln!(
+                "slot: {n} jobserver token(s) were lost (no process holds the FIFO, \
+                 {granted} granted to jobs, {} waiting): wrote them back",
+                self.pool.waiting()
+            );
+            let line = serde_json::json!({
+                "t": now_ms(),
+                "event": "tokens_restored",
+                "tokens": n,
+                "granted": granted,
+            });
+            let mut g = self.inner.lock().expect("server lock");
+            if let Ok(mut b) = serde_json::to_vec(&line) {
+                b.push(b'\n');
+                let _ = g.census_log.write_all(&b);
+            }
         }
     }
 

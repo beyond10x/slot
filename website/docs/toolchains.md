@@ -83,6 +83,11 @@ go reads `GOMAXPROCS` for its default `-p`, so `slot task check` that runs `go t
 `--test-threads` cores rather than all of them, while the wrapper holds one slot. Call
 `slot go test` directly where go should hold its own slots.
 
+A test runner behind a wrapper is not seen: `slot task ux:gate` that starts `playwright test`
+holds one slot while its workers use as many cores as the runner starts (one node process at
+1153 % CPU on 2026-11-12). Pass a worker flag inside the task, or call the runner directly
+(`slot npx playwright test --workers=2`) so the job holds one slot per worker.
+
 All toolchains also pass `TERM`, `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TZ`, `LANG` and
 `LC_ALL` to a remote server. A name that looks like a credential (`CARGO_REGISTRY_TOKEN`) is
 held back even when it matches a toolchain's prefix. `SLOT_ENV` adds more names; see
