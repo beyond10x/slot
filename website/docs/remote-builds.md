@@ -25,10 +25,14 @@ slot cargo test -p foo
 1. Install slot on the server ([Getting started](getting-started.md#install)) and run
    `slot serve`, for example with the systemd user unit.
 2. Make sure a non-interactive ssh session finds `slot` on `PATH`, or set `SLOT_REMOTE` on the
-   workstation to its full path on the server.
+   workstation to its full path on the server. A stock Debian account does not: `~/.local/bin`
+   is on `PATH` only in login shells, and `ssh host cmd` is not one.
 3. Install `rsync` on both machines.
 4. Give the server what the builds need: the toolchains (rustup, go), and read access to any
    private git dependencies or Go modules.
+5. Check the disk floor. A job waits while its filesystem has less than `--min-free-disk`
+   (default 25 GB) free, and the client prints why. A server with a smaller disk needs a lower
+   value, for example `slot serve --min-free-disk 5`.
 
 Jobs on the server start from the daemon's own environment (its `PATH`, `HOME` and toolchain
 installs), not from the workstation's. With the systemd unit, that is the unit's `PATH`.
@@ -73,8 +77,11 @@ change the other.
 Only variables the job's toolchain admits cross to the server: for rust `CARGO_*` (not
 `CARGO_TARGET_DIR`, `CARGO_HOME`, `CARGO_BUILD_JOBS`), `RUST*`, `NEXTEST_*`, `INSTA_*`; for go
 `GO*` (not the cache and path variables) and `CGO_ENABLED`; for all, terminal and locale variables.
-The full lists are on [Toolchains](toolchains.md). Credentials such as `*_TOKEN`, `AWS_*` or
-`HOME` never cross.
+The full lists are on [Toolchains](toolchains.md). `HOME`, `AWS_*` and other variables no
+toolchain admits never cross. A name that contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`,
+`CREDENTIAL`, `_KEY` or `AUTH` never crosses through a toolchain's prefix either, so
+`CARGO_REGISTRY_TOKEN` and `CARGO_REGISTRIES_<name>_TOKEN` stay on the workstation (slot 0.6.0
+and older sent them).
 
 To forward more variables, list their names in `SLOT_ENV`, comma-separated:
 
@@ -106,11 +113,16 @@ If the sync fails (the host is down, ssh is refused), `slot` runs the command lo
 ## Tests that need local services
 
 Tests that talk to docker, a database, a local cluster or a port on localhost fail on the server.
-Run them with `--local`:
+List them in `.slot.toml` at the repository root:
 
-```console
-slot --local cargo test -p integration
+```toml
+local = ["cargo test -p integration", "go test ./e2e/..."]
 ```
+
+A command whose first words are one of the entries runs on this machine's daemon, through the
+local pool, and slot prints `slot: .slot.toml lists `cargo test -p integration` as local: running
+on this machine`. For a one-off, `slot --local <command>` runs the command here without the
+daemon.
 
 ## Security
 
@@ -129,4 +141,12 @@ key can run.
 - **A restricted ssh command.** An `authorized_keys` forced command that accepts only the sync and
   run steps.
 
-Remote mode has been tested with a local stand-in for ssh, not yet against a second machine.
+## Measured
+
+Against a 4-vCPU KVM guest on the workstation (numbers and method in the repository's
+`docs/design.md` § 16), for a workspace of 66 crates and 132 MB of source:
+
+- first sync 1.75 s; a sync with nothing or one file changed 0.29 s;
+- cold `cargo build -p ess-cli` 160.7 s; no-op rebuild 0.61 s; one changed file 4.5 s;
+- output arrives line by line; `slot cancel`, SIGTERM to the client and a dropped ssh connection
+  each end the job on the server.

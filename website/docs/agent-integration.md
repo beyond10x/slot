@@ -103,5 +103,14 @@ a task runs large go builds, call `slot go …` inside the task instead.
 ## Tests that need local services
 
 Tests that need docker, a database or a port on localhost work through the local daemon, since
-the job runs on the same machine. With a [remote server](remote-builds.md) they fail there; run
-them with `slot --local`. A per-repository file that lists such tests is planned, not built.
+the job runs on the same machine. With a [remote server](remote-builds.md) they fail there. List
+them in `.slot.toml` at the repository root, and they run on this machine's daemon while every
+other build goes to the server:
+
+```toml
+local = ["cargo test -p integration", "go test ./e2e/..."]
+```
+
+Each entry is a command prefix: it matches when its words are the first words of the command, so
+`cargo test -p integration -- --nocapture` matches and `cargo test -p integration2` does not. The
+command still runs through the pool, and slot prints one line saying why it ran locally.

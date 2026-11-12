@@ -2,7 +2,7 @@
   "name": "slot",
   "displayName": "Slot",
   "description": "Run every build through the shared slot pool: skills for building, setup and upgrade, a PreToolUse hook that refuses builds outside the pool, and the slot-warden agent that finds sessions still building outside it.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": {
     "name": "Beyond10x"
   },

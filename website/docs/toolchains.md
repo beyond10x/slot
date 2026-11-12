@@ -84,7 +84,8 @@ go reads `GOMAXPROCS` for its default `-p`, so `slot task check` that runs `go t
 `slot go test` directly where go should hold its own slots.
 
 All toolchains also pass `TERM`, `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TZ`, `LANG` and
-`LC_ALL` to a remote server. `SLOT_ENV` adds more names; see
+`LC_ALL` to a remote server. A name that looks like a credential (`CARGO_REGISTRY_TOKEN`) is
+held back even when it matches a toolchain's prefix. `SLOT_ENV` adds more names; see
 [Remote builds](remote-builds.md#environment).
 
 ## Adding a toolchain
