@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-12
 
 - Call mode: while a call uses the microphone or the camera, the headroom goes up to the call
   value (40 % by default) and back to the earlier value 2 minutes after the call. A call is a
