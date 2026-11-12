@@ -1,0 +1,57 @@
+#!/bin/sh
+# PATH shim: installed as `cargo` and `go` in a directory placed first on PATH,
+# it sends build commands through slot and runs everything else directly.
+#
+# Through slot: cargo build|b|check|c|test|t|clippy|doc|d|bench|nextest|install|rustc|llvm-cov|miri
+#               go build|test|vet|install
+# Directly:     every other subcommand (run, fmt, metadata, …), any command inside a slot
+#               job (SLOT_JOB set), SLOT_SHIM_OFF=1, or when `slot` is not on PATH.
+
+name=${0##*/}
+dir=${0%/*}
+case $dir in /*) ;; *) dir=$(pwd)/$dir ;; esac
+
+strip_path() {
+  out=
+  old_ifs=$IFS
+  IFS=:
+  for p in $PATH; do
+    case $p in "$dir" | "$dir/") continue ;; esac
+    if [ -n "$1" ] && [ "$p" -ef "$dir" ] 2>/dev/null; then continue; fi
+    out=${out:+$out:}$p
+  done
+  IFS=$old_ifs
+  PATH=$out
+  export PATH
+}
+strip_path check
+
+real=$(command -v -- "$name") || {
+  echo "slot-shim: $name: not found on PATH" >&2
+  exit 127
+}
+
+if [ -n "${SLOT_JOB:-}" ] || [ -n "${SLOT_SHIM_OFF:-}" ] || ! command -v slot >/dev/null 2>&1; then
+  exec "$real" "$@"
+fi
+
+sub=
+skip=
+for a in "$@"; do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case $a in
+    --color | --config | -Z | -C | --manifest-path) skip=1 ;;
+    +* | -*) ;;
+    *) sub=$a; break ;;
+  esac
+done
+
+case $name:$sub in
+  cargo:build | cargo:b | cargo:check | cargo:c | cargo:test | cargo:t | cargo:clippy | \
+  cargo:doc | cargo:d | cargo:bench | cargo:nextest | cargo:install | cargo:rustc | \
+  cargo:llvm-cov | cargo:miri | \
+  go:build | go:test | go:vet | go:install)
+    exec slot run -- "$real" "$@"
+    ;;
+esac
+exec "$real" "$@"

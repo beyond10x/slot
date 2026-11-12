@@ -28,6 +28,46 @@ What it achieves:
   agent's session id when it runs inside a Claude Code session (`CLAUDE_CODE_SESSION_ID`).
 - If the daemon is down, builds still run locally, with one line on stderr.
 
+## Make it the default: the PATH shim
+
+An instruction depends on every agent following it. On a machine where every agent session should
+build through slot, install the shim instead: [`contrib/slot-shim`](https://github.com/beyond10x/slot/blob/main/contrib/slot-shim),
+linked as `cargo` and `go` in a directory that agent shells put first on `PATH`.
+
+```sh
+d=~/.local/share/slot
+mkdir -p "$d/shims"
+curl -fsSL -o "$d/slot-shim" https://raw.githubusercontent.com/beyond10x/slot/main/contrib/slot-shim
+chmod +x "$d/slot-shim"
+ln -sfn ../slot-shim "$d/shims/cargo"
+ln -sfn ../slot-shim "$d/shims/go"
+```
+
+Then put `$d/shims` first on `PATH` for agent shells only. For Claude Code, which sets
+`CLAUDECODE=1` in its shells, in `~/.zshenv`:
+
+```sh
+if [[ -n $CLAUDECODE && -d $HOME/.local/share/slot/shims ]]; then
+  path=($HOME/.local/share/slot/shims ${path:#$HOME/.local/share/slot/shims})
+  export PATH
+fi
+```
+
+A Claude Code `SessionStart` hook that appends the same `PATH` line to `$CLAUDE_ENV_FILE` does it
+for every shell, bash or zsh.
+
+What the shim sends through slot:
+
+- `cargo build`, `b`, `check`, `c`, `test`, `t`, `clippy`, `doc`, `d`, `bench`, `nextest`,
+  `install`, `rustc`, `llvm-cov`, `miri`; global flags such as `+nightly` or `--locked` before the
+  subcommand are skipped when finding it.
+- `go build`, `test`, `vet`, `install`.
+
+Everything else runs directly: `cargo run`, `cargo fmt`, `cargo metadata`, `go run`, `go mod`. A
+command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` does not queue its
+cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
+`PATH` the shim runs the real command.
+
 ## Remove the old workarounds
 
 Once builds go through slot, these are not needed and some are ignored:
@@ -49,8 +89,7 @@ a task runs large go builds, call `slot go …` inside the task instead.
 ## What not to wrap
 
 - **rust-analyzer and IDE checks.** They run cargo for metadata and `cargo check` on their own
-  schedule. slot has no `cargo` shim on `PATH` for this reason; only commands that start with
-  `slot` go through it.
+  schedule. Put the shim on `PATH` for agent shells only, never for the editor.
 - **Long-running processes.** A server, a watcher or `cargo run` of a daemon holds its slot for as
   long as it runs. Start those without `slot`.
 

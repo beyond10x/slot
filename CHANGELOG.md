@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `contrib/slot-shim`: a `PATH` shim for `cargo` and `go` that sends build, check, test, clippy,
+  doc, bench and install through slot and runs every other subcommand directly, so agent shells
+  build through the pool without a `slot` prefix. Install steps in the agent-integration guide.
+
 ## 0.1.0 — 2026-11-12
 
 - `slot serve`: one GNU-make jobserver FIFO shared by every job, FIFO-ordered admission,
