@@ -270,7 +270,7 @@ impl NodeTest {
 
     /// The toolchain for one command line.
     pub fn from_argv(argv: &[String]) -> Self {
-        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let cores = crate::procstat::host_cpus();
         Self {
             workers: worker_flag(argv, cores).unwrap_or(NODE_TEST_WORKERS),
         }

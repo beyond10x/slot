@@ -159,7 +159,7 @@ pub enum HookCmd {
 }
 
 fn default_tokens() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    crate::procstat::host_cpus()
 }
 
 impl ServeArgs {

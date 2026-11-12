@@ -37,9 +37,10 @@ Two limits, both lifted again at 0 %:
   withheld tokens back at once. A queued job that asked for more slots than now circulate is
   given the new maximum.
 - **CPU quota.** When the daemon runs as a systemd user service, it sets `CPUQuota` on its own
-  unit to `(100 − headroom) × cores` percent. Every job runs inside that unit's cgroup, so the
-  quota caps all builds together, including test binaries and anything else a job starts that the
-  jobserver does not see. The kernel enforces it immediately.
+  unit to `(100 − headroom) × cores` percent, where cores are the CPUs online on the host
+  (`/sys/devices/system/cpu/online`), never the quota in force. Every job runs inside that unit's
+  cgroup, so the quota caps all builds together, including test binaries and anything else a job
+  starts that the jobserver does not see. The kernel enforces it immediately.
 
 The slot count shapes the queue; the quota is what holds the CPU free.
 

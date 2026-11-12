@@ -428,6 +428,12 @@ Two limits, because neither is enough alone:
   CPUQuota=(100 − h) × cores %` caps the whole cgroup subtree at once, enforced by the kernel.
   `--runtime` writes a drop-in under `/run` that a reboot drops; the daemon re-applies the saved value
   on start. An empty `CPUQuota=` clears it at 0 %.
+- **The base is the host's online CPUs** (`/sys/devices/system/cpu/online`), both for `cores` in
+  the quota and for the default pool size. `std::thread::available_parallelism` reads the
+  cgroup's `cpu.max`; 0.3.x used it, and a daemon that re-executed inside its own
+  `CPUQuota=1200%` on 20 cores counted 12, sized the pool at 12 and set its next quota from 12
+  (`headroom 40%: 7 of 12 tokens, cpu quota 720%`, 2026-11-12). Each upgrade under a headroom
+  would have shrunk both again. Fixed in 0.4.1.
 
 Gaps: jobs under `--memory-max` run in their own `systemd-run --scope` units outside
 `slot.service`, so the quota does not reach them; a daemon not under systemd gets the token limit
