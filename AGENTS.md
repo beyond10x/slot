@@ -49,8 +49,9 @@ slot grows a multi-tenant service surface.
 ## Gate
 
 `task check` is the complete offline gate: `cargo fmt --check`, `cargo clippy -D warnings`,
-`cargo test`, the UI's typecheck, tests and build, the UX gates (`task ui-ux`), and the drift
-checks of the generated CLI reference and UI types. CI runs it in `.github/workflows/gate.yml`.
+`cargo test`, the UI's typecheck, tests and build, the UX gates (`task ui-ux`), the docs site
+build and its UX gates (`task site`, `task site-ux`), and the drift checks of the generated CLI
+reference and UI types. CI runs it in `.github/workflows/gate.yml`.
 
 ## UX gates and rounds
 
@@ -71,6 +72,17 @@ harness renders every page in it, so the gates measure the same layout on every 
   `ui/ux/findings/UXF-nnn.md`; a closed S1 or S2 names its regression asset
   (`ui/ux/findings.test.ts`). The change set is one task under the standing UX story in `.engineering/planning/story/`.
 - A new UI state or task gets a scenario in `ui/ux/scenarios.ts` before the change that adds it.
+
+`website/ux/` holds the same loop for the docs site, against the built `website/build`
+(`task site-ux`, part of `task check`): every sitemap page at 1366x768 and 1280x720 in both themes
+with no sideways page scroll, nothing past its box, navbar, search, theme toggle and sidebar in
+view at the top and the bottom, axe-core 0 serious or critical (`gates.spec.ts`); the reader
+tasks in `tasks.ts` done from the landing page by pointer and by keyboard in at most 3 actions
+(`screen-only.spec.ts`); `ratchet.ts` against `website/ux/baseline.json`, reusing
+`ui/ux/ratchet-lib.ts` (keyboard Tab counts and layout shift only in a round); `copy.test.ts` (the landing page names no version but the workspace's, a
+`planned` item in `website/data/status.json` points at a "Not built yet" section that still
+lists it). A round: `task site-ux-round -- D-nn`; findings are `website/ux/findings/DXF-nnn.md`.
+A page or a feature that a reader should find gets a task in `website/ux/tasks.ts`.
 
 Tests use `tempfile` directories, never a fixed path under `/tmp`.
 
@@ -139,7 +151,9 @@ Bare SemVer tags (`0.1.0`).
    `plugin/.claude-plugin/plugin.json` and `plugin/.codex-plugin/plugin.json`
    (`crates/slot-docs/tests/docs_version.rs` fails otherwise), and every page that describes
    what the release changes (`toolchains.md`, `reference/environment.md`, `agent-integration.md`,
-   `task generate` for the CLI reference). `task check` green on that commit.
+   `task generate` for the CLI reference), and the landing page: a shipped feature gets a line in
+   `website/data/status.json` (and a planned one turns `shipped`), a reader-facing one a card in
+   `website/product.json`. `task check` green on that commit.
 2. Annotated tag on `main`, created and pushed as the bot.
 3. The tag push runs `.github/workflows/release.yml` (contents: read): `task check`; tag,
    `Cargo.toml` and `CHANGELOG.md` agree; two Linux targets built and smoke-tested (x86_64 and

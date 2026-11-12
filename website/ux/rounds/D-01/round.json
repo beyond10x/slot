@@ -1,0 +1,2155 @@
+{
+  "id": "D-01",
+  "metrics": {
+    "page:docs": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.007
+    },
+    "page:docs_agent-integration": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.004
+    },
+    "page:docs_claude-code-plugin": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.009
+    },
+    "page:docs_getting-started": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.008
+    },
+    "page:docs_headroom": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 0,
+      "layout_shift.per_load": 0.032
+    },
+    "page:docs_how-it-works": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.002
+    },
+    "page:docs_reference_cli": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 0,
+      "layout_shift.per_load": 0.005
+    },
+    "page:docs_reference_environment": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0
+    },
+    "page:docs_remote-builds": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.002
+    },
+    "page:docs_toolchains": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0.072
+    },
+    "page:landing": {
+      "layout.doc_hscroll": 0,
+      "layout.past_box": 0,
+      "layout.scroll_boxes": 0,
+      "always_visible.hidden": 4,
+      "axe.serious": 2,
+      "layout_shift.per_load": 0
+    },
+    "task:cancel": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 75,
+      "screen_only.failed": 0,
+      "screen_only.actions": 2,
+      "screen_only.looks": 0,
+      "screen_only.steers": 0
+    },
+    "task:disk": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 5,
+      "screen_only.failed": 0,
+      "screen_only.actions": 1,
+      "screen_only.looks": 0,
+      "screen_only.steers": 0
+    },
+    "task:headroom": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 20,
+      "screen_only.failed": 0,
+      "screen_only.actions": 2,
+      "screen_only.looks": 7,
+      "screen_only.steers": 1
+    },
+    "task:install": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 69,
+      "screen_only.failed": 0,
+      "screen_only.actions": 2,
+      "screen_only.looks": 0,
+      "screen_only.steers": 0
+    },
+    "task:plugin": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 23,
+      "screen_only.failed": 0,
+      "screen_only.actions": 2,
+      "screen_only.looks": 8,
+      "screen_only.steers": 1
+    },
+    "task:remote-env": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 87,
+      "screen_only.failed": 0,
+      "screen_only.actions": 2,
+      "screen_only.looks": 4,
+      "screen_only.steers": 0
+    },
+    "task:upgrade": {
+      "screen_only.keyboard_failed": 0,
+      "screen_only.keyboard_tabs": 75,
+      "screen_only.failed": 0,
+      "screen_only.actions": 2,
+      "screen_only.looks": 0,
+      "screen_only.steers": 0
+    }
+  },
+  "problems": [
+    "docs @ 1280x720 dark: always-visible: top: search: missing",
+    "docs @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs @ 1280x720 dark: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1280x720 light: always-visible: top: search: missing",
+    "docs @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs @ 1280x720 light: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1366x768 dark: always-visible: top: search: missing",
+    "docs @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs @ 1366x768 dark: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1366x768 light: always-visible: top: search: missing",
+    "docs @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs @ 1366x768 light: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs/agent-integration @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/agent-integration @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1280x720 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1280x720 light: always-visible: top: search: missing",
+    "docs/agent-integration @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1280x720 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/agent-integration @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1366x768 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1366x768 light: always-visible: top: search: missing",
+    "docs/agent-integration @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1366x768 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/claude-code-plugin @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1280x720 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1280x720 light: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1280x720 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1366x768 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1366x768 light: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1366x768 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/getting-started @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/getting-started @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1280x720 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1280x720 light: always-visible: top: search: missing",
+    "docs/getting-started @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1280x720 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/getting-started @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1366x768 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1366x768 light: always-visible: top: search: missing",
+    "docs/getting-started @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1366x768 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/headroom @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/headroom @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/headroom @ 1280x720 light: always-visible: top: search: missing",
+    "docs/headroom @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/headroom @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/headroom @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/headroom @ 1366x768 light: always-visible: top: search: missing",
+    "docs/headroom @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/how-it-works @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1280x720 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1280x720 light: always-visible: top: search: missing",
+    "docs/how-it-works @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1280x720 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/how-it-works @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1366x768 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1366x768 light: always-visible: top: search: missing",
+    "docs/how-it-works @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1366x768 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/reference/cli @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/reference/cli @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1280x720 light: always-visible: top: search: missing",
+    "docs/reference/cli @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/reference/cli @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1366x768 light: always-visible: top: search: missing",
+    "docs/reference/cli @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/reference/environment @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1280x720 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1280x720 light: always-visible: top: search: missing",
+    "docs/reference/environment @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1280x720 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/reference/environment @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1366x768 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1366x768 light: always-visible: top: search: missing",
+    "docs/reference/environment @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1366x768 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/remote-builds @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1280x720 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1280x720 light: always-visible: top: search: missing",
+    "docs/remote-builds @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1280x720 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/remote-builds @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1366x768 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1366x768 light: always-visible: top: search: missing",
+    "docs/remote-builds @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1366x768 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/toolchains @ 1280x720 dark: always-visible: top: search: missing",
+    "docs/toolchains @ 1280x720 dark: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1280x720 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1280x720 light: always-visible: top: search: missing",
+    "docs/toolchains @ 1280x720 light: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1280x720 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1366x768 dark: always-visible: top: search: missing",
+    "docs/toolchains @ 1366x768 dark: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1366x768 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1366x768 light: always-visible: top: search: missing",
+    "docs/toolchains @ 1366x768 light: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1366x768 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "landing @ 1280x720 dark: always-visible: top: search: missing",
+    "landing @ 1280x720 dark: always-visible: bottom: search: missing",
+    "landing @ 1280x720 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1280x720 light: always-visible: top: search: missing",
+    "landing @ 1280x720 light: always-visible: bottom: search: missing",
+    "landing @ 1280x720 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1366x768 dark: always-visible: top: search: missing",
+    "landing @ 1366x768 dark: always-visible: bottom: search: missing",
+    "landing @ 1366x768 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1366x768 light: always-visible: top: search: missing",
+    "landing @ 1366x768 light: always-visible: bottom: search: missing",
+    "landing @ 1366x768 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)"
+  ],
+  "measured": [
+    "docs @ 1024x768 dark: always-visible: top: search: missing",
+    "docs @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs @ 1024x768 dark: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1024x768 light: always-visible: top: search: missing",
+    "docs @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs @ 1024x768 light: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1280x800 dark: always-visible: top: search: missing",
+    "docs @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs @ 1280x800 dark: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1280x800 light: always-visible: top: search: missing",
+    "docs @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs @ 1280x800 light: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 1440x900 dark: always-visible: top: search: missing",
+    "docs @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs @ 1440x900 dark: axe: link-in-text-block (6): li:nth-child(2) > a[href$=\"how-it-works\"], li:nth-child(3) > a[href$=\"toolchains\"]",
+    "docs @ 1440x900 light: always-visible: top: search: missing",
+    "docs @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs @ 1440x900 light: axe: link-in-text-block (6): li:nth-child(2) > a[href$=\"how-it-works\"], li:nth-child(3) > a[href$=\"toolchains\"]",
+    "docs @ 390x844 dark: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 390x844 light: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 768x1024 dark: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs @ 768x1024 light: axe: link-in-text-block (7): p:nth-child(6) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], li:nth-child(2) > a[href$=\"how-it-works\"]",
+    "docs/agent-integration @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/agent-integration @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1024x768 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1024x768 light: always-visible: top: search: missing",
+    "docs/agent-integration @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1024x768 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/agent-integration @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1280x800 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1280x800 light: always-visible: top: search: missing",
+    "docs/agent-integration @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1280x800 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/agent-integration @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1440x900 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 1440x900 light: always-visible: top: search: missing",
+    "docs/agent-integration @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/agent-integration @ 1440x900 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 390x844 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 390x844 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 768x1024 dark: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/agent-integration @ 768x1024 light: axe: link-in-text-block (2): p:nth-child(18) > a[href$=\"claude-code-plugin\"], p:nth-child(28) > a[href$=\"remote-builds\"]",
+    "docs/claude-code-plugin @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1024x768 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1024x768 light: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1024x768 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1280x800 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1280x800 light: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1280x800 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1440x900 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 1440x900 light: always-visible: top: search: missing",
+    "docs/claude-code-plugin @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/claude-code-plugin @ 1440x900 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 390x844 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 390x844 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 768x1024 dark: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/claude-code-plugin @ 768x1024 light: axe: link-in-text-block (1): ul:nth-child(15) > li:nth-child(3) > a",
+    "docs/getting-started @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/getting-started @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1024x768 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1024x768 light: always-visible: top: search: missing",
+    "docs/getting-started @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1024x768 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/getting-started @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1280x800 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1280x800 light: always-visible: top: search: missing",
+    "docs/getting-started @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1280x800 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/getting-started @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1440x900 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 1440x900 light: always-visible: top: search: missing",
+    "docs/getting-started @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/getting-started @ 1440x900 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 390x844 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 390x844 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 768x1024 dark: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/getting-started @ 768x1024 light: axe: link-in-text-block (8): p:nth-child(5) > a[target=\"_blank\"][rel=\"noopener noreferrer\"], p:nth-child(16) > a[href$=\"remote-builds\"]",
+    "docs/headroom @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/headroom @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/headroom @ 1024x768 light: always-visible: top: search: missing",
+    "docs/headroom @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/headroom @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/headroom @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/headroom @ 1280x800 light: always-visible: top: search: missing",
+    "docs/headroom @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/headroom @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/headroom @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/headroom @ 1440x900 light: always-visible: top: search: missing",
+    "docs/headroom @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/how-it-works @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1024x768 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1024x768 light: always-visible: top: search: missing",
+    "docs/how-it-works @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1024x768 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/how-it-works @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1280x800 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1280x800 light: always-visible: top: search: missing",
+    "docs/how-it-works @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1280x800 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/how-it-works @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1440x900 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 1440x900 light: always-visible: top: search: missing",
+    "docs/how-it-works @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/how-it-works @ 1440x900 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 390x844 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 390x844 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 768x1024 dark: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/how-it-works @ 768x1024 light: axe: link-in-text-block (2): p:nth-child(10) > a[href$=\"toolchains\"], ul:nth-child(43) > li:nth-child(1) > a[href$=\"headroom\"]",
+    "docs/reference/cli @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/reference/cli @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1024x768 light: always-visible: top: search: missing",
+    "docs/reference/cli @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/reference/cli @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1280x800 light: always-visible: top: search: missing",
+    "docs/reference/cli @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/reference/cli @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/reference/cli @ 1440x900 light: always-visible: top: search: missing",
+    "docs/reference/cli @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/reference/environment @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1024x768 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1024x768 light: always-visible: top: search: missing",
+    "docs/reference/environment @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1024x768 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/reference/environment @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1280x800 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1280x800 light: always-visible: top: search: missing",
+    "docs/reference/environment @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1280x800 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/reference/environment @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1440x900 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 1440x900 light: always-visible: top: search: missing",
+    "docs/reference/environment @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/reference/environment @ 1440x900 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 390x844 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 390x844 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 768x1024 dark: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/reference/environment @ 768x1024 light: axe: link-in-text-block (1): p:nth-child(13) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/remote-builds @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1024x768 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1024x768 light: always-visible: top: search: missing",
+    "docs/remote-builds @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1024x768 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/remote-builds @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1280x800 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1280x800 light: always-visible: top: search: missing",
+    "docs/remote-builds @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1280x800 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/remote-builds @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1440x900 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 1440x900 light: always-visible: top: search: missing",
+    "docs/remote-builds @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/remote-builds @ 1440x900 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 390x844 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 390x844 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 768x1024 dark: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/remote-builds @ 768x1024 light: axe: link-in-text-block (2): ol:nth-child(5) > li:nth-child(1) > a, p:nth-child(15) > a[href$=\"toolchains\"]",
+    "docs/toolchains @ 1024x768 dark: always-visible: top: search: missing",
+    "docs/toolchains @ 1024x768 dark: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1024x768 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1024x768 light: always-visible: top: search: missing",
+    "docs/toolchains @ 1024x768 light: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1024x768 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1280x800 dark: always-visible: top: search: missing",
+    "docs/toolchains @ 1280x800 dark: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1280x800 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1280x800 light: always-visible: top: search: missing",
+    "docs/toolchains @ 1280x800 light: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1280x800 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1440x900 dark: always-visible: top: search: missing",
+    "docs/toolchains @ 1440x900 dark: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1440x900 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 1440x900 light: always-visible: top: search: missing",
+    "docs/toolchains @ 1440x900 light: always-visible: bottom: search: missing",
+    "docs/toolchains @ 1440x900 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 390x844 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 390x844 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 768x1024 dark: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "docs/toolchains @ 768x1024 light: axe: link-in-text-block (2): p:nth-child(19) > a, p:nth-child(25) > a[target=\"_blank\"][rel=\"noopener noreferrer\"]",
+    "landing @ 1024x768 dark: always-visible: top: search: missing",
+    "landing @ 1024x768 dark: always-visible: bottom: search: missing",
+    "landing @ 1024x768 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1024x768 light: always-visible: top: search: missing",
+    "landing @ 1024x768 light: always-visible: bottom: search: missing",
+    "landing @ 1024x768 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1280x800 dark: always-visible: top: search: missing",
+    "landing @ 1280x800 dark: always-visible: bottom: search: missing",
+    "landing @ 1280x800 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1280x800 light: always-visible: top: search: missing",
+    "landing @ 1280x800 light: always-visible: bottom: search: missing",
+    "landing @ 1280x800 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1440x900 dark: always-visible: top: search: missing",
+    "landing @ 1440x900 dark: always-visible: bottom: search: missing",
+    "landing @ 1440x900 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 1440x900 light: always-visible: top: search: missing",
+    "landing @ 1440x900 light: always-visible: bottom: search: missing",
+    "landing @ 1440x900 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 390x844 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 390x844 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 768x1024 dark: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)",
+    "landing @ 768x1024 light: axe: target-size (3): .dotCurrent_my6y, .dot_hblH:nth-child(2)"
+  ],
+  "bots": [
+    {
+      "task": "cancel",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "cancel",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "cancel",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "cancel",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "cancel",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli -> docs/reference/cli",
+        "slot cancel -> #slot-cancel"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 10,
+      "steers": 0,
+      "keyboard_tabs": 7,
+      "path": [
+        "",
+        "cli reference → -> docs/reference/cli"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 10,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli reference → -> docs/reference/cli"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 5,
+      "steers": 0,
+      "keyboard_tabs": 7,
+      "path": [
+        "",
+        "cli reference → -> docs/reference/cli"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "cancel",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "cli reference → -> docs/reference/cli"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "disk",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "disk",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "disk",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "disk",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 8,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works → -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 8,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works → -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 5,
+      "path": [
+        "",
+        "how it works → -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "disk",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 3,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "how it works → -> docs/how-it-works"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 3,
+      "looks": 8,
+      "steers": 1,
+      "keyboard_tabs": 58,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom",
+        "call mode -> #call-mode"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 3,
+      "looks": 7,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom",
+        "call mode -> #call-mode"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 3,
+      "looks": 9,
+      "steers": 1,
+      "keyboard_tabs": 58,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom",
+        "call mode -> #call-mode"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "headroom",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 3,
+      "looks": 7,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom",
+        "call mode -> #call-mode"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "headroom",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 9,
+      "steers": 1,
+      "keyboard_tabs": 20,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 6,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 10,
+      "steers": 1,
+      "keyboard_tabs": 20,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "headroom",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 7,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "headroom",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 7,
+      "steers": 1,
+      "keyboard_tabs": 20,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 6,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 4,
+      "looks": 18,
+      "steers": 3,
+      "keyboard_tabs": 22,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 4,
+      "looks": 16,
+      "steers": 3,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 4,
+      "looks": 11,
+      "steers": 3,
+      "keyboard_tabs": 22,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "headroom",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 4,
+      "looks": 9,
+      "steers": 3,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "headroom -> docs/headroom"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 1,
+      "steers": 0,
+      "keyboard_tabs": 69,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 1,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 1,
+      "steers": 0,
+      "keyboard_tabs": 69,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "install",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 1,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "install",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 69,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 69,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "install",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "install -> #install"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "install",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 4,
+      "path": [
+        "",
+        "get started -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 2,
+      "steers": 0,
+      "keyboard_tabs": 4,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 2,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 4,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "install",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 9,
+      "steers": 1,
+      "keyboard_tabs": 23,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 8,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 9,
+      "steers": 1,
+      "keyboard_tabs": 23,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "plugin",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 8,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "plugin",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 9,
+      "steers": 1,
+      "keyboard_tabs": 23,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 7,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 9,
+      "steers": 1,
+      "keyboard_tabs": 23,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "plugin",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 8,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "plugin",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 7,
+      "steers": 1,
+      "keyboard_tabs": 23,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 6,
+      "steers": 1,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "documentation -> docs",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 4,
+      "looks": 18,
+      "steers": 3,
+      "keyboard_tabs": 25,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 4,
+      "looks": 16,
+      "steers": 3,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 4,
+      "looks": 11,
+      "steers": 3,
+      "keyboard_tabs": 25,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "plugin",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 4,
+      "looks": 9,
+      "steers": 3,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "menu",
+        "documentation -> docs",
+        "menu",
+        "claude code plugin -> docs/claude-code-plugin"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 87,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 5,
+      "steers": 0,
+      "keyboard_tabs": 87,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 5,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 87,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 5,
+      "steers": 0,
+      "keyboard_tabs": 87,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 87,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 4,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds",
+        "environment -> #environment"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 12,
+      "steers": 0,
+      "keyboard_tabs": 20,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 12,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 7,
+      "steers": 0,
+      "keyboard_tabs": 20,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "remote-env",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 6,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "remote build server -> docs/remote-builds"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1024x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1024x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1280x720",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1280x720",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1280x800",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1280x800",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1366x768",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1366x768",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": true
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1440x900",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 75,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "1440x900",
+      "mode": "pointer",
+      "done": true,
+      "actions": 2,
+      "looks": 0,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started -> docs/getting-started",
+        "upgrade -> #upgrade"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "390x844",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 9,
+      "steers": 0,
+      "keyboard_tabs": 4,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "390x844",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 9,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "768x1024",
+      "mode": "keyboard",
+      "done": true,
+      "actions": 1,
+      "looks": 5,
+      "steers": 0,
+      "keyboard_tabs": 4,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    },
+    {
+      "task": "upgrade",
+      "viewport": "768x1024",
+      "mode": "pointer",
+      "done": true,
+      "actions": 1,
+      "looks": 5,
+      "steers": 0,
+      "keyboard_tabs": 0,
+      "path": [
+        "",
+        "get started → -> docs/getting-started"
+      ],
+      "notes": [],
+      "gating": false
+    }
+  ]
+}
