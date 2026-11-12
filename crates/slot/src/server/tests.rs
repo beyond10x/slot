@@ -57,6 +57,7 @@ struct Res {
     err: String,
     info: String,
     code: i32,
+    started: bool,
 }
 
 fn send(sock: &Path, mut req: Request) -> UnixStream {
@@ -81,6 +82,7 @@ fn collect(c: UnixStream) -> Res {
             Frame::Out { b } => r.out += &b,
             Frame::Err { b } => r.err += &b,
             Frame::Info { msg } => r.info += &msg,
+            Frame::Start { .. } => r.started = true,
             Frame::Exit { code } => {
                 r.code = code;
                 break;
@@ -129,6 +131,34 @@ fn jobserver_env_reaches_command_and_client_jobs_are_dropped() {
     assert!(r.out.contains(&auth), "{}", r.out);
     assert!(r.out.contains("jobs=\n"), "{}", r.out);
     assert!(r.out.contains("tag=1\n"), "{}", r.out);
+}
+
+#[test]
+fn a_pending_upgrade_holds_admission() {
+    let f = start(1);
+    let running = send(&f.socket, sh(&f.root, "sleep 1"));
+    std::thread::sleep(Duration::from_millis(150));
+    let queued_before = send(&f.socket, sh(&f.root, "echo before"));
+    std::thread::sleep(Duration::from_millis(100));
+    f.server.hold_admission();
+    let queued_after = send(&f.socket, sh(&f.root, "echo after"));
+    let r = collect(running);
+    assert_eq!((r.code, r.started), (0, true), "the running job finishes");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(f.server.nothing_running(), "the moment to re-execute");
+    let states: Vec<JobState> = {
+        let g = f.server.inner.lock().unwrap();
+        g.active.values().map(|l| l.job.state).collect()
+    };
+    assert_eq!(states, [JobState::Queued, JobState::Queued]);
+    assert_eq!(f.server.pool().free(), 1, "the slot went back to the pool");
+    for c in [queued_before, queued_after] {
+        c.set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let r = collect(c);
+        assert!(!r.started, "admitted during an upgrade: {r:?}");
+        assert_eq!(r.out, "");
+    }
 }
 
 #[test]

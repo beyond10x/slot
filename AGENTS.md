@@ -62,10 +62,17 @@ with `worktree finish --discard-cache --archive` when the change is merged.
 ## Upgrading a running daemon
 
 Install the new binary over the old path, then `systemctl --user reload slot`. Reload sends
-SIGHUP: the daemon keeps taking jobs and re-executes the new binary, same pid, at the first moment
-no job is active. `systemctl --user restart slot` instead drains: the socket disappears, new
-`slot` calls run locally outside the pool, and the stop waits for the longest running job. Use it
-only when the unit file itself changed.
+SIGHUP: the daemon admits no new job (new and queued jobs stay queued), waits until no job runs,
+then re-executes the new binary, same pid. Queued jobs are dropped with their connections; the
+client (0.3.1 and later) sees the connection close before a `start` frame, waits up to 10 min for
+the socket and resubmits the same request once. A job that had started is never resubmitted.
+`systemctl --user restart slot` instead drains: the socket disappears, new `slot` calls run
+locally outside the pool, and the stop waits for the longest running job. Use it only when the
+unit file itself changed.
+
+Every field added to a type the daemon sends (`State`, `Tick`, `Job`, the census types, `Frame`
+variants) carries `#[serde(default)]`, so a newer client reads an older daemon and the reverse.
+An unknown `/api/` path answers 404, so a client can tell an older daemon from a failed call.
 
 ## Delivery
 

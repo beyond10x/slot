@@ -136,6 +136,11 @@ async fn output(State(s): State<Arc<Server>>, Path(id): Path<i64>) -> Response {
 
 async fn asset(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
+    // An unknown API path is a 404, not the UI page, so a newer client can
+    // tell that this daemon lacks it.
+    if path.starts_with("api/") {
+        return (StatusCode::NOT_FOUND, "slot: no such API path\n").into_response();
+    }
     let path = if path.is_empty() { "index.html" } else { path };
     let Some(f) = UI.get_file(path).or_else(|| UI.get_file("index.html")) else {
         return StatusCode::NOT_FOUND.into_response();

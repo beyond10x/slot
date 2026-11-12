@@ -9,7 +9,10 @@ use anyhow::{Context, Result, bail};
 pub use crate::server::limits::View as LimitsView;
 use crate::types::{Job, JobState, State};
 
-/// One HTTP/1.0 request to the daemon's web address; the body of a 200 answer.
+/// One HTTP/1.0 request to the daemon's web address; the body of a 200
+/// answer. A daemon older than the client answers an API path it does not
+/// have with its web UI page (200, `text/html`), so a body that is not JSON
+/// is refused with that explanation.
 fn request(addr: &str, method: &str, path: &str, body: Option<&str>) -> Result<String> {
     let mut s = TcpStream::connect(addr).with_context(|| format!("connect {addr}"))?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
@@ -32,6 +35,17 @@ fn request(addr: &str, method: &str, path: &str, body: Option<&str>) -> Result<S
             "{addr}: {} {}",
             head.lines().next().unwrap_or(""),
             body.trim()
+        );
+    }
+    let json = head.lines().any(|l| {
+        l.split_once(':').is_some_and(|(k, v)| {
+            k.eq_ignore_ascii_case("content-type") && v.trim().starts_with("application/json")
+        })
+    });
+    if !json {
+        bail!(
+            "{addr}{path}: the answer is not JSON; the daemon is older than this client and \
+             has no {path} (upgrade it: systemctl --user reload slot)"
         );
     }
     Ok(body.to_string())
@@ -114,7 +128,7 @@ pub fn render(s: &State) -> String {
         .iter()
         .filter(|j| j.state == JobState::Running)
         .collect();
-    let pool = if s.limit < s.tokens {
+    let pool = if s.limit > 0 && s.limit < s.tokens {
         format!(
             "{} of {} slots ({}% headroom)",
             s.limit, s.tokens, s.headroom_percent
@@ -181,6 +195,70 @@ mod tests {
             render_headroom(&v)
                 .ends_with("cpu quota not applied: not running in a systemd user unit\n")
         );
+    }
+
+    /// Serves one HTTP answer on a free port and returns the address.
+    fn answer_once(resp: &'static str) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let (mut c, _) = l.accept().unwrap();
+            // Read the whole request: closing with unread bytes resets the
+            // connection before the client reads the answer.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let text = String::from_utf8_lossy(&req);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: "))
+                        .map_or(0, |n| n.trim().parse().unwrap());
+                    if body.len() >= len {
+                        break;
+                    }
+                }
+                match c.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = c.write_all(resp.as_bytes());
+        });
+        addr
+    }
+
+    #[test]
+    fn an_older_daemon_answering_with_its_page_is_an_error() {
+        let addr = answer_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\r\n<!doctype html>",
+        );
+        let e = headroom(&addr, Some(30)).unwrap_err().to_string();
+        assert!(e.contains("older than this client"), "{e}");
+        let addr = answer_once(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"headroom_percent\":30,\
+             \"cpu_quota_percent\":null,\"effective_tokens\":14,\"tokens\":20,\"systemd\":false,\
+             \"note\":\"\"}",
+        );
+        assert_eq!(headroom(&addr, None).unwrap().effective_tokens, 14);
+    }
+
+    #[test]
+    fn an_older_state_without_a_limit_shows_the_pool() {
+        let s = State {
+            host: "h".into(),
+            cores: 4,
+            tokens: 4,
+            limit: 0,
+            headroom_percent: 0,
+            cpu_quota_percent: None,
+            free: 4,
+            active: vec![],
+            done: vec![],
+            now_ms: 0,
+            toolchains: vec![],
+        };
+        assert_eq!(render(&s), "4 slots, 4 free, 0 running, 0 queued\n");
     }
 
     #[test]

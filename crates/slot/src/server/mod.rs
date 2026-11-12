@@ -179,6 +179,8 @@ pub struct Server {
     host: String,
     cores: u32,
     headroom: Mutex<Headroom>,
+    /// True once an upgrade is pending: no job is admitted from then on.
+    upgrading: watch::Sender<bool>,
 }
 
 /// The headroom in force and whether its CPU quota is applied.
@@ -269,7 +271,30 @@ impl Server {
                 quota: None,
                 note: String::new(),
             }),
+            upgrading: watch::Sender::new(false),
         }))
+    }
+
+    /// Stops admitting jobs: queued ones stay queued, new ones queue. Set
+    /// when an upgrade is requested, so the running jobs can end and the
+    /// daemon re-executes; the queued clients resubmit to the new process.
+    pub(crate) fn hold_admission(&self) {
+        self.upgrading.send_replace(true);
+    }
+
+    /// Waits until admission is open; false when the client went away first.
+    async fn admission_open(&self, gone: watch::Receiver<bool>) -> bool {
+        let mut open = self.upgrading.subscribe();
+        tokio::select! {
+            r = open.wait_for(|held| !held) => r.is_ok(),
+            () = client_gone(gone) => false,
+        }
+    }
+
+    /// Whether no job holds slots or runs a process: the moment to re-execute.
+    fn nothing_running(&self) -> bool {
+        let g = self.inner.lock().expect("server lock");
+        g.active.values().all(|l| l.pid.is_none() && l.held == 0)
     }
 
     /// The jobserver pool.
@@ -332,11 +357,11 @@ impl Server {
                 _ = term.recv() => break,
                 _ = hup.recv() => {
                     upgrade = true;
-                    eprintln!("slot: upgrade requested; re-executing at the first moment no job is active");
+                    self.hold_admission();
+                    eprintln!("slot: upgrade requested; admitting no new job, re-executing once no job runs");
                 }
                 _ = idle_check.tick(), if upgrade => {
-                    let idle = self.inner.lock().expect("server lock").active.is_empty();
-                    if idle {
+                    if self.nothing_running() {
                         drop(listener);
                         return Err(self.reexec());
                     }
@@ -348,9 +373,10 @@ impl Server {
     }
 
     /// Replaces this process with the binary now installed at our path,
-    /// same pid and arguments. Called only while no job is active, so the
-    /// new process starts with a full pool and reloads history from the job
-    /// log. Returns only on failure.
+    /// same pid and arguments. Called only while no job runs, so the new
+    /// process starts with a full pool and reloads history from the job log.
+    /// Queued jobs are dropped with their connections; their clients
+    /// resubmit. Returns only on failure.
     fn reexec(&self) -> anyhow::Error {
         let exe = std::fs::read_link("/proc/self/exe").map_or_else(
             |_| PathBuf::from("slot"),
@@ -521,22 +547,35 @@ impl Server {
                 ),
             });
         }
-        let mut waiter = self.pool.acquire(tokens);
-        tokio::select! {
-            () = waiter.ready() => {}
-            () = client_gone(gone.clone()) => {
-                if self.pool.cancel(&waiter) {
-                    self.set_held(id, tokens);
-                }
+        let held = loop {
+            if !self.admission_open(gone.clone()).await {
                 self.finish(id, JobState::Cancelled, -1, None);
                 return (130, None);
             }
-        }
-        self.set_held(id, tokens);
+            let mut waiter = self.pool.acquire(tokens);
+            tokio::select! {
+                () = waiter.ready() => {}
+                () = client_gone(gone.clone()) => {
+                    if self.pool.cancel(&waiter) {
+                        self.set_held(id, waiter.held());
+                    }
+                    self.finish(id, JobState::Cancelled, -1, None);
+                    return (130, None);
+                }
+            }
+            // Granted after an upgrade was requested: give the slots back
+            // and wait with the other queued jobs.
+            if *self.upgrading.borrow() {
+                self.pool.release(waiter.held());
+                continue;
+            }
+            break waiter.held();
+        };
+        self.set_held(id, held);
 
         let ctx = Context {
             jobserver_auth: self.pool.auth(),
-            held: tokens,
+            held,
             free_tokens: self.pool.free(),
             test_threads: self.cfg.test_threads,
             cache_dir: if req.workspace.is_some() {
@@ -619,6 +658,7 @@ impl Server {
             }
         }
         self.publish(id);
+        let _ = tx.send(Frame::Start { id });
 
         let pipes: Vec<std::thread::JoinHandle<()>> = [
             child

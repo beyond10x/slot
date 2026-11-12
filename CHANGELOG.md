@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.1 — 2026-11-12
+
+- Upgrades finish on a busy machine. After `systemctl --user reload slot` the daemon admits no
+  new job and re-executes once no job runs, instead of waiting for a moment with nothing queued.
+  A client whose job was still queued sees the connection close before the new `start` frame,
+  prints `slot: daemon upgrading, resubmitting job`, waits up to 10 minutes for the socket and
+  sends the same command again, once. A job that had started is not resubmitted.
+- A 0.3.0 client could not read `/api/state` from an older daemon (`missing field limit`). Every
+  field added since 0.1.0 now has a default.
+- `slot headroom` and the web UI's slider report an older daemon instead of treating its web
+  page as success: an answer that is not JSON is an error, and the daemon now answers an unknown
+  `/api/` path with 404.
+- A job that asked for more slots than circulate under a headroom released the slots it asked
+  for instead of the ones it held, adding tokens to the pool until the next idle moment.
+
 ## 0.3.0 — 2026-11-12
 
 - Headroom: a share of the CPU, 0 to 50 %, that builds leave free for interactive work such as a

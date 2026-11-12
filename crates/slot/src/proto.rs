@@ -53,6 +53,14 @@ pub enum Frame {
         /// Bytes as text; invalid UTF-8 is replaced.
         b: String,
     },
+    /// The job's process started. A client that loses the connection
+    /// before this frame knows the command never ran. Clients older than
+    /// 0.3.1 ignore it.
+    Start {
+        /// Job id.
+        #[serde(default)]
+        id: i64,
+    },
     /// A message from the daemon for the client's stderr.
     Info {
         /// The message.

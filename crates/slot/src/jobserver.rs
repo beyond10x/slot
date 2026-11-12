@@ -52,6 +52,12 @@ impl Waiter {
         self.n
     }
 
+    /// Tokens this waiter holds now. After [`Waiter::ready`] that is the
+    /// request, or less when a lower limit shrank it while it was queued.
+    pub fn held(&self) -> usize {
+        self.state.lock().expect("waiter lock").got
+    }
+
     /// Resolves when every requested token is held.
     pub async fn ready(&mut self) {
         if let Some(rx) = self.rx.take() {
@@ -382,6 +388,7 @@ mod tests {
         assert!(!ready_within(&mut b, 200).await);
         p.set_limit(2);
         assert!(ready_within(&mut b, 1000).await, "2 of 2 is enough now");
+        assert_eq!((b.tokens(), b.held()), (4, 2), "held is what to release");
         p.release(2);
         p.release(2);
         tokio::time::sleep(Duration::from_millis(100)).await;

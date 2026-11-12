@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-slot"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-slot-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "b10x-slot",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-slot-docs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "b10x-slot",

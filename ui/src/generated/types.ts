@@ -130,7 +130,8 @@ cores: number,
  */
 tokens: number, 
 /**
- * Tokens that circulate: the pool size less the headroom.
+ * Tokens that circulate: the pool size less the headroom; 0 from a
+ * daemon older than 0.3.0, which has no limit.
  */
 limit: number, 
 /**
@@ -270,7 +271,8 @@ t: number,
  */
 tokens: number, 
 /**
- * Tokens that circulate: the pool size less the headroom.
+ * Tokens that circulate: the pool size less the headroom; 0 from a
+ * daemon older than 0.3.0.
  */
 limit: number, 
 /**

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildCores, effectiveTokens, headroomCaption } from './headroom.ts';
+import { buildCores, effectiveTokens, headroomCaption, notJsonError } from './headroom.ts';
 
 test('effective tokens match the daemon', () => {
   assert.equal(effectiveTokens(20, 0), 20);
@@ -17,4 +17,10 @@ test('caption names cores and slots', () => {
   assert.equal(headroomCaption(20, 20, 0), 'builds may use 20 of 20 cores, 20 of 20 slots');
   assert.equal(buildCores(12, 25), 9);
   assert.equal(headroomCaption(6, 6, 25), 'builds may use 4.5 of 6 cores, 5 of 6 slots');
+});
+
+test('an answer that is not JSON comes from an older daemon', () => {
+  assert.equal(notJsonError('application/json'), null);
+  assert.match(notJsonError('text/html; charset=utf-8') ?? '', /older than this page/);
+  assert.match(notJsonError(null) ?? '', /older than this page/);
 });

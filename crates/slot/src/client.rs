@@ -11,7 +11,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use std::fmt::Write as _;
 
@@ -22,6 +22,12 @@ use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::toolchain;
+
+/// How long a queued job waits for an upgrading daemon to come back.
+pub const UPGRADE_WAIT: Duration = Duration::from_secs(600);
+
+/// Interval between connection attempts while the daemon upgrades.
+const UPGRADE_POLL: Duration = Duration::from_millis(500);
 
 /// Client settings, read from `SLOT_*` variables.
 #[derive(Debug, Clone, Default)]
@@ -101,18 +107,49 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         }),
         ..Request::default()
     };
-    let conn = if let Some(host) = &s.host {
-        remote(host, top.as_deref(), &cwd, &mut req, s)
-    } else {
-        req.cwd = cwd.to_string_lossy().into_owned();
-        req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
-        local(&s.socket)
-    };
-    match conn {
-        Ok(c) => talk(c, &req),
+    if let Some(host) = &s.host {
+        return match remote(host, top.as_deref(), &cwd, &mut req, s) {
+            Ok(c) => talk(c, &req).code(),
+            Err(e) => {
+                eprintln!("slot: daemon unreachable ({e:#}), ran locally");
+                run_local(argv)
+            }
+        };
+    }
+    req.cwd = cwd.to_string_lossy().into_owned();
+    req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+    submit_local(&s.socket, &req, UPGRADE_WAIT)
+}
+
+/// Runs `req` through the daemon at `socket`. An upgrading daemon drops the
+/// connections of jobs it has not started and re-executes; such a job is
+/// sent again, once, as soon as the socket is back, for up to `wait`.
+/// A job whose process had started is not sent again.
+pub fn submit_local(socket: &Path, req: &Request, wait: Duration) -> i32 {
+    let conn = match local(socket) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("slot: daemon unreachable ({e:#}), ran locally");
-            run_local(argv)
+            return run_local(&req.argv);
+        }
+    };
+    match talk(conn, req) {
+        Ended::Lost { started: false } => {}
+        ended => return ended.code(),
+    }
+    eprintln!("slot: daemon upgrading, resubmitting job");
+    let deadline = Instant::now() + wait;
+    loop {
+        match local(socket) {
+            Ok(c) => return talk(c, req).code(),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(UPGRADE_POLL),
+            Err(e) => {
+                eprintln!(
+                    "slot: daemon not back after {}s ({e:#}), ran locally",
+                    wait.as_secs()
+                );
+                return run_local(&req.argv);
+            }
         }
     }
 }
@@ -274,7 +311,30 @@ fn remote(
     })
 }
 
-fn talk(conn: Conn, req: &Request) -> i32 {
+/// How a conversation with the daemon ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// The job's exit code, or 3 when the request could not be sent.
+    Exit(i32),
+    /// The connection closed without an exit frame. `started` is whether
+    /// the job's process had started (a start, output or error frame came).
+    Lost { started: bool },
+}
+
+impl Ended {
+    /// The exit code for the caller; a lost connection is reported here.
+    fn code(self) -> i32 {
+        match self {
+            Self::Exit(code) => code,
+            Self::Lost { .. } => {
+                eprintln!("slot: connection to daemon lost");
+                3
+            }
+        }
+    }
+}
+
+fn talk(conn: Conn, req: &Request) -> Ended {
     let Conn {
         reader,
         mut writer,
@@ -284,13 +344,13 @@ fn talk(conn: Conn, req: &Request) -> i32 {
         Ok(b) => b,
         Err(e) => {
             eprintln!("slot: {e}");
-            return 3;
+            return Ended::Exit(3);
         }
     };
     line.push(b'\n');
     if let Err(e) = writer.write_all(&line).and_then(|()| writer.flush()) {
         eprintln!("slot: send: {e}");
-        return 3;
+        return Ended::Exit(3);
     }
     // The writer stays open until the job ends: closing it tells the daemon
     // the client is gone, and the daemon cancels the job.
@@ -304,24 +364,138 @@ fn talk(conn: Conn, req: &Request) -> i32 {
     }
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
+    let mut started = false;
     for l in BufReader::new(reader).lines() {
         let Ok(l) = l else { break };
         match serde_json::from_str::<Frame>(&l) {
             Ok(Frame::Out { b }) => {
+                started = true;
                 let _ = stdout.write_all(b.as_bytes());
                 let _ = stdout.flush();
             }
             Ok(Frame::Err { b }) => {
+                started = true;
                 let _ = stderr.write_all(b.as_bytes());
             }
+            Ok(Frame::Start { .. }) => started = true,
             Ok(Frame::Info { msg }) => eprintln!("{msg}"),
             Ok(Frame::Exit { code }) => {
                 drop(writer);
-                return code;
+                return Ended::Exit(code);
             }
             Err(_) => {}
         }
     }
-    eprintln!("slot: connection to daemon lost");
-    3
+    Ended::Lost { started }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
+
+    /// A fake daemon: for each script, accepts one connection, reads the
+    /// request, reports it, writes the script's frames and closes. Between
+    /// connections the socket is gone for `gap`, as during a re-exec.
+    fn fake_daemon(
+        socket: PathBuf,
+        scripts: Vec<Vec<Frame>>,
+        gap: Duration,
+    ) -> mpsc::Receiver<Request> {
+        let (tx, rx) = mpsc::channel();
+        let l = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let mut l = Some(l);
+            for (i, frames) in scripts.into_iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(gap);
+                    l = Some(UnixListener::bind(&socket).unwrap());
+                }
+                let (c, _) = l.as_ref().unwrap().accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&c).read_line(&mut line).unwrap();
+                tx.send(serde_json::from_str(&line).unwrap()).unwrap();
+                let mut w = &c;
+                for f in frames {
+                    let mut b = serde_json::to_vec(&f).unwrap();
+                    b.push(b'\n');
+                    w.write_all(&b).unwrap();
+                }
+                drop(l.take());
+                let _ = std::fs::remove_file(&socket);
+                drop(c);
+            }
+        });
+        rx
+    }
+
+    fn request() -> Request {
+        Request {
+            argv: vec!["cargo".into(), "check".into()],
+            cwd: "/w".into(),
+            ..Request::default()
+        }
+    }
+
+    #[test]
+    fn a_job_dropped_while_queued_is_resubmitted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let queued = Frame::Info {
+            msg: "slot: job 1 queued".into(),
+        };
+        let rx = fake_daemon(
+            socket.clone(),
+            vec![
+                vec![queued],
+                vec![Frame::Start { id: 1 }, Frame::Exit { code: 7 }],
+            ],
+            Duration::from_millis(800),
+        );
+        let t0 = Instant::now();
+        assert_eq!(
+            submit_local(&socket, &request(), Duration::from_secs(10)),
+            7
+        );
+        assert!(t0.elapsed() >= Duration::from_millis(800));
+        assert_eq!(rx.recv().unwrap(), request());
+        assert_eq!(rx.recv().unwrap(), request(), "the same request again");
+    }
+
+    #[test]
+    fn a_started_job_is_not_resubmitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let rx = fake_daemon(
+            socket.clone(),
+            vec![vec![Frame::Start { id: 1 }], vec![Frame::Exit { code: 0 }]],
+            Duration::from_millis(100),
+        );
+        assert_eq!(
+            submit_local(&socket, &request(), Duration::from_secs(10)),
+            3
+        );
+        assert_eq!(rx.recv().unwrap(), request());
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "no second submission"
+        );
+    }
+
+    #[test]
+    fn output_from_an_older_daemon_counts_as_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let rx = fake_daemon(
+            socket.clone(),
+            vec![vec![Frame::Out { b: String::new() }]],
+            Duration::ZERO,
+        );
+        assert_eq!(
+            submit_local(&socket, &request(), Duration::from_millis(600)),
+            3
+        );
+        assert_eq!(rx.recv().unwrap(), request());
+    }
 }
