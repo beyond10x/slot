@@ -11,6 +11,10 @@ permissions:
   contents: read
   checks: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+
 jobs:
   common:
     uses: beyond10x/gates/.github/workflows/common.yml@44f4a083349f064ebb2246fd4d66f9862729cd70
