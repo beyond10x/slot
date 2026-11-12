@@ -236,7 +236,7 @@ impl Server {
             .ok()
             .and_then(|h| h.into_string().ok())
             .unwrap_or_default();
-        let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+        let cores = procstat::host_cpus() as u32;
         let pool_size = cfg.tokens;
         Ok(Arc::new(Self {
             cfg,

@@ -7,6 +7,29 @@ use std::fs;
 pub const CLK_TCK: f64 = 100.0;
 const PAGE: u64 = 4096;
 
+/// CPUs online on the host, from `/sys/devices/system/cpu/online`.
+/// Unlike [`std::thread::available_parallelism`] it ignores the cgroup CPU
+/// quota (`cpu.max`), which the daemon sets on its own unit for a headroom:
+/// counted under that quota, a re-executed daemon would size its pool and its
+/// next quota from the capped number and shrink both on every upgrade.
+pub fn host_cpus() -> usize {
+    fs::read_to_string("/sys/devices/system/cpu/online")
+        .ok()
+        .and_then(|s| count_cpu_list(&s))
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get))
+}
+
+/// CPUs in a kernel CPU list such as `0-7,16-23`; `None` when malformed.
+pub fn count_cpu_list(s: &str) -> Option<usize> {
+    let mut n = 0;
+    for part in s.trim().split(',').filter(|p| !p.is_empty()) {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+        n += b.checked_sub(a)? + 1;
+    }
+    (n > 0).then_some(n)
+}
+
 /// One process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proc {
@@ -324,6 +347,27 @@ pub fn system_cpu() -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_list_counts_ranges_and_singles() {
+        assert_eq!(count_cpu_list("0-19\n"), Some(20));
+        assert_eq!(count_cpu_list("0-7,16-23"), Some(16));
+        assert_eq!(count_cpu_list("0,2,4-5"), Some(4));
+        assert_eq!(count_cpu_list("0"), Some(1));
+        assert_eq!(count_cpu_list(""), None);
+        assert_eq!(
+            count_cpu_list("1200000 100000"),
+            None,
+            "a cpu.max line is not a cpu list"
+        );
+        assert_eq!(count_cpu_list("5-3"), None);
+    }
+
+    #[test]
+    fn host_cpus_ignore_the_cgroup_quota() {
+        let capped = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        assert!(host_cpus() >= capped, "{} < {capped}", host_cpus());
+    }
 
     fn p(pid: i32, ppid: i32, ticks: u64) -> Proc {
         Proc {

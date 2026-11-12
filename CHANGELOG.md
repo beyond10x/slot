@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 — 2026-11-12
+
+- The pool no longer shrinks when the daemon re-executes under a headroom. The default
+  `--tokens` and the core count behind the CPU quota came from
+  `std::thread::available_parallelism`, which reads the cgroup's CPU quota: a daemon that
+  re-executed inside its own `CPUQuota=1200%` on 20 cores counted 12, sized the pool at 12 and
+  set the next quota from 12 (measured: `headroom 40%: 7 of 12 tokens, cpu quota 720%`). They now
+  count the CPUs online on the host (`/sys/devices/system/cpu/online`), and so do `node-test`
+  percentage worker flags.
+
 ## 0.4.0 — 2026-11-12
 
 - The repository is a Claude Code plugin marketplace (`claude plugin marketplace add
