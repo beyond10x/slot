@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.13.0
+version=0.14.0
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -158,7 +158,7 @@ moment it holds admission: for up to 60 s no new job starts while the running on
 job still runs after 60 s, jobs start again, and the next hold begins when every running job is
 expected to end within 60 s (the 90th percentile of its last runs of the same command in the
 same repository, at least 3) or when none runs. `--upgrade-hold` sets the 60 s; 0 never holds.
-Until the switch, `slot status` shows a line starting `upgrade pending:`. Upgrading from a daemon
+Until the switch, `slot status` and the header of the web view show a line starting `upgrade pending:`. Upgrading from a daemon
 older than 0.11.0 goes this way once, since the running daemon decides.
 
 Without a handover, a queued job's connection closes when the daemon replaces itself. Its client prints

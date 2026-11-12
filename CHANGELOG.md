@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 — 2026-11-12
 
 - The web view shows a pending upgrade in its header, the line `slot status` prints
   (`upgrade pending: no new job starts for 42s, …`). While a reload holds admission, builds
