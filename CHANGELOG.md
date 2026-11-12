@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Call mode: while a call uses the microphone or the camera, the headroom goes up to the call
+  value (40 % by default) and back to the earlier value 2 minutes after the call. A call is a
+  running PipeWire capture stream linked to a microphone or camera node, or a process holding
+  `/dev/video*`; level meters and mixers are ignored (`--call-ignore`). `slot headroom --call N`
+  sets the call value at run time (0 turns call mode off); a headroom set by hand during a call
+  stays. `slot headroom`, `slot status`, `/api/limits` and a badge in the web UI show it.
+- The design document records the measurement behind not coalescing identical concurrent jobs:
+  0 overlapping pairs from different sessions in 740 jobs.
+
 ## 0.4.1 — 2026-11-12
 
 - The pool no longer shrinks when the daemon re-executes under a headroom. The default

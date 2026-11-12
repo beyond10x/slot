@@ -398,6 +398,12 @@ Ideas, none built yet:
    feature variants. Repository change; measure variants per crate before and after.
 4. Coalesce identical concurrent jobs: a second job with the same working directory, argv and
    environment as one already running could attach to its output instead of running again.
+   Measured 2026-11-12 and not built: in `jobs.jsonl`, 740 jobs over 6.4 h (toolchain not
+   `other`), pairs of jobs from different sessions with the same repository and the same argv
+   whose run times overlapped: 0 in the same working directory, 0 in different worktrees of the
+   same repository. Method: group by `(repo, argv)`, sort by `started_ms`, count pairs where the
+   later starts before the earlier ends and `session` differs. Repeat the count before building
+   it.
 5. sccache size: the cache is at its 20 GiB limit, so least-recently-used entries are evicted.
    Measure the miss rate after raising it to 40 GiB, against the disk floor of 25 GB free.
 6. Per-job cache numbers in the UI: units compiled, sccache hits and misses for each job, so
@@ -440,6 +446,32 @@ Gaps: jobs under `--memory-max` run in their own `systemd-run --scope` units out
 only. Disk IO is not limited: the user manager delegates only `cpu memory pids` to user units, so
 `IOWeight` on `slot.service` has no effect without an `io` delegation drop-in for
 `user@.service`.
+
+### 13.1 Call mode (0.5.0)
+
+Need: the operator set 40 % by hand for each video call on 2026-11-12. Call mode does it.
+
+Detection, every 5 s, in `call::probe`:
+
+- `pw-dump` (3 s deadline): a `Stream/Input/Audio` or `Stream/Input/Video` node in state
+  `running`, without `stream.capture.sink` or `stream.monitor`, with an `active` link from an
+  `Audio/Source*` or `Video/Source*` node whose name does not end in `.monitor`. A stream that is
+  open but corked (a browser tab with microphone permission, a call app between calls) is `idle`
+  or `suspended`, and a recording of what plays is fed by a sink monitor; neither counts.
+  Measured on the operator's desktop with no call on: no capture stream, the microphone and the
+  camera nodes `suspended`.
+- `/proc/*/fd` of the user's processes for `/dev/video*`, except `pipewire` and `wireplumber`:
+  Chromium and Firefox read the camera through V4L2, not PipeWire. One pass took 47 ms.
+- Ignored applications (`--call-ignore`): level meters, mixers and patchbays, which capture
+  without being a call.
+
+State (`call::Tracker`): the first probe that sees a call raises the headroom to the call value
+when that is higher, without saving it, so a restart during a call comes back with the
+operator's value and the next probe raises it again. 120 s (`--call-off-after`) without any
+capture ends the call and puts the saved value back. A headroom set by hand during a call is
+saved, stays, and the end of that call changes nothing. The call value is saved in
+`limits.json` beside the headroom once set through the API; 0 turns call mode off, and turning
+it off during a call puts the earlier value back.
 
 Change control: `PUT /api/limits` changes how the whole machine behaves, so it requires a JSON
 content type (a cross-site form post cannot send one without a CORS preflight, which the daemon

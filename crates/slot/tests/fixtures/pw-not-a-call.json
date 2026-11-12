@@ -1,0 +1,13 @@
+[
+  {"id": 59, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Sink", "node.name": "alsa_output.pci-0000_00_1f.3.analog-stereo"}}},
+  {"id": 58, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Source", "node.name": "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"}}},
+  {"id": 60, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Source", "node.name": "alsa_input.pci-0000_00_1f.3.analog-stereo"}}},
+  {"id": 81, "type": "PipeWire:Interface:Node", "info": {"state": "idle", "props": {"media.class": "Stream/Input/Audio", "application.name": "Chromium", "application.process.binary": "chromium", "node.name": "Chromium input"}}},
+  {"id": 86, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "pavucontrol", "application.process.binary": "pavucontrol", "node.name": "Peak detect"}}},
+  {"id": 87, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "OBS", "stream.capture.sink": "true", "node.name": "OBS desktop audio"}}},
+  {"id": 88, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "Recorder", "node.name": "Recorder"}}},
+  {"id": 90, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 60, "input-node-id": 81, "state": "paused"}},
+  {"id": 92, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 60, "input-node-id": 86, "state": "active"}},
+  {"id": 93, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 58, "input-node-id": 87, "state": "active"}},
+  {"id": 94, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 58, "input-node-id": 88, "state": "active"}}
+]

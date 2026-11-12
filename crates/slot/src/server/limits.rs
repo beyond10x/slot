@@ -22,6 +22,10 @@ pub const FILE: &str = "limits.json";
 pub struct Saved {
     /// Headroom, percent.
     pub headroom_percent: u8,
+    /// Headroom during a call, percent, 0 = call mode off; `None` = the
+    /// daemon's `--call-headroom`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_headroom_percent: Option<u8>,
 }
 
 /// Reads the saved headroom; 0 when the file is missing or unreadable.
@@ -31,6 +35,7 @@ pub fn load(dir: &Path) -> Saved {
         .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
         .map(|s| Saved {
             headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
+            call_headroom_percent: s.call_headroom_percent.map(|c| c.min(MAX_HEADROOM)),
         })
         .unwrap_or_default()
 }
@@ -72,11 +77,34 @@ pub fn apply_quota(unit: Option<&str>, quota: Option<u32>) -> Result<(), String>
     }
 }
 
-/// Body of `PUT /api/limits`.
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// Body of `PUT /api/limits`; a field left out is not changed.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 pub struct Request {
     /// Headroom, percent, 0 to [`MAX_HEADROOM`].
-    pub headroom_percent: u8,
+    #[serde(default)]
+    pub headroom_percent: Option<u8>,
+    /// Headroom during a call, percent, 0 to [`MAX_HEADROOM`]; 0 turns call
+    /// mode off.
+    #[serde(default)]
+    pub call_headroom_percent: Option<u8>,
+}
+
+/// Call mode as `GET /api/limits` shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CallView {
+    /// Whether a call holds the microphone or the camera now.
+    pub active: bool,
+    /// Applications seen capturing.
+    pub apps: Vec<String>,
+    /// Headroom before the call, which comes back after it.
+    pub base_percent: u8,
+    /// Whether the headroom was set by hand during this call, so it stays.
+    pub manual: bool,
+    /// Seconds until the headroom goes back, once no capture is seen.
+    pub ends_in_s: Option<u64>,
+    /// Why call detection does not run; empty when it does.
+    pub note: String,
 }
 
 /// Answer of `GET` and `PUT /api/limits`.
@@ -95,6 +123,13 @@ pub struct View {
     /// Why the quota is not applied; empty when it is.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// Headroom during a call, percent; 0 = call mode off. 0 from a daemon
+    /// older than 0.5.0.
+    #[serde(default)]
+    pub call_headroom_percent: u8,
+    /// Call mode now.
+    #[serde(default)]
+    pub call: CallView,
 }
 
 /// Whether a browser request from `origin` may change settings. A request
@@ -135,10 +170,21 @@ mod tests {
             dir.path(),
             Saved {
                 headroom_percent: 35,
+                call_headroom_percent: None,
             },
         )
         .unwrap();
         assert_eq!(load(dir.path()).headroom_percent, 35);
+        assert_eq!(load(dir.path()).call_headroom_percent, None);
+        save(
+            dir.path(),
+            Saved {
+                headroom_percent: 20,
+                call_headroom_percent: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(load(dir.path()).call_headroom_percent, Some(0));
         std::fs::write(dir.path().join(FILE), r#"{"headroom_percent":99}"#).unwrap();
         assert_eq!(load(dir.path()).headroom_percent, MAX_HEADROOM);
         std::fs::write(dir.path().join(FILE), "garbage").unwrap();

@@ -38,6 +38,9 @@ slot serve [OPTIONS]
 - `--memory-max`: systemd `MemoryMax` per job, for example 24G
 - `--keep-jobs`: Finished jobs kept in memory and shown in the UI (default `500`)
 - `--cpu-weight`: systemd `CPUWeight` for every job (interactive apps default to 100); 0 leaves it unset. Applied to the daemon's own unit at start (default `20`)
+- `--call-headroom`: Call mode: headroom while a call uses the microphone or the camera, percent; 0 turns call mode off. `slot headroom --call` changes it at run time and that value is kept (default `40`)
+- `--call-off-after`: Seconds without capture after which a call counts as ended and the headroom goes back (default `120`)
+- `--call-ignore`: Applications whose capture is not a call (level meters, mixers), comma-separated; replaces the default list (default `pavucontrol,pwvucontrol,easyeffects,helvum,qpwgraph,coppwr,noisetorch`)
 
 ### `slot proxy`
 
@@ -78,6 +81,7 @@ slot headroom [OPTIONS] [PERCENT]
 ```
 
 - `<PERCENT>`: New headroom, percent, 0 to 50; without it, prints the current one
+- `--call`: Headroom during a call, percent, 0 to 50; 0 turns call mode off
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot sessions`

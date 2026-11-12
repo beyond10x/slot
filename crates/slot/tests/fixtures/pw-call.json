@@ -1,0 +1,8 @@
+[
+  {"id": 59, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Sink", "node.name": "alsa_output.pci-0000_00_1f.3.analog-stereo"}}},
+  {"id": 60, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Source", "node.name": "alsa_input.pci-0000_00_1f.3.analog-stereo"}}},
+  {"id": 81, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "Chromium", "application.process.binary": "chromium", "node.name": "Chromium input"}}},
+  {"id": 82, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Output/Audio", "application.name": "Chromium", "node.name": "Chromium"}}},
+  {"id": 90, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 60, "output-port-id": 61, "input-node-id": 81, "input-port-id": 83, "state": "active"}},
+  {"id": 91, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 82, "output-port-id": 84, "input-node-id": 59, "input-port-id": 85, "state": "active"}}
+]

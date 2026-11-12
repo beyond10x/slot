@@ -139,6 +139,11 @@ limit: number,
  */
 headroom_percent: number, 
 /**
+ * Applications in a call while call mode holds the headroom up; empty
+ * otherwise.
+ */
+call_apps: Array<string>, 
+/**
  * CPU quota on the daemon unit, percent of one core; null when not capped.
  */
 cpu_quota_percent: number | null, 
@@ -279,6 +284,11 @@ limit: number,
  * Share of the CPU kept free for interactive work, percent.
  */
 headroom_percent: number, 
+/**
+ * Applications in a call while call mode holds the headroom up; empty
+ * otherwise.
+ */
+call_apps: Array<string>, 
 /**
  * Tokens free.
  */

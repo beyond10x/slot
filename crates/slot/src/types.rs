@@ -108,7 +108,7 @@ pub struct Unit {
 }
 
 /// Snapshot served at `GET /api/state`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 pub struct State {
     /// Host name.
     pub host: String,
@@ -123,6 +123,10 @@ pub struct State {
     /// Share of the CPU kept free for interactive work, percent.
     #[serde(default)]
     pub headroom_percent: u32,
+    /// Applications in a call while call mode holds the headroom up; empty
+    /// otherwise.
+    #[serde(default)]
+    pub call_apps: Vec<String>,
     /// CPU quota on the daemon unit, percent of one core; null when not capped.
     #[serde(default)]
     pub cpu_quota_percent: Option<u32>,
@@ -162,6 +166,10 @@ pub enum Event {
         /// Share of the CPU kept free for interactive work, percent.
         #[serde(default)]
         headroom_percent: u32,
+        /// Applications in a call while call mode holds the headroom up; empty
+        /// otherwise.
+        #[serde(default)]
+        call_apps: Vec<String>,
         /// Tokens free.
         free: u32,
         /// Jobs waiting for tokens.

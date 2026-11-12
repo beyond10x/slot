@@ -62,21 +62,69 @@ pub fn fetch(addr: &str) -> Result<State> {
     serde_json::from_str(&body).with_context(|| format!("{addr}: /api/state"))
 }
 
-/// Reads the headroom, or sets it to `percent` first.
-pub fn headroom(addr: &str, percent: Option<u8>) -> Result<LimitsView> {
-    let body = match percent {
-        Some(p) => request(
+/// Reads the headroom, or sets the headroom and the call headroom first.
+pub fn headroom(addr: &str, percent: Option<u8>, call: Option<u8>) -> Result<LimitsView> {
+    let mut fields = Vec::new();
+    if let Some(p) = percent {
+        fields.push(format!(r#""headroom_percent":{p}"#));
+    }
+    if let Some(c) = call {
+        fields.push(format!(r#""call_headroom_percent":{c}"#));
+    }
+    let body = if fields.is_empty() {
+        request(addr, "GET", "/api/limits", None)?
+    } else {
+        request(
             addr,
             "PUT",
             "/api/limits",
-            Some(&format!(r#"{{"headroom_percent":{p}}}"#)),
-        )?,
-        None => request(addr, "GET", "/api/limits", None)?,
+            Some(&format!("{{{}}}", fields.join(","))),
+        )?
     };
     serde_json::from_str(&body).with_context(|| format!("{addr}: /api/limits"))
 }
 
-/// One line for `slot headroom`.
+/// The call mode line of `slot headroom` and `slot status`; empty from a
+/// daemon without call mode.
+pub fn render_call(v: &LimitsView) -> String {
+    let c = &v.call;
+    if v.call_headroom_percent == 0 {
+        return format!("call mode off{}\n", note(&c.note));
+    }
+    if !c.active {
+        return format!(
+            "call mode {}%: no call{}\n",
+            v.call_headroom_percent,
+            note(&c.note)
+        );
+    }
+    let back = if c.manual {
+        "set by hand, stays after the call".to_string()
+    } else if v.headroom_percent == c.base_percent {
+        "unchanged".to_string()
+    } else {
+        match c.ends_in_s {
+            Some(s) => format!("back to {}% in {s}s", c.base_percent),
+            None => format!("back to {}% after the call", c.base_percent),
+        }
+    };
+    format!(
+        "call mode {}%: call on ({}), headroom {}%, {back}\n",
+        v.call_headroom_percent,
+        c.apps.join(", "),
+        v.headroom_percent
+    )
+}
+
+fn note(n: &str) -> String {
+    if n.is_empty() {
+        String::new()
+    } else {
+        format!(" ({n})")
+    }
+}
+
+/// `slot headroom`: the headroom line and the call mode line.
 pub fn render_headroom(v: &LimitsView) -> String {
     let quota = match v.cpu_quota_percent {
         Some(q) => format!("cpu quota {q}% ({:.1} cores)", f64::from(q) / 100.0),
@@ -84,8 +132,11 @@ pub fn render_headroom(v: &LimitsView) -> String {
         None => format!("cpu quota not applied: {}", v.note),
     };
     format!(
-        "headroom {}%: builds get {} of {} slots, {quota}\n",
-        v.headroom_percent, v.effective_tokens, v.tokens
+        "headroom {}%: builds get {} of {} slots, {quota}\n{}",
+        v.headroom_percent,
+        v.effective_tokens,
+        v.tokens,
+        render_call(v)
     )
 }
 
@@ -147,6 +198,11 @@ pub fn render(s: &State) -> String {
         running.len(),
         queued.len()
     );
+    if !s.call_apps.is_empty() {
+        out.push_str("call mode: ");
+        out.push_str(&s.call_apps.join(", "));
+        out.push_str(" in a call, headroom raised\n");
+    }
     for j in queued.iter().chain(running.iter()) {
         out.push_str(&line(j, s.now_ms));
         out.push('\n');
@@ -189,16 +245,33 @@ mod tests {
             tokens: 20,
             systemd: true,
             note: String::new(),
+            call_headroom_percent: 40,
+            call: crate::server::limits::CallView::default(),
         };
         assert_eq!(
             render_headroom(&v),
-            "headroom 30%: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)\n"
+            "headroom 30%: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)\n\
+             call mode 40%: no call\n"
         );
+        v.call.active = true;
+        v.call.apps = vec!["Chromium".into()];
+        v.call.base_percent = 20;
+        v.headroom_percent = 40;
+        v.call.ends_in_s = Some(75);
+        assert_eq!(
+            render_call(&v),
+            "call mode 40%: call on (Chromium), headroom 40%, back to 20% in 75s\n"
+        );
+        v.call.manual = true;
+        assert!(render_call(&v).ends_with("set by hand, stays after the call\n"));
+        v.call_headroom_percent = 0;
+        assert_eq!(render_call(&v), "call mode off\n");
+        v.headroom_percent = 30;
         v.cpu_quota_percent = None;
         v.note = "not running in a systemd user unit".into();
         assert!(
             render_headroom(&v)
-                .ends_with("cpu quota not applied: not running in a systemd user unit\n")
+                .contains("cpu quota not applied: not running in a systemd user unit\n")
         );
     }
 
@@ -238,14 +311,14 @@ mod tests {
         let addr = answer_once(
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\r\n<!doctype html>",
         );
-        let e = headroom(&addr, Some(30)).unwrap_err().to_string();
+        let e = headroom(&addr, Some(30), None).unwrap_err().to_string();
         assert!(e.contains("older than this client"), "{e}");
         let addr = answer_once(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"headroom_percent\":30,\
              \"cpu_quota_percent\":null,\"effective_tokens\":14,\"tokens\":20,\"systemd\":false,\
              \"note\":\"\"}",
         );
-        assert_eq!(headroom(&addr, None).unwrap().effective_tokens, 14);
+        assert_eq!(headroom(&addr, None, None).unwrap().effective_tokens, 14);
     }
 
     #[test]
@@ -256,12 +329,10 @@ mod tests {
             tokens: 4,
             limit: 0,
             headroom_percent: 0,
-            cpu_quota_percent: None,
             free: 4,
             active: vec![],
             done: vec![],
-            now_ms: 0,
-            toolchains: vec![],
+            ..State::default()
         };
         assert_eq!(render(&s), "4 slots, 4 free, 0 running, 0 queued\n");
     }
@@ -273,13 +344,10 @@ mod tests {
             cores: 4,
             tokens: 4,
             limit: 4,
-            headroom_percent: 0,
-            cpu_quota_percent: None,
             free: 0,
             active: vec![job(7, JobState::Running, 4), job(8, JobState::Queued, 1)],
-            done: vec![],
             now_ms: 151_000,
-            toolchains: vec![],
+            ..State::default()
         };
         let out = render(&s);
         let lines: Vec<&str> = out.lines().collect();

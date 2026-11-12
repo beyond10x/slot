@@ -26,6 +26,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::call;
 use crate::census;
 use crate::jobserver::Pool;
 use crate::policy;
@@ -75,7 +76,17 @@ pub struct Config {
     pub keep_jobs: usize,
     /// systemd `CPUWeight` for jobs; `None` = leave unset.
     pub cpu_weight: Option<u16>,
+    /// Call mode: headroom while a call holds the microphone or the camera,
+    /// percent; 0 = off. A value saved through `PUT /api/limits` wins.
+    pub call_headroom: u8,
+    /// Time without capture after which a call counts as ended.
+    pub call_off_after: Duration,
+    /// Applications whose capture is not a call (level meters, mixers).
+    pub call_ignore: Vec<String>,
 }
+
+/// Interval between two call probes.
+const CALL_PROBE: Duration = Duration::from_secs(5);
 
 /// The systemd user unit this process runs in, from `/proc/self/cgroup`.
 fn own_unit() -> Option<String> {
@@ -183,12 +194,20 @@ pub struct Server {
     upgrading: watch::Sender<bool>,
 }
 
-/// The headroom in force and whether its CPU quota is applied.
+/// The headroom in force, whether its CPU quota is applied, and call mode.
 #[derive(Debug, Clone, Default)]
 struct Headroom {
     percent: u8,
     quota: Option<u32>,
     note: String,
+    /// Headroom during a call; 0 = call mode off.
+    call_percent: u8,
+    /// `call_percent` as saved through the API; `None` = the daemon default.
+    call_saved: Option<u8>,
+    /// The headroom last saved, which a restart starts from.
+    saved_percent: u8,
+    call: call::Tracker,
+    call_note: String,
 }
 
 fn now_ms() -> i64 {
@@ -238,6 +257,7 @@ impl Server {
             .unwrap_or_default();
         let cores = procstat::host_cpus() as u32;
         let pool_size = cfg.tokens;
+        let call_headroom = cfg.call_headroom;
         Ok(Arc::new(Self {
             cfg,
             pool,
@@ -268,8 +288,13 @@ impl Server {
             cores,
             headroom: Mutex::new(Headroom {
                 percent: saved.headroom_percent,
-                quota: None,
-                note: String::new(),
+                saved_percent: saved.headroom_percent,
+                call_percent: saved
+                    .call_headroom_percent
+                    .unwrap_or(call_headroom)
+                    .min(limits::MAX_HEADROOM),
+                call_saved: saved.call_headroom_percent,
+                ..Headroom::default()
             }),
             upgrading: watch::Sender::new(false),
         }))
@@ -323,9 +348,10 @@ impl Server {
                 .unwrap_or_default();
             eprintln!("slot: {msg}");
         }
+        tokio::spawn(Arc::clone(&self).call_watch());
         let h = self.headroom_percent();
         if h > 0 {
-            let v = Arc::clone(&self).set_headroom(h).await;
+            let v = self.apply_headroom(h, false).await;
             eprintln!(
                 "slot: headroom {h}%: {} of {} tokens, cpu quota {}",
                 v.effective_tokens,
@@ -909,6 +935,7 @@ impl Server {
                     tokens: self.cfg.tokens as u32,
                     limit: self.pool.limit() as u32,
                     headroom_percent: u32::from(self.headroom_percent()),
+                    call_apps: self.call_apps(),
                     free: self.pool.free() as u32,
                     waiting: self.pool.waiting() as u32,
                     sys_cpu: g.sys_cpu,
@@ -964,6 +991,7 @@ impl Server {
     /// The `GET /api/limits` answer.
     pub fn limits(&self) -> limits::View {
         let h = self.headroom.lock().expect("headroom lock").clone();
+        let now = Instant::now();
         limits::View {
             headroom_percent: h.percent,
             cpu_quota_percent: h.quota,
@@ -971,22 +999,145 @@ impl Server {
             tokens: self.cfg.tokens,
             systemd: own_unit().is_some(),
             note: h.note,
+            call_headroom_percent: h.call_percent,
+            call: limits::CallView {
+                active: h.call.active(),
+                apps: h.call.apps().to_vec(),
+                base_percent: if h.call.active() {
+                    h.call.base()
+                } else {
+                    h.percent
+                },
+                manual: h.call.is_manual(),
+                ends_in_s: h.call.ends_in(now, self.cfg.call_off_after),
+                note: h.call_note,
+            },
         }
     }
 
-    /// Sets the headroom: lowers the circulating tokens, saves it, and sets
-    /// `CPUQuota` on the daemon's unit when there is one.
+    /// Applications in a call while call mode is on; empty otherwise.
+    fn call_apps(&self) -> Vec<String> {
+        let h = self.headroom.lock().expect("headroom lock");
+        if h.call.active() {
+            h.call.apps().to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Sets the headroom by hand (`slot headroom`, the UI slider): saved, and
+    /// during a call it stays when the call ends.
     pub async fn set_headroom(self: Arc<Self>, percent: u8) -> limits::View {
+        self.headroom.lock().expect("headroom lock").call.manual();
+        self.apply_headroom(percent, true).await
+    }
+
+    /// Applies a `PUT /api/limits` body: the call headroom first, then the
+    /// headroom.
+    pub async fn update_limits(self: Arc<Self>, req: limits::Request) -> limits::View {
+        if let Some(c) = req.call_headroom_percent {
+            let c = c.min(limits::MAX_HEADROOM);
+            let action = {
+                let mut h = self.headroom.lock().expect("headroom lock");
+                h.call_percent = c;
+                h.call_saved = Some(c);
+                h.call.retarget(c)
+            };
+            self.save_limits();
+            match action {
+                call::Action::Raise(p) => {
+                    self.apply_headroom(p, false).await;
+                }
+                call::Action::Restore(p) => {
+                    self.apply_headroom(p, true).await;
+                }
+                call::Action::Keep => {}
+            }
+        }
+        match req.headroom_percent {
+            Some(p) => Arc::clone(&self).set_headroom(p).await,
+            None => self.limits(),
+        }
+    }
+
+    fn save_limits(&self) {
+        let saved = {
+            let h = self.headroom.lock().expect("headroom lock");
+            limits::Saved {
+                headroom_percent: h.saved_percent,
+                call_headroom_percent: h.call_saved,
+            }
+        };
+        if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
+            eprintln!("slot: save {}: {e}", limits::FILE);
+        }
+    }
+
+    /// Watches for calls and moves the headroom: up when one starts, back
+    /// [`Config::call_off_after`] after the last capture.
+    async fn call_watch(self: Arc<Self>) {
+        let have_pw = tokio::task::spawn_blocking(|| {
+            Command::new("pw-dump")
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+        .await
+        .unwrap_or(false);
+        if !have_pw {
+            self.headroom.lock().expect("headroom lock").call_note =
+                "pw-dump not found: only camera use is seen".into();
+        }
+        let mut tick = tokio::time::interval(CALL_PROBE);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let percent = self.headroom.lock().expect("headroom lock").call_percent;
+            if percent == 0 {
+                continue;
+            }
+            let ignore = self.cfg.call_ignore.clone();
+            let apps = tokio::task::spawn_blocking(move || call::probe(&ignore))
+                .await
+                .unwrap_or_default();
+            let (action, current, seen) = {
+                let mut h = self.headroom.lock().expect("headroom lock");
+                let current = h.percent;
+                let action = h.call.observe(
+                    Instant::now(),
+                    apps,
+                    current,
+                    percent,
+                    self.cfg.call_off_after,
+                );
+                (action, current, h.call.apps().join(", "))
+            };
+            match action {
+                call::Action::Raise(p) => {
+                    eprintln!("slot: call started ({seen}): headroom {current}% -> {p}%");
+                    self.apply_headroom(p, false).await;
+                }
+                call::Action::Restore(p) => {
+                    eprintln!("slot: call ended: headroom {current}% -> {p}%");
+                    self.apply_headroom(p, true).await;
+                }
+                call::Action::Keep => {}
+            }
+        }
+    }
+
+    /// Sets the headroom: lowers the circulating tokens, saves it when
+    /// `persist`, and sets `CPUQuota` on the daemon's unit when there is one.
+    async fn apply_headroom(self: &Arc<Self>, percent: u8, persist: bool) -> limits::View {
         let percent = percent.min(limits::MAX_HEADROOM);
         self.pool
             .set_limit(limits::effective_tokens(self.cfg.tokens, percent));
-        if let Err(e) = limits::save(
-            &self.cfg.state_dir,
-            limits::Saved {
-                headroom_percent: percent,
-            },
-        ) {
-            eprintln!("slot: save {}: {e}", limits::FILE);
+        if persist {
+            self.headroom.lock().expect("headroom lock").saved_percent = percent;
+            self.save_limits();
         }
         let quota = limits::cpu_quota_percent(self.cores, percent);
         let applied = if self.cfg.cpu_quota {
@@ -1022,6 +1173,7 @@ impl Server {
             tokens: self.cfg.tokens as u32,
             limit: self.pool.limit() as u32,
             headroom_percent: u32::from(self.headroom_percent()),
+            call_apps: self.call_apps(),
             cpu_quota_percent: self.headroom.lock().expect("headroom lock").quota,
             free: self.pool.free() as u32,
             active: g.active.values().map(|l| l.job.clone()).collect(),

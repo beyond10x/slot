@@ -29,6 +29,9 @@ fn start(tokens: usize) -> Fixture {
         memory_max: None,
         keep_jobs: 100,
         cpu_weight: None,
+        call_headroom: 0,
+        call_off_after: Duration::from_secs(120),
+        call_ignore: Vec::new(),
     };
     let server = Server::new(cfg.clone()).unwrap();
     let s = Arc::clone(&server);
@@ -298,6 +301,9 @@ fn history_survives_restart() {
         memory_max: None,
         keep_jobs: 100,
         cpu_weight: None,
+        call_headroom: 0,
+        call_off_after: Duration::from_secs(120),
+        call_ignore: Vec::new(),
     })
     .unwrap();
     let st = again.state();
@@ -328,6 +334,33 @@ fn headroom_lowers_the_limit_and_is_saved() {
     assert_eq!(limits::load(&f.root.join("state")).headroom_percent, 50);
     let v = rt.block_on(Arc::clone(&f.server).set_headroom(0));
     assert_eq!(v.effective_tokens, 2);
+}
+
+#[test]
+fn the_call_headroom_is_saved_beside_the_headroom() {
+    let f = start(2);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(Arc::clone(&f.server).set_headroom(20));
+    let v = rt.block_on(Arc::clone(&f.server).update_limits(limits::Request {
+        headroom_percent: None,
+        call_headroom_percent: Some(30),
+    }));
+    assert_eq!(v.call_headroom_percent, 30);
+    assert_eq!(v.headroom_percent, 20, "no call: the headroom stays");
+    let saved = limits::load(&f.root.join("state"));
+    assert_eq!(
+        (saved.headroom_percent, saved.call_headroom_percent),
+        (20, Some(30))
+    );
+    let v = rt.block_on(Arc::clone(&f.server).update_limits(limits::Request {
+        headroom_percent: Some(10),
+        call_headroom_percent: Some(0),
+    }));
+    assert_eq!((v.headroom_percent, v.call_headroom_percent), (10, 0));
+    assert_eq!(
+        limits::load(&f.root.join("state")).call_headroom_percent,
+        Some(0)
+    );
 }
 
 #[test]
