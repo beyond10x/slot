@@ -116,11 +116,15 @@ pub struct State {
     pub cores: u32,
     /// Pool size.
     pub tokens: u32,
-    /// Tokens that circulate: the pool size less the headroom.
+    /// Tokens that circulate: the pool size less the headroom; 0 from a
+    /// daemon older than 0.3.0, which has no limit.
+    #[serde(default)]
     pub limit: u32,
     /// Share of the CPU kept free for interactive work, percent.
+    #[serde(default)]
     pub headroom_percent: u32,
     /// CPU quota on the daemon unit, percent of one core; null when not capped.
+    #[serde(default)]
     pub cpu_quota_percent: Option<u32>,
     /// Tokens free now.
     pub free: u32,
@@ -151,9 +155,12 @@ pub enum Event {
         t: i64,
         /// Pool size.
         tokens: u32,
-        /// Tokens that circulate: the pool size less the headroom.
+        /// Tokens that circulate: the pool size less the headroom; 0 from a
+        /// daemon older than 0.3.0.
+        #[serde(default)]
         limit: u32,
         /// Share of the CPU kept free for interactive work, percent.
+        #[serde(default)]
         headroom_percent: u32,
         /// Tokens free.
         free: u32,
@@ -172,6 +179,7 @@ pub enum Event {
 
 /// Build processes of one tool family.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
 pub struct CensusClass {
     /// Tool family, for example `rust-compile`, `go-test`, `node-test`.
     pub class: String,
@@ -188,6 +196,7 @@ pub struct CensusClass {
 
 /// Build processes of one agent session.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
 pub struct CensusSession {
     /// Session id from the process environment; empty when none.
     pub session: String,
@@ -206,6 +215,7 @@ pub struct CensusSession {
 
 /// Host-wide view of build work.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
 pub struct HostCensus {
     /// Cores used by every process on the host.
     pub host_cores: f64,
@@ -238,4 +248,28 @@ pub struct Chunk {
     pub t: String,
     /// Text.
     pub b: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `/api/state` and a tick as a 0.2.0 daemon sends them: no limit, no
+    /// headroom. A newer client must still read them.
+    #[test]
+    fn reads_state_and_tick_from_an_older_daemon() {
+        let state = r#"{"host":"h","cores":4,"tokens":4,"free":3,"active":[],"done":[],
+            "now_ms":1,"toolchains":["rust"]}"#;
+        let s: State = serde_json::from_str(state).unwrap();
+        assert_eq!((s.tokens, s.limit, s.headroom_percent), (4, 0, 0));
+        assert_eq!(s.cpu_quota_percent, None);
+        let tick = r#"{"type":"tick","t":1,"tokens":4,"free":3,"waiting":0,"sys_cpu":0.1,
+            "job_cores":0.0,"jobs":[],"census":{"host_cores":1.0}}"#;
+        let Event::Tick { limit, census, .. } = serde_json::from_str(tick).unwrap() else {
+            panic!("not a tick");
+        };
+        assert_eq!(limit, 0);
+        assert_eq!(census.host_cores, 1.0);
+        assert_eq!(census.classes.len(), 0);
+    }
 }

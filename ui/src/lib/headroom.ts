@@ -22,3 +22,13 @@ export function headroomCaption(cores: number, tokens: number, headroom: number)
   const shown = Number.isInteger(c) ? String(c) : c.toFixed(1);
   return `builds may use ${shown} of ${cores} cores, ${effectiveTokens(tokens, headroom)} of ${tokens} slots`;
 }
+
+/**
+ * Error text for an answer from `PUT api/limits` that is not JSON, or null
+ * when it is. A daemon older than 0.3.0 has no such path and answers with
+ * this page (200, text/html).
+ */
+export function notJsonError(contentType: string | null): string | null {
+  if (contentType?.trim().toLowerCase().startsWith('application/json')) return null;
+  return 'the daemon is older than this page and has no headroom; upgrade it (systemctl --user reload slot)';
+}

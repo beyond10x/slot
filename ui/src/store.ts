@@ -2,6 +2,7 @@ import { reactive, shallowReactive, shallowRef } from 'vue';
 import type { Event, HostCensus, Job, LiveJob, State } from './generated/types.ts';
 import { coresSample, mergeByT, parseHistory } from './lib/history.ts';
 import type { Sample, Tick } from './lib/history.ts';
+import { notJsonError } from './lib/headroom.ts';
 import { familyOrder, hostSample } from './lib/host.ts';
 import type { HostSample } from './lib/host.ts';
 import { isActive, jobId } from './lib/job.ts';
@@ -222,6 +223,8 @@ export function setHeadroom(percent: number): void {
           body: JSON.stringify({ headroom_percent: percent }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).trim()}`);
+        const older = notJsonError(res.headers.get('content-type'));
+        if (older) throw new Error(older);
         const v = (await res.json()) as {
           headroom_percent: number;
           effective_tokens: number;

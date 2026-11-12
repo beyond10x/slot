@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.3.0
+version=0.3.1
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -139,9 +139,15 @@ mv ~/.local/bin/slot.new ~/.local/bin/slot
 systemctl --user reload slot
 ```
 
-Reload sends SIGHUP. The daemon keeps taking jobs and replaces itself with the new binary, same
-process id, at the first moment no job is queued or running. On a machine that is never idle
-that can take hours; the old version keeps serving until then.
+Reload sends SIGHUP. From then on the daemon starts no new job: new and queued jobs stay
+queued, and the running ones finish. When none is running, it replaces itself with the new
+binary, same process id. The wait is as long as the longest job running at the reload.
+
+A queued job's connection closes when the daemon replaces itself. Its client prints
+`slot: daemon upgrading, resubmitting job`, waits for the new daemon's socket (up to 10 minutes,
+checking every 0.5 s) and sends the same command again, once. A job whose command had started is
+not sent again: the client reports `slot: connection to daemon lost` and exits with 3. Clients
+older than 0.3.1 do not resubmit; their queued jobs fail with that message.
 
 `systemctl --user restart slot` stops at once instead: the socket disappears, new `slot` calls
 run locally outside the pool, and the stop waits for the longest running job. Use it only when
