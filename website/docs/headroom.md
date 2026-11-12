@@ -58,9 +58,10 @@ A call is any of:
 
 Level meters, mixers and dictation capture too, so `claude` (Claude Code's voice input),
 `pavucontrol`, `pwvucontrol`, `easyeffects`, `helvum`, `qpwgraph`, `coppwr` and `noisetorch` are
-ignored. A name in the list matches the application name, its binary, or the name of its
-process; an ALSA program shows up in PipeWire as `PipeWire ALSA [...]`, so its process name is
-what counts. `slot serve --call-ignore a,b` replaces the
+ignored. A name in the list matches the application name, its binary, the name of its process,
+or a directory or file name in the path of its executable: Claude Code runs as
+`.../claude/versions/<version>`, so its process name is a version number. An ALSA program shows
+up in PipeWire as `PipeWire ALSA [...]`, so its process name is the name shown. `slot serve --call-ignore a,b` replaces the
 list; `--call-headroom` sets the default call value and `--call-off-after` the delay in seconds.
 Without `pw-dump` only camera use is seen, and `slot headroom` says so.
 

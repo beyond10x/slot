@@ -19,6 +19,33 @@ use tokio::sync::oneshot;
 
 /// How long the reader waits for a token before it looks at its flags again.
 const READ_POLL_MS: u16 = 100;
+/// Processes other than `own` that have the FIFO at `path` open, from
+/// `/proc/<pid>/fd`. Processes of other users are not readable and not
+/// counted; the FIFO is mode 0600, so they cannot open it either.
+pub fn holders(path: &Path, own: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for p in procs.flatten() {
+        let Some(pid) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(p.path().join("fd")) else {
+            continue;
+        };
+        if fds
+            .flatten()
+            .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == path))
+        {
+            out.push(pid);
+        }
+    }
+    out
+}
 
 /// The token pool.
 pub struct Pool {
@@ -386,6 +413,37 @@ impl Pool {
         diff
     }
 
+    /// Tokens missing from the pool while jobs run. Valid only when no
+    /// process but the daemon has the FIFO open: then every token is in the
+    /// FIFO, held back, granted to a running job (`granted`), or taken by a
+    /// queued request. Anything short of that was read by a process that
+    /// exited without writing it back. In-flight tokens (read by the reader
+    /// thread, not yet booked) also show up here for a moment, so the caller
+    /// acts only on a shortfall seen twice in a row. 0 while the pool is
+    /// paused for a handover: tokens taken from queued requests are then in
+    /// the daemon's hands and counted nowhere here.
+    pub fn missing(&self, granted: usize) -> usize {
+        let inner = self.inner.lock().expect("jobserver lock");
+        if inner.pause {
+            return 0;
+        }
+        let queued: usize = inner
+            .queue
+            .iter()
+            .map(|w| w.lock().expect("waiter lock"))
+            .filter(|w| !w.cancelled && !w.granted)
+            .map(|w| w.got)
+            .sum();
+        let booked = inner.held_back + granted + queued;
+        self.size.saturating_sub(booked + self.free())
+    }
+
+    /// Writes `n` lost tokens back.
+    pub fn restore(&self, n: usize) {
+        let _inner = self.inner.lock().expect("jobserver lock");
+        self.write(n);
+    }
+
     fn head(inner: &mut Inner) -> Option<Arc<Mutex<WaiterState>>> {
         while let Some(h) = inner.queue.front() {
             if h.lock().expect("waiter lock").cancelled {
@@ -481,6 +539,38 @@ mod tests {
         p.release(2);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(p.free(), 3);
+    }
+
+    #[tokio::test]
+    async fn missing_counts_tokens_a_dead_client_took() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fifo");
+        let p = Pool::new(&path, 6).unwrap();
+        p.set_limit(4);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut a = p.acquire(1);
+        assert!(ready_within(&mut a, 1000).await);
+        assert_eq!(p.missing(1), 0, "held back 2, granted 1, free 3");
+        {
+            let mut client = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let mut buf = [0u8; 1];
+            client.read_exact(&mut buf).unwrap();
+        }
+        assert_eq!(p.missing(1), 1, "the client exited holding one token");
+        let mut b = p.acquire(3);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(b.held(), 2);
+        assert_eq!(p.missing(1), 1, "a partly served request is booked");
+        p.restore(1);
+        assert!(
+            ready_within(&mut b, 1000).await,
+            "the restored token completes it"
+        );
+        assert_eq!(p.missing(4), 0);
     }
 
     #[tokio::test]

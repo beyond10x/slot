@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0 — 2026-11-12
+
+- Lost build slots come back while the pool is busy. A compiler killed while it held jobserver
+  tokens (a cancel, a `timeout`) took them with it, and the daemon gave them back only when no job
+  ran at all, which a busy machine never reached: on 2026-11-12 8 of 12 slots were gone and 19
+  jobs queued while the host used 3 to 4 cores. Every 15 s while jobs wait and the FIFO is empty,
+  if no other process has the FIFO open, the daemon writes the shortfall back (the smaller of two
+  passes); journal line, census event `tokens_restored`, `/metrics`
+  `slot_tokens_restored_total`.
+- Call mode no longer counts Claude Code's voice input as a call when Claude Code runs from a
+  per-version install (`.../claude/versions/<version>`, process name = the version): the ignore
+  list now also matches the names in the executable's path, for PipeWire clients and camera
+  holders.
+
 ## 0.11.0 — 2026-11-12
 
 - `systemctl --user reload slot` re-executes at once and hands every running and queued job to
