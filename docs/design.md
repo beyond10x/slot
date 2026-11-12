@@ -398,6 +398,12 @@ Ideas, none built yet:
    feature variants. Repository change; measure variants per crate before and after.
 4. Coalesce identical concurrent jobs: a second job with the same working directory, argv and
    environment as one already running could attach to its output instead of running again.
+   Measured 2026-11-12 and not built: in `jobs.jsonl`, 740 jobs over 6.4 h (toolchain not
+   `other`), pairs of jobs from different sessions with the same repository and the same argv
+   whose run times overlapped: 0 in the same working directory, 0 in different worktrees of the
+   same repository. Method: group by `(repo, argv)`, sort by `started_ms`, count pairs where the
+   later starts before the earlier ends and `session` differs. Repeat the count before building
+   it.
 5. sccache size: the cache is at its 20 GiB limit, so least-recently-used entries are evicted.
    Measure the miss rate after raising it to 40 GiB, against the disk floor of 25 GB free.
 6. Per-job cache numbers in the UI: units compiled, sccache hits and misses for each job, so
@@ -407,8 +413,16 @@ Ideas, none built yet:
    20-core host: tokens leak until every `sccache rustc` on the machine waits behind one compile,
    at 0 % CPU, which looks like a hung server. Writing 18 bytes into the pipe's write end
    (fd 4) started 7 compilers at once; restarting the server also resets it, but fails the
-   compiles in flight. The census could report free tokens of the server against its running
-   compilers.
+   compiles in flight. Built in 0.5.0 (`sccache::Watchdog`): every 5 s the daemon samples each
+   sccache server of its uid (free tokens by `FIONREAD` on the read end of the one pipe the
+   server holds both ends of, compiles = its child processes, clients = `sccache` processes with
+   the same `SCCACHE_SERVER_PORT`, CPU ticks of the server process). It writes `pool − running`
+   tokens only after 60 s in which every sample had no free token, fewer compiles than the pool,
+   more clients than compiles, and the server process averaged under 5 % of a core. The pool is
+   the host's CPU count or the largest `free + running` seen, whichever is larger. A server
+   started under a CPU quota may have had a smaller pool; writing up to the CPU count then
+   allows more parallel compiles inside sccache, which slot's jobserver bounds anyway, since
+   every compile belongs to a cargo that holds a slot.
 
 ## 13. Headroom (0.3.0)
 
@@ -435,13 +449,70 @@ Two limits, because neither is enough alone:
   (`headroom 40%: 7 of 12 tokens, cpu quota 720%`, 2026-11-12). Each upgrade under a headroom
   would have shrunk both again. Fixed in 0.4.1.
 
-Gaps: jobs under `--memory-max` run in their own `systemd-run --scope` units outside
-`slot.service`, so the quota does not reach them; a daemon not under systemd gets the token limit
-only. Disk IO is not limited: the user manager delegates only `cpu memory pids` to user units, so
+Jobs under `--memory-max` run in their own `systemd-run --scope` units outside `slot.service`.
+Since 0.5.0 those scopes go into `slot.slice` (`--slice`) and the quota is set on `slot.slice` as
+well (checked 2026-11-12: a scope in a slice with `CPUQuota=100%` reads `cpu.max` `100000
+100000`). The daemon's unit and the slice each get the full quota; the daemon's own CPU is small,
+so builds stay under it. Gap: a daemon not under systemd gets the token limit only. Disk IO is not limited: the user manager delegates only `cpu memory pids` to user units, so
 `IOWeight` on `slot.service` has no effect without an `io` delegation drop-in for
 `user@.service`.
+
+### 13.1 Call mode (0.5.0)
+
+Need: the operator set 40 % by hand for each video call on 2026-11-12. Call mode does it.
+
+Detection, every 5 s, in `call::probe`:
+
+- `pw-dump` (3 s deadline): a `Stream/Input/Audio` or `Stream/Input/Video` node in state
+  `running`, without `stream.capture.sink` or `stream.monitor`, with an `active` link from an
+  `Audio/Source*` or `Video/Source*` node whose name does not end in `.monitor`. A stream that is
+  open but corked (a browser tab with microphone permission, a call app between calls) is `idle`
+  or `suspended`, and a recording of what plays is fed by a sink monitor; neither counts.
+  Measured on the operator's desktop with no call on: no capture stream, the microphone and the
+  camera nodes `suspended`.
+- `/proc/*/fd` of the user's processes for `/dev/video*`, except `pipewire` and `wireplumber`:
+  Chromium and Firefox read the camera through V4L2, not PipeWire. One pass took 47 ms.
+- Ignored applications (`--call-ignore`): level meters, mixers and patchbays, which capture
+  without being a call.
+
+State (`call::Tracker`): the first probe that sees a call raises the headroom to the call value
+when that is higher, without saving it, so a restart during a call comes back with the
+operator's value and the next probe raises it again. 120 s (`--call-off-after`) without any
+capture ends the call and puts the saved value back. A headroom set by hand during a call is
+saved, stays, and the end of that call changes nothing. The call value is saved in
+`limits.json` beside the headroom once set through the API; 0 turns call mode off, and turning
+it off during a call puts the earlier value back.
 
 Change control: `PUT /api/limits` changes how the whole machine behaves, so it requires a JSON
 content type (a cross-site form post cannot send one without a CORS preflight, which the daemon
 does not answer) and an `Origin` that is absent or the daemon's own `http://127.0.0.1:<port>` or
 `http://localhost:<port>`.
+
+
+## 14. Admission by disk and memory (0.5.0)
+
+Need: the workspace rule says no build starts under 25 GB free, and a build that runs out of disk
+or memory fails late and takes others with it. Slots count CPU only.
+
+Before a job takes slots, `Server::short_of` checks, in this order:
+
+- **Disk.** `statvfs` of the job's directory and of its `CARGO_TARGET_DIR` (relative to the
+  directory when relative), at the nearest existing ancestor. Under `--min-free-disk` (GB,
+  default 25, 0 off) the job waits. Disk does not come back by waiting for other jobs, so a job
+  alone waits too, until space is freed.
+- **Memory.** `MemAvailable` less a reservation must cover the job's expected peak plus
+  `--min-free-memory` (GB, default 4, 0 off). The reservation is, for each job that started in the
+  last 30 s, its expected peak less its sampled memory: a burst of jobs admitted together would
+  otherwise each see the same free memory. Jobs running longer than that are counted by
+  `MemAvailable` itself; summing every job's 90th percentile would hold builds back that fit in
+  practice. With no other job running the check is skipped, so memory never stalls the queue.
+
+Expected peak (`admission::History`): the 90th percentile of `peak_rss` of the last 20 runs of
+the same `(repo, argv)` with at least 3, else of the last 200 runs of the toolchain with at least
+5, else 1 GB. It is loaded from `jobs.jsonl` at start (1,152 of 1,241 jobs on 2026-11-12 had a
+sample) and updated as jobs end. Toolchain 90th percentiles then: rust 3.9 GiB, other 3.5 GiB,
+node-test 1.8 GiB, go 0.8 GiB.
+
+The check repeats every 2 s and once more after the slots are granted: a job that finds memory
+gone gives its slots back and waits again. The client gets one `slot: job N waiting: …` line per
+kind of reason; the job carries `wait_reason` for `slot status` and the UI.

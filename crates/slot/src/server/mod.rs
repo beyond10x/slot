@@ -26,6 +26,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::admission;
+use crate::call;
 use crate::census;
 use crate::jobserver::Pool;
 use crate::policy;
@@ -33,7 +35,7 @@ use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
 use crate::rewrite::Rewriter;
 use crate::toolchain::{self, Context};
-use crate::types::{Event, HostCensus, Job, JobState, LiveJob, State, Unit};
+use crate::types::{Event, HostCensus, Job, JobState, LiveJob, SccacheWatch, State, Unit};
 
 pub use ring::Ring;
 
@@ -75,7 +77,32 @@ pub struct Config {
     pub keep_jobs: usize,
     /// systemd `CPUWeight` for jobs; `None` = leave unset.
     pub cpu_weight: Option<u16>,
+    /// Call mode: headroom while a call holds the microphone or the camera,
+    /// percent; 0 = off. A value saved through `PUT /api/limits` wins.
+    pub call_headroom: u8,
+    /// Time without capture after which a call counts as ended.
+    pub call_off_after: Duration,
+    /// Applications whose capture is not a call (level meters, mixers).
+    pub call_ignore: Vec<String>,
+    /// Watch sccache servers and give back jobserver tokens they lost.
+    pub sccache_watch: bool,
+    /// Free memory and disk a job needs before it may start; 0 turns one off.
+    pub admission: admission::Limits,
 }
+
+/// systemd slice the scopes of jobs under `--memory-max` run in; the
+/// headroom's CPU quota is set on it too.
+pub const JOB_SLICE: &str = "slot.slice";
+
+/// How often a job that waits for disk or memory looks again.
+const RESOURCE_POLL: Duration = Duration::from_secs(2);
+
+/// Jobs that started this recently count as still growing towards their
+/// expected peak memory.
+const STARTING_MS: i64 = 30_000;
+
+/// Interval between two call probes.
+const CALL_PROBE: Duration = Duration::from_secs(5);
 
 /// The systemd user unit this process runs in, from `/proc/self/cgroup`.
 fn own_unit() -> Option<String> {
@@ -137,6 +164,8 @@ struct Live {
     cores: f64,
     rss: u64,
     procs: usize,
+    /// Peak memory the job is expected to reach, from earlier runs.
+    expect_rss: u64,
 }
 
 struct Done {
@@ -167,6 +196,8 @@ struct Inner {
     title_pending: HashSet<String>,
     last_census: HostCensus,
     controller: policy::Controller,
+    /// Peak memory of finished jobs, for admission.
+    memory: admission::History,
 }
 
 /// The daemon.
@@ -181,14 +212,23 @@ pub struct Server {
     headroom: Mutex<Headroom>,
     /// True once an upgrade is pending: no job is admitted from then on.
     upgrading: watch::Sender<bool>,
+    sccache: Mutex<SccacheWatch>,
 }
 
-/// The headroom in force and whether its CPU quota is applied.
+/// The headroom in force, whether its CPU quota is applied, and call mode.
 #[derive(Debug, Clone, Default)]
 struct Headroom {
     percent: u8,
     quota: Option<u32>,
     note: String,
+    /// Headroom during a call; 0 = call mode off.
+    call_percent: u8,
+    /// `call_percent` as saved through the API; `None` = the daemon default.
+    call_saved: Option<u8>,
+    /// The headroom last saved, which a restart starts from.
+    saved_percent: u8,
+    call: call::Tracker,
+    call_note: String,
 }
 
 fn now_ms() -> i64 {
@@ -209,10 +249,12 @@ impl Server {
         let log_path = cfg.state_dir.join("jobs.jsonl");
         let mut done = VecDeque::new();
         let mut next_id = 0;
+        let mut memory = admission::History::default();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
+                    memory.record(&job);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
@@ -238,6 +280,8 @@ impl Server {
             .unwrap_or_default();
         let cores = procstat::host_cpus() as u32;
         let pool_size = cfg.tokens;
+        let call_headroom = cfg.call_headroom;
+        let sccache_watch = cfg.sccache_watch;
         Ok(Arc::new(Self {
             cfg,
             pool,
@@ -261,6 +305,7 @@ impl Server {
                     cores as usize,
                     pool_size,
                 )),
+                memory,
             }),
             events,
             history: Mutex::new(VecDeque::new()),
@@ -268,10 +313,19 @@ impl Server {
             cores,
             headroom: Mutex::new(Headroom {
                 percent: saved.headroom_percent,
-                quota: None,
-                note: String::new(),
+                saved_percent: saved.headroom_percent,
+                call_percent: saved
+                    .call_headroom_percent
+                    .unwrap_or(call_headroom)
+                    .min(limits::MAX_HEADROOM),
+                call_saved: saved.call_headroom_percent,
+                ..Headroom::default()
             }),
             upgrading: watch::Sender::new(false),
+            sccache: Mutex::new(SccacheWatch {
+                enabled: sccache_watch,
+                ..SccacheWatch::default()
+            }),
         }))
     }
 
@@ -323,9 +377,13 @@ impl Server {
                 .unwrap_or_default();
             eprintln!("slot: {msg}");
         }
+        tokio::spawn(Arc::clone(&self).call_watch());
+        if self.cfg.sccache_watch {
+            tokio::spawn(Arc::clone(&self).sccache_watch());
+        }
         let h = self.headroom_percent();
         if h > 0 {
-            let v = Arc::clone(&self).set_headroom(h).await;
+            let v = self.apply_headroom(h, false).await;
             eprintln!(
                 "slot: headroom {h}%: {} of {} tokens, cpu quota {}",
                 v.effective_tokens,
@@ -502,6 +560,7 @@ impl Server {
             let mut g = self.inner.lock().expect("server lock");
             g.next_id += 1;
             let id = g.next_id;
+            let expect_rss = g.memory.expected(&req.repo, &req.argv, tc.name());
             let job = Job {
                 id,
                 argv: req.argv.clone(),
@@ -520,6 +579,7 @@ impl Server {
                 cpu_s: 0.0,
                 compile_server_cpu_s: 0.0,
                 peak_rss: 0,
+                wait_reason: String::new(),
             };
             g.active.insert(
                 id,
@@ -532,6 +592,7 @@ impl Server {
                     cores: 0.0,
                     rss: 0,
                     procs: 0,
+                    expect_rss,
                 },
             );
             id
@@ -547,8 +608,16 @@ impl Server {
                 ),
             });
         }
+        let mut disks = vec![cwd.clone()];
+        if let Some(t) = toolchain::get(&req.env, "CARGO_TARGET_DIR").filter(|t| !t.is_empty()) {
+            disks.push(cwd.join(t));
+        }
         let held = loop {
             if !self.admission_open(gone.clone()).await {
+                self.finish(id, JobState::Cancelled, -1, None);
+                return (130, None);
+            }
+            if !self.resources_ready(id, &disks, &tx, gone.clone()).await {
                 self.finish(id, JobState::Cancelled, -1, None);
                 return (130, None);
             }
@@ -566,6 +635,12 @@ impl Server {
             // Granted after an upgrade was requested: give the slots back
             // and wait with the other queued jobs.
             if *self.upgrading.borrow() {
+                self.pool.release(waiter.held());
+                continue;
+            }
+            // Memory may have gone while the job waited for slots: give
+            // them back and wait for memory first.
+            if self.short_of(id, &disks).is_some() {
                 self.pool.release(waiter.held());
                 continue;
             }
@@ -609,6 +684,8 @@ impl Server {
                 "--scope",
                 "--quiet",
                 "--collect",
+                "--slice",
+                JOB_SLICE,
                 "-p",
             ]
             .iter()
@@ -733,6 +810,82 @@ impl Server {
         (code, msg)
     }
 
+    /// Why job `id` may not start now: its filesystems (`disks`) are short
+    /// of space, or memory is short and another job runs. `(kind, text)`.
+    fn short_of(&self, id: i64, disks: &[PathBuf]) -> Option<(&'static str, String)> {
+        let limits = self.cfg.admission;
+        let free: Vec<(String, u64)> = disks
+            .iter()
+            .filter_map(|p| admission::disk_free(p).map(|f| (p.display().to_string(), f)))
+            .collect();
+        if let Some(r) = admission::disk_wait(&free, limits) {
+            return Some(("disk", r));
+        }
+        if limits.min_free_memory == 0 {
+            return None;
+        }
+        let available = admission::mem_available()?;
+        let now = now_ms();
+        let (expected, reserved, others) = {
+            let g = self.inner.lock().expect("server lock");
+            let expected = g.active.get(&id).map_or(0, |l| l.expect_rss);
+            let mut reserved = 0;
+            let mut others = false;
+            for (other, l) in &g.active {
+                if *other == id || l.pid.is_none() {
+                    continue;
+                }
+                others = true;
+                if now - l.job.started_ms < STARTING_MS {
+                    reserved += l.expect_rss.saturating_sub(l.rss);
+                }
+            }
+            (expected, reserved, others)
+        };
+        admission::memory_wait(available, reserved, expected, limits, others).map(|r| ("memory", r))
+    }
+
+    /// Waits until job `id` may start as far as disk and memory go, telling
+    /// the client why it waits; false when the client went away first.
+    async fn resources_ready(
+        &self,
+        id: i64,
+        disks: &[PathBuf],
+        tx: &mpsc::UnboundedSender<Frame>,
+        gone: watch::Receiver<bool>,
+    ) -> bool {
+        let mut told = "";
+        loop {
+            let short = self.short_of(id, disks);
+            let reason = short.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
+            let changed = {
+                let mut g = self.inner.lock().expect("server lock");
+                g.active.get_mut(&id).is_some_and(|l| {
+                    let c = l.job.wait_reason != reason;
+                    l.job.wait_reason.clone_from(&reason);
+                    c
+                })
+            };
+            if changed {
+                self.publish(id);
+            }
+            let Some((kind, text)) = short else {
+                return true;
+            };
+            if kind != told {
+                let _ = tx.send(Frame::Info {
+                    msg: format!("slot: job {id} waiting: {text}"),
+                });
+                eprintln!("slot: job {id} waiting: {text}");
+                told = kind;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(RESOURCE_POLL) => {}
+                () = client_gone(gone.clone()) => return false,
+            }
+        }
+    }
+
     fn set_held(&self, id: i64, n: usize) {
         let mut g = self.inner.lock().expect("server lock");
         if let Some(l) = g.active.get_mut(&id) {
@@ -750,6 +903,7 @@ impl Server {
             live.job.cpu_s = live.job.compile_server_cpu_s + cpu.unwrap_or(0.0);
             let job = live.job.clone();
             g.metrics.record(&job);
+            g.memory.record(&job);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -909,6 +1063,7 @@ impl Server {
                     tokens: self.cfg.tokens as u32,
                     limit: self.pool.limit() as u32,
                     headroom_percent: u32::from(self.headroom_percent()),
+                    call_apps: self.call_apps(),
                     free: self.pool.free() as u32,
                     waiting: self.pool.waiting() as u32,
                     sys_cpu: g.sys_cpu,
@@ -964,6 +1119,7 @@ impl Server {
     /// The `GET /api/limits` answer.
     pub fn limits(&self) -> limits::View {
         let h = self.headroom.lock().expect("headroom lock").clone();
+        let now = Instant::now();
         limits::View {
             headroom_percent: h.percent,
             cpu_quota_percent: h.quota,
@@ -971,28 +1127,216 @@ impl Server {
             tokens: self.cfg.tokens,
             systemd: own_unit().is_some(),
             note: h.note,
+            call_headroom_percent: h.call_percent,
+            call: limits::CallView {
+                active: h.call.active(),
+                apps: h.call.apps().to_vec(),
+                base_percent: if h.call.active() {
+                    h.call.base()
+                } else {
+                    h.percent
+                },
+                manual: h.call.is_manual(),
+                ends_in_s: h.call.ends_in(now, self.cfg.call_off_after),
+                note: h.call_note,
+            },
         }
     }
 
-    /// Sets the headroom: lowers the circulating tokens, saves it, and sets
-    /// `CPUQuota` on the daemon's unit when there is one.
+    /// Applications in a call while call mode is on; empty otherwise.
+    fn call_apps(&self) -> Vec<String> {
+        let h = self.headroom.lock().expect("headroom lock");
+        if h.call.active() {
+            h.call.apps().to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Sets the headroom by hand (`slot headroom`, the UI slider): saved, and
+    /// during a call it stays when the call ends.
     pub async fn set_headroom(self: Arc<Self>, percent: u8) -> limits::View {
+        self.headroom.lock().expect("headroom lock").call.manual();
+        self.apply_headroom(percent, true).await
+    }
+
+    /// Applies a `PUT /api/limits` body: the call headroom first, then the
+    /// headroom.
+    pub async fn update_limits(self: Arc<Self>, req: limits::Request) -> limits::View {
+        if let Some(c) = req.call_headroom_percent {
+            let c = c.min(limits::MAX_HEADROOM);
+            let action = {
+                let mut h = self.headroom.lock().expect("headroom lock");
+                h.call_percent = c;
+                h.call_saved = Some(c);
+                h.call.retarget(c)
+            };
+            self.save_limits();
+            match action {
+                call::Action::Raise(p) => {
+                    self.apply_headroom(p, false).await;
+                }
+                call::Action::Restore(p) => {
+                    self.apply_headroom(p, true).await;
+                }
+                call::Action::Keep => {}
+            }
+        }
+        match req.headroom_percent {
+            Some(p) => Arc::clone(&self).set_headroom(p).await,
+            None => self.limits(),
+        }
+    }
+
+    fn save_limits(&self) {
+        let saved = {
+            let h = self.headroom.lock().expect("headroom lock");
+            limits::Saved {
+                headroom_percent: h.saved_percent,
+                call_headroom_percent: h.call_saved,
+            }
+        };
+        if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
+            eprintln!("slot: save {}: {e}", limits::FILE);
+        }
+    }
+
+    /// Every 5 s, gives back the jobserver tokens an sccache server lost
+    /// (see [`crate::sccache`]). Each refill goes to the journal and to the
+    /// census log.
+    async fn sccache_watch(self: Arc<Self>) {
+        let dog = Arc::new(Mutex::new(crate::sccache::Watchdog::new(
+            self.cores as usize,
+        )));
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let d = Arc::clone(&dog);
+            let Ok(pass) = tokio::task::spawn_blocking(move || {
+                let snap = Snapshot::scan();
+                d.lock().expect("watchdog lock").pass(&snap)
+            })
+            .await
+            else {
+                continue;
+            };
+            let now = now_ms();
+            {
+                let mut w = self.sccache.lock().expect("sccache lock");
+                w.servers = pass.servers as u32;
+                w.short = pass.short as u32;
+                for r in &pass.refills {
+                    w.refills += 1;
+                    w.tokens += r.tokens as u32;
+                    w.last_refill_ms = now;
+                }
+            }
+            for r in &pass.refills {
+                eprintln!(
+                    "slot: sccache server {} (port {}) had no free token for 60 s with {} compile(s) \
+                     running and {} client(s): wrote {} token(s) back",
+                    r.pid, r.port, r.running, r.clients, r.tokens
+                );
+                let line = serde_json::json!({
+                    "t": now,
+                    "event": "sccache_refill",
+                    "pid": r.pid,
+                    "port": r.port,
+                    "tokens": r.tokens,
+                    "running": r.running,
+                    "clients": r.clients,
+                });
+                let mut g = self.inner.lock().expect("server lock");
+                if let Ok(mut b) = serde_json::to_vec(&line) {
+                    b.push(b'\n');
+                    let _ = g.census_log.write_all(&b);
+                }
+            }
+        }
+    }
+
+    /// Watches for calls and moves the headroom: up when one starts, back
+    /// [`Config::call_off_after`] after the last capture.
+    async fn call_watch(self: Arc<Self>) {
+        let have_pw = tokio::task::spawn_blocking(|| {
+            Command::new("pw-dump")
+                .arg("--version")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+        .await
+        .unwrap_or(false);
+        if !have_pw {
+            self.headroom.lock().expect("headroom lock").call_note =
+                "pw-dump not found: only camera use is seen".into();
+        }
+        let mut tick = tokio::time::interval(CALL_PROBE);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let percent = self.headroom.lock().expect("headroom lock").call_percent;
+            if percent == 0 {
+                continue;
+            }
+            let ignore = self.cfg.call_ignore.clone();
+            let apps = tokio::task::spawn_blocking(move || call::probe(&ignore))
+                .await
+                .unwrap_or_default();
+            let (action, current, seen) = {
+                let mut h = self.headroom.lock().expect("headroom lock");
+                let current = h.percent;
+                let action = h.call.observe(
+                    Instant::now(),
+                    apps,
+                    current,
+                    percent,
+                    self.cfg.call_off_after,
+                );
+                (action, current, h.call.apps().join(", "))
+            };
+            match action {
+                call::Action::Raise(p) => {
+                    eprintln!("slot: call started ({seen}): headroom {current}% -> {p}%");
+                    self.apply_headroom(p, false).await;
+                }
+                call::Action::Restore(p) => {
+                    eprintln!("slot: call ended: headroom {current}% -> {p}%");
+                    self.apply_headroom(p, true).await;
+                }
+                call::Action::Keep => {}
+            }
+        }
+    }
+
+    /// Sets the headroom: lowers the circulating tokens, saves it when
+    /// `persist`, and sets `CPUQuota` on the daemon's unit when there is one.
+    async fn apply_headroom(self: &Arc<Self>, percent: u8, persist: bool) -> limits::View {
         let percent = percent.min(limits::MAX_HEADROOM);
         self.pool
             .set_limit(limits::effective_tokens(self.cfg.tokens, percent));
-        if let Err(e) = limits::save(
-            &self.cfg.state_dir,
-            limits::Saved {
-                headroom_percent: percent,
-            },
-        ) {
-            eprintln!("slot: save {}: {e}", limits::FILE);
+        if persist {
+            self.headroom.lock().expect("headroom lock").saved_percent = percent;
+            self.save_limits();
         }
         let quota = limits::cpu_quota_percent(self.cores, percent);
+        let slice = self.cfg.memory_max.is_some();
         let applied = if self.cfg.cpu_quota {
-            tokio::task::spawn_blocking(move || limits::apply_quota(own_unit().as_deref(), quota))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()))
+            tokio::task::spawn_blocking(move || {
+                let unit = own_unit();
+                limits::apply_quota(unit.as_deref(), quota)?;
+                // Jobs under --memory-max run in scopes in JOB_SLICE, outside
+                // the daemon's unit: the same quota covers them there.
+                if slice && unit.is_some() {
+                    limits::apply_quota(Some(JOB_SLICE), quota)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()))
         } else {
             Err("cpu quota disabled (--cpu-quota false)".into())
         };
@@ -1022,12 +1366,14 @@ impl Server {
             tokens: self.cfg.tokens as u32,
             limit: self.pool.limit() as u32,
             headroom_percent: u32::from(self.headroom_percent()),
+            call_apps: self.call_apps(),
             cpu_quota_percent: self.headroom.lock().expect("headroom lock").quota,
             free: self.pool.free() as u32,
             active: g.active.values().map(|l| l.job.clone()).collect(),
             done: g.done.iter().map(|d| d.job.clone()).collect(),
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),
+            sccache: self.sccache.lock().expect("sccache lock").clone(),
         }
     }
 

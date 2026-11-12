@@ -5,6 +5,8 @@
 //! streams its output back and exits with its code. In remote mode the client
 //! syncs the repository to a build server over ssh first.
 
+pub mod admission;
+pub mod call;
 pub mod census;
 pub mod cli;
 pub mod client;
@@ -15,6 +17,7 @@ pub mod policy;
 pub mod procstat;
 pub mod proto;
 pub mod rewrite;
+pub mod sccache;
 pub mod server;
 pub mod sessions;
 pub mod status;

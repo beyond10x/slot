@@ -34,6 +34,8 @@ export const store = reactive({
   limit: 0,
   /** Share of the CPU kept free for interactive work, percent, as the daemon has it. */
   headroom: 0,
+  /** Applications in a call while call mode holds the headroom up. */
+  callApps: [] as string[],
   /** CPU quota on the daemon unit, percent of one core; null when not capped. */
   cpuQuota: null as number | null,
   /** Error of the last headroom change; empty when it went through. */
@@ -84,6 +86,7 @@ async function loadState(): Promise<void> {
   store.tokens = st.tokens;
   store.limit = st.limit;
   store.headroom = st.headroom_percent;
+  store.callApps = st.call_apps ?? [];
   store.cpuQuota = st.cpu_quota_percent;
   store.free = st.free;
   store.toolchains = st.toolchains;
@@ -98,6 +101,7 @@ function applyTick(m: Tick): void {
   store.tokens = m.tokens;
   store.limit = m.limit;
   store.headroom = m.headroom_percent;
+  store.callApps = m.call_apps ?? [];
   store.free = m.free;
   store.jobCores = m.job_cores;
   store.sysCpu = m.sys_cpu;

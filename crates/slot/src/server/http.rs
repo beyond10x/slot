@@ -73,17 +73,20 @@ async fn limits_put(State(s): State<Arc<Server>>, headers: HeaderMap, body: Byte
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
     };
-    if req.headroom_percent > super::limits::MAX_HEADROOM {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "slot: headroom_percent must be 0 to {}\n",
-                super::limits::MAX_HEADROOM
-            ),
-        )
-            .into_response();
+    let max = super::limits::MAX_HEADROOM;
+    for (name, v) in [
+        ("headroom_percent", req.headroom_percent),
+        ("call_headroom_percent", req.call_headroom_percent),
+    ] {
+        if v.is_some_and(|v| v > max) {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("slot: {name} must be 0 to {max}\n"),
+            )
+                .into_response();
+        }
     }
-    axum::Json(s.set_headroom(req.headroom_percent).await).into_response()
+    axum::Json(s.update_limits(req).await).into_response()
 }
 
 async fn metrics(State(s): State<Arc<Server>>) -> impl IntoResponse {

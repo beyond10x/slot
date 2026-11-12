@@ -72,11 +72,62 @@ When no job runs and none waits, every token must be back in the FIFO. The daemo
 restores tokens that a killed process took with it, or removes surplus ones, and logs
 `slot: jobserver reconciled by <n> tokens`.
 
+## sccache watchdog
+
+An sccache server limits its own compiles with a private jobserver: a pipe that starts with one
+token per CPU. A token a compile never gives back is gone until the server restarts, and once
+all are gone every `sccache rustc` on the machine waits at 0 % CPU behind the compiles still
+running. Restarting the server fails the compiles in flight.
+
+Every 5 seconds the daemon looks at each sccache server of your user: the tokens in its pipe
+(read through `/proc/<pid>/fd`), its running compiles (its child processes) and its clients
+waiting on the same port. When for 60 seconds no token was free, fewer compiles ran than the
+pool holds, a client waited and the server itself used under 5 % of a core, the daemon writes
+the missing tokens back, at most `pool − running`. The pool is the number of CPUs, or more if
+the server was seen with more. A server whose jobserver pipe cannot be told apart from its other
+pipes is left alone.
+
+Each refill is a journal line and a `"event":"sccache_refill"` line in `census.jsonl`.
+`slot status` shows the servers, how many are short of tokens now, and the refills since the
+daemon started:
+
+```text
+sccache: 2 server(s), 0 short of tokens, refills since start: none
+```
+
+`slot serve --sccache-watch false` turns the watchdog off.
+
+## Waiting for disk and memory
+
+Before a job takes its slots, the daemon checks two things, and the job waits while either is
+short:
+
+- **Disk.** The filesystem of the job's directory, and of `CARGO_TARGET_DIR` when the job sets
+  it, must have 25 GB free (`slot serve --min-free-disk`, in GB; 0 turns it off). A job that
+  waits for disk waits until space is freed.
+- **Memory.** Available memory (`MemAvailable`), less what jobs that started in the last 30
+  seconds are still expected to take, must cover the job's expected peak plus 4 GB
+  (`--min-free-memory`, in GB; 0 turns it off). The expected peak is the 90th percentile of the
+  peak memory of the same command in the same repository over its last 20 runs (at least 3),
+  else of the same toolchain over its last 200 runs (at least 5), else 1 GB. A job is never held
+  for memory while no other job runs, so the queue cannot stall on it.
+
+The client prints why it waits, once per reason:
+
+```text
+slot: job 12 waiting: 18.0 GB free on the filesystem of /srv/build/repo, builds need 25.0 GB
+```
+
+`slot status` shows the reason under the queued job, and the web UI's queue marks it `disk` or
+`memory`. The check runs again every 2 seconds, and once more after the slots are granted: a job
+that finds memory gone by then gives its slots back and waits again.
+
 ## Memory limit
 
 `slot serve --memory-max 24G` runs each job in a systemd scope with that `MemoryMax`, so an
-out-of-memory kill ends that job and not the daemon. It is off by default and has not been tested
-beyond starting jobs.
+out-of-memory kill ends that job and not the daemon. The scopes run in `slot.slice`, outside the
+daemon's unit, so the headroom's CPU quota is set on `slot.slice` as well as on the daemon's
+unit. It is off by default and has not been tested beyond starting jobs.
 
 ## Job log
 

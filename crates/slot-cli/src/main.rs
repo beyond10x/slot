@@ -19,10 +19,12 @@ fn main() -> ExitCode {
             print!("{}", slot::status::render(&s));
             0
         }),
-        Cmd::Headroom(args) => slot::status::headroom(&args.http, args.percent).map(|v| {
-            print!("{}", slot::status::render_headroom(&v));
-            0
-        }),
+        Cmd::Headroom(args) => {
+            slot::status::headroom(&args.http, args.percent, args.call).map(|v| {
+                print!("{}", slot::status::render_headroom(&v));
+                0
+            })
+        }
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);
             if args.json {

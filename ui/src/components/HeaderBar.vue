@@ -67,6 +67,9 @@ onUnmounted(() => ro?.disconnect());
         aria-describedby="headroom-caption" @input="onHeadroom" />
       <b>{{ draft }}%</b>
       <span id="headroom-caption" class="muted">{{ caption }}</span></label>
+    <span v-if="store.callApps.length" class="call"
+      title="Call mode: a call uses the microphone or the camera, so the headroom is raised; it goes back 2 min after the call. Moving the slider now keeps your value.">
+      call · {{ store.callApps.join(', ') }}</span>
     <span v-if="store.headroomError" class="bad">{{ store.headroomError }}</span>
     <span>running <b>{{ running }}</b></span>
     <span>queue <b>{{ queue.length }}</b> · longest wait <b>{{ fmtDur(queue.longestS) }}</b></span>
@@ -97,6 +100,7 @@ b { font-variant-numeric: tabular-nums; }
 .tokens i.off { background: transparent; outline: 1px dashed #bbb; outline-offset: -1px; }
 .headroom { display: inline-flex; gap: 6px; align-items: center; }
 .headroom input { width: 110px; }
+.call { padding: 1px 7px; border-radius: 9px; background: #e6f0ff; color: #1d4f91; }
 .conn { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: #c33; }
 .conn.ok { background: #2a2; }
 .legend > span { margin-right: 12px; }

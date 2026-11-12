@@ -38,6 +38,12 @@ slot serve [OPTIONS]
 - `--memory-max`: systemd `MemoryMax` per job, for example 24G
 - `--keep-jobs`: Finished jobs kept in memory and shown in the UI (default `500`)
 - `--cpu-weight`: systemd `CPUWeight` for every job (interactive apps default to 100); 0 leaves it unset. Applied to the daemon's own unit at start (default `20`)
+- `--call-headroom`: Call mode: headroom while a call uses the microphone or the camera, percent; 0 turns call mode off. `slot headroom --call` changes it at run time and that value is kept (default `40`)
+- `--call-off-after`: Seconds without capture after which a call counts as ended and the headroom goes back (default `120`)
+- `--call-ignore`: Applications whose capture is not a call (level meters, mixers), comma-separated; replaces the default list (default `pavucontrol,pwvucontrol,easyeffects,helvum,qpwgraph,coppwr,noisetorch`)
+- `--sccache-watch`: Watch this user's sccache servers and write back the jobserver tokens a server lost, once it had none free for 60 s while compiles waited; `false` turns the watchdog off (default `true`)
+- `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off (default `25`)
+- `--min-free-memory`: A job waits while available memory, less what jobs that started in the last 30 s still take, is below its expected peak (from earlier runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway (default `4`)
 
 ### `slot proxy`
 
@@ -78,6 +84,7 @@ slot headroom [OPTIONS] [PERCENT]
 ```
 
 - `<PERCENT>`: New headroom, percent, 0 to 50; without it, prints the current one
+- `--call`: Headroom during a call, percent, 0 to 50; 0 turns call mode off
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot sessions`

@@ -278,6 +278,7 @@ mod tests {
             cpu_s: 2.5,
             compile_server_cpu_s: 1.0,
             peak_rss: 0,
+            wait_reason: String::new(),
         }
     }
 

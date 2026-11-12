@@ -35,7 +35,7 @@ const rows = computed(() => {
         <td>{{ r.job.repo }}</td>
         <td class="muted">{{ r.job.session.slice(0, 8) }}</td>
         <td class="num">{{ r.job.tokens }}</td>
-        <td class="num">{{ r.wait }}</td>
+        <td class="num" :title="r.job.wait_reason || undefined">{{ r.wait }}<span v-if="r.job.wait_reason" class="why"> · {{ r.job.wait_reason.includes('filesystem') ? 'disk' : 'memory' }}</span></td>
       </tr>
       <tr v-if="!rows.length" class="empty"><td colspan="8" class="muted">queue empty</td></tr>
     </tbody>

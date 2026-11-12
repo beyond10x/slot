@@ -70,7 +70,11 @@ compile_server_cpu_s: number,
 /**
  * Highest sampled resident memory, bytes.
  */
-peak_rss: number, };
+peak_rss: number, 
+/**
+ * Why a queued job waits besides slots (disk space, memory); empty otherwise.
+ */
+wait_reason: string, };
 
 export type Unit = { 
 /**
@@ -116,6 +120,32 @@ units: Array<Unit>,
  */
 units_seen: number, };
 
+export type SccacheWatch = { 
+/**
+ * Whether the watchdog runs (`slot serve --sccache-watch`).
+ */
+enabled: boolean, 
+/**
+ * sccache servers of this user seen in the last pass.
+ */
+servers: number, 
+/**
+ * Servers with no free token and fewer compiles than their pool now.
+ */
+short: number, 
+/**
+ * Refills since the daemon started.
+ */
+refills: number, 
+/**
+ * Tokens written back since the daemon started.
+ */
+tokens: number, 
+/**
+ * Time of the last refill, Unix milliseconds; 0 if none.
+ */
+last_refill_ms: number, };
+
 export type State = { 
 /**
  * Host name.
@@ -139,6 +169,11 @@ limit: number,
  */
 headroom_percent: number, 
 /**
+ * Applications in a call while call mode holds the headroom up; empty
+ * otherwise.
+ */
+call_apps: Array<string>, 
+/**
  * CPU quota on the daemon unit, percent of one core; null when not capped.
  */
 cpu_quota_percent: number | null, 
@@ -161,7 +196,11 @@ now_ms: number,
 /**
  * Registered toolchain names.
  */
-toolchains: Array<string>, };
+toolchains: Array<string>, 
+/**
+ * The sccache watchdog.
+ */
+sccache: SccacheWatch, };
 
 export type CensusClass = { 
 /**
@@ -279,6 +318,11 @@ limit: number,
  * Share of the CPU kept free for interactive work, percent.
  */
 headroom_percent: number, 
+/**
+ * Applications in a call while call mode holds the headroom up; empty
+ * otherwise.
+ */
+call_apps: Array<string>, 
 /**
  * Tokens free.
  */

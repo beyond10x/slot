@@ -72,6 +72,9 @@ pub struct Job {
     /// Highest sampled resident memory, bytes.
     #[ts(type = "number")]
     pub peak_rss: u64,
+    /// Why a queued job waits besides slots (disk space, memory); empty otherwise.
+    #[serde(default)]
+    pub wait_reason: String,
 }
 
 /// Live numbers of one running job.
@@ -108,7 +111,7 @@ pub struct Unit {
 }
 
 /// Snapshot served at `GET /api/state`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 pub struct State {
     /// Host name.
     pub host: String,
@@ -123,6 +126,10 @@ pub struct State {
     /// Share of the CPU kept free for interactive work, percent.
     #[serde(default)]
     pub headroom_percent: u32,
+    /// Applications in a call while call mode holds the headroom up; empty
+    /// otherwise.
+    #[serde(default)]
+    pub call_apps: Vec<String>,
     /// CPU quota on the daemon unit, percent of one core; null when not capped.
     #[serde(default)]
     pub cpu_quota_percent: Option<u32>,
@@ -137,6 +144,9 @@ pub struct State {
     pub now_ms: i64,
     /// Registered toolchain names.
     pub toolchains: Vec<String>,
+    /// The sccache watchdog.
+    #[serde(default)]
+    pub sccache: SccacheWatch,
 }
 
 /// One message on `GET /api/events`.
@@ -162,6 +172,10 @@ pub enum Event {
         /// Share of the CPU kept free for interactive work, percent.
         #[serde(default)]
         headroom_percent: u32,
+        /// Applications in a call while call mode holds the headroom up; empty
+        /// otherwise.
+        #[serde(default)]
+        call_apps: Vec<String>,
         /// Tokens free.
         free: u32,
         /// Jobs waiting for tokens.
@@ -211,6 +225,25 @@ pub struct CensusSession {
     pub rss: u64,
     /// Processes.
     pub procs: u32,
+}
+
+/// The sccache watchdog: servers seen and tokens written back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct SccacheWatch {
+    /// Whether the watchdog runs (`slot serve --sccache-watch`).
+    pub enabled: bool,
+    /// sccache servers of this user seen in the last pass.
+    pub servers: u32,
+    /// Servers with no free token and fewer compiles than their pool now.
+    pub short: u32,
+    /// Refills since the daemon started.
+    pub refills: u32,
+    /// Tokens written back since the daemon started.
+    pub tokens: u32,
+    /// Time of the last refill, Unix milliseconds; 0 if none.
+    #[ts(type = "number")]
+    pub last_refill_ms: i64,
 }
 
 /// Host-wide view of build work.

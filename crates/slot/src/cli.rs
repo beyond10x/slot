@@ -94,6 +94,33 @@ pub struct ServeArgs {
     /// 0 leaves it unset. Applied to the daemon's own unit at start.
     #[arg(long, default_value_t = 20)]
     pub cpu_weight: u16,
+    /// Call mode: headroom while a call uses the microphone or the camera,
+    /// percent; 0 turns call mode off. `slot headroom --call` changes it at
+    /// run time and that value is kept.
+    #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u8).range(0..=50))]
+    pub call_headroom: u8,
+    /// Seconds without capture after which a call counts as ended and the
+    /// headroom goes back.
+    #[arg(long, default_value_t = 120)]
+    pub call_off_after: u64,
+    /// Applications whose capture is not a call (level meters, mixers),
+    /// comma-separated; replaces the default list.
+    #[arg(long, value_delimiter = ',', default_values_t = crate::call::DEFAULT_IGNORE.iter().map(|s| (*s).to_string()))]
+    pub call_ignore: Vec<String>,
+    /// Watch this user's sccache servers and write back the jobserver tokens
+    /// a server lost, once it had none free for 60 s while compiles waited;
+    /// `false` turns the watchdog off.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub sccache_watch: bool,
+    /// A job waits while the filesystem of its directory or of
+    /// `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off.
+    #[arg(long, default_value_t = 25.0, value_name = "GB")]
+    pub min_free_disk: f64,
+    /// A job waits while available memory, less what jobs that started in
+    /// the last 30 s still take, is below its expected peak (from earlier
+    /// runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway.
+    #[arg(long, default_value_t = 4.0, value_name = "GB")]
+    pub min_free_memory: f64,
 }
 
 /// `slot proxy` options.
@@ -125,6 +152,9 @@ pub struct StatusArgs {
 pub struct HeadroomArgs {
     /// New headroom, percent, 0 to 50; without it, prints the current one.
     pub percent: Option<u8>,
+    /// Headroom during a call, percent, 0 to 50; 0 turns call mode off.
+    #[arg(long, value_name = "PERCENT")]
+    pub call: Option<u8>,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -156,6 +186,15 @@ pub enum HookCmd {
     /// builds or tests outside the pool. `SLOT_HOOK=warn` adds the advice as
     /// context instead of refusing; `SLOT_HOOK=off` allows everything.
     ClaudePreToolUse,
+}
+
+/// Gigabytes (10⁹ bytes) to bytes; negative or not a number is 0.
+fn gb_bytes(gb: f64) -> u64 {
+    if gb.is_finite() && gb > 0.0 {
+        (gb * crate::admission::GB as f64) as u64
+    } else {
+        0
+    }
 }
 
 fn default_tokens() -> usize {
@@ -190,6 +229,14 @@ impl ServeArgs {
             memory_max: self.memory_max.clone(),
             keep_jobs: self.keep_jobs,
             cpu_weight: (self.cpu_weight > 0).then_some(self.cpu_weight),
+            call_headroom: self.call_headroom,
+            call_off_after: std::time::Duration::from_secs(self.call_off_after),
+            call_ignore: self.call_ignore.clone(),
+            sccache_watch: self.sccache_watch,
+            admission: crate::admission::Limits {
+                min_free_memory: gb_bytes(self.min_free_memory),
+                min_free_disk: gb_bytes(self.min_free_disk),
+            },
         })
     }
 }

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0 — 2026-11-12
+
+- Call mode: while a call uses the microphone or the camera, the headroom goes up to the call
+  value (40 % by default) and back to the earlier value 2 minutes after the call. A call is a
+  running PipeWire capture stream linked to a microphone or camera node, or a process holding
+  `/dev/video*`; level meters and mixers are ignored (`--call-ignore`). `slot headroom --call N`
+  sets the call value at run time (0 turns call mode off); a headroom set by hand during a call
+  stays. `slot headroom`, `slot status`, `/api/limits` and a badge in the web UI show it.
+- sccache watchdog: the daemon watches the private jobserver of every sccache server of its
+  user and writes back the tokens a server lost, once for 60 s it had none free, fewer compiles
+  than its pool, a waiting client and under 5 % CPU. Each refill goes to the journal and
+  `census.jsonl`; `slot status` shows the count. `--sccache-watch false` turns it off.
+- Admission by disk and memory: a job waits before taking slots while the filesystem of its
+  directory or `CARGO_TARGET_DIR` has under 25 GB free (`--min-free-disk`), or while available
+  memory does not cover its expected peak (90th percentile of earlier runs of the same command)
+  plus 4 GB (`--min-free-memory`). A job is never held for memory while no other job runs. The
+  client prints `slot: job N waiting: …`; `slot status` and the web UI queue show the reason
+  (`wait_reason` on the job).
+- Jobs under `--memory-max` run in `slot.slice`, and the headroom's CPU quota is set there too;
+  before, they ran outside the quota.
+- The design document records the measurement behind not coalescing identical concurrent jobs:
+  0 overlapping pairs from different sessions in 740 jobs.
+
 ## 0.4.1 — 2026-11-12
 
 - The pool no longer shrinks when the daemon re-executes under a headroom. The default
