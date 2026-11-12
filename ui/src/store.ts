@@ -38,6 +38,8 @@ export const store = reactive({
   callApps: [] as string[],
   /** CPU quota on the daemon unit, percent of one core; null when not capped. */
   cpuQuota: null as number | null,
+  /** A pending upgrade, as one line from the daemon; empty when none. */
+  upgrade: '',
   /** Error of the last headroom change; empty when it went through. */
   headroomError: '',
   /** Count of refused headroom changes; the slider goes back to the daemon's value on each. */
@@ -92,6 +94,7 @@ async function loadState(): Promise<void> {
   store.headroom = st.headroom_percent;
   store.callApps = st.call_apps ?? [];
   store.cpuQuota = st.cpu_quota_percent;
+  store.upgrade = st.upgrade ?? '';
   store.free = st.free;
   store.toolchains = st.toolchains;
   store.clock = now();
@@ -106,6 +109,8 @@ function applyTick(m: Tick): void {
   store.limit = m.limit;
   store.headroom = m.headroom_percent;
   store.callApps = m.call_apps ?? [];
+  // An older daemon sends no upgrade in its ticks; the line from the snapshot stands.
+  if (m.upgrade !== undefined) store.upgrade = m.upgrade;
   store.free = m.free;
   store.jobCores = m.job_cores;
   store.sysCpu = m.sys_cpu;

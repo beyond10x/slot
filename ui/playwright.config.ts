@@ -1,6 +1,7 @@
 import { defineConfig } from '@playwright/test';
+import { gatePort } from './ux/port.ts';
 
-const PORT = 4317;
+const PORT = gatePort();
 
 export default defineConfig({
   testDir: 'ux',

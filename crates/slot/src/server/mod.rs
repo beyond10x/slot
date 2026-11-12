@@ -1978,6 +1978,11 @@ impl Server {
                     job_cores: total,
                     jobs,
                     census,
+                    upgrade: self
+                        .upgrade
+                        .lock()
+                        .expect("upgrade lock")
+                        .describe(Instant::now()),
                 }
             };
             self.send(&event);

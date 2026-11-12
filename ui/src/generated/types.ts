@@ -350,7 +350,12 @@ jobs: Array<LiveJob>,
 /**
  * Every build process on the host, run by slot or not.
  */
-census: HostCensus, };
+census: HostCensus, 
+/**
+ * A pending upgrade, as one line; empty when none, and from a daemon
+ * that does not send it.
+ */
+upgrade: string, };
 
 export type Chunk = { 
 /**

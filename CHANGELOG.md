@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- The web view shows a pending upgrade in its header, the line `slot status` prints
+  (`upgrade pending: no new job starts for 42s, …`). While a reload holds admission, builds
+  queue with slots free, and the page did not say why. Every tick carries the line in a new
+  field `upgrade`; a page reading an older daemon keeps the line from `/api/state`.
+- Below 1100 px the output pane is a sheet along the bottom of the window, 45 % high, and the
+  job tables keep the full width. At 960 px the Running, Finished and Sessions tables ran 135,
+  90 and 70 px under the pane. Opening an output there scrolls the job's row above the sheet.
+- The UX gates serve the built UI on a free port instead of 4317, so two worktrees run
+  `task check` at the same time; `UX_PORT` sets the port.
+
 ## 0.13.0 — 2026-11-12
 
 - `ignite` toolchain: `ignite test` and `ignite conformance` hold one slot per test job (`--jobs`,

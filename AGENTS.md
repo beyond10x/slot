@@ -59,7 +59,9 @@ no scrolling element but the output text, the `data-ux-region` header marks full
 axe-core 0 serious or critical) and `ui/ux/screen-only.spec.ts` (every scenario task done by
 pointer and by keyboard, at most 2 actions, no `false_complete`) at 1366x768 and 1280x720, against
 the built `ui/dist` with every API answered from `ui/ux/scenarios.ts`; then `node ux/ratchet.ts`
-against `ui/ux/baseline.json`. Playwright's Chromium headless shell must be installed
+against `ui/ux/baseline.json`. Each run serves `ui/dist` on a free port (`ui/ux/port.ts`; `UX_PORT`
+sets one), so worktrees run the gates at the same time; `ui/ux/concurrent.e2e.ts` runs two at once.
+Playwright's Chromium headless shell must be installed
 (`pnpm exec playwright install --only-shell chromium` in `ui/`), and the DejaVu Sans font: the
 harness renders every page in it, so the gates measure the same layout on every host.
 

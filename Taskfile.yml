@@ -25,6 +25,7 @@ tasks:
     cmds:
       - pnpm exec playwright test
       - node ux/ratchet.ts
+      - node --test --disable-warning=ExperimentalWarning ux/concurrent.e2e.ts
 
   ux-round:
     desc: 'Measure a UX round at every size and write its report: task ux-round -- R-nn'

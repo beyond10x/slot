@@ -54,6 +54,11 @@ watch(
 main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 38%); }
 main.nopane { grid-template-columns: minmax(0, 1fr); }
 main > div { container-type: inline-size; min-width: 0; }
+/* Below 1100 px the output pane is a sheet along the bottom (OutputPane.vue); the tables keep the full width. */
+@media (max-width: 1099px) {
+  main { grid-template-columns: minmax(0, 1fr); }
+  main:not(.nopane) { padding-bottom: 45vh; }
+}
 section { padding: 8px 14px; }
 .waiting { padding: 8px 14px; }
 </style>

@@ -5,9 +5,10 @@ import { join, resolve } from 'node:path';
 import { chromium } from '@playwright/test';
 import type { Page } from '@playwright/test';
 import { open } from './harness.ts';
+import { freePort } from './port.ts';
 import { SCENARIOS } from './scenarios.ts';
 
-const PORT = 4318;
+const PORT = freePort();
 const BASE = `http://127.0.0.1:${PORT}/`;
 const outDir = resolve(process.argv[2] ?? '.');
 const scenario = (name: string) => {
