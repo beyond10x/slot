@@ -74,10 +74,25 @@ beyond10x/slot` and `b10x-gates api`. Never push, tag or write to GitHub as a pe
 
 ## Release
 
-Bare SemVer tags (`0.1.0`). A tag push runs `.github/workflows/release.yml`: `task check`, tag,
-`Cargo.toml` and `CHANGELOG.md` agree, two Linux targets built (x86_64 and aarch64 gnu; slot
-reads `/proc` and has no macOS port), `slot-<version>-<target>.tar.gz` plus
-`SHA256SUMS` published.
+Bare SemVer tags (`0.1.0`).
+
+1. Bump `version` in `[workspace.package]` of `Cargo.toml`, let `cargo build` update
+   `Cargo.lock`, and move the `CHANGELOG.md` entries under `## <version> — <YYYY-MM-DD>`.
+   `task check` green on that commit.
+2. Annotated tag on `main`, created and pushed as the bot.
+3. The tag push runs `.github/workflows/release.yml` (contents: read): `task check`; tag,
+   `Cargo.toml` and `CHANGELOG.md` agree; two Linux targets built and smoke-tested (x86_64 and
+   aarch64 gnu; slot reads `/proc` and has no macOS port). It uploads the artifact
+   `slot-<version>-release`: `slot-<version>-<target>.tar.gz` for both targets, `SHA256SUMS`
+   and `notes.md` (the changelog section).
+4. `gh run download <run> -n slot-<version>-release -D target/release-assets` (read-only), then
+   `sha256sum -c SHA256SUMS` there.
+5. From the checkout, with paths relative to it (Gates refuses a home-directory path):
+   `b10x-gates gh --repository beyond10x/slot -- release create <version> --verify-tag --title
+   "slot <version>" --notes-file target/release-assets/notes.md target/release-assets/slot-*.tar.gz
+   target/release-assets/SHA256SUMS`.
+6. Report released only after the release author is `b10x-bot[bot]` and the downloaded assets
+   pass `sha256sum -c`.
 
 ## Never
 

@@ -88,49 +88,38 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  publish:
-    name: Publish release assets
+  bundle:
+    name: Bundle release assets
     needs: [gate, package]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Verify archives and write checksums
+      - name: Verify archives, write checksums and notes
         run: |
           set -euo pipefail
-          cd dist
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            test -f "slot-$GITHUB_REF_NAME-$target.tar.gz" || { echo "::error::missing slot-$GITHUB_REF_NAME-$target.tar.gz" >&2; exit 1; }
+            test -f "dist/slot-$GITHUB_REF_NAME-$target.tar.gz" || { echo "::error::missing slot-$GITHUB_REF_NAME-$target.tar.gz" >&2; exit 1; }
           done
-          sha256sum slot-*.tar.gz > SHA256SUMS
-          sha256sum --check SHA256SUMS
-          cat SHA256SUMS
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            notes="${RUNNER_TEMP}/notes.md"
-            awk -v heading="## ${GITHUB_REF_NAME} — " '
-              index($0, heading) == 1 { found = 1; next }
-              found && /^## / { exit }
-              found { lines[++n] = $0 }
-              END {
-                first = 1; while (first <= n && lines[first] ~ /^[[:space:]]*$/) first++
-                last = n; while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
-                for (i = first; i <= last; i++) print lines[i]
-              }' CHANGELOG.md > "$notes"
-            test -s "$notes" || { echo "::error::CHANGELOG.md has no ${GITHUB_REF_NAME} notes" >&2; exit 1; }
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "slot $GITHUB_REF_NAME" --notes-file "$notes"
-          fi
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          (cd dist && sha256sum slot-*.tar.gz > SHA256SUMS && sha256sum --check SHA256SUMS && cat SHA256SUMS)
+          awk -v heading="## ${GITHUB_REF_NAME} — " '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { lines[++n] = $0 }
+            END {
+              first = 1; while (first <= n && lines[first] ~ /^[[:space:]]*$/) first++
+              last = n; while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+              for (i = first; i <= last; i++) print lines[i]
+            }' CHANGELOG.md > dist/notes.md
+          test -s dist/notes.md || { echo "::error::CHANGELOG.md has no ${GITHUB_REF_NAME} notes" >&2; exit 1; }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: slot-${{ github.ref_name }}-release
+          path: dist/*
+          if-no-files-found: error
