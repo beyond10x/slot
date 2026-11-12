@@ -25,6 +25,7 @@ what is specific to slot.
 | `crates/slot-docs` | generators: CLI reference, UI TypeScript types, site provenance |
 | `ui/` | web UI, Vue 3 + TypeScript + Vite + pnpm; built into `ui/dist`, embedded at compile time |
 | `website/` | public documentation site, Docusaurus on `@beyond10x/docs-system` |
+| `plugin/`, `.claude-plugin/marketplace.json` | the `slot` agent plugin (skills, hook, slot-warden agent) and its marketplace; plugin version = workspace version |
 
 ## Boundary
 
@@ -97,7 +98,8 @@ Bare SemVer tags (`0.1.0`).
 
 1. Bump `version` in `[workspace.package]` of `Cargo.toml`, let `cargo build` update
    `Cargo.lock`, and move the `CHANGELOG.md` entries under `## <version> — <YYYY-MM-DD>`.
-   Update the docs in the same commit: `version=` in `website/docs/getting-started.md`
+   Update the docs in the same commit: `version=` in `website/docs/getting-started.md`, `version` in
+   `plugin/.claude-plugin/plugin.json` and `plugin/.codex-plugin/plugin.json`
    (`crates/slot-docs/tests/docs_version.rs` fails otherwise), and every page that describes
    what the release changes (`toolchains.md`, `reference/environment.md`, `agent-integration.md`,
    `task generate` for the CLI reference). `task check` green on that commit.

@@ -23,6 +23,16 @@ fn main() -> ExitCode {
             print!("{}", slot::status::render_headroom(&v));
             0
         }),
+        Cmd::Sessions(args) => {
+            let r = slot::sessions::report(&args.http, args.window, args.min_cores);
+            if args.json {
+                println!("{}", slot::sessions::json(&r));
+            } else {
+                print!("{}", slot::sessions::render(&r));
+            }
+            Ok(0)
+        }
+        Cmd::Hook(slot::cli::HookCmd::ClaudePreToolUse) => return slot::hook::run(),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
                 .into_iter()

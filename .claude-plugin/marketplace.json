@@ -1,0 +1,16 @@
+{
+  "name": "slot",
+  "owner": {
+    "name": "Beyond10x"
+  },
+  "metadata": {
+    "description": "The slot plugin: build through one shared pool of build slots, refuse builds outside it, and find the sessions that still build outside it."
+  },
+  "plugins": [
+    {
+      "name": "slot",
+      "source": "./plugin",
+      "description": "Run every build through the shared slot pool: skills for building, setup and upgrade, a PreToolUse hook that refuses builds outside the pool, and the slot-warden agent that finds sessions still building outside it."
+    }
+  ]
+}

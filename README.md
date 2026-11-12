@@ -24,6 +24,17 @@ slot serve                 # or install the systemd user unit: contrib/slot.serv
 
 Open <http://127.0.0.1:7411/> for the live view.
 
+## Claude Code plugin
+
+```console
+claude plugin marketplace add beyond10x/slot
+claude plugin install slot@slot
+```
+
+Skills for building through slot, a `PreToolUse` hook that refuses a build outside the pool and
+names the `slot` command instead, and the `slot-warden` agent that finds sessions still building
+outside it. See the [plugin page](https://beyond10x.github.io/slot/docs/claude-code-plugin).
+
 ## Remote build server
 
 Run `slot serve` on the server. On the workstation:

@@ -71,7 +71,8 @@ pub fn class_of(comm: &str, argv: &[String]) -> Option<&'static str> {
     }
 }
 
-fn cmdline(pid: i32) -> Vec<String> {
+/// The command line of `pid`; empty when it cannot be read.
+pub fn cmdline(pid: i32) -> Vec<String> {
     fs::read(format!("/proc/{pid}/cmdline"))
         .map(|b| {
             b.split(|&c| c == 0)
@@ -82,7 +83,8 @@ fn cmdline(pid: i32) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn session_of(pid: i32) -> String {
+/// The agent session `pid` belongs to ([`SESSION_ENV`]); empty when none.
+pub fn session_of(pid: i32) -> String {
     let Ok(b) = fs::read(format!("/proc/{pid}/environ")) else {
         return String::new();
     };
