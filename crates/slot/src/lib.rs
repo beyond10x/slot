@@ -16,6 +16,7 @@ pub mod policy;
 pub mod procstat;
 pub mod proto;
 pub mod rewrite;
+pub mod sccache;
 pub mod server;
 pub mod sessions;
 pub mod status;

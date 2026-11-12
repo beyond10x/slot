@@ -41,6 +41,7 @@ slot serve [OPTIONS]
 - `--call-headroom`: Call mode: headroom while a call uses the microphone or the camera, percent; 0 turns call mode off. `slot headroom --call` changes it at run time and that value is kept (default `40`)
 - `--call-off-after`: Seconds without capture after which a call counts as ended and the headroom goes back (default `120`)
 - `--call-ignore`: Applications whose capture is not a call (level meters, mixers), comma-separated; replaces the default list (default `pavucontrol,pwvucontrol,easyeffects,helvum,qpwgraph,coppwr,noisetorch`)
+- `--sccache-watch`: Watch this user's sccache servers and write back the jobserver tokens a server lost, once it had none free for 60 s while compiles waited; `false` turns the watchdog off (default `true`)
 
 ### `slot proxy`
 

@@ -172,6 +172,22 @@ fn line(j: &Job, now: i64) -> String {
     )
 }
 
+/// `sccache: 2 server(s), 0 short of tokens, refills since start: 1 (18 tokens, last 4m10s ago)`.
+fn sccache_line(w: &crate::types::SccacheWatch, now: i64) -> String {
+    let refills = match w.refills {
+        0 => "none".to_string(),
+        n => format!(
+            "{n} ({} tokens, last {} ago)",
+            w.tokens,
+            secs(now - w.last_refill_ms)
+        ),
+    };
+    format!(
+        "sccache: {} server(s), {} short of tokens, refills since start: {refills}\n",
+        w.servers, w.short
+    )
+}
+
 /// The pool line, then one line per queued or running job, queued first.
 pub fn render(s: &State) -> String {
     let queued: Vec<&Job> = s
@@ -202,6 +218,10 @@ pub fn render(s: &State) -> String {
         out.push_str("call mode: ");
         out.push_str(&s.call_apps.join(", "));
         out.push_str(" in a call, headroom raised\n");
+    }
+    let w = &s.sccache;
+    if w.enabled && (w.servers > 0 || w.refills > 0) {
+        out.push_str(&sccache_line(w, s.now_ms));
     }
     for j in queued.iter().chain(running.iter()) {
         out.push_str(&line(j, s.now_ms));
@@ -319,6 +339,36 @@ mod tests {
              \"note\":\"\"}",
         );
         assert_eq!(headroom(&addr, None, None).unwrap().effective_tokens, 14);
+    }
+
+    #[test]
+    fn the_sccache_watchdog_line() {
+        let mut s = State {
+            tokens: 4,
+            free: 4,
+            now_ms: 400_000,
+            ..State::default()
+        };
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n",
+            "off: no line"
+        );
+        s.sccache = crate::types::SccacheWatch {
+            enabled: true,
+            servers: 2,
+            short: 1,
+            refills: 1,
+            tokens: 18,
+            last_refill_ms: 150_000,
+        };
+        assert_eq!(
+            render(&s).lines().nth(1),
+            Some(
+                "sccache: 2 server(s), 1 short of tokens, refills since start: 1 (18 tokens, \
+                 last 4m10s ago)"
+            )
+        );
     }
 
     #[test]

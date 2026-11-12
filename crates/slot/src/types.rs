@@ -141,6 +141,9 @@ pub struct State {
     pub now_ms: i64,
     /// Registered toolchain names.
     pub toolchains: Vec<String>,
+    /// The sccache watchdog.
+    #[serde(default)]
+    pub sccache: SccacheWatch,
 }
 
 /// One message on `GET /api/events`.
@@ -219,6 +222,25 @@ pub struct CensusSession {
     pub rss: u64,
     /// Processes.
     pub procs: u32,
+}
+
+/// The sccache watchdog: servers seen and tokens written back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct SccacheWatch {
+    /// Whether the watchdog runs (`slot serve --sccache-watch`).
+    pub enabled: bool,
+    /// sccache servers of this user seen in the last pass.
+    pub servers: u32,
+    /// Servers with no free token and fewer compiles than their pool now.
+    pub short: u32,
+    /// Refills since the daemon started.
+    pub refills: u32,
+    /// Tokens written back since the daemon started.
+    pub tokens: u32,
+    /// Time of the last refill, Unix milliseconds; 0 if none.
+    #[ts(type = "number")]
+    pub last_refill_ms: i64,
 }
 
 /// Host-wide view of build work.

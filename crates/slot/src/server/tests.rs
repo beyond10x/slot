@@ -32,6 +32,7 @@ fn start(tokens: usize) -> Fixture {
         call_headroom: 0,
         call_off_after: Duration::from_secs(120),
         call_ignore: Vec::new(),
+        sccache_watch: false,
     };
     let server = Server::new(cfg.clone()).unwrap();
     let s = Arc::clone(&server);
@@ -304,6 +305,7 @@ fn history_survives_restart() {
         call_headroom: 0,
         call_off_after: Duration::from_secs(120),
         call_ignore: Vec::new(),
+        sccache_watch: false,
     })
     .unwrap();
     let st = again.state();

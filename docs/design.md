@@ -413,8 +413,16 @@ Ideas, none built yet:
    20-core host: tokens leak until every `sccache rustc` on the machine waits behind one compile,
    at 0 % CPU, which looks like a hung server. Writing 18 bytes into the pipe's write end
    (fd 4) started 7 compilers at once; restarting the server also resets it, but fails the
-   compiles in flight. The census could report free tokens of the server against its running
-   compilers.
+   compiles in flight. Built in 0.5.0 (`sccache::Watchdog`): every 5 s the daemon samples each
+   sccache server of its uid (free tokens by `FIONREAD` on the read end of the one pipe the
+   server holds both ends of, compiles = its child processes, clients = `sccache` processes with
+   the same `SCCACHE_SERVER_PORT`, CPU ticks of the server process). It writes `pool − running`
+   tokens only after 60 s in which every sample had no free token, fewer compiles than the pool,
+   more clients than compiles, and the server process averaged under 5 % of a core. The pool is
+   the host's CPU count or the largest `free + running` seen, whichever is larger. A server
+   started under a CPU quota may have had a smaller pool; writing up to the CPU count then
+   allows more parallel compiles inside sccache, which slot's jobserver bounds anyway, since
+   every compile belongs to a cargo that holds a slot.
 
 ## 13. Headroom (0.3.0)
 

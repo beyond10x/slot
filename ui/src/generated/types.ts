@@ -116,6 +116,32 @@ units: Array<Unit>,
  */
 units_seen: number, };
 
+export type SccacheWatch = { 
+/**
+ * Whether the watchdog runs (`slot serve --sccache-watch`).
+ */
+enabled: boolean, 
+/**
+ * sccache servers of this user seen in the last pass.
+ */
+servers: number, 
+/**
+ * Servers with no free token and fewer compiles than their pool now.
+ */
+short: number, 
+/**
+ * Refills since the daemon started.
+ */
+refills: number, 
+/**
+ * Tokens written back since the daemon started.
+ */
+tokens: number, 
+/**
+ * Time of the last refill, Unix milliseconds; 0 if none.
+ */
+last_refill_ms: number, };
+
 export type State = { 
 /**
  * Host name.
@@ -166,7 +192,11 @@ now_ms: number,
 /**
  * Registered toolchain names.
  */
-toolchains: Array<string>, };
+toolchains: Array<string>, 
+/**
+ * The sccache watchdog.
+ */
+sccache: SccacheWatch, };
 
 export type CensusClass = { 
 /**

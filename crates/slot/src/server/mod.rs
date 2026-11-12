@@ -34,7 +34,7 @@ use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
 use crate::rewrite::Rewriter;
 use crate::toolchain::{self, Context};
-use crate::types::{Event, HostCensus, Job, JobState, LiveJob, State, Unit};
+use crate::types::{Event, HostCensus, Job, JobState, LiveJob, SccacheWatch, State, Unit};
 
 pub use ring::Ring;
 
@@ -83,6 +83,8 @@ pub struct Config {
     pub call_off_after: Duration,
     /// Applications whose capture is not a call (level meters, mixers).
     pub call_ignore: Vec<String>,
+    /// Watch sccache servers and give back jobserver tokens they lost.
+    pub sccache_watch: bool,
 }
 
 /// Interval between two call probes.
@@ -192,6 +194,7 @@ pub struct Server {
     headroom: Mutex<Headroom>,
     /// True once an upgrade is pending: no job is admitted from then on.
     upgrading: watch::Sender<bool>,
+    sccache: Mutex<SccacheWatch>,
 }
 
 /// The headroom in force, whether its CPU quota is applied, and call mode.
@@ -258,6 +261,7 @@ impl Server {
         let cores = procstat::host_cpus() as u32;
         let pool_size = cfg.tokens;
         let call_headroom = cfg.call_headroom;
+        let sccache_watch = cfg.sccache_watch;
         Ok(Arc::new(Self {
             cfg,
             pool,
@@ -297,6 +301,10 @@ impl Server {
                 ..Headroom::default()
             }),
             upgrading: watch::Sender::new(false),
+            sccache: Mutex::new(SccacheWatch {
+                enabled: sccache_watch,
+                ..SccacheWatch::default()
+            }),
         }))
     }
 
@@ -349,6 +357,9 @@ impl Server {
             eprintln!("slot: {msg}");
         }
         tokio::spawn(Arc::clone(&self).call_watch());
+        if self.cfg.sccache_watch {
+            tokio::spawn(Arc::clone(&self).sccache_watch());
+        }
         let h = self.headroom_percent();
         if h > 0 {
             let v = self.apply_headroom(h, false).await;
@@ -1073,6 +1084,61 @@ impl Server {
         }
     }
 
+    /// Every 5 s, gives back the jobserver tokens an sccache server lost
+    /// (see [`crate::sccache`]). Each refill goes to the journal and to the
+    /// census log.
+    async fn sccache_watch(self: Arc<Self>) {
+        let dog = Arc::new(Mutex::new(crate::sccache::Watchdog::new(
+            self.cores as usize,
+        )));
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let d = Arc::clone(&dog);
+            let Ok(pass) = tokio::task::spawn_blocking(move || {
+                let snap = Snapshot::scan();
+                d.lock().expect("watchdog lock").pass(&snap)
+            })
+            .await
+            else {
+                continue;
+            };
+            let now = now_ms();
+            {
+                let mut w = self.sccache.lock().expect("sccache lock");
+                w.servers = pass.servers as u32;
+                w.short = pass.short as u32;
+                for r in &pass.refills {
+                    w.refills += 1;
+                    w.tokens += r.tokens as u32;
+                    w.last_refill_ms = now;
+                }
+            }
+            for r in &pass.refills {
+                eprintln!(
+                    "slot: sccache server {} (port {}) had no free token for 60 s with {} compile(s) \
+                     running and {} client(s): wrote {} token(s) back",
+                    r.pid, r.port, r.running, r.clients, r.tokens
+                );
+                let line = serde_json::json!({
+                    "t": now,
+                    "event": "sccache_refill",
+                    "pid": r.pid,
+                    "port": r.port,
+                    "tokens": r.tokens,
+                    "running": r.running,
+                    "clients": r.clients,
+                });
+                let mut g = self.inner.lock().expect("server lock");
+                if let Ok(mut b) = serde_json::to_vec(&line) {
+                    b.push(b'\n');
+                    let _ = g.census_log.write_all(&b);
+                }
+            }
+        }
+    }
+
     /// Watches for calls and moves the headroom: up when one starts, back
     /// [`Config::call_off_after`] after the last capture.
     async fn call_watch(self: Arc<Self>) {
@@ -1180,6 +1246,7 @@ impl Server {
             done: g.done.iter().map(|d| d.job.clone()).collect(),
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),
+            sccache: self.sccache.lock().expect("sccache lock").clone(),
         }
     }
 

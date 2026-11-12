@@ -8,6 +8,10 @@
   `/dev/video*`; level meters and mixers are ignored (`--call-ignore`). `slot headroom --call N`
   sets the call value at run time (0 turns call mode off); a headroom set by hand during a call
   stays. `slot headroom`, `slot status`, `/api/limits` and a badge in the web UI show it.
+- sccache watchdog: the daemon watches the private jobserver of every sccache server of its
+  user and writes back the tokens a server lost, once for 60 s it had none free, fewer compiles
+  than its pool, a waiting client and under 5 % CPU. Each refill goes to the journal and
+  `census.jsonl`; `slot status` shows the count. `--sccache-watch false` turns it off.
 - The design document records the measurement behind not coalescing identical concurrent jobs:
   0 overlapping pairs from different sessions in 740 jobs.
 
