@@ -203,8 +203,26 @@ mod tests {
         let addr = l.local_addr().unwrap().to_string();
         std::thread::spawn(move || {
             let (mut c, _) = l.accept().unwrap();
+            // Read the whole request: closing with unread bytes resets the
+            // connection before the client reads the answer.
+            let mut req = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = c.read(&mut buf);
+            loop {
+                let text = String::from_utf8_lossy(&req);
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let len = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("Content-Length: "))
+                        .map_or(0, |n| n.trim().parse().unwrap());
+                    if body.len() >= len {
+                        break;
+                    }
+                }
+                match c.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
             let _ = c.write_all(resp.as_bytes());
         });
         addr
