@@ -32,3 +32,6 @@ export function notJsonError(contentType: string | null): string | null {
   if (contentType?.trim().toLowerCase().startsWith('application/json')) return null;
   return 'the daemon is older than this page and has no headroom; upgrade it (systemctl --user reload slot)';
 }
+
+/** One-click headroom values: none, after a call, during a call. */
+export const HEADROOM_PRESETS: readonly number[] = [0, 20, 40];

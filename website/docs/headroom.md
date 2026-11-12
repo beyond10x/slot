@@ -11,8 +11,10 @@ through slot.
 
 ## Setting it
 
-In the web UI, move **headroom for you** in the header. The caption shows what builds get, for
-example `builds may use 14 of 20 cores, 14 of 20 slots` at 30 %.
+In the web UI, press **0 %**, **20 %** or **40 %** next to **headroom for you** in the header, or
+move the slider for another value. The caption shows what builds get, for example `builds may use
+14 of 20 cores, 14 of 20 slots` at 30 %. If the daemon refuses the change (a daemon older than
+0.3.0 has no headroom), the header says why and the slider goes back to the value the daemon runs.
 
 From a shell:
 
