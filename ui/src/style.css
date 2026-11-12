@@ -18,9 +18,20 @@ select, button { font: inherit; }
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid #eee; white-space: nowrap; }
 th { color: var(--mute); font-weight: 600; position: sticky; top: var(--hdr); background: var(--bg); }
-td.cmd { max-width: 420px; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 12px; }
+td.cmd { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 12px; }
+td.repo { max-width: 14em; overflow: hidden; text-overflow: ellipsis; }
+button.jobid { min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; color: inherit; font: inherit;
+  font-variant-numeric: tabular-nums; text-align: left; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
 td.num, th.num { text-align: right; }
 tbody tr { cursor: pointer; }
 tbody tr:hover td { background: #f3f3f3; }
 tbody tr.sel td { background: #e8f0fb; }
 tbody tr.empty { cursor: default; }
+/* Below this width the job tables drop the columns that only add detail: sparkline, memory, session id. */
+@container (max-width: 1150px) {
+  .opt { display: none; }
+}
+/* Below this width the Running table drops its live-output button too: the job number opens the output. */
+@container (max-width: 900px) {
+  .opt2 { display: none; }
+}

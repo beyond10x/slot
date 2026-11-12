@@ -160,7 +160,7 @@ onUnmounted(() => es?.close());
         <button type="button" @click="select(null)">close</button>
       </span>
     </div>
-    <pre ref="pre" @scroll.passive="onScroll"><div ref="dropped" class="dropped" :hidden="!dropped">… {{ dropped }} earlier lines dropped</div></pre>
+    <pre ref="pre" tabindex="0" role="log" aria-live="off" :aria-label="`output of job ${props.id}`" @scroll.passive="onScroll"><div ref="dropped" class="dropped" :hidden="!dropped">… {{ dropped }} earlier lines dropped</div></pre>
   </aside>
 </template>
 

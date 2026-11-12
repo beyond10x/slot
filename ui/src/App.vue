@@ -27,7 +27,8 @@ watch(
 
 <template>
   <HeaderBar />
-  <main :class="{ nopane: store.selected === null }">
+  <p v-if="!store.ready" class="muted waiting">loading jobs and history from the daemon…</p>
+  <main v-else :class="{ nopane: store.selected === null }">
     <div>
       <HostPanel />
       <section>
@@ -52,5 +53,7 @@ watch(
 <style scoped>
 main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 38%); }
 main.nopane { grid-template-columns: minmax(0, 1fr); }
+main > div { container-type: inline-size; min-width: 0; }
 section { padding: 8px 14px; }
+.waiting { padding: 8px 14px; }
 </style>

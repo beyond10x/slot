@@ -4,3 +4,6 @@
 /website/build/
 /website/node_modules/
 /website/.docusaurus/
+/ui/ux/out/
+/ui/test-results/
+/ui/playwright-report/

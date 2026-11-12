@@ -31,22 +31,22 @@ const rows = computed(() =>
     <thead>
       <tr>
         <th>#</th><th>tool</th><th>repo</th><th>command</th><th>exit</th>
-        <th class="num">wait</th><th class="num">duration</th><th class="num">CPU s</th><th class="num">avg cores</th>
-        <th class="num">peak RSS</th><th>ended</th>
+        <th class="num">wait</th><th class="num">duration</th><th class="num">CPU s</th><th class="num opt">avg cores</th>
+        <th class="num opt">peak RSS</th><th>ended</th>
       </tr>
     </thead>
     <tbody>
       <tr v-for="r in rows" :key="r.id" :class="{ sel: store.selected === r.id }" @click="select(r.id)">
-        <td>{{ r.id }}</td>
+        <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id)">{{ r.id }}</button></td>
         <td><ToolDot :name="r.job.toolchain" /></td>
-        <td>{{ r.job.repo }}</td>
+        <td class="repo" :title="r.job.repo">{{ r.job.repo }}</td>
         <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
         <td :class="{ bad: r.bad }">{{ r.exit }}</td>
         <td class="num">{{ r.wait }}</td>
         <td class="num">{{ r.dur }}</td>
         <td class="num">{{ r.cpu }}</td>
-        <td class="num">{{ r.avg }}</td>
-        <td class="num">{{ r.rss }}</td>
+        <td class="num opt">{{ r.avg }}</td>
+        <td class="num opt">{{ r.rss }}</td>
         <td class="muted">{{ r.ended }}</td>
       </tr>
     </tbody>

@@ -40,6 +40,8 @@ export const store = reactive({
   cpuQuota: null as number | null,
   /** Error of the last headroom change; empty when it went through. */
   headroomError: '',
+  /** Count of refused headroom changes; the slider goes back to the daemon's value on each. */
+  headroomRefused: 0,
   free: 0,
   jobCores: 0,
   sysCpu: 0,
@@ -48,6 +50,8 @@ export const store = reactive({
   families: [] as string[],
   connected: false,
   historyLoaded: false,
+  /** The first snapshot and the history attempt are done: the page renders its panels at once, so nothing shifts. */
+  ready: false,
   error: '',
   clock: Date.now(),
   windowS: 600,
@@ -205,6 +209,7 @@ export async function start(): Promise<void> {
   }
   connect();
   await loadHistory().catch(() => undefined);
+  store.ready = true;
 }
 
 /** Opens the output pane on a job; closing it (null) also stops following the newest job. */
@@ -241,6 +246,7 @@ export function setHeadroom(percent: number): void {
         store.headroomError = v.headroom_percent > 0 && v.cpu_quota_percent === null ? `cpu quota not applied: ${v.note ?? ''}` : '';
       } catch (e) {
         store.headroomError = `headroom: ${(e as Error).message}`;
+        store.headroomRefused++;
       }
     })();
   }, 300);

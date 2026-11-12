@@ -19,6 +19,31 @@ tasks:
       - pnpm install --frozen-lockfile
       - pnpm check
 
+  ui-ux:
+    desc: Run the UX gates and the ratchet against the built UI (ui/ux).
+    dir: ui
+    cmds:
+      - pnpm exec playwright test
+      - node ux/ratchet.ts
+
+  ux-round:
+    desc: 'Measure a UX round at every size and write its report: task ux-round -- R-nn'
+    dir: ui
+    env:
+      UX_ALL: '1'
+    cmds:
+      - rm -rf ux/out
+      - pnpm exec playwright test || true
+      - node ux/round.ts {{.CLI_ARGS}}
+
+  ui-hero:
+    desc: Render the docs hero screenshots from the UX scenarios into website/static/img (needs ui/dist and pngquant).
+    dir: ui
+    cmds:
+      - mkdir -p ../target/hero
+      - node ux/hero.ts ../target/hero
+      - for f in ui-host-census ui-job-output ui-queue-live-units; do pngquant --quality=70-90 --force --output ../website/static/img/$f.png ../target/hero/$f.png; done
+
   generate:
     desc: Regenerate the CLI reference and the UI types.
     cmds:
@@ -30,6 +55,7 @@ tasks:
     cmds:
       - task: ui-check
       - task: ui
+      - task: ui-ux
       - cargo fmt --all -- --check
       - cargo clippy --workspace --all-targets --locked -- -D warnings
       - cargo test --workspace --locked
