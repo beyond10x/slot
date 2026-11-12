@@ -36,6 +36,14 @@ test('every version on the landing page is the workspace version', () => {
   for (const m of product.matchAll(/(?<![\d.])(\d+\.\d+\.\d+)(?![\d.])/g)) assert.equal(m[1], v, `product.json names ${m[1]}, the workspace is ${v}`);
 });
 
+test('the status list covers the changelog up to the workspace version', () => {
+  const v = workspaceVersion();
+  const status = JSON.parse(readFileSync(join(site, 'data', 'status.json'), 'utf8')) as { source: string };
+  const m = /CHANGELOG\.md \S+ to (\d+\.\d+\.\d+)/.exec(status.source);
+  assert.ok(m, `data/status.json source names no CHANGELOG.md range: ${status.source}`);
+  assert.equal(m[1], v, `data/status.json covers CHANGELOG.md up to ${m[1]}, the workspace is ${v}: add what shipped since to the status list`);
+});
+
 test('a planned item on the status list points at a "Not built yet" section that still lists it', () => {
   const status = JSON.parse(readFileSync(join(site, 'data', 'status.json'), 'utf8')) as { items: StatusItem[] };
   for (const it of status.items) {

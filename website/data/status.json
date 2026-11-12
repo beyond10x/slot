@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-12",
-  "source": "CHANGELOG.md 0.1.0 to 0.10.0 and docs/design.md sections 10 to 16",
+  "source": "CHANGELOG.md 0.1.0 to 0.14.0 and docs/design.md sections 10 to 16",
   "items": [
     {
       "area": "Pool",
@@ -35,14 +35,21 @@
       "area": "Pool",
       "label": "Upgrade a busy daemon",
       "status": "shipped",
-      "detail": "systemctl --user reload slot re-executes the new binary once no job runs, holding admission for at most 60 s at a time (0.5.1).",
+      "detail": "systemctl --user reload slot re-executes at once and hands every running and queued job to the new binary (0.11.0).",
       "href": "/docs/getting-started#upgrade"
     },
     {
-      "area": "Toolchains",
-      "label": "rust, go and other",
+      "area": "Pool",
+      "label": "Lost slots come back",
       "status": "shipped",
-      "detail": "cargo is a jobserver client, go holds a fixed share and runs with -p set to it, anything else holds one slot and passes the pool down.",
+      "detail": "Tokens a killed compiler took with it are written back while jobs wait and no other process has the jobserver open (0.12.0).",
+      "href": "/docs/how-it-works#the-queue"
+    },
+    {
+      "area": "Toolchains",
+      "label": "rust, go, node-test, ignite and other",
+      "status": "shipped",
+      "detail": "cargo is a jobserver client, go holds a fixed share and runs with -p set to it, ignite test holds one slot per test job (0.13.0), anything else holds one slot and passes the pool down.",
       "href": "/docs/toolchains"
     },
     {
