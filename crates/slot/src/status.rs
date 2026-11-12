@@ -6,13 +6,21 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+pub use crate::server::limits::View as LimitsView;
 use crate::types::{Job, JobState, State};
 
-/// Reads `GET /api/state` from the daemon's web address.
-pub fn fetch(addr: &str) -> Result<State> {
+/// One HTTP/1.0 request to the daemon's web address; the body of a 200 answer.
+fn request(addr: &str, method: &str, path: &str, body: Option<&str>) -> Result<String> {
     let mut s = TcpStream::connect(addr).with_context(|| format!("connect {addr}"))?;
-    s.set_read_timeout(Some(Duration::from_secs(5)))?;
-    write!(s, "GET /api/state HTTP/1.0\r\nHost: {addr}\r\n\r\n")?;
+    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+    match body {
+        Some(b) => write!(
+            s,
+            "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{b}",
+            b.len()
+        )?,
+        None => write!(s, "{method} {path} HTTP/1.0\r\nHost: {addr}\r\n\r\n")?,
+    }
     let mut raw = Vec::new();
     s.read_to_end(&mut raw)?;
     let text = String::from_utf8_lossy(&raw);
@@ -20,9 +28,46 @@ pub fn fetch(addr: &str) -> Result<State> {
         bail!("{addr}: no HTTP response");
     };
     if !head.lines().next().is_some_and(|l| l.contains(" 200")) {
-        bail!("{addr}: {}", head.lines().next().unwrap_or(""));
+        bail!(
+            "{addr}: {} {}",
+            head.lines().next().unwrap_or(""),
+            body.trim()
+        );
     }
-    serde_json::from_str(body).with_context(|| format!("{addr}: /api/state"))
+    Ok(body.to_string())
+}
+
+/// Reads `GET /api/state` from the daemon's web address.
+pub fn fetch(addr: &str) -> Result<State> {
+    let body = request(addr, "GET", "/api/state", None)?;
+    serde_json::from_str(&body).with_context(|| format!("{addr}: /api/state"))
+}
+
+/// Reads the headroom, or sets it to `percent` first.
+pub fn headroom(addr: &str, percent: Option<u8>) -> Result<LimitsView> {
+    let body = match percent {
+        Some(p) => request(
+            addr,
+            "PUT",
+            "/api/limits",
+            Some(&format!(r#"{{"headroom_percent":{p}}}"#)),
+        )?,
+        None => request(addr, "GET", "/api/limits", None)?,
+    };
+    serde_json::from_str(&body).with_context(|| format!("{addr}: /api/limits"))
+}
+
+/// One line for `slot headroom`.
+pub fn render_headroom(v: &LimitsView) -> String {
+    let quota = match v.cpu_quota_percent {
+        Some(q) => format!("cpu quota {q}% ({:.1} cores)", f64::from(q) / 100.0),
+        None if v.headroom_percent == 0 => "no cpu quota".to_string(),
+        None => format!("cpu quota not applied: {}", v.note),
+    };
+    format!(
+        "headroom {}%: builds get {} of {} slots, {quota}\n",
+        v.headroom_percent, v.effective_tokens, v.tokens
+    )
 }
 
 fn secs(ms: i64) -> String {
@@ -69,9 +114,16 @@ pub fn render(s: &State) -> String {
         .iter()
         .filter(|j| j.state == JobState::Running)
         .collect();
+    let pool = if s.limit < s.tokens {
+        format!(
+            "{} of {} slots ({}% headroom)",
+            s.limit, s.tokens, s.headroom_percent
+        )
+    } else {
+        format!("{} slots", s.tokens)
+    };
     let mut out = format!(
-        "{} slots, {} free, {} running, {} queued\n",
-        s.tokens,
+        "{pool}, {} free, {} running, {} queued\n",
         s.free,
         running.len(),
         queued.len()
@@ -110,11 +162,36 @@ mod tests {
     }
 
     #[test]
+    fn headroom_line() {
+        let mut v = LimitsView {
+            headroom_percent: 30,
+            cpu_quota_percent: Some(1400),
+            effective_tokens: 14,
+            tokens: 20,
+            systemd: true,
+            note: String::new(),
+        };
+        assert_eq!(
+            render_headroom(&v),
+            "headroom 30%: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)\n"
+        );
+        v.cpu_quota_percent = None;
+        v.note = "not running in a systemd user unit".into();
+        assert!(
+            render_headroom(&v)
+                .ends_with("cpu quota not applied: not running in a systemd user unit\n")
+        );
+    }
+
+    #[test]
     fn lists_queued_before_running() {
         let s = State {
             host: "h".into(),
             cores: 4,
             tokens: 4,
+            limit: 4,
+            headroom_percent: 0,
+            cpu_quota_percent: None,
             free: 0,
             active: vec![job(7, JobState::Running, 4), job(8, JobState::Queued, 1)],
             done: vec![],

@@ -18,7 +18,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Guides',
       collapsed: false,
-      items: ['remote-builds', 'agent-integration'],
+      items: ['headroom', 'remote-builds', 'agent-integration'],
     },
     {
       type: 'category',

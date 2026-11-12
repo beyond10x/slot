@@ -39,6 +39,8 @@ pub enum Cmd {
     Run(RunArgs),
     /// Show the pool and every queued and running job.
     Status(StatusArgs),
+    /// Show or set the headroom: the share of the CPU kept free for you.
+    Headroom(HeadroomArgs),
     /// Any other command is run as a build: `slot cargo test -p foo`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -64,6 +66,10 @@ pub struct ServeArgs {
     /// (go jobs get their slot count). Default: a quarter of the pool, at least 2.
     #[arg(long)]
     pub test_threads: Option<usize>,
+    /// Whether a headroom also sets systemd `CPUQuota` on the daemon unit, a
+    /// hard cap on every job together; `false` keeps only the token limit.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub cpu_quota: bool,
     /// Jobserver FIFO and job log.
     #[arg(long, default_value_os_t = paths::default_state_dir())]
     pub state_dir: PathBuf,
@@ -109,6 +115,16 @@ pub struct StatusArgs {
     pub http: String,
 }
 
+/// `slot headroom` options.
+#[derive(Debug, Clone, Args)]
+pub struct HeadroomArgs {
+    /// New headroom, percent, 0 to 50; without it, prints the current one.
+    pub percent: Option<u8>,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
 fn default_tokens() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
@@ -128,6 +144,7 @@ impl ServeArgs {
             tokens,
             go_tokens: self.go_tokens,
             test_threads: self.test_threads.unwrap_or((tokens / 4).max(2)),
+            cpu_quota: self.cpu_quota,
             ws_root: self
                 .ws_root
                 .clone()

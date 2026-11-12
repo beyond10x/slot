@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -26,6 +27,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/jobs/{id}/output", get(output))
         .route("/metrics", get(metrics))
         .route("/api/history", get(history))
+        .route("/api/limits", get(limits_get).put(limits_put))
         .fallback(get(asset))
         .with_state(s);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -35,6 +37,53 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
 
 async fn state(State(s): State<Arc<Server>>) -> impl IntoResponse {
     axum::Json(s.state())
+}
+
+async fn limits_get(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    axum::Json(s.limits())
+}
+
+/// Why a settings change is refused, if it is: a browser page from another
+/// origin, or a body that is not JSON (a form or `text/plain` post needs no
+/// CORS preflight, so it must not be accepted).
+pub(super) fn refuse_change(headers: &HeaderMap, port: u16) -> Option<(StatusCode, &'static str)> {
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    if !super::limits::origin_allowed(origin, port) {
+        return Some((StatusCode::FORBIDDEN, "slot: request from another origin\n"));
+    }
+    let json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim_start().starts_with("application/json"));
+    if !json {
+        return Some((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "slot: Content-Type must be application/json\n",
+        ));
+    }
+    None
+}
+
+async fn limits_put(State(s): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
+    let port = s.cfg.http.map_or(0, |a| a.port());
+    if let Some(r) = refuse_change(&headers, port) {
+        return r.into_response();
+    }
+    let req: super::limits::Request = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
+    };
+    if req.headroom_percent > super::limits::MAX_HEADROOM {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "slot: headroom_percent must be 0 to {}\n",
+                super::limits::MAX_HEADROOM
+            ),
+        )
+            .into_response();
+    }
+    axum::Json(s.set_headroom(req.headroom_percent).await).into_response()
 }
 
 async fn metrics(State(s): State<Arc<Server>>) -> impl IntoResponse {

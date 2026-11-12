@@ -2,6 +2,7 @@
 //! to the client and publishes live state to the web UI.
 
 mod http;
+pub mod limits;
 mod metrics;
 mod ring;
 
@@ -57,6 +58,8 @@ pub struct Config {
     pub tokens: usize,
     /// Tokens a go job holds.
     pub go_tokens: usize,
+    /// Whether a headroom also sets `CPUQuota` on the daemon's systemd unit.
+    pub cpu_quota: bool,
     /// Default thread count of test runners in a job (`RUST_TEST_THREADS`,
     /// `NEXTEST_TEST_THREADS`, `GOMAXPROCS`) when the caller sets none.
     pub test_threads: usize,
@@ -175,6 +178,15 @@ pub struct Server {
     history: Mutex<VecDeque<String>>,
     host: String,
     cores: u32,
+    headroom: Mutex<Headroom>,
+}
+
+/// The headroom in force and whether its CPU quota is applied.
+#[derive(Debug, Clone, Default)]
+struct Headroom {
+    percent: u8,
+    quota: Option<u32>,
+    note: String,
 }
 
 fn now_ms() -> i64 {
@@ -190,6 +202,8 @@ impl Server {
             .with_context(|| format!("create {}", cfg.state_dir.display()))?;
         std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))?;
         let pool = Pool::new(&cfg.state_dir.join("jobserver.fifo"), cfg.tokens)?;
+        let saved = limits::load(&cfg.state_dir);
+        pool.set_limit(limits::effective_tokens(cfg.tokens, saved.headroom_percent));
         let log_path = cfg.state_dir.join("jobs.jsonl");
         let mut done = VecDeque::new();
         let mut next_id = 0;
@@ -250,6 +264,11 @@ impl Server {
             history: Mutex::new(VecDeque::new()),
             host,
             cores,
+            headroom: Mutex::new(Headroom {
+                percent: saved.headroom_percent,
+                quota: None,
+                note: String::new(),
+            }),
         }))
     }
 
@@ -278,6 +297,17 @@ impl Server {
                 .await
                 .unwrap_or_default();
             eprintln!("slot: {msg}");
+        }
+        let h = self.headroom_percent();
+        if h > 0 {
+            let v = Arc::clone(&self).set_headroom(h).await;
+            eprintln!(
+                "slot: headroom {h}%: {} of {} tokens, cpu quota {}",
+                v.effective_tokens,
+                v.tokens,
+                v.cpu_quota_percent
+                    .map_or_else(|| format!("not applied ({})", v.note), |q| format!("{q}%"))
+            );
         }
         eprintln!(
             "slot: socket {}, http {}, {} tokens, fifo {}",
@@ -811,7 +841,7 @@ impl Server {
                     managed.extend(procs.iter().map(|p| p.pid));
                 }
                 let sample = g.census.sample(&snap, &managed, dt);
-                let used = self.cfg.tokens.saturating_sub(self.pool.free());
+                let used = self.pool.limit().saturating_sub(self.pool.free());
                 let waiting = self.pool.waiting();
                 g.window.add(now_ms(), &sample, used, waiting);
                 if g.window.len() >= CENSUS_WINDOW {
@@ -837,6 +867,8 @@ impl Server {
                 Event::Tick {
                     t: now_ms(),
                     tokens: self.cfg.tokens as u32,
+                    limit: self.pool.limit() as u32,
+                    headroom_percent: u32::from(self.headroom_percent()),
                     free: self.pool.free() as u32,
                     waiting: self.pool.waiting() as u32,
                     sys_cpu: g.sys_cpu,
@@ -885,6 +917,62 @@ impl Server {
         g.metrics.render(&gauges)
     }
 
+    fn headroom_percent(&self) -> u8 {
+        self.headroom.lock().expect("headroom lock").percent
+    }
+
+    /// The `GET /api/limits` answer.
+    pub fn limits(&self) -> limits::View {
+        let h = self.headroom.lock().expect("headroom lock").clone();
+        limits::View {
+            headroom_percent: h.percent,
+            cpu_quota_percent: h.quota,
+            effective_tokens: self.pool.limit(),
+            tokens: self.cfg.tokens,
+            systemd: own_unit().is_some(),
+            note: h.note,
+        }
+    }
+
+    /// Sets the headroom: lowers the circulating tokens, saves it, and sets
+    /// `CPUQuota` on the daemon's unit when there is one.
+    pub async fn set_headroom(self: Arc<Self>, percent: u8) -> limits::View {
+        let percent = percent.min(limits::MAX_HEADROOM);
+        self.pool
+            .set_limit(limits::effective_tokens(self.cfg.tokens, percent));
+        if let Err(e) = limits::save(
+            &self.cfg.state_dir,
+            limits::Saved {
+                headroom_percent: percent,
+            },
+        ) {
+            eprintln!("slot: save {}: {e}", limits::FILE);
+        }
+        let quota = limits::cpu_quota_percent(self.cores, percent);
+        let applied = if self.cfg.cpu_quota {
+            tokio::task::spawn_blocking(move || limits::apply_quota(own_unit().as_deref(), quota))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+        } else {
+            Err("cpu quota disabled (--cpu-quota false)".into())
+        };
+        {
+            let mut h = self.headroom.lock().expect("headroom lock");
+            h.percent = percent;
+            match applied {
+                Ok(()) => {
+                    h.quota = quota;
+                    h.note = String::new();
+                }
+                Err(e) => {
+                    h.quota = None;
+                    h.note = e;
+                }
+            }
+        }
+        self.limits()
+    }
+
     /// The `GET /api/state` snapshot.
     pub fn state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
@@ -892,6 +980,9 @@ impl Server {
             host: self.host.clone(),
             cores: self.cores,
             tokens: self.cfg.tokens as u32,
+            limit: self.pool.limit() as u32,
+            headroom_percent: u32::from(self.headroom_percent()),
+            cpu_quota_percent: self.headroom.lock().expect("headroom lock").quota,
             free: self.pool.free() as u32,
             active: g.active.values().map(|l| l.job.clone()).collect(),
             done: g.done.iter().map(|d| d.job.clone()).collect(),
