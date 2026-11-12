@@ -69,7 +69,9 @@ again and the next hold starts when every running job's predicted end (p90 of th
 argv) is within the hold, or the pool is idle (`server/upgrade.rs`). `slot status` shows
 `upgrade pending: …` until then. Queued jobs are dropped with their connections; the
 client (0.3.1 and later) sees the connection close before a `start` frame, waits up to 10 min for
-the socket and resubmits the same request once. A job that had started is never resubmitted.
+the socket and resubmits the same request once. A job that had started is never resubmitted, nor
+one whose client got SIGINT, SIGTERM or SIGHUP: the signal thread records the signal before it
+closes the connection (`client::handle_signals`).
 `systemctl --user restart slot` instead drains: the socket disappears, new `slot` calls run
 locally outside the pool, and the stop waits for the longest running job. Use it only when the
 unit file itself changed.
