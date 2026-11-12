@@ -51,6 +51,11 @@ fn request(addr: &str, method: &str, path: &str, body: Option<&str>) -> Result<S
     Ok(body.to_string())
 }
 
+/// The body of `GET <path>` from the daemon's web address.
+pub fn get(addr: &str, path: &str) -> Result<String> {
+    request(addr, "GET", path, None)
+}
+
 /// Reads `GET /api/state` from the daemon's web address.
 pub fn fetch(addr: &str) -> Result<State> {
     let body = request(addr, "GET", "/api/state", None)?;

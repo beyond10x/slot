@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.3.1
+version=0.4.0
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -107,7 +107,8 @@ and returns its slots to the pool.
 #316   running go         4 slot(s)   2m05s  payments-api  go test ./...
 ```
 
-If the command's name is also a slot subcommand (`serve`, `proxy`, `run`, `status`), use
+If the command's name is also a slot subcommand (`serve`, `proxy`, `run`, `status`, `headroom`,
+`sessions`, `hook`), use
 `slot run`:
 
 ```console
@@ -157,4 +158,5 @@ the unit file changed.
 
 - [How it works](how-it-works.md): the pool, the queue, the job log and the web UI.
 - [Agent integration](agent-integration.md): make coding agents use slot.
+- [Claude Code plugin](claude-code-plugin.md): refuse builds outside the pool.
 - [Remote builds](remote-builds.md): run builds on another machine.

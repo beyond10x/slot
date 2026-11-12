@@ -79,3 +79,32 @@ slot headroom [OPTIONS] [PERCENT]
 
 - `<PERCENT>`: New headroom, percent, 0 to 50; without it, prints the current one
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+### `slot sessions`
+
+List agent sessions that build outside the pool, with their commands
+
+```text
+slot sessions [OPTIONS]
+```
+
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+- `--window`: Seconds of history to average (default `60`)
+- `--min-cores`: Leave out sessions below this many cores outside slot, unless a command of theirs runs now; builds outside any agent session are left out below it in any case (default `0.5`)
+- `--json`: Print JSON instead of text (default `false`)
+
+### `slot hook`
+
+Agent hooks: refuse a build command that would run outside the pool
+
+```text
+slot hook [OPTIONS] <COMMAND>
+```
+
+#### `slot hook claude-pre-tool-use`
+
+Claude Code `PreToolUse` hook for the Bash tool: reads the event on stdin and exits 2 with the `slot` command to run when the command builds or tests outside the pool. `SLOT_HOOK=warn` adds the advice as context instead of refusing; `SLOT_HOOK=off` allows everything
+
+```text
+slot hook claude-pre-tool-use [OPTIONS]
+```

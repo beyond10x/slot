@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v slot >/dev/null 2>&1 || exit 0; case $(slot --version 2>/dev/null) in 'slot 0.'[0-3].*|'') exit 0;; esac; exec slot hook claude-pre-tool-use",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -402,6 +402,13 @@ Ideas, none built yet:
    Measure the miss rate after raising it to 40 GiB, against the disk floor of 25 GB free.
 6. Per-job cache numbers in the UI: units compiled, sccache hits and misses for each job, so
    repeated work shows up where it happens.
+7. Watch the sccache server's own jobserver. On 2026-11-12 a server that had run for 8 days
+   had 0 free tokens in its jobserver pipe (FIONREAD on its fd 3) and 1 compiler running, on a
+   20-core host: tokens leak until every `sccache rustc` on the machine waits behind one compile,
+   at 0 % CPU, which looks like a hung server. Writing 18 bytes into the pipe's write end
+   (fd 4) started 7 compilers at once; restarting the server also resets it, but fails the
+   compiles in flight. The census could report free tokens of the server against its running
+   compilers.
 
 ## 13. Headroom (0.3.0)
 

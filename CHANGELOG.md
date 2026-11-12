@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 — 2026-11-12
+
+- The repository is a Claude Code plugin marketplace (`claude plugin marketplace add
+  beyond10x/slot`, then `claude plugin install slot@slot`). The plugin in `plugin/` carries the
+  skills `slot:building`, `slot:init`, `slot:upgrade` and `/slot:warden`, a `PreToolUse` hook and
+  the `slot-warden` agent. The skills also load in Codex.
+- `slot hook claude-pre-tool-use`: the hook. It refuses a Bash command that compiles or runs
+  tests outside the pool (cargo and go builds unless the PATH shim is installed, `make` and `task`
+  targets named like a build, `npm test`, vitest, jest, `playwright test`), with one line naming the `slot` command to run
+  instead. `SLOT_HOOK=warn` adds the line as context instead; `SLOT_HOOK=off` allows everything.
+- `slot sessions`: agent sessions that build outside the pool, with cores averaged over the
+  daemon's history and the commands running outside it now; `--json` for agents.
+- Commands named `headroom`, `sessions` or `hook` need `slot run`.
+
 ## 0.3.1 — 2026-11-12
 
 - Upgrades finish on a busy machine. After `systemctl --user reload slot` the daemon admits no

@@ -41,6 +41,11 @@ pub enum Cmd {
     Status(StatusArgs),
     /// Show or set the headroom: the share of the CPU kept free for you.
     Headroom(HeadroomArgs),
+    /// List agent sessions that build outside the pool, with their commands.
+    Sessions(SessionsArgs),
+    /// Agent hooks: refuse a build command that would run outside the pool.
+    #[command(subcommand)]
+    Hook(HookCmd),
     /// Any other command is run as a build: `slot cargo test -p foo`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -123,6 +128,34 @@ pub struct HeadroomArgs {
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
+}
+
+/// `slot sessions` options.
+#[derive(Debug, Clone, Args)]
+pub struct SessionsArgs {
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+    /// Seconds of history to average.
+    #[arg(long, default_value_t = 60)]
+    pub window: usize,
+    /// Leave out sessions below this many cores outside slot, unless a command of theirs runs now;
+    /// builds outside any agent session are left out below it in any case.
+    #[arg(long, default_value_t = 0.5)]
+    pub min_cores: f64,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `slot hook` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum HookCmd {
+    /// Claude Code `PreToolUse` hook for the Bash tool: reads the event on
+    /// stdin and exits 2 with the `slot` command to run when the command
+    /// builds or tests outside the pool. `SLOT_HOOK=warn` adds the advice as
+    /// context instead of refusing; `SLOT_HOOK=off` allows everything.
+    ClaudePreToolUse,
 }
 
 fn default_tokens() -> usize {

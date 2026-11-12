@@ -68,6 +68,13 @@ command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` d
 cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
 `PATH` the shim runs the real command.
 
+## Claude Code: refuse builds outside the pool
+
+The shim covers `cargo` and `go`. For everything else (`task`, `make`, vitest, jest, playwright)
+the [Claude Code plugin](claude-code-plugin.md) adds a `PreToolUse` hook that refuses a build
+command outside the pool and names the `slot` command to run instead, and `slot sessions` with the
+`slot-warden` agent to find sessions that still build outside it.
+
 ## Remove the old workarounds
 
 Once builds go through slot, these are not needed and some are ignored:

@@ -8,6 +8,7 @@
 pub mod census;
 pub mod cli;
 pub mod client;
+pub mod hook;
 pub mod jobserver;
 pub mod paths;
 pub mod policy;
@@ -15,6 +16,7 @@ pub mod procstat;
 pub mod proto;
 pub mod rewrite;
 pub mod server;
+pub mod sessions;
 pub mod status;
 pub mod toolchain;
 pub mod types;
