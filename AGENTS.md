@@ -83,7 +83,13 @@ with `worktree finish --discard-cache --archive` when the change is merged.
 ## Upgrading a running daemon
 
 Install the new binary over the old path, then `systemctl --user reload slot`. Reload sends
-SIGHUP: the daemon re-executes the new binary, same pid, at the first moment no job runs. It holds
+SIGHUP. From 0.11.0 the daemon re-executes at once and hands running and queued jobs, their
+slots, output pipes and client sockets to the new image (`server/handover.rs`, design.md
+§ 15.2); the state file carries `version`, and a release must read every version an older one
+writes. The integration test is `crates/slot-cli/tests/handover.rs`. `server/handover.rs` holds
+the only `unsafe` code (adopting inherited descriptors by number); the workspace denies it
+everywhere else. When the new binary is older than 0.11.0, or with `--handover false`, the
+bounded hold below applies: the daemon re-executes the new binary, same pid, at the first moment no job runs. It holds
 admission for at most `--upgrade-hold` (60 s) to get there; if a job still runs, admission opens
 again and the next hold starts when every running job's predicted end (p90 of the same repo and
 argv) is within the hold, or the pool is idle (`server/upgrade.rs`). `slot status` shows

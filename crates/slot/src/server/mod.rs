@@ -2,6 +2,7 @@
 //! to the client and publishes live state to the web UI.
 
 pub mod cache;
+pub mod handover;
 mod http;
 pub mod limits;
 mod metrics;
@@ -10,28 +11,34 @@ mod upgrade;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::SocketAddr;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::sys::signal::{Signal, killpg};
-use nix::sys::wait::{Id, WaitPidFlag, waitid};
+use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid, waitpid};
 use nix::unistd::Pid;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+use tokio::io::{
+    AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader,
+};
+use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::admission;
 use crate::call;
 use crate::census;
-use crate::jobserver::Pool;
+use crate::jobserver::{Pool, WaiterHandle};
 use crate::policy;
 use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
@@ -96,6 +103,9 @@ pub struct Config {
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
     pub cache_budget: u64,
+    /// On reload, hand running and queued jobs to the new binary instead of
+    /// waiting for an idle pool (`handover`); the bounded hold is the fallback.
+    pub handover: bool,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -176,7 +186,39 @@ struct Live {
     expect_rss: u64,
     /// How `slot cancel` stops the job.
     stop: Option<Stop>,
+    /// The request, while queued: a handover queues it again.
+    req: Option<Request>,
+    /// The queued request's tokens, which a handover takes back.
+    waiter: Option<WaiterHandle>,
+    /// Output pump threads of the running job.
+    pumps: Vec<std::thread::JoinHandle<PumpEnd>>,
+    /// Path rewrite of a remote job: from, to.
+    rewrite: (String, String),
+    /// Exit code and CPU seconds once reaped.
+    exited: Option<handover::Exited>,
+    /// The client connection.
+    conn: Option<u64>,
 }
+
+/// A pump thread's end: its stream, and the pipe when it stopped for a
+/// handover before the end of the stream.
+type PumpEnd = (&'static str, Option<OwnedFd>);
+
+/// A client connection, for a handover.
+struct ConnEntry {
+    /// A duplicate of the socket, which outlives the tokio halves across exec.
+    fd: OwnedFd,
+    uid: Option<u32>,
+    /// Asks the writer for its unsent bytes; it writes nothing afterwards.
+    ctl: Ctl,
+}
+
+/// Sends a client writer a request for its unsent bytes.
+type Ctl = mpsc::UnboundedSender<oneshot::Sender<Vec<u8>>>;
+
+/// The job record was not finished: a handover took it.
+#[derive(Debug)]
+struct HandedOver;
 
 /// The submitter of a job and the means to stop it.
 #[derive(Clone)]
@@ -219,6 +261,9 @@ struct Inner {
     controller: policy::Controller,
     /// Peak memory of finished jobs, for admission.
     memory: admission::History,
+    /// Set once a handover took the job table: nothing finishes, reaps,
+    /// starts or answers a client after it in this process.
+    handing_over: bool,
 }
 
 /// The daemon.
@@ -236,6 +281,13 @@ pub struct Server {
     /// A pending upgrade and its admission hold.
     upgrade: Mutex<upgrade::Plan>,
     sccache: Mutex<SccacheWatch>,
+    /// Open client connections.
+    conns: Mutex<HashMap<u64, ConnEntry>>,
+    next_conn: AtomicU64,
+    /// Tells every output pump to stop between two reads.
+    pause_pumps: Arc<AtomicBool>,
+    /// What a handover passed to this process, until `run` takes it.
+    inherited: Mutex<Option<handover::Inherited>>,
 }
 
 /// The headroom in force, whether its CPU quota is applied, and call mode.
@@ -263,11 +315,46 @@ fn now_ms() -> i64 {
 impl Server {
     /// Creates the state directory, the jobserver and loads history.
     pub fn new(cfg: Config) -> Result<Arc<Self>> {
+        Self::with_inherited(cfg, None)
+    }
+
+    /// Like [`Server::new`], taking over what a handover passed on
+    /// ([`handover::take_inherited`]): the jobserver FIFO is adopted, not
+    /// recreated, and `run` resumes the jobs.
+    pub fn with_inherited(
+        cfg: Config,
+        mut inherited: Option<handover::Inherited>,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.state_dir)
             .with_context(|| format!("create {}", cfg.state_dir.display()))?;
         std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))?;
-        let pool = Pool::new(&cfg.state_dir.join("jobserver.fifo"), cfg.tokens)?;
+        let fifo = cfg.state_dir.join("jobserver.fifo");
         let saved = limits::load(&cfg.state_dir);
+        let adopted = inherited.as_mut().and_then(|h| {
+            if h.state.pool.size != cfg.tokens {
+                eprintln!(
+                    "slot: handover pool has {} tokens, this daemon {}: not adopting it",
+                    h.state.pool.size, cfg.tokens
+                );
+                return None;
+            }
+            let held = h.take(Some(h.state.fifo));
+            match Pool::adopt(&fifo, h.state.pool, held) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("slot: handover: {e:#}");
+                    None
+                }
+            }
+        });
+        let pool = if let Some(p) = adopted {
+            p
+        } else {
+            if let Some(h) = inherited.take() {
+                handover::abandon(h);
+            }
+            Pool::new(&fifo, cfg.tokens)?
+        };
         pool.set_limit(limits::effective_tokens(cfg.tokens, saved.headroom_percent));
         let log_path = cfg.state_dir.join("jobs.jsonl");
         let mut done = VecDeque::new();
@@ -301,6 +388,9 @@ impl Server {
             .ok()
             .and_then(|h| h.into_string().ok())
             .unwrap_or_default();
+        if let Some(h) = &inherited {
+            next_id = next_id.max(h.state.next_id);
+        }
         let cores = procstat::host_cpus() as u32;
         let pool_size = cfg.tokens;
         let call_headroom = cfg.call_headroom;
@@ -330,6 +420,7 @@ impl Server {
                     pool_size,
                 )),
                 memory,
+                handing_over: false,
             }),
             events,
             history: Mutex::new(VecDeque::new()),
@@ -351,6 +442,10 @@ impl Server {
                 enabled: sccache_watch,
                 ..SccacheWatch::default()
             }),
+            conns: Mutex::new(HashMap::new()),
+            next_conn: AtomicU64::new(1),
+            pause_pumps: Arc::new(AtomicBool::new(false)),
+            inherited: Mutex::new(inherited),
         }))
     }
 
@@ -441,10 +536,25 @@ impl Server {
 
     /// Serves until the listener fails.
     pub async fn run(self: Arc<Self>) -> Result<()> {
-        let _ = std::fs::remove_file(&self.cfg.socket);
-        let listener = UnixListener::bind(&self.cfg.socket)
-            .with_context(|| format!("bind {}", self.cfg.socket.display()))?;
-        std::fs::set_permissions(&self.cfg.socket, std::fs::Permissions::from_mode(0o600))?;
+        let inherited = self.inherited.lock().expect("inherited lock").take();
+        let (listener, inherited) = if let Some(mut h) = inherited {
+            let fd = h.take(Some(h.state.listener));
+            if let Some(Ok(l)) = fd.map(|fd| {
+                let l = std::os::unix::net::UnixListener::from(fd);
+                l.set_nonblocking(true)?;
+                UnixListener::from_std(l)
+            }) {
+                (l, Some(h))
+            } else {
+                eprintln!("slot: handover: listening socket not inherited, binding anew");
+                (self.bind()?, Some(h))
+            }
+        } else {
+            (self.bind()?, None)
+        };
+        if let Some(h) = inherited {
+            self.resume(h);
+        }
         tokio::spawn(Arc::clone(&self).sampler());
         if let Some(addr) = self.cfg.http {
             let s = Arc::clone(&self);
@@ -497,6 +607,15 @@ impl Server {
                 }
                 _ = term.recv() => break,
                 _ = hup.recv() => {
+                    if self.cfg.handover {
+                        match self.hand_over(&listener).await {
+                            Ok(never) => match never {},
+                            Err(Abort::Fatal(e)) => return Err(e),
+                            Err(Abort::Retry(why)) => {
+                                eprintln!("slot: handover not possible ({why}); using the bounded hold");
+                            }
+                        }
+                    }
                     upgrade = true;
                     eprintln!("slot: upgrade requested; re-executing once no job runs");
                     let idle = self.nothing_running();
@@ -531,18 +650,435 @@ impl Server {
     /// Queued jobs are dropped with their connections; their clients
     /// resubmit. Returns only on failure.
     fn reexec(&self) -> anyhow::Error {
-        let exe = std::fs::read_link("/proc/self/exe").map_or_else(
-            |_| PathBuf::from("slot"),
-            |p| {
-                let s = p.to_string_lossy();
-                PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s))
-            },
-        );
+        let exe = installed_exe();
         let args: Vec<String> = std::env::args().skip(1).collect();
         let _ = std::fs::remove_file(&self.cfg.socket);
         eprintln!("slot: idle, re-executing {}", exe.display());
-        let err = Command::new(&exe).args(&args).exec();
+        let err = Command::new(&exe)
+            .args(&args)
+            .env_remove(handover::ENV)
+            .exec();
         anyhow!("re-exec {}: {err}", exe.display())
+    }
+
+    fn bind(&self) -> Result<UnixListener> {
+        let _ = std::fs::remove_file(&self.cfg.socket);
+        let listener = UnixListener::bind(&self.cfg.socket)
+            .with_context(|| format!("bind {}", self.cfg.socket.display()))?;
+        std::fs::set_permissions(&self.cfg.socket, std::fs::Permissions::from_mode(0o600))?;
+        Ok(listener)
+    }
+
+    /// Re-executes the installed binary now and hands it every running and
+    /// queued job (`docs/design.md` § 15.2). `Retry` when nothing was
+    /// changed for good and the bounded hold can take over; `Fatal` when the
+    /// job table was already given up and only exiting is left.
+    async fn hand_over(
+        self: &Arc<Self>,
+        listener: &UnixListener,
+    ) -> Result<std::convert::Infallible, Abort> {
+        let exe = installed_exe();
+        let check = exe.clone();
+        let ok = tokio::task::spawn_blocking(move || handover::supports(&check))
+            .await
+            .unwrap_or(false);
+        if !ok {
+            return Err(Abort::Retry(format!(
+                "{} is older than {}.{}.{} or does not run",
+                exe.display(),
+                handover::SINCE.0,
+                handover::SINCE.1,
+                handover::SINCE.2
+            )));
+        }
+        let started = Instant::now();
+        let was_held = *self.upgrading.borrow();
+        self.hold_admission();
+        let undo = |why: String| {
+            self.pool.resume();
+            if !was_held {
+                self.open_admission();
+            }
+            Abort::Retry(why)
+        };
+        let pool = Arc::clone(&self.pool);
+        let paused = tokio::task::spawn_blocking(move || pool.pause(Duration::from_secs(2)))
+            .await
+            .unwrap_or(false);
+        if !paused {
+            return Err(undo("the jobserver reader did not stop within 2 s".into()));
+        }
+        // Jobs granted their slots before admission stopped are starting:
+        // wait until each has its process, at most 2 s.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let taken = loop {
+            {
+                let mut g = self.inner.lock().expect("server lock");
+                if !g.active.values().any(|l| l.held > 0 && l.pid.is_none()) {
+                    g.handing_over = true;
+                    break self.take_table(&mut g);
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(undo(
+                    "a job that got its slots did not start within 2 s".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        // From here on this process only hands over.
+        self.pause_pumps.store(true, Ordering::SeqCst);
+        let Table {
+            mut running,
+            queued,
+            pumps,
+            next_id,
+        } = taken;
+        let ends = tokio::task::spawn_blocking(move || {
+            pumps
+                .into_iter()
+                .map(|hs| {
+                    hs.into_iter()
+                        .filter_map(|h| h.join().ok())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| Abort::Fatal(anyhow!("join output pumps: {e}")))?;
+        let mut keep: Vec<OwnedFd> = Vec::new();
+        for ((r, _), ends) in running.iter_mut().zip(ends) {
+            for (t, fd) in ends {
+                let n = fd.as_ref().map(handover::raw);
+                if t == "out" {
+                    r.stdout = n;
+                } else {
+                    r.stderr = n;
+                }
+                keep.extend(fd);
+            }
+        }
+        let conns: Vec<(u64, OwnedFd, Option<u32>, Ctl)> = {
+            let g = self.conns.lock().expect("conns lock");
+            g.iter()
+                .filter_map(|(id, c)| {
+                    c.fd.try_clone()
+                        .ok()
+                        .map(|fd| (*id, fd, c.uid, c.ctl.clone()))
+                })
+                .collect()
+        };
+        let mut state = handover::State {
+            version: handover::VERSION,
+            listener: handover::raw(listener),
+            fifo: handover::raw(self.pool.file()),
+            pool: self.pool.state(),
+            next_id,
+            ..handover::State::default()
+        };
+        let mut index: HashMap<u64, usize> = HashMap::new();
+        for (id, fd, uid, ctl) in conns {
+            let (tx, rx) = oneshot::channel();
+            if ctl.send(tx).is_err() {
+                continue;
+            }
+            let Ok(Ok(pending)) = tokio::time::timeout(Duration::from_secs(1), rx).await else {
+                continue;
+            };
+            index.insert(id, state.conns.len());
+            state.conns.push(handover::Conn {
+                fd: handover::raw(&fd),
+                uid,
+                pending,
+            });
+            keep.push(fd);
+        }
+        for (r, conn) in &mut running {
+            r.conn = conn.and_then(|c| index.get(&c).copied());
+        }
+        state.running = running.into_iter().map(|(r, _)| r).collect();
+        state.queued = queued
+            .into_iter()
+            .map(|(mut q, conn)| {
+                q.conn = conn.and_then(|c| index.get(&c).copied());
+                q
+            })
+            .collect();
+        let fatal = |e: anyhow::Error| Abort::Fatal(e);
+        handover::keep_on_exec(listener.as_fd()).map_err(fatal)?;
+        handover::keep_on_exec(self.pool.file().as_fd()).map_err(fatal)?;
+        for fd in &keep {
+            handover::keep_on_exec(fd.as_fd()).map_err(fatal)?;
+        }
+        let path = handover::write(&self.cfg.state_dir, &state).map_err(fatal)?;
+        eprintln!(
+            "slot: handing {} running and {} queued job(s) and {} connection(s) to {} after {} ms",
+            state.running.len(),
+            state.queued.len(),
+            state.conns.len(),
+            exe.display(),
+            started.elapsed().as_millis()
+        );
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let err = Command::new(&exe)
+            .args(&args)
+            .env(handover::ENV, &path)
+            .exec();
+        Err(Abort::Fatal(anyhow!("re-exec {}: {err}", exe.display())))
+    }
+
+    /// Takes the job table for a handover, under the server lock: running
+    /// jobs with their pumps, queued jobs with their requests. Tokens that
+    /// queued requests gathered go back to the FIFO.
+    fn take_table(&self, g: &mut Inner) -> Table {
+        let mut t = Table {
+            next_id: g.next_id,
+            ..Table::default()
+        };
+        for (id, l) in &mut g.active {
+            if let Some(pid) = l.pid {
+                t.pumps.push(std::mem::take(&mut l.pumps));
+                t.running.push((
+                    handover::Running {
+                        job: l.job.clone(),
+                        pid,
+                        held: l.held,
+                        stdout: None,
+                        stderr: None,
+                        rewrite: l.rewrite.clone(),
+                        exited: l.exited,
+                        conn: None,
+                    },
+                    l.conn,
+                ));
+            } else {
+                if let Some(w) = l.waiter.take() {
+                    self.pool.release(w.take());
+                }
+                if let Some(req) = l.req.clone() {
+                    t.queued.push((
+                        handover::Queued {
+                            id: *id,
+                            enqueued_ms: l.job.enqueued_ms,
+                            req,
+                            conn: None,
+                        },
+                        l.conn,
+                    ));
+                }
+            }
+        }
+        t
+    }
+
+    /// Takes over what a handover passed on: client connections, running
+    /// jobs (their pumps restart, their pid is reaped here) and queued jobs.
+    fn resume(self: &Arc<Self>, mut h: handover::Inherited) {
+        let state = std::mem::take(&mut h.state);
+        let mut conns: Vec<Option<Attached>> = Vec::new();
+        for c in state.conns {
+            let a = h.take(Some(c.fd)).and_then(|fd| {
+                let dup = fd.try_clone().ok()?;
+                let s = std::os::unix::net::UnixStream::from(fd);
+                s.set_nonblocking(true).ok()?;
+                let s = UnixStream::from_std(s).ok()?;
+                let (rd, wr) = s.into_split();
+                Some(self.attach(rd, wr, dup, c.uid, c.pending))
+            });
+            conns.push(a);
+        }
+        let n_running = state.running.len();
+        let snap = Snapshot::scan();
+        for r in state.running {
+            let conn = r.conn.and_then(|i| conns.get_mut(i).and_then(Option::take));
+            let out = h.take(r.stdout);
+            let err = h.take(r.stderr);
+            let (id, pid) = (r.job.id, r.pid);
+            // Into the table before the first client is accepted, so an idle
+            // reconcile never takes the tokens these jobs hold.
+            let (tx, gone, keep) = self.adopt_running(r, out, err, conn.as_ref(), &snap);
+            let s = Arc::clone(self);
+            tokio::spawn(async move {
+                let _keep = keep;
+                let done = s.supervise(id, pid, &tx, gone).await;
+                drop(tx);
+                s.end_conn(conn, done.is_some()).await;
+            });
+        }
+        let n_queued = state.queued.len();
+        for q in state.queued {
+            let conn = q.conn.and_then(|i| conns.get_mut(i).and_then(Option::take));
+            let s = Arc::clone(self);
+            tokio::spawn(async move { s.adopt_queued(q, conn).await });
+        }
+        // Connections of jobs that had ended: send what was left, then close.
+        for a in conns.into_iter().flatten() {
+            let Attached { id, writer, tx, .. } = a;
+            drop(tx);
+            let s = Arc::clone(self);
+            tokio::spawn(async move {
+                let _ = writer.await;
+                s.conns.lock().expect("conns lock").remove(&id);
+            });
+        }
+        eprintln!("slot: took over {n_running} running and {n_queued} queued job(s)");
+    }
+
+    /// Puts a job a handover passed on into the table and restarts its
+    /// pumps. Returns the frame sender, the gone signal and, for a job
+    /// whose client is gone, the signal's sender to keep alive.
+    fn adopt_running(
+        &self,
+        r: handover::Running,
+        out: Option<OwnedFd>,
+        err: Option<OwnedFd>,
+        conn: Option<&Attached>,
+        snap: &Snapshot,
+    ) -> (
+        mpsc::UnboundedSender<Frame>,
+        watch::Receiver<bool>,
+        Option<watch::Sender<bool>>,
+    ) {
+        let id = r.job.id;
+        let (tx, gone, stop, keep) = if let Some(a) = conn {
+            (a.tx.clone(), a.gone_rx.clone(), Some(a.stop()), None)
+        } else {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (g, rx) = watch::channel(false);
+            (tx, rx, None, Some(g))
+        };
+        let ring = Arc::new(Ring::new(OUTPUT_KEEP));
+        let pumps = self.start_pumps([out, err], &tx, &ring, &r.rewrite);
+        {
+            let mut g = self.inner.lock().expect("server lock");
+            let expect_rss = g
+                .memory
+                .expected(&r.job.repo, &r.job.argv, &r.job.toolchain);
+            let mut tracker = Tracker::default();
+            tracker.sample(snap, r.pid, &[], 0.0);
+            g.active.insert(
+                id,
+                Live {
+                    job: r.job,
+                    pid: Some(r.pid),
+                    held: r.held,
+                    tracker,
+                    out: ring,
+                    cores: 0.0,
+                    rss: 0,
+                    procs: 0,
+                    expect_rss,
+                    stop,
+                    req: None,
+                    waiter: None,
+                    pumps,
+                    rewrite: r.rewrite,
+                    exited: r.exited,
+                    conn: conn.map(|a| a.id),
+                },
+            );
+        }
+        self.publish(id);
+        (tx, gone, keep)
+    }
+
+    async fn adopt_queued(self: Arc<Self>, q: handover::Queued, conn: Option<Attached>) {
+        let Some(a) = conn else {
+            // Nobody waits for it any more.
+            return;
+        };
+        let stop = a.stop();
+        let done = self
+            .run_job(
+                q.req,
+                a.tx.clone(),
+                a.gone_rx.clone(),
+                Some(stop),
+                Some(a.id),
+                Some((q.id, q.enqueued_ms)),
+            )
+            .await;
+        self.end_conn(Some(a), done.is_some()).await;
+    }
+
+    /// Ends a connection after its job: waits for the writer to send the
+    /// exit frame and forgets the connection. When a handover took the job,
+    /// waits for the re-exec instead.
+    async fn end_conn(&self, a: Option<Attached>, done: bool) {
+        if !done {
+            std::future::pending::<()>().await;
+        }
+        if let Some(a) = a {
+            let id = a.id;
+            drop(a.tx);
+            let _ = a.writer.await;
+            self.conns.lock().expect("conns lock").remove(&id);
+        }
+    }
+
+    /// Registers a client connection: a reader that notices the client
+    /// leave, a writer that sends `pending` and then frames.
+    fn attach<R>(
+        self: &Arc<Self>,
+        rd: R,
+        wr: OwnedWriteHalf,
+        dup: OwnedFd,
+        uid: Option<u32>,
+        pending: Vec<u8>,
+    ) -> Attached
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        let id = self.next_conn.fetch_add(1, Ordering::Relaxed);
+        let (gone_tx, gone_rx) = watch::channel(false);
+        let gone_tx = Arc::new(gone_tx);
+        let reader_gone = Arc::clone(&gone_tx);
+        tokio::spawn(async move {
+            let mut rd = rd;
+            let mut sink = [0u8; 256];
+            while rd.read(&mut sink).await.unwrap_or(0) > 0 {}
+            reader_gone.send_replace(true);
+        });
+        let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+        let (ctl_tx, ctl_rx) = mpsc::unbounded_channel();
+        let writer = tokio::spawn(client_writer(wr, rx, ctl_rx, pending));
+        self.conns.lock().expect("conns lock").insert(
+            id,
+            ConnEntry {
+                fd: dup,
+                uid,
+                ctl: ctl_tx,
+            },
+        );
+        Attached {
+            id,
+            uid,
+            tx,
+            gone_tx,
+            gone_rx,
+            writer,
+        }
+    }
+
+    /// Starts one pump thread per open pipe.
+    fn start_pumps(
+        &self,
+        fds: [Option<OwnedFd>; 2],
+        tx: &mpsc::UnboundedSender<Frame>,
+        out: &Arc<Ring>,
+        rewrite: &(String, String),
+    ) -> Vec<std::thread::JoinHandle<PumpEnd>> {
+        fds.into_iter()
+            .zip(["out", "err"])
+            .filter_map(|(fd, t)| fd.map(|fd| (fd, t)))
+            .map(|(fd, t)| {
+                let tx = tx.clone();
+                let out = Arc::clone(out);
+                let (from, to) = rewrite.clone();
+                let pause = Arc::clone(&self.pause_pumps);
+                std::thread::spawn(move || pump(fd, t, &from, &to, &tx, &out, &pause))
+            })
+            .collect()
     }
 
     /// Stops taking jobs and waits for running and queued ones to end.
@@ -567,6 +1103,9 @@ impl Server {
 
     async fn handle(self: Arc<Self>, stream: UnixStream) {
         let uid = stream.peer_cred().ok().map(|c| c.uid());
+        let Ok(dup) = stream.as_fd().try_clone_to_owned() else {
+            return;
+        };
         let (rd, mut wr) = stream.into_split();
         let mut rd = TokioBufReader::new(rd);
         let mut line = String::new();
@@ -589,42 +1128,39 @@ impl Server {
             let _ = wr.shutdown().await;
             return;
         }
-        let (gone_tx, gone_rx) = watch::channel(false);
-        let gone_tx = Arc::new(gone_tx);
-        let reader_gone = Arc::clone(&gone_tx);
-        tokio::spawn(async move {
-            let mut sink = [0u8; 256];
-            while rd.read(&mut sink).await.unwrap_or(0) > 0 {}
-            reader_gone.send_replace(true);
-        });
-        let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
-        let writer = tokio::spawn(async move {
-            while let Some(f) = rx.recv().await {
-                let Ok(mut b) = serde_json::to_vec(&f) else {
-                    continue;
-                };
-                b.push(b'\n');
-                if wr.write_all(&b).await.is_err() {
-                    break;
-                }
-                if matches!(f, Frame::Exit { .. }) {
-                    break;
-                }
-            }
-            let _ = wr.shutdown().await;
-        });
-        let stop = Stop {
-            uid,
-            gone: gone_tx,
-            frames: tx.clone(),
-        };
-        let (code, msg) = self.run_job(req, tx.clone(), gone_rx, Some(stop)).await;
+        let a = self.attach(rd, wr, dup, uid, Vec::new());
+        let stop = a.stop();
+        let done = self
+            .run_job(
+                req,
+                a.tx.clone(),
+                a.gone_rx.clone(),
+                Some(stop),
+                Some(a.id),
+                None,
+            )
+            .await;
+        self.end_conn(Some(a), done.is_some()).await;
+    }
+
+    /// Sends a client its last frames unless a handover took the table;
+    /// `None` then. Frames sent under the server lock are in the writer's
+    /// queue before a handover flushes it.
+    fn reply(
+        &self,
+        tx: &mpsc::UnboundedSender<Frame>,
+        code: i32,
+        msg: Option<String>,
+    ) -> Option<()> {
+        let g = self.inner.lock().expect("server lock");
+        if g.handing_over {
+            return None;
+        }
         if let Some(msg) = msg {
             let _ = tx.send(Frame::Info { msg });
         }
         let _ = tx.send(Frame::Exit { code });
-        drop(tx);
-        let _ = writer.await;
+        Some(())
     }
 
     /// The job's environment before the toolchain adds to it.
@@ -635,6 +1171,7 @@ impl Server {
         // Remote clients send only allowlisted variables; PATH, HOME and
         // the toolchain installs are the server's own.
         std::env::vars()
+            .filter(|(k, _)| k != handover::ENV)
             .map(|(k, v)| format!("{k}={v}"))
             .chain(req.env.iter().cloned())
             .collect()
@@ -704,19 +1241,24 @@ impl Server {
         ))
     }
 
+    /// Queues, runs and supervises one job. `resume` keeps the id and queue
+    /// time of a job a handover passed on. `None` when a handover took the
+    /// job: the client is answered by the next process.
     async fn run_job(
         self: &Arc<Self>,
         req: Request,
         tx: mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
         stop: Option<Stop>,
-    ) -> (i32, Option<String>) {
+        conn: Option<u64>,
+        resume: Option<(i64, i64)>,
+    ) -> Option<()> {
         if req.argv.is_empty() {
-            return (2, Some("slot: empty command".into()));
+            return self.reply(&tx, 2, Some("slot: empty command".into()));
         }
         let (cwd, from, to) = match self.resolve(&req) {
             Ok(v) => v,
-            Err(e) => return (2, Some(format!("slot: {e}"))),
+            Err(e) => return self.reply(&tx, 2, Some(format!("slot: {e}"))),
         };
         // A mistyped subcommand (`slot cancle 12`) would otherwise wait in
         // the queue for slots and fail only when it starts.
@@ -724,15 +1266,19 @@ impl Server {
         if !req.argv[0].contains('/')
             && let Err(e) = look_path(&req.argv[0], &base)
         {
-            return (127, Some(format!("slot: {e}; not queued")));
+            return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
         }
         let tc = toolchain::for_argv(&req.argv, self.cfg.go_tokens);
         let tokens = tc.tokens().clamp(1, self.pool.size());
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
         let id = {
             let mut g = self.inner.lock().expect("server lock");
-            g.next_id += 1;
-            let id = g.next_id;
+            let (id, enqueued_ms) = if let Some(r) = resume {
+                r
+            } else {
+                g.next_id += 1;
+                (g.next_id, now_ms())
+            };
             let expect_rss = g.memory.expected(&req.repo, &req.argv, tc.name());
             let job = Job {
                 id,
@@ -745,7 +1291,7 @@ impl Server {
                 remote: req.workspace.is_some(),
                 tokens: tokens as u32,
                 state: JobState::Queued,
-                enqueued_ms: now_ms(),
+                enqueued_ms,
                 started_ms: 0,
                 ended_ms: 0,
                 exit: 0,
@@ -767,6 +1313,12 @@ impl Server {
                     procs: 0,
                     expect_rss,
                     stop,
+                    req: Some(req.clone()),
+                    waiter: None,
+                    pumps: Vec::new(),
+                    rewrite: (from.clone(), to.clone()),
+                    exited: None,
+                    conn,
                 },
             );
             id
@@ -789,41 +1341,64 @@ impl Server {
         if let Some(t) = toolchain::get(&req.env, "CARGO_TARGET_DIR").filter(|t| !t.is_empty()) {
             disks.push(cwd.join(t));
         }
+        let cancelled = End {
+            state: JobState::Cancelled,
+            code: -1,
+            cpu: None,
+            client_code: 130,
+            msg: None,
+            note_wait: false,
+        };
         let held = loop {
             if !self.admission_open(gone.clone()).await {
-                self.finish(id, JobState::Cancelled, -1, None);
-                return (130, None);
+                return self.finish(id, &tx, cancelled).ok();
             }
             if !self.resources_ready(id, &disks, &tx, gone.clone()).await {
-                self.finish(id, JobState::Cancelled, -1, None);
-                return (130, None);
+                return self.finish(id, &tx, cancelled).ok();
             }
             let mut waiter = self.pool.acquire(tokens);
+            if let Some(l) = self.inner.lock().expect("server lock").active.get_mut(&id) {
+                l.waiter = Some(waiter.handle());
+            }
             tokio::select! {
                 () = waiter.ready() => {}
                 () = client_gone(gone.clone()) => {
                     if self.pool.cancel(&waiter) {
-                        self.set_held(id, waiter.held());
+                        self.pool.release(waiter.take_held());
                     }
-                    self.finish(id, JobState::Cancelled, -1, None);
-                    return (130, None);
+                    return self.finish(id, &tx, cancelled).ok();
                 }
-            }
-            // Granted after an upgrade was requested: give the slots back
-            // and wait with the other queued jobs.
-            if *self.upgrading.borrow() {
-                self.pool.release(waiter.held());
-                continue;
             }
             // Memory may have gone while the job waited for slots: give
             // them back and wait for memory first.
             if self.short_of(id, &disks).is_some() {
-                self.pool.release(waiter.held());
+                self.pool.release(waiter.take_held());
                 continue;
             }
-            break waiter.held();
+            // Claim the slots under the server lock: an upgrade requested
+            // meanwhile (hold or handover) sends them back and the job waits
+            // with the others; a handover sees the claim and waits for the
+            // process.
+            let claimed = {
+                let mut g = self.inner.lock().expect("server lock");
+                if *self.upgrading.borrow() || g.handing_over {
+                    None
+                } else {
+                    let n = waiter.take_held();
+                    g.active.get_mut(&id).map(|l| {
+                        l.held = n;
+                        l.waiter = None;
+                        n
+                    })
+                }
+            };
+            match claimed {
+                Some(n) => break n,
+                None => {
+                    self.pool.release(waiter.take_held());
+                }
+            }
         };
-        self.set_held(id, held);
 
         let ctx = Context {
             jobserver_auth: self.pool.auth(),
@@ -868,12 +1443,17 @@ impl Server {
             wrap.extend(argv);
             argv = wrap;
         }
+        let failed = |msg: String| End {
+            state: JobState::Failed,
+            code: 127,
+            cpu: None,
+            client_code: 127,
+            msg: Some(msg),
+            note_wait: false,
+        };
         let program = match look_path(&argv[0], &env) {
             Ok(p) => p,
-            Err(e) => {
-                self.finish(id, JobState::Failed, 127, None);
-                return (127, Some(format!("slot: {e}")));
-            }
+            Err(e) => return self.finish(id, &tx, failed(format!("slot: {e}"))).ok(),
         };
         let mut cmd = Command::new(&program);
         cmd.arg0(&argv[0])
@@ -888,21 +1468,18 @@ impl Server {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                self.finish(id, JobState::Failed, 127, None);
-                return (127, Some(format!("slot: {}: {e}", argv[0])));
+                return self
+                    .finish(id, &tx, failed(format!("slot: {}: {e}", argv[0])))
+                    .ok();
             }
         };
         let pid = child.id() as i32;
-        {
-            let mut g = self.inner.lock().expect("server lock");
-            if let Some(l) = g.active.get_mut(&id) {
-                l.pid = Some(pid);
-                l.job.started_ms = now_ms();
-                l.job.state = JobState::Running;
-                l.tracker.sample(&Snapshot::scan(), pid, &[], 0.0);
-            }
-        }
-        self.publish(id);
+        let pipes = [
+            child.stdout.take().map(OwnedFd::from),
+            child.stderr.take().map(OwnedFd::from),
+        ];
+        // The process is reaped by pid (`reap`), here or after a handover.
+        drop(child);
         let target_dir = req.workspace.as_ref().map_or_else(String::new, |w| {
             self.cfg
                 .cache_root
@@ -911,30 +1488,43 @@ impl Server {
                 .to_string_lossy()
                 .into_owned()
         });
-        let _ = tx.send(Frame::Start { id, target_dir });
+        let pumps = self.start_pumps(pipes, &tx, &out, &(from, to));
+        {
+            let mut g = self.inner.lock().expect("server lock");
+            if let Some(l) = g.active.get_mut(&id) {
+                l.pid = Some(pid);
+                l.job.started_ms = now_ms();
+                l.job.state = JobState::Running;
+                l.tracker.sample(&Snapshot::scan(), pid, &[], 0.0);
+                l.req = None;
+                l.pumps = pumps;
+            }
+            let _ = tx.send(Frame::Start { id, target_dir });
+        }
+        self.publish(id);
+        let done = self.supervise(id, pid, &tx, gone).await;
+        if done.is_some()
+            && let Some(ws) = &req.workspace
+        {
+            let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
+            let ws = ws.id.clone();
+            tokio::task::spawn_blocking(move || cache.record_size(&ws));
+        }
+        done
+    }
 
-        let pipes: Vec<std::thread::JoinHandle<()>> = [
-            child
-                .stdout
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-            child
-                .stderr
-                .take()
-                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-        ]
-        .into_iter()
-        .zip(["out", "err"])
-        .filter_map(|(p, t)| p.map(|p| (p, t)))
-        .map(|(p, t)| {
-            let tx = tx.clone();
-            let out = Arc::clone(&out);
-            let (from, to) = (from.clone(), to.clone());
-            std::thread::spawn(move || pump(p, t, &from, &to, &tx, &out))
-        })
-        .collect();
-
-        let wait = tokio::task::spawn_blocking(move || reap(child));
+    /// Waits for job `id`'s process `pid` (or kills its group when the
+    /// client goes away), lets its output drain and finishes it. `None`
+    /// when a handover took the job first.
+    async fn supervise(
+        self: &Arc<Self>,
+        id: i64,
+        pid: i32,
+        tx: &mpsc::UnboundedSender<Frame>,
+        gone: watch::Receiver<bool>,
+    ) -> Option<()> {
+        let s = Arc::clone(self);
+        let wait = tokio::task::spawn_blocking(move || s.reap(id, pid));
         tokio::pin!(wait);
         let mut cancelled = false;
         let result = tokio::select! {
@@ -950,45 +1540,85 @@ impl Server {
                 }
             }
         };
-        let (code, cpu) = result.unwrap_or((127, None));
+        let exited = result.ok().flatten()?;
         // A grandchild that keeps a pipe open would block forever: give the
         // readers 2 s after the job's main process exits.
         let deadline = Instant::now() + Duration::from_secs(2);
-        for h in pipes {
-            while !h.is_finished() && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        loop {
+            let drained = {
+                let g = self.inner.lock().expect("server lock");
+                g.active
+                    .get(&id)
+                    .is_none_or(|l| l.pumps.iter().all(std::thread::JoinHandle::is_finished))
+            };
+            if drained || Instant::now() >= deadline {
+                break;
             }
-            if h.is_finished() {
-                let _ = h.join();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let end = if cancelled {
+            End {
+                state: JobState::Cancelled,
+                code: -1,
+                cpu: exited.cpu,
+                client_code: 130,
+                msg: None,
+                note_wait: false,
             }
-        }
-        if cancelled {
-            self.finish(id, JobState::Cancelled, -1, cpu);
-            return (130, None);
-        }
-        let state = if code == 0 {
-            JobState::Ok
         } else {
-            JobState::Failed
+            End {
+                state: if exited.code == 0 {
+                    JobState::Ok
+                } else {
+                    JobState::Failed
+                },
+                code: exited.code,
+                cpu: exited.cpu,
+                client_code: exited.code,
+                msg: None,
+                note_wait: true,
+            }
         };
-        let job = self.finish(id, state, code, cpu);
-        if let Some(ws) = &req.workspace {
-            let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
-            let ws = ws.id.clone();
-            tokio::task::spawn_blocking(move || cache.record_size(&ws));
+        self.finish(id, tx, end).ok()
+    }
+
+    /// Waits for job `id`'s process to exit, reads its CPU time while it is
+    /// still a zombie, then reaps it, unless a handover took the table:
+    /// then the zombie stays for the next process. A job a handover found
+    /// reaped already gets its recorded exit.
+    fn reap(&self, id: i64, pid: i32) -> Option<handover::Exited> {
+        if let Some(e) = self
+            .inner
+            .lock()
+            .expect("server lock")
+            .active
+            .get(&id)
+            .and_then(|l| l.exited)
+        {
+            return Some(e);
         }
-        let msg = job.and_then(|j| {
-            let wait = j.started_ms - j.enqueued_ms;
-            (wait >= 2000).then(|| {
-                format!(
-                    "slot: job {} waited {}s for a build slot, ran {}s",
-                    j.id,
-                    wait / 1000,
-                    (j.ended_ms - j.started_ms) / 1000
-                )
-            })
-        });
-        (code, msg)
+        let p = Pid::from_raw(pid);
+        while let Err(nix::errno::Errno::EINTR) =
+            waitid(Id::Pid(p), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT)
+        {}
+        let cpu = procstat::total_cpu_seconds(pid);
+        let mut g = self.inner.lock().expect("server lock");
+        if g.handing_over {
+            return None;
+        }
+        let code = loop {
+            match waitpid(p, None) {
+                Ok(WaitStatus::Exited(_, c)) => break c,
+                Ok(WaitStatus::Signaled(_, s, _)) => break 128 + s as i32,
+                Err(nix::errno::Errno::EINTR) => {}
+                _ => break 127,
+            }
+        };
+        let e = handover::Exited { code, cpu };
+        if let Some(l) = g.active.get_mut(&id) {
+            l.exited = Some(e);
+        }
+        Some(e)
     }
 
     /// Workspace ids with a queued or running job.
@@ -1126,21 +1756,35 @@ impl Server {
         }
     }
 
-    fn set_held(&self, id: i64, n: usize) {
-        let mut g = self.inner.lock().expect("server lock");
-        if let Some(l) = g.active.get_mut(&id) {
-            l.held = n;
-        }
-    }
-
-    fn finish(&self, id: i64, state: JobState, code: i32, cpu: Option<f64>) -> Option<Job> {
-        let (job, held, idle) = {
+    /// Finishes job `id`: logs it, returns its slots and answers its client,
+    /// all under the server lock, so a handover sees the job either before
+    /// or after, never half. `Err` when a handover took the table.
+    fn finish(
+        &self,
+        id: i64,
+        tx: &mpsc::UnboundedSender<Frame>,
+        end: End,
+    ) -> Result<(), HandedOver> {
+        let (job, idle) = {
             let mut g = self.inner.lock().expect("server lock");
-            let mut live = g.active.remove(&id)?;
-            live.job.state = state;
-            live.job.exit = code;
+            if g.handing_over {
+                return Err(HandedOver);
+            }
+            let Some(mut live) = g.active.remove(&id) else {
+                return Ok(());
+            };
+            if let Some(w) = live.waiter.take() {
+                self.pool.release(w.take());
+            }
+            for h in std::mem::take(&mut live.pumps) {
+                if h.is_finished() {
+                    let _ = h.join();
+                }
+            }
+            live.job.state = end.state;
+            live.job.exit = end.code;
             live.job.ended_ms = now_ms();
-            live.job.cpu_s = live.job.compile_server_cpu_s + cpu.unwrap_or(0.0);
+            live.job.cpu_s = live.job.compile_server_cpu_s + end.cpu.unwrap_or(0.0);
             let job = live.job.clone();
             g.metrics.record(&job);
             g.memory.record(&job);
@@ -1160,17 +1804,34 @@ impl Server {
                 d.out = None;
             }
             live.out.close();
-            (job, live.held, g.active.is_empty())
+            self.pool.release(live.held);
+            let wait = job.started_ms - job.enqueued_ms;
+            let msg = end.msg.or_else(|| {
+                (end.note_wait && job.started_ms > 0 && wait >= 2000).then(|| {
+                    format!(
+                        "slot: job {} waited {}s for a build slot, ran {}s",
+                        job.id,
+                        wait / 1000,
+                        (job.ended_ms - job.started_ms) / 1000
+                    )
+                })
+            });
+            if let Some(msg) = msg {
+                let _ = tx.send(Frame::Info { msg });
+            }
+            let _ = tx.send(Frame::Exit {
+                code: end.client_code,
+            });
+            (job, g.active.is_empty())
         };
-        self.pool.release(held);
-        self.send(&Event::Job { job: job.clone() });
+        self.send(&Event::Job { job });
         if idle {
             let n = self.pool.reconcile();
             if n != 0 {
                 eprintln!("slot: jobserver reconciled by {n:+} tokens");
             }
         }
-        Some(job)
+        Ok(())
     }
 
     fn publish(&self, id: i64) {
@@ -1675,14 +2336,22 @@ fn compile_server_work(g: &mut Inner, snap: &Snapshot) -> HashMap<i64, Vec<Proc>
     out
 }
 
+/// How long a pump waits for output before it looks at the pause flag.
+const PUMP_POLL_MS: u16 = 100;
+
+/// Copies one output pipe of a job to its client and its ring until the end
+/// of the stream, or until `pause` is set: then it returns the pipe, so a
+/// handover can pass it on with no byte read and not sent.
 fn pump(
-    mut p: Box<dyn Read + Send>,
-    t: &str,
+    fd: OwnedFd,
+    t: &'static str,
     from: &str,
     to: &str,
     tx: &mpsc::UnboundedSender<Frame>,
     out: &Ring,
-) {
+    pause: &AtomicBool,
+) -> PumpEnd {
+    let mut p = File::from(fd);
     let mut rw = Rewriter::new(from, to);
     let mut buf = vec![0u8; 32 << 10];
     let emit = |b: Vec<u8>| {
@@ -1699,25 +2368,137 @@ fn pump(
         let _ = tx.send(f);
     };
     loop {
+        if pause.load(Ordering::SeqCst) {
+            emit(rw.finish());
+            return (t, Some(OwnedFd::from(p)));
+        }
+        let mut fds = [PollFd::new(p.as_fd(), PollFlags::POLLIN)];
+        match poll(&mut fds, PUMP_POLL_MS) {
+            Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+            Ok(_) => {}
+            Err(_) => break,
+        }
         match p.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
             Ok(n) => emit(rw.push(&buf[..n])),
+            Err(e) if matches!(e.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) => {}
+            Err(_) => break,
         }
     }
     emit(rw.finish());
+    (t, None)
 }
 
-/// Waits for the child, reads its CPU time (including reaped descendants)
-/// while it is still a zombie, then reaps it.
-fn reap(mut child: std::process::Child) -> (i32, Option<f64>) {
-    let pid = Pid::from_raw(child.id() as i32);
-    let _ = waitid(Id::Pid(pid), WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT);
-    let cpu = procstat::total_cpu_seconds(pid.as_raw());
-    let code = match child.wait() {
-        Ok(st) => st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0)),
-        Err(_) => 127,
-    };
-    (code, cpu)
+/// Writes frames to one client. Bytes are queued in `pending` and written as
+/// the socket takes them; a request on `ctl` gets every unsent byte, and the
+/// writer then writes nothing more, for a handover to pass on. Ends after
+/// the exit frame, or when every sender is gone, once `pending` is written.
+async fn client_writer(
+    mut wr: OwnedWriteHalf,
+    mut rx: mpsc::UnboundedReceiver<Frame>,
+    mut ctl: mpsc::UnboundedReceiver<oneshot::Sender<Vec<u8>>>,
+    mut pending: Vec<u8>,
+) {
+    let mut rx_open = true;
+    let mut ctl_open = true;
+    let mut closing = false;
+    loop {
+        if (closing || !rx_open) && pending.is_empty() {
+            let _ = wr.shutdown().await;
+            return;
+        }
+        tokio::select! {
+            biased;
+            c = ctl.recv(), if ctl_open => match c {
+                Some(reply) => {
+                    let _ = reply.send(std::mem::take(&mut pending));
+                    std::future::pending::<()>().await;
+                }
+                None => ctl_open = false,
+            },
+            f = rx.recv(), if rx_open && !closing => match f {
+                Some(f) => {
+                    if let Ok(b) = serde_json::to_vec(&f) {
+                        pending.extend_from_slice(&b);
+                        pending.push(b'\n');
+                    }
+                    closing = matches!(f, Frame::Exit { .. });
+                }
+                None => rx_open = false,
+            },
+            r = wr.writable(), if !pending.is_empty() => {
+                if r.is_err() {
+                    return;
+                }
+                match wr.try_write(&pending) {
+                    Ok(n) => {
+                        pending.drain(..n);
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+}
+
+/// The binary installed at this process's path, which a reload executes.
+fn installed_exe() -> PathBuf {
+    std::fs::read_link("/proc/self/exe").map_or_else(
+        |_| PathBuf::from("slot"),
+        |p| {
+            let s = p.to_string_lossy();
+            PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s))
+        },
+    )
+}
+
+/// Why a handover did not happen.
+enum Abort {
+    /// Nothing changed for good; the bounded hold takes over.
+    Retry(String),
+    /// The job table is given up; the daemon can only exit.
+    Fatal(anyhow::Error),
+}
+
+/// The job table a handover takes, with each job's connection id.
+#[derive(Default)]
+struct Table {
+    running: Vec<(handover::Running, Option<u64>)>,
+    queued: Vec<(handover::Queued, Option<u64>)>,
+    pumps: Vec<Vec<std::thread::JoinHandle<PumpEnd>>>,
+    next_id: i64,
+}
+
+/// How a job ends: what is logged and what the client is told.
+struct End {
+    state: JobState,
+    code: i32,
+    cpu: Option<f64>,
+    client_code: i32,
+    msg: Option<String>,
+    /// Tell the client how long it waited for slots, when that was 2 s or more.
+    note_wait: bool,
+}
+
+/// A registered client connection.
+struct Attached {
+    id: u64,
+    uid: Option<u32>,
+    tx: mpsc::UnboundedSender<Frame>,
+    gone_tx: Arc<watch::Sender<bool>>,
+    gone_rx: watch::Receiver<bool>,
+    writer: tokio::task::JoinHandle<()>,
+}
+
+impl Attached {
+    fn stop(&self) -> Stop {
+        Stop {
+            uid: self.uid,
+            gone: Arc::clone(&self.gone_tx),
+            frames: self.tx.clone(),
+        }
+    }
 }
 
 fn look_path(name: &str, env: &[String]) -> Result<PathBuf> {

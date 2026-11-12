@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.0 — 2026-11-12
+
+- `systemctl --user reload slot` re-executes at once and hands every running and queued job to
+  the new binary: processes, slots, output pipes, client connections and unsent output carry
+  over, so a long job no longer delays an upgrade and no job waits for one. Clients see no
+  change; queued jobs keep their id and place. The journal says `slot: handing N running and M
+  queued job(s) …` and `slot: took over …`. A new binary older than 0.11.0, or
+  `slot serve --handover false`, gets the bounded hold of 0.5.1. Upgrading from an older daemon
+  uses its own rule once.
+- The jobserver reader and the output pumps poll, so they stop between two reads; a client's
+  frames are written as its socket takes them instead of one write at a time.
+
 ## 0.10.0 — 2026-11-12
 
 - `slot shell`: an ssh forced command for a build server. With

@@ -21,8 +21,10 @@ Done when `slot --version` prints the newest version and the plugin list shows t
 ## The running daemon
 
 A replaced binary does not change the daemon that is already running. `systemctl --user reload
-slot` sends SIGHUP: the daemon keeps taking jobs and re-executes the new binary, same pid, at the
-first moment no job is active; the journal says `slot: idle, re-executing`. Never `restart` for an
+slot` sends SIGHUP. A 0.11.0 or later daemon re-executes the new binary at once, same pid, and
+hands it the running and queued jobs; the journal says `slot: handing … job(s)` and `slot: took
+over …`. An older daemon re-executes at the first moment no job is active (`slot: idle,
+re-executing`). Never `restart` for an
 upgrade: it drains every session's builds and sends new ones outside the pool while it waits. A
 build server's daemon is upgraded the same way on that machine.
 

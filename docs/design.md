@@ -547,7 +547,40 @@ re-executed at 17:23:37, 16 min 25 s later.
 host the switch can wait for an idle moment that never comes; the queue keeps moving meanwhile,
 which is the property that matters. 15.2 removes the wait.
 
-### 15.2 Handover re-exec (design, not built)
+### 15.2 Handover re-exec (0.11.0)
+
+Built in 0.11.0 (`server/handover.rs`, `Server::hand_over`, `Server::resume`) as designed below,
+with these differences:
+
+- The FIFO is reopened by path (`Pool::adopt`), not passed as a descriptor; the state carries
+  size, reserve and `held_back`. The jobserver reader polls with a 100 ms timeout on a
+  non-blocking descriptor, so `Pool::pause` stops it between two tokens.
+- Pumps poll their pipe with a 100 ms timeout and return the pipe when paused. Client writers
+  keep serialized frames in a byte buffer and write what the socket takes; a handover takes the
+  unsent bytes (`Conn.pending`), so a client blocked on a full socket costs nothing and no frame
+  is cut. Every connection is registered with a duplicate of its socket, which survives `exec`.
+- One flag under the server lock, `handing_over`, orders everything: a job's slot claim, its
+  `Start` frame, its reaping (`waitpid` after `waitid(WNOWAIT)`) and its finish (log line,
+  token release, `Exit` frame) each happen under the lock and check it. A job is in the table
+  the handover takes, or it finished before, never half.
+- Before the irreversible step the daemon checks the installed binary prints a version of
+  0.11.0 or later, pauses the pool, and waits up to 2 s for jobs granted slots to have their
+  process; a failure there undoes the pause and falls back to 15.1.
+- The new process adopts descriptors by number only after checking `/proc/self/fd/<n>` is a
+  socket or a pipe, before it opens anything (`take_inherited` runs first in `slot serve`), then
+  closes every other inherited descriptor. An unreadable state file closes all of them and kills
+  the process group of every child of the daemon. That and the adoption are the only `unsafe`
+  code in slot.
+- Running jobs enter the table before the first client is accepted, so the idle reconcile
+  cannot take the tokens they hold. Queued jobs keep their id and queue time.
+- The headroom of a call in progress is not carried: the new process starts from the saved
+  headroom and call mode raises it again within 5 s.
+
+Measured by `crates/slot-cli/tests/handover.rs`: 20 running and 20 queued jobs, each printing a
+counter every 10 ms, through two reloads 1 s apart: every client got all 300 lines once and its
+exit code, 40 jobs logged once each, and 20 of 20 tokens in the FIFO at the end.
+
+The design as written before it was built:
 
 Goal: re-execute at once on reload, with jobs running, and keep them: their processes, slots,
 output streams and clients. `exec` keeps the pid, so the job processes stay children of the

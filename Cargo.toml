@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/slot", "crates/slot-cli", "crates/slot-docs"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -18,7 +18,7 @@ b10x-slot = { path = "crates/slot" }
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }
 include_dir = "0.7"
-nix = { version = "0.30", features = ["fs", "signal", "process", "user", "hostname"] }
+nix = { version = "0.30", features = ["fs", "signal", "process", "user", "hostname", "poll"] }
 rustix = { version = "1", features = ["fs", "stdio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,7 +33,7 @@ ts-rs = "11"
 
 [workspace.lints.rust]
 missing_docs = "warn"
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
