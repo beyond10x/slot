@@ -37,6 +37,8 @@ pub struct Limits {
 pub struct History {
     by_command: HashMap<(String, Vec<String>), VecDeque<u64>>,
     by_toolchain: HashMap<String, VecDeque<u64>>,
+    /// Run times of jobs that ended on their own (ok or failed), ms.
+    runtime: HashMap<(String, Vec<String>), VecDeque<u64>>,
 }
 
 fn p90(v: &VecDeque<u64>) -> u64 {
@@ -48,6 +50,22 @@ fn p90(v: &VecDeque<u64>) -> u64 {
 impl History {
     /// Adds a finished job; jobs that never ran or have no sample are skipped.
     pub fn record(&mut self, j: &Job) {
+        if j.started_ms > 0
+            && j.ended_ms >= j.started_ms
+            && matches!(
+                j.state,
+                crate::types::JobState::Ok | crate::types::JobState::Failed
+            )
+        {
+            let r = self
+                .runtime
+                .entry((j.repo.clone(), j.argv.clone()))
+                .or_default();
+            r.push_back((j.ended_ms - j.started_ms) as u64);
+            if r.len() > KEEP_PER_COMMAND {
+                r.pop_front();
+            }
+        }
         if j.peak_rss == 0 || j.started_ms == 0 {
             return;
         }
@@ -64,6 +82,15 @@ impl History {
         if t.len() > KEEP_PER_TOOLCHAIN {
             t.pop_front();
         }
+    }
+
+    /// Expected run time of a command, ms: the 90th percentile of its last
+    /// 20 runs that ended on their own, with at least 3; `None` otherwise.
+    pub fn expected_runtime(&self, repo: &str, argv: &[String]) -> Option<u64> {
+        self.runtime
+            .get(&(repo.to_string(), argv.to_vec()))
+            .filter(|v| v.len() >= 3)
+            .map(p90)
     }
 
     /// Expected peak memory of a job, bytes.
@@ -191,6 +218,31 @@ mod tests {
             peak_rss: rss,
             wait_reason: String::new(),
         }
+    }
+
+    #[test]
+    fn expected_runtime_needs_three_finished_runs() {
+        let mut h = History::default();
+        let argv = vec!["cargo".to_string(), "test".to_string()];
+        let mut j = job("a", "cargo test", "rust", 0);
+        assert_eq!(h.expected_runtime("a", &argv), None);
+        for ms in [10_000, 20_000] {
+            j.ended_ms = j.started_ms + ms;
+            h.record(&j);
+        }
+        assert_eq!(h.expected_runtime("a", &argv), None);
+        j.state = JobState::Cancelled;
+        j.ended_ms = j.started_ms + 1;
+        h.record(&j);
+        assert_eq!(
+            h.expected_runtime("a", &argv),
+            None,
+            "a cancelled run says nothing"
+        );
+        j.state = JobState::Failed;
+        j.ended_ms = j.started_ms + 30_000;
+        h.record(&j);
+        assert_eq!(h.expected_runtime("a", &argv), Some(30_000));
     }
 
     #[test]

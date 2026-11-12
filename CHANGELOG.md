@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.1 — 2026-11-12
+
+- Upgrades no longer stop every build behind one long job. After `systemctl --user reload
+  slot`, admission is held for at most 60 s (`--upgrade-hold`, 0 never holds); if a job still
+  runs, jobs start again and the next hold begins when the running jobs are expected to end
+  within 60 s (from earlier runs of the same command in the same repository) or none runs. The
+  daemon re-executes at the first moment no job runs. `slot status` shows `upgrade pending: …`
+  until then. The design document describes a handover re-exec that keeps running jobs (not
+  built).
+- `slot cancel <id>` cancels a queued or running job: a running job's process group gets
+  SIGTERM, then SIGKILL after 5 s, as when its client goes away. Only the user who submitted
+  the job may cancel it. Before, `slot cancel 12` was queued as a build running a command named
+  `cancel`.
+- A command not found on `PATH` is refused at once (`slot: cancle: not found in PATH; not
+  queued`, exit 127) instead of waiting in the queue and failing when it starts.
+
 ## 0.5.0 — 2026-11-12
 
 - Call mode: while a call uses the microphone or the camera, the headroom goes up to the call

@@ -520,3 +520,82 @@ node-test 1.8 GiB, go 0.8 GiB.
 The check repeats every 2 s and once more after the slots are granted: a job that finds memory
 gone gives its slots back and waits again. The client gets one `slot: job N waiting: …` line per
 kind of reason; the job carries `wait_reason` for `slot status` and the UI.
+
+## 15. Upgrading while jobs run
+
+### 15.1 Bounded hold (0.5.1)
+
+Up to 0.5.0, `systemctl --user reload slot` stopped admission until no job ran, then re-executed.
+On 2026-11-12 the reload to 0.5.0 came at 17:07:12 while one `cargo test` job ran; every
+other build on the host queued behind it (up to 25 jobs) until it was stopped and the daemon
+re-executed at 17:23:37, 16 min 25 s later.
+
+0.5.1 bounds the hold (`server/upgrade.rs`, a pure state machine tested without a daemon):
+
+- On SIGHUP with the pool idle, re-execute at once.
+- Otherwise hold admission for at most `--upgrade-hold` (default 60 s, 0 never holds).
+- If a job still runs when the hold ends, open admission, log it, and keep the upgrade pending.
+- Hold again when every running job is predicted to end within the hold, or re-execute as soon
+  as the pool is idle, whichever comes first. A job's prediction is the 90th percentile of the
+  run time of its last 20 runs of the same `(repo, argv)` that ended on their own, with at least
+  3 (`admission::History::expected_runtime`). A job with no prediction, or past it, blocks a new
+  hold; only idle then triggers the switch.
+- Admission stays open at least 10 s between holds, so queued jobs start.
+
+`State.upgrade` carries one line for `slot status` (`upgrade pending: …`). The cost: on a busy
+host the switch can wait for an idle moment that never comes; the queue keeps moving meanwhile,
+which is the property that matters. 15.2 removes the wait.
+
+### 15.2 Handover re-exec (design, not built)
+
+Goal: re-execute at once on reload, with jobs running, and keep them: their processes, slots,
+output streams and clients. `exec` keeps the pid, so the job processes stay children of the
+daemon and `waitid` on them keeps working in the new image. What is lost on `exec` is every
+userspace object: threads (output pumps, the jobserver reader), tokio tasks (client writers),
+the in-memory job table and every file descriptor marked `FD_CLOEXEC` (all of ours: Rust opens
+with `O_CLOEXEC`).
+
+Sequence in the old process, on SIGHUP:
+
+1. Stop accepting: stop polling the listener; new clients queue in the kernel backlog.
+2. Quiesce: tell each pump thread to stop after the frame it is sending, wait for the client
+   writer tasks to flush, and stop the jobserver reader. Bytes the job writes meanwhile stay in
+   its stdout/stderr pipe (64 KiB each by default); a job that fills it blocks for the moment of
+   the switch, nothing is lost. Bounded: if a step does not finish in 2 s, fall back to 15.1.
+3. Return pool tokens the daemon itself holds for waiters not yet granted, so only tokens owned by
+   jobs are out of the FIFO.
+4. Write `state_dir/handover.json` (mode 0600, `"version": 1`):
+   - listener fd, jobserver FIFO fd (same FIFO path; it is not recreated);
+   - pool: size, limit, reserve, `held_back`;
+   - per running job: the `Job` record, pid, `held` tokens, fds of its stdout and stderr read
+     ends, fd of its client connection, the client's uid, the tracker's last sample, path
+     rewrite pair;
+   - per queued job: the `Request` and its client fd (so queued clients no longer resubmit);
+   - headroom, call-mode tracker and upgrade counters.
+5. Clear `FD_CLOEXEC` on exactly those fds (`fcntl(F_SETFD, 0)`), then `exec` with
+   `SLOT_HANDOVER=<path>` in the environment.
+
+In the new process, before binding anything:
+
+1. Read and delete the file. Unknown `version`, or any fd that is not open or not of the expected
+   type (`fstat`: socket, FIFO, pipe), aborts the adoption of that item only.
+2. Set `FD_CLOEXEC` back on every adopted fd, so jobs started later do not inherit them.
+3. Adopt the listener and the FIFO; build the pool from the recorded counts without writing
+   tokens.
+4. For each running job: restore the table entry, start pumps on its pipe fds and a writer on its
+   client fd, and `waitid` on its pid. A job whose pid is gone (it ended during the switch) is
+   reaped by that `waitid` with its real exit code, because it is still our child.
+5. Re-queue the queued jobs in their old order.
+
+Failure handling: the old image is gone after `exec`, so the new binary must read every format
+version an older release writes, and must start even if the file is unreadable. Fallback for an
+unreadable file: kill each listed pid's process group, write the recorded `held` tokens back, and
+close the client fds, so their clients report `connection to daemon lost` (exit 3) as today
+after a restart. A job's output ring (last 256 KiB shown in the UI) is not carried; the UI shows
+output from the switch on.
+
+Tests: a two-binary integration test (old binary from the previous tag, new from the tree) that
+reloads with a job printing a counter every 10 ms and checks no line is lost or doubled, the exit
+code reaches the client, and the pool returns to `size` free; and a fault test per fallback path.
+
+Out of scope: `systemctl restart`, which ends the process and all its children by design.

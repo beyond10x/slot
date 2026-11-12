@@ -38,6 +38,7 @@ fn start_with(tokens: usize, admission: crate::admission::Limits) -> Fixture {
         call_ignore: Vec::new(),
         sccache_watch: false,
         admission,
+        upgrade_hold: Duration::from_secs(60),
     };
     let server = Server::new(cfg.clone()).unwrap();
     let s = Arc::clone(&server);
@@ -171,6 +172,20 @@ fn a_pending_upgrade_holds_admission() {
 }
 
 #[test]
+fn a_hold_that_runs_out_admits_the_queued_jobs() {
+    let f = start(1);
+    let running = send(&f.socket, sh(&f.root, "sleep 0.5"));
+    std::thread::sleep(Duration::from_millis(150));
+    f.server.hold_admission();
+    let queued = send(&f.socket, sh(&f.root, "echo after"));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!f.server.upgrade_step(upgrade::Step::Release));
+    assert_eq!(collect(running).code, 0);
+    let r = collect(queued);
+    assert_eq!((r.code, r.started, r.out.as_str()), (0, true, "after\n"));
+}
+
+#[test]
 fn second_job_waits_for_the_slot() {
     let f = start(1);
     let first = send(&f.socket, sh(&f.root, "sleep 1"));
@@ -220,6 +235,76 @@ fn client_disconnect_kills_job_and_returns_token() {
     assert!(gone, "job still running after client disconnect");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(f.server.pool().free(), 1);
+}
+
+fn cancel(f: &Fixture, id: i64) -> Res {
+    run(
+        f,
+        Request {
+            cancel: Some(id),
+            ..Request::default()
+        },
+    )
+}
+
+#[test]
+fn slot_cancel_stops_a_queued_and_a_running_job() {
+    let f = start(1);
+    let marker = f.root.join("pid");
+    let running = send(
+        &f.socket,
+        sh(
+            &f.root,
+            &format!("echo $$ > {}; sleep 30", marker.display()),
+        ),
+    );
+    let mut pid = 0;
+    for _ in 0..200 {
+        if let Ok(s) = std::fs::read_to_string(&marker)
+            && let Ok(p) = s.trim().parse::<i32>()
+        {
+            pid = p;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(pid > 0, "job did not start");
+    let queued = send(&f.socket, sh(&f.root, "true"));
+    std::thread::sleep(Duration::from_millis(300));
+
+    let r = cancel(&f, 2);
+    assert_eq!(r.code, 0, "{r:?}");
+    let q = collect(queued);
+    assert_eq!(q.code, 130, "{q:?}");
+    assert!(q.info.contains("cancelled by `slot cancel`"), "{q:?}");
+    assert!(!q.started);
+
+    let r = cancel(&f, 1);
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(collect(running).code, 130);
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(f.server.pool().free(), 1);
+
+    let r = cancel(&f, 99);
+    assert_eq!(r.code, 1);
+    assert!(r.info.contains("not queued or running"), "{r:?}");
+}
+
+#[test]
+fn a_command_not_on_path_is_refused_without_queueing() {
+    let f = start(1);
+    let mut req = sh(&f.root, "x");
+    req.argv = vec!["cancle".into(), "12".into()];
+    let r = run(&f, req);
+    assert_eq!(r.code, 127, "{r:?}");
+    assert!(
+        r.info.contains("cancle: not found in PATH; not queued"),
+        "{r:?}"
+    );
+    assert_eq!(run(&f, sh(&f.root, "true")).code, 0);
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 1, "{log}");
 }
 
 #[test]
@@ -312,6 +397,7 @@ fn history_survives_restart() {
         call_ignore: Vec::new(),
         sccache_watch: false,
         admission: crate::admission::Limits::default(),
+        upgrade_hold: Duration::from_secs(60),
     })
     .unwrap();
     let st = again.state();

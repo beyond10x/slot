@@ -32,7 +32,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Cmd {
     /// Run the daemon: the slot pool, the job queue and the web UI.
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Bridge stdin/stdout to the daemon's socket (remote clients run this over ssh).
     Proxy(ProxyArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
@@ -41,6 +41,9 @@ pub enum Cmd {
     Status(StatusArgs),
     /// Show or set the headroom: the share of the CPU kept free for you.
     Headroom(HeadroomArgs),
+    /// Cancel a queued or running job you submitted; a running job's
+    /// processes get SIGTERM, then SIGKILL after 5 s.
+    Cancel(CancelArgs),
     /// List agent sessions that build outside the pool, with their commands.
     Sessions(SessionsArgs),
     /// Agent hooks: refuse a build command that would run outside the pool.
@@ -121,6 +124,12 @@ pub struct ServeArgs {
     /// runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway.
     #[arg(long, default_value_t = 4.0, value_name = "GB")]
     pub min_free_memory: f64,
+    /// After `systemctl --user reload slot`, the longest time no new job
+    /// starts while jobs still run, seconds. Then jobs start again, and the
+    /// next hold begins when the running jobs are expected to end within it
+    /// (from earlier runs of the same command) or none runs. 0 never holds.
+    #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+    pub upgrade_hold: u64,
 }
 
 /// `slot proxy` options.
@@ -158,6 +167,20 @@ pub struct HeadroomArgs {
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
+}
+
+/// `slot cancel` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct CancelArgs {
+    /// Job id, as `slot status` shows it (`#12` or `12`).
+    #[arg(value_parser = parse_job_id)]
+    pub id: i64,
+}
+
+fn parse_job_id(s: &str) -> Result<i64, String> {
+    s.trim_start_matches('#')
+        .parse()
+        .map_err(|_| format!("not a job id: {s}"))
 }
 
 /// `slot sessions` options.
@@ -237,6 +260,7 @@ impl ServeArgs {
                 min_free_memory: gb_bytes(self.min_free_memory),
                 min_free_disk: gb_bytes(self.min_free_disk),
             },
+            upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
         })
     }
 }

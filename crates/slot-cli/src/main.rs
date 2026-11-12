@@ -25,6 +25,7 @@ fn main() -> ExitCode {
                 0
             })
         }
+        Cmd::Cancel(args) => Ok(client::cancel(args.id, &Settings::from_env())),
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);
             if args.json {

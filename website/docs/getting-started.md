@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.5.0
+version=0.5.1
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -97,7 +97,11 @@ slot: job 3 waited 5s for a build slot, ran 0s
 ```
 
 Ctrl-C, or any signal that ends `slot`, cancels the job: the daemon kills the job's process group
-and returns its slots to the pool.
+and returns its slots to the pool. From another shell, `slot cancel 3` does the same for job 3, if
+you submitted it; the job's own `slot` exits with 130.
+
+A command that is not on `PATH` is refused before it is queued:
+`slot: cancle: not found in PATH; not queued`, exit 127.
 
 `slot status` lists the pool and every queued and running job:
 
@@ -140,9 +144,13 @@ mv ~/.local/bin/slot.new ~/.local/bin/slot
 systemctl --user reload slot
 ```
 
-Reload sends SIGHUP. From then on the daemon starts no new job: new and queued jobs stay
-queued, and the running ones finish. When none is running, it replaces itself with the new
-binary, same process id. The wait is as long as the longest job running at the reload.
+Reload sends SIGHUP. The daemon replaces itself with the new binary, same process id, at the
+first moment no job runs. To reach that moment it holds admission: for up to 60 s no new job
+starts while the running ones finish. If a job still runs after 60 s, jobs start again, and the
+next hold begins when every running job is expected to end within 60 s (the 90th percentile of
+its last runs of the same command in the same repository, at least 3) or when none runs.
+`--upgrade-hold` sets the 60 s; 0 never holds. Until the switch, `slot status` shows a line
+starting `upgrade pending:`.
 
 A queued job's connection closes when the daemon replaces itself. Its client prints
 `slot: daemon upgrading, resubmitting job`, waits for the new daemon's socket (up to 10 minutes,

@@ -224,6 +224,10 @@ pub fn render(s: &State) -> String {
         out.push_str(&s.call_apps.join(", "));
         out.push_str(" in a call, headroom raised\n");
     }
+    if !s.upgrade.is_empty() {
+        out.push_str(&s.upgrade);
+        out.push('\n');
+    }
     let w = &s.sccache;
     if w.enabled && (w.servers > 0 || w.refills > 0) {
         out.push_str(&sccache_line(w, s.now_ms));
@@ -391,6 +395,21 @@ mod tests {
             ..State::default()
         };
         assert_eq!(render(&s), "4 slots, 4 free, 0 running, 0 queued\n");
+    }
+
+    #[test]
+    fn a_pending_upgrade_is_shown_under_the_pool() {
+        let s = State {
+            tokens: 4,
+            free: 4,
+            upgrade: "upgrade pending: re-executing at the first moment no job runs".into(),
+            ..State::default()
+        };
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n\
+             upgrade pending: re-executing at the first moment no job runs\n"
+        );
     }
 
     #[test]
