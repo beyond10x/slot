@@ -169,13 +169,27 @@ daemon.
 
 Build scripts and tests run arbitrary code on the server. slot assumes the workstation and the
 server are one trust domain: one user, a private network (LAN or a VPN overlay), not exposed
-publicly. Remote mode uses plain ssh to `slot proxy` and rsync; it does not restrict what the ssh
-key can run.
+publicly.
 
-## Not built yet
+### Restrict the key to slot
 
-- **A restricted ssh command.** An `authorized_keys` forced command that accepts only the sync and
-  run steps.
+`slot shell` is a forced command for the server's `~/.ssh/authorized_keys`:
+
+```text
+command="/usr/local/bin/slot shell",restrict ssh-ed25519 AAAA… workstation
+```
+
+ssh then runs `slot shell` for every connection with that key, and it runs only the steps of
+remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
+--sender` from the workspace root or the cache root's `target/`), `slot proxy` and `slot cancel
+<id>`. Anything else exits 126 with `slot shell: refused: …`. rsync options that name another
+file or program (`-e`, `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are
+refused, as are `..` in paths, shell operators and quotes that would expand. `restrict` turns off
+port, agent and X11 forwarding and the terminal. Pass `--ws-root`, `--cache-root` or
+`--state-dir` to `slot shell` when `slot serve` uses other values.
+
+This narrows the key to slot's protocol. It is not a sandbox: a job is any command, so whoever
+holds the key can still run code on the server as that user through `slot proxy`.
 
 ## Measured
 

@@ -14,6 +14,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Cmd::Serve(args) => serve(&args).map(|()| 0),
         Cmd::Proxy(args) => proxy(&args.socket),
+        Cmd::Shell(args) => Ok(shell(&args)),
         Cmd::Run(args) => Ok(build(&args.command, cli.local, &cli.fetch)),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
@@ -60,6 +61,44 @@ fn build(argv: &[String], local: bool, fetch: &[String]) -> i32 {
     let mut s = Settings::from_env();
     s.fetch = fetch.to_vec();
     client::run(argv, &s)
+}
+
+/// `slot shell`: the forced command of a build server's ssh key. Exits
+/// 126 for a command that is not a remote step.
+fn shell(args: &slot::cli::ShellArgs) -> i32 {
+    use slot::shell::Plan;
+    use std::os::unix::process::CommandExt;
+    let line = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
+    let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/"), Into::into);
+    let ws = args
+        .ws_root
+        .clone()
+        .unwrap_or_else(|| args.state_dir.join("ws"));
+    let cache = args
+        .cache_root
+        .clone()
+        .unwrap_or_else(|| args.state_dir.join("cache"));
+    match slot::shell::plan(&line, &home, &ws, &cache) {
+        Ok(Plan::Rsync(rsync_args)) => {
+            let e = std::process::Command::new("rsync").args(rsync_args).exec();
+            eprintln!("slot shell: rsync: {e}");
+            127
+        }
+        Ok(Plan::Proxy) => proxy(&args.socket).unwrap_or_else(|e| {
+            eprintln!("slot shell: {e:#}");
+            3
+        }),
+        Ok(Plan::Cancel(id)) => {
+            let mut s = Settings::from_env();
+            s.host = None;
+            s.socket.clone_from(&args.socket);
+            client::cancel(id, &s)
+        }
+        Err(e) => {
+            eprintln!("slot shell: refused: {e}");
+            126
+        }
+    }
 }
 
 fn serve(args: &slot::cli::ServeArgs) -> Result<()> {
