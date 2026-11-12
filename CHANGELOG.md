@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-12
 
 - `contrib/slot-shim`: a `PATH` shim for `cargo` and `go` that sends build, check, test, clippy,
   doc, bench and install through slot and runs every other subcommand directly, so agent shells
   build through the pool without a `slot` prefix. Install steps in the agent-integration guide.
+- Test binaries no longer start one thread per core while their job holds one slot:
+  `RUST_TEST_THREADS` and `NEXTEST_TEST_THREADS` default to `slot serve --test-threads` (a
+  quarter of the pool, at least 2) in rust jobs and in wrapper jobs such as `slot task check` or
+  `slot bash script.sh`; `GOMAXPROCS` defaults to the slots held in go jobs and to
+  `--test-threads` in wrapper jobs. A value the caller set is kept.
+- New toolchain `node-test` for `playwright test`, vitest and jest: the job holds one slot per
+  worker, read from `--workers`/`-j` or `--maxWorkers`/`--max-workers`, 4 without a flag.
+- `slot status` prints the pool and every queued and running job. A command named `status` now
+  needs `slot run status`.
 
 ## 0.1.0 — 2026-11-12
 

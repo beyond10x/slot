@@ -57,6 +57,9 @@ pub struct Config {
     pub tokens: usize,
     /// Tokens a go job holds.
     pub go_tokens: usize,
+    /// Default thread count of test runners in a job (`RUST_TEST_THREADS`,
+    /// `NEXTEST_TEST_THREADS`, `GOMAXPROCS`) when the caller sets none.
+    pub test_threads: usize,
     /// Jobserver FIFO and job log.
     pub state_dir: PathBuf,
     /// Where remote clients sync workspaces.
@@ -505,6 +508,7 @@ impl Server {
             jobserver_auth: self.pool.auth(),
             held: tokens,
             free_tokens: self.pool.free(),
+            test_threads: self.cfg.test_threads,
             cache_dir: if req.workspace.is_some() {
                 self.cfg.cache_root.to_string_lossy().into_owned()
             } else {

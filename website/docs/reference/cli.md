@@ -30,6 +30,7 @@ slot serve [OPTIONS]
 - `--http`: Web UI address; `off` disables it (default `127.0.0.1:7411`)
 - `--tokens`: Build slots in the pool (jobserver tokens); default: the number of CPUs
 - `--go-tokens`: Slots a go job holds; go's -p is set to match (default `4`)
+- `--test-threads`: Threads a test runner in a job may use when the caller sets none: `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (go jobs get their slot count). Default: a quarter of the pool, at least 2
 - `--state-dir`: Jobserver FIFO and job log
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs and caches for synced workspaces (default: `<state-dir>/cache`)
@@ -56,3 +57,13 @@ slot run [OPTIONS] <COMMAND>...
 ```
 
 - `<COMMAND>`: The command and its arguments
+
+### `slot status`
+
+Show the pool and every queued and running job
+
+```text
+slot status [OPTIONS]
+```
+
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)

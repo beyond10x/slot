@@ -28,8 +28,10 @@ How a tool shares the pool depends on whether it speaks the jobserver protocol:
 - **Commands:** `cargo`, any `cargo-*` binary, `rustc`.
 - **Slots:** 1. cargo and rustc read further tokens from the FIFO.
 - **Sets:** `MAKEFLAGS` and `CARGO_MAKEFLAGS` with the jobserver; `RUST_TEST_THREADS` and
-  `NEXTEST_TEST_THREADS` to the free slots at start, at least 2, unless already set. In remote
-  mode, `CARGO_TARGET_DIR=<cache-root>/target/<workspace-id>`.
+  `NEXTEST_TEST_THREADS` to `slot serve --test-threads` (default a quarter of the pool, at least
+  2), unless already set. A test binary does not read the jobserver, so without this it starts
+  one thread per core while its job holds one slot. In remote mode,
+  `CARGO_TARGET_DIR=<cache-root>/target/<workspace-id>`.
 - **Crosses to a remote server:** `CARGO_*` except `CARGO_TARGET_DIR`, `CARGO_HOME` and
   `CARGO_BUILD_JOBS`; `RUST*`; `NEXTEST_*`; `INSTA_*`; `SQLX_OFFLINE`.
 - **Not synced:** `/target/`.
@@ -38,32 +40,48 @@ How a tool shares the pool depends on whether it speaks the jobserver protocol:
 
 - **Commands:** `go`, `gotestsum`, `golangci-lint`.
 - **Slots:** `slot serve --go-tokens`, default 4, at most the pool size.
-- **Sets:** `GOFLAGS` gets `-p=<slots held>` appended to any value the caller had; the jobserver
-  variables are removed. In remote mode, `GOCACHE=<cache-root>/go-build`, shared by all
-  workspaces (the Go build cache is safe for concurrent use).
+- **Sets:** `GOFLAGS` gets `-p=<slots held>` appended to any value the caller had;
+  `GOMAXPROCS=<slots held>` unless already set, which also caps `t.Parallel()` tests inside one
+  package; the jobserver variables are removed. In remote mode, `GOCACHE=<cache-root>/go-build`,
+  shared by all workspaces (the Go build cache is safe for concurrent use).
 - **Crosses to a remote server:** `GO*` except `GOCACHE`, `GOPATH`, `GOROOT`, `GOMODCACHE` and
   `GOTMPDIR`; `CGO_ENABLED`.
 - **Not synced:** nothing beyond `.gitignore` and `.git`.
-- **Not capped:** tests that call `t.Parallel()` inside one package run up to `GOMAXPROCS`
-  threads. Setting `GOMAXPROCS` would change test behaviour, so slot leaves it alone.
 
 ```shell-session
 $ slot go env GOFLAGS
 -p=4
 ```
 
+## node-test
+
+- **Commands:** `playwright test`, `vitest` and `jest`, also behind `npx`, `yarn`, `pnpm exec` or
+  `bunx`, or as a path such as `node_modules/.bin/vitest`.
+- **Slots:** one per worker: the value of `--workers` or `-j` (playwright), or `--maxWorkers` or
+  `--max-workers` (vitest, jest), as a number or a percentage of the cores. Without one of those
+  flags, 4. Pass the flag: without it the runner still starts about one worker per core.
+- **Sets:** nothing; the jobserver variables are removed.
+- **Crosses to a remote server:** `CI`, `NODE_ENV`, `NODE_OPTIONS`, `PLAYWRIGHT_*`, `VITEST_*`,
+  `JEST_*`.
+- **Not synced:** `/node_modules/`.
+
+A browser started by a playwright worker uses more than one core; one slot per worker undercounts
+it.
+
 ## other
 
 - **Commands:** everything else, for example `task`, `make`, `just`, `sh`.
 - **Slots:** 1.
 - **Sets:** `MAKEFLAGS` and `CARGO_MAKEFLAGS` with the jobserver, so cargo or make started inside
-  shares the pool. In remote mode, `CARGO_TARGET_DIR` and `GOCACHE` as for rust and go.
+  shares the pool; `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` to
+  `slot serve --test-threads`, unless already set, so test binaries and go commands inside a
+  wrapper are capped too. In remote mode, `CARGO_TARGET_DIR` and `GOCACHE` as for rust and go.
 - **Crosses to a remote server:** the union of the rust and go lists.
 - **Not synced:** `/target/`.
 
-A go command inside a wrapper is not a jobserver client and is not capped. `slot task check` that
-runs `go test` holds one slot while go uses as many cores as it likes; call `slot go test`
-directly where that matters.
+go reads `GOMAXPROCS` for its default `-p`, so `slot task check` that runs `go test` uses
+`--test-threads` cores rather than all of them, while the wrapper holds one slot. Call
+`slot go test` directly where go should hold its own slots.
 
 All toolchains also pass `TERM`, `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TZ`, `LANG` and
 `LC_ALL` to a remote server. `SLOT_ENV` adds more names; see

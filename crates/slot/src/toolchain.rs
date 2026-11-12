@@ -18,7 +18,33 @@ pub struct Context {
     pub cache_dir: String,
     /// Workspace id; empty in local mode.
     pub workspace_id: String,
+    /// Default parallelism of test runners that do not speak the jobserver
+    /// protocol (libtest, nextest, Go test binaries); 0 means the free tokens.
+    pub test_threads: usize,
 }
+
+impl Context {
+    fn test_threads(&self) -> usize {
+        if self.test_threads > 0 {
+            self.test_threads
+        } else {
+            self.free_tokens.max(2)
+        }
+    }
+}
+
+/// Sets each of `keys` to `n` unless the caller already set it.
+fn default_threads(mut env: Vec<String>, keys: &[&str], n: usize) -> Vec<String> {
+    for k in keys {
+        if get(&env, k).is_none() {
+            env.push(format!("{k}={n}"));
+        }
+    }
+    env
+}
+
+/// Test-runner variables slot sets when the caller has not.
+pub const RUST_TEST_VARS: &[&str] = &["RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"];
 
 /// One build tool family.
 pub trait Toolchain: Send + Sync {
@@ -46,6 +72,9 @@ pub fn registry(go_parallel: usize) -> Vec<Box<dyn Toolchain>> {
         Box::new(Go {
             parallel: go_parallel,
         }),
+        Box::new(NodeTest {
+            workers: NODE_TEST_WORKERS,
+        }),
         Box::new(Generic),
     ]
 }
@@ -57,10 +86,14 @@ pub fn names() -> Vec<&'static str> {
 
 /// The toolchain for `argv`.
 pub fn for_argv(argv: &[String], go_parallel: usize) -> Box<dyn Toolchain> {
-    registry(go_parallel)
+    let tc = registry(go_parallel)
         .into_iter()
         .find(|t| t.matches(argv))
-        .unwrap_or_else(|| Box::new(Generic))
+        .unwrap_or_else(|| Box::new(Generic));
+    if tc.name() == NodeTest::NAME {
+        return Box::new(NodeTest::from_argv(argv));
+    }
+    tc
 }
 
 fn base(argv: &[String]) -> &str {
@@ -134,13 +167,7 @@ impl Toolchain for Cargo {
             let dir = Path::new(&c.cache_dir).join("target").join(&c.workspace_id);
             env = set(env, "CARGO_TARGET_DIR", &dir.to_string_lossy());
         }
-        let threads = c.free_tokens.max(2).to_string();
-        for k in ["RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"] {
-            if get(&env, k).is_none() {
-                env.push(format!("{k}={threads}"));
-            }
-        }
-        env
+        default_threads(env, RUST_TEST_VARS, c.test_threads())
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -190,7 +217,7 @@ impl Toolchain for Go {
             let dir = Path::new(&c.cache_dir).join("go-build");
             env = set(env, "GOCACHE", &dir.to_string_lossy());
         }
-        env
+        default_threads(env, &["GOMAXPROCS"], n)
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -205,6 +232,109 @@ impl Toolchain for Go {
 
     fn sync_excludes(&self) -> &'static [&'static str] {
         &[]
+    }
+}
+
+/// Slots a JavaScript test run holds when its command names no worker count.
+pub const NODE_TEST_WORKERS: usize = 4;
+
+/// JavaScript and browser test runners: `playwright test`, vitest, jest,
+/// also behind npx, yarn, pnpm or bunx. They start about one worker per core
+/// unless told otherwise and do not speak the jobserver protocol, so the job
+/// holds one slot per worker: the count from `--workers`/`-j` (playwright) or
+/// `--maxWorkers`/`--max-workers` (vitest, jest), `N` or `N%` of the cores,
+/// else [`NODE_TEST_WORKERS`].
+pub struct NodeTest {
+    /// Slots the job holds.
+    pub workers: usize,
+}
+
+impl NodeTest {
+    /// Toolchain name.
+    pub const NAME: &'static str = "node-test";
+
+    /// The runner `argv` starts, if any.
+    pub fn runner(argv: &[String]) -> Option<&'static str> {
+        for (i, a) in argv.iter().take(5).enumerate() {
+            match Path::new(a).file_name().and_then(|s| s.to_str()) {
+                Some("vitest") => return Some("vitest"),
+                Some("jest") => return Some("jest"),
+                Some("playwright") if argv.get(i + 1).is_some_and(|n| n == "test") => {
+                    return Some("playwright");
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The toolchain for one command line.
+    pub fn from_argv(argv: &[String]) -> Self {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        Self {
+            workers: worker_flag(argv, cores).unwrap_or(NODE_TEST_WORKERS),
+        }
+    }
+}
+
+/// Worker count named on a test runner's command line.
+fn worker_flag(argv: &[String], cores: usize) -> Option<usize> {
+    const FLAGS: &[&str] = &["--workers", "-j", "--maxWorkers", "--max-workers"];
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        let value = match a.split_once('=') {
+            Some((k, v)) if FLAGS.contains(&k) => v.to_string(),
+            _ if FLAGS.contains(&a.as_str()) => it.next()?.clone(),
+            _ => continue,
+        };
+        return count(&value, cores);
+    }
+    None
+}
+
+fn count(v: &str, cores: usize) -> Option<usize> {
+    if let Some(p) = v.strip_suffix('%') {
+        let p: f64 = p.parse().ok()?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        return Some(((cores as f64 * p / 100.0).floor() as usize).max(1));
+    }
+    v.parse().ok().filter(|n| *n > 0)
+}
+
+impl Toolchain for NodeTest {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn matches(&self, argv: &[String]) -> bool {
+        Self::runner(argv).is_some()
+    }
+
+    fn tokens(&self) -> usize {
+        self.workers.max(1)
+    }
+
+    fn env(&self, _c: &Context, env: Vec<String>) -> Vec<String> {
+        unset(env, STRIPPED)
+    }
+
+    fn client_env(&self, name: &str) -> bool {
+        matches!(name, "CI" | "NODE_ENV" | "NODE_OPTIONS")
+            || ["PLAYWRIGHT_", "VITEST_", "JEST_"]
+                .iter()
+                .any(|p| name.starts_with(p))
+            || common_client_env(name)
+    }
+
+    fn sync_excludes(&self) -> &'static [&'static str] {
+        &["/node_modules/"]
     }
 }
 
@@ -233,7 +363,9 @@ impl Toolchain for Generic {
             let go = Path::new(&c.cache_dir).join("go-build");
             env = set(env, "GOCACHE", &go.to_string_lossy());
         }
-        env
+        let n = c.test_threads();
+        let env = default_threads(env, RUST_TEST_VARS, n);
+        default_threads(env, &["GOMAXPROCS"], n)
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -270,9 +402,72 @@ mod tests {
             ("make -j8", "other"),
             ("gofmt -l .", "other"),
             ("cargofake build", "other"),
+            ("yarn vitest run --maxWorkers=4", "node-test"),
+            ("npx playwright test -c a.ts", "node-test"),
+            ("pnpm exec jest", "node-test"),
+            ("/repo/node_modules/.bin/vitest", "node-test"),
+            ("npx playwright install chromium", "other"),
+            ("yarn typecheck", "other"),
         ] {
             assert_eq!(for_argv(&argv(cmd), 4).name(), want, "{cmd}");
         }
+    }
+
+    #[test]
+    fn node_test_holds_one_slot_per_worker() {
+        for (cmd, want) in [
+            ("yarn vitest run --maxWorkers=3 a.test.ts", 3),
+            ("yarn vitest run --maxWorkers 6", 6),
+            ("npx playwright test --workers=2", 2),
+            ("npx playwright test -j 5", 5),
+            ("npx jest --max-workers=50%", 10),
+            ("npx playwright test", NODE_TEST_WORKERS),
+            ("npx playwright test -- --workers=9", NODE_TEST_WORKERS),
+            ("yarn vitest run --maxWorkers=0", NODE_TEST_WORKERS),
+            ("yarn vitest run --maxWorkers", NODE_TEST_WORKERS),
+        ] {
+            let a = argv(cmd);
+            let got = worker_flag(&a, 20).unwrap_or(NODE_TEST_WORKERS);
+            assert_eq!(got, want, "{cmd}");
+        }
+        assert_eq!(NodeTest { workers: 0 }.tokens(), 1);
+    }
+
+    #[test]
+    fn test_runners_get_a_default_thread_count() {
+        let c = Context {
+            jobserver_auth: "fifo:/p".into(),
+            held: 4,
+            free_tokens: 18,
+            test_threads: 5,
+            ..Context::default()
+        };
+        let cargo = Cargo.env(&c, v(&["RUST_TEST_THREADS=1"]));
+        assert!(
+            cargo.contains(&"RUST_TEST_THREADS=1".to_string()),
+            "{cargo:?}"
+        );
+        assert!(
+            cargo.contains(&"NEXTEST_TEST_THREADS=5".to_string()),
+            "{cargo:?}"
+        );
+        let generic = Generic.env(&c, v(&["PATH=/bin"]));
+        for want in [
+            "RUST_TEST_THREADS=5",
+            "NEXTEST_TEST_THREADS=5",
+            "GOMAXPROCS=5",
+        ] {
+            assert!(
+                generic.contains(&want.to_string()),
+                "missing {want} in {generic:?}"
+            );
+        }
+        let go = Go { parallel: 4 }.env(&c, v(&[]));
+        assert!(go.contains(&"GOMAXPROCS=4".to_string()), "{go:?}");
+        let go = Go { parallel: 4 }.env(&c, v(&["GOMAXPROCS=2"]));
+        assert!(
+            go.contains(&"GOMAXPROCS=2".to_string()) && !go.contains(&"GOMAXPROCS=4".to_string())
+        );
     }
 
     #[test]
@@ -342,6 +537,7 @@ mod tests {
             "HOME",
             "CARGO_TARGET_DIR",
             "GOCACHE",
+            "CI_JOB_TOKEN",
         ] {
             for tc in registry(4) {
                 assert!(!tc.client_env(name), "{} forwards {name}", tc.name());

@@ -15,5 +15,6 @@ pub mod procstat;
 pub mod proto;
 pub mod rewrite;
 pub mod server;
+pub mod status;
 pub mod toolchain;
 pub mod types;

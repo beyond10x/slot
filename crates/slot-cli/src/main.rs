@@ -15,6 +15,10 @@ fn main() -> ExitCode {
         Cmd::Serve(args) => serve(&args).map(|()| 0),
         Cmd::Proxy(args) => proxy(&args.socket),
         Cmd::Run(args) => Ok(build(&args.command, cli.local)),
+        Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
+            print!("{}", slot::status::render(&s));
+            0
+        }),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
                 .into_iter()

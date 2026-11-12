@@ -37,6 +37,8 @@ pub enum Cmd {
     Proxy(ProxyArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
+    /// Show the pool and every queued and running job.
+    Status(StatusArgs),
     /// Any other command is run as a build: `slot cargo test -p foo`.
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -57,6 +59,11 @@ pub struct ServeArgs {
     /// Slots a go job holds; go's -p is set to match.
     #[arg(long, default_value_t = 4)]
     pub go_tokens: usize,
+    /// Threads a test runner in a job may use when the caller sets none:
+    /// `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS`
+    /// (go jobs get their slot count). Default: a quarter of the pool, at least 2.
+    #[arg(long)]
+    pub test_threads: Option<usize>,
     /// Jobserver FIFO and job log.
     #[arg(long, default_value_os_t = paths::default_state_dir())]
     pub state_dir: PathBuf,
@@ -94,6 +101,14 @@ pub struct RunArgs {
     pub command: Vec<String>,
 }
 
+/// `slot status` options.
+#[derive(Debug, Clone, Args)]
+pub struct StatusArgs {
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
 fn default_tokens() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
@@ -106,11 +121,13 @@ impl ServeArgs {
         } else {
             Some(self.http.parse()?)
         };
+        let tokens = self.tokens.unwrap_or_else(default_tokens);
         Ok(crate::server::Config {
             socket: self.socket.clone(),
             http,
-            tokens: self.tokens.unwrap_or_else(default_tokens),
+            tokens,
             go_tokens: self.go_tokens,
+            test_threads: self.test_threads.unwrap_or((tokens / 4).max(2)),
             ws_root: self
                 .ws_root
                 .clone()

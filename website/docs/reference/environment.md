@@ -30,7 +30,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 |---|---|
 | `SLOT_JOB` | the job id, used to attribute sccache CPU time to the job |
 | `MAKEFLAGS`, `CARGO_MAKEFLAGS` | `-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo`, for rust and other jobs |
-| `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | free slots at start, at least 2; rust jobs, unless the caller set them |
+| `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2); rust and other jobs, unless the caller set them |
+| `GOMAXPROCS` | slots held for go jobs; `--test-threads` for other jobs; unless the caller set it |
 | `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs |
 | `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
