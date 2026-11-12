@@ -43,6 +43,9 @@ pub enum Cmd {
     Serve(Box<ServeArgs>),
     /// Bridge stdin/stdout to the daemon's socket (remote clients run this over ssh).
     Proxy(ProxyArgs),
+    /// ssh forced command for a build server: runs only the sync, fetch,
+    /// proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`.
+    Shell(ShellArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -154,6 +157,23 @@ pub struct ProxyArgs {
     /// The daemon's socket.
     #[arg(long, env = "SLOT_SOCKET", default_value_os_t = paths::default_socket())]
     pub socket: PathBuf,
+}
+
+/// `slot shell` options. Give the same roots as `slot serve` if you changed them there.
+#[derive(Debug, Clone, Args)]
+pub struct ShellArgs {
+    /// The daemon's socket, for `slot proxy`.
+    #[arg(long, env = "SLOT_SOCKET", default_value_os_t = paths::default_socket())]
+    pub socket: PathBuf,
+    /// The daemon's state directory.
+    #[arg(long, default_value_os_t = paths::default_state_dir())]
+    pub state_dir: PathBuf,
+    /// Where remote clients sync workspaces (default: `<state-dir>/ws`).
+    #[arg(long)]
+    pub ws_root: Option<PathBuf>,
+    /// Target dirs of synced workspaces (default: `<state-dir>/cache`).
+    #[arg(long)]
+    pub cache_root: Option<PathBuf>,
 }
 
 /// `slot run` arguments.

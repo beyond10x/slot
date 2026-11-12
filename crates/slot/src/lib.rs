@@ -21,6 +21,7 @@ pub mod rewrite;
 pub mod sccache;
 pub mod server;
 pub mod sessions;
+pub mod shell;
 pub mod status;
 pub mod toolchain;
 pub mod types;

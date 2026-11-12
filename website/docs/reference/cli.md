@@ -58,6 +58,19 @@ slot proxy [OPTIONS]
 
 - `--socket`: The daemon's socket (env `SLOT_SOCKET`)
 
+### `slot shell`
+
+ssh forced command for a build server: runs only the sync, fetch, proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`
+
+```text
+slot shell [OPTIONS]
+```
+
+- `--socket`: The daemon's socket, for `slot proxy` (env `SLOT_SOCKET`)
+- `--state-dir`: The daemon's state directory
+- `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
+- `--cache-root`: Target dirs of synced workspaces (default: `<state-dir>/cache`)
+
 ### `slot run`
 
 Run a build command; use this when the command's name is also a slot subcommand

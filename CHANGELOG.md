@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.0 — 2026-11-12
+
+- `slot shell`: an ssh forced command for a build server. With
+  `command="/path/to/slot shell",restrict` on the key in `authorized_keys`, the key runs only
+  the steps of remote mode: the sync into the workspace root, a fetch from the workspace root or
+  the cache root's `target/`, `slot proxy` and `slot cancel <id>`. Anything else, rsync options
+  that name another file or program, `..` in paths and shell operators exit 126 with
+  `slot shell: refused: …`. Tested against a KVM guest. It narrows the key; it is not a
+  sandbox, since a job is any command.
+
 ## 0.9.0 — 2026-11-12
 
 - Build servers seed a new worktree's target directory from the most recently used one of the

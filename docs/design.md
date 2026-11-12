@@ -116,7 +116,8 @@ A single static binary on `PATH` (Go; see §10).
 ### 3.3 Transport and access
 
 - ssh with a dedicated key whose `authorized_keys` entry has
-  `command="slot-shell",restrict`. `slot-shell` accepts only `sync` (rsync server side) and `run`.
+  `command="/path/to/slot shell",restrict`. `slot shell` accepts only the sync and fetch rsync
+  steps inside the workspace and cache roots, `slot proxy` and `slot cancel <id>`.
 - Network path: LAN or a private overlay (WireGuard/Tailscale). Not exposed publicly.
 
 ## 4. Agent integration
@@ -281,12 +282,12 @@ Differences:
   by that job lives in the group and would die with it. On cancel the group is killed.
 - The web UI (live timeline, slot usage, cores per toolchain, live output) was not in the draft.
 
+Built after the first draft, tested against a KVM guest (§ 16): `.slot.toml` with `local`
+command prefixes (0.7.0), `--fetch` (0.8.0), reflink seeding and budget eviction of server target
+dirs (0.9.0), and the forced command, named `slot shell` instead of a separate `slot-shell`
+binary (0.10.0).
+
 Not built yet:
-- `--fetch` of artifacts back to the client.
-- Reflink seeding of a new workspace's target dir, and disk-budget eviction of target dirs.
-- ssh forced-command (`command="slot-shell",restrict`); remote mode uses plain ssh to
-  `slot proxy` and rsync.
-- `.slot.toml` per-repo config (tests that must run `--local`).
 - Memory limit per job exists as `--memory-max` (systemd scope) but is off by default and untested.
 
 ## 11. Measuring the whole host, and an adaptive pool
@@ -675,4 +676,13 @@ Seeding and eviction (`server/cache.rs`), measured on the same guest with the ca
 
 The budget counts each target directory in full, so reflinked copies count once per worktree
 although they share blocks: xfs showed 4.2 GB used for two directories recorded as 9.7 GB.
+
+The forced command (`slot shell`, `shell.rs`) on the same guest, with a second key whose
+`authorized_keys` line is `command="…/slot shell --cache-root …",restrict`: a build, a build with
+`--fetch target/debug/ess` (410 MB back) and `slot cancel` (client exit 130) all ran through it.
+Refused with exit 126: no command, `id`, `bash -c id`, `slot proxy; id`, a fetch of
+`.ssh/authorized_keys`, a sync into `.ssh/`, `--rsync-path=sh`, `cat /etc/hostname`. A local port
+forward through the key failed with `administratively prohibited`. The rsync client in server mode
+sends `-logDtpre.iLsfxCIvu`: the `e` before `.` marks protocol capabilities, so `slot shell`
+accepts `e` only there; the first unit tests had refused every sync for it.
 
