@@ -54,8 +54,11 @@ A call is any of:
   corked is `idle`, so it does not count; neither does a recording of a sink monitor.
 - a process of yours that holds `/dev/video*` open. Browsers read the camera this way.
 
-Level meters and mixers capture too, so `pavucontrol`, `pwvucontrol`, `easyeffects`, `helvum`,
-`qpwgraph`, `coppwr` and `noisetorch` are ignored. `slot serve --call-ignore a,b` replaces the
+Level meters, mixers and dictation capture too, so `claude` (Claude Code's voice input),
+`pavucontrol`, `pwvucontrol`, `easyeffects`, `helvum`, `qpwgraph`, `coppwr` and `noisetorch` are
+ignored. A name in the list matches the application name, its binary, or the name of its
+process; an ALSA program shows up in PipeWire as `PipeWire ALSA [...]`, so its process name is
+what counts. `slot serve --call-ignore a,b` replaces the
 list; `--call-headroom` sets the default call value and `--call-off-after` the delay in seconds.
 Without `pw-dump` only camera use is seen, and `slot headroom` says so.
 

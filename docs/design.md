@@ -473,7 +473,11 @@ Detection, every 5 s, in `call::probe`:
 - `/proc/*/fd` of the user's processes for `/dev/video*`, except `pipewire` and `wireplumber`:
   Chromium and Firefox read the camera through V4L2, not PipeWire. One pass took 47 ms.
 - Ignored applications (`--call-ignore`): level meters, mixers and patchbays, which capture
-  without being a call.
+  without being a call, and `claude`. A test daemon on the operator's desktop on 2026-11-12 saw
+  a running capture `PipeWire ALSA [2.1.322]` with no call on: a Claude Code process recording
+  voice input through ALSA. Its application name and binary carry only the version, so a stream
+  is matched by the `comm` of the client's `application.process.id` as well, and an ALSA client
+  is shown by that name.
 
 State (`call::Tracker`): the first probe that sees a call raises the headroom to the call value
 when that is higher, without saving it, so a restart during a call comes back with the

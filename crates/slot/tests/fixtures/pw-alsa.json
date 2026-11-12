@@ -1,0 +1,9 @@
+[
+  {"id": 60, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Audio/Source", "node.name": "alsa_input.pci-0000_00_1f.3.analog-stereo"}}},
+  {"id": 86, "type": "PipeWire:Interface:Client", "info": {"props": {"application.name": "PipeWire ALSA [2.1.322]", "application.process.binary": "2.1.322", "application.process.id": 4100}}},
+  {"id": 87, "type": "PipeWire:Interface:Client", "info": {"props": {"application.name": "PipeWire ALSA [zoom]", "application.process.binary": "zoom", "application.process.id": 4200}}},
+  {"id": 100, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "PipeWire ALSA [2.1.322]", "client.id": 86, "media.name": "ALSA Capture", "node.name": "alsa_capture.2.1.322"}}},
+  {"id": 101, "type": "PipeWire:Interface:Node", "info": {"state": "running", "props": {"media.class": "Stream/Input/Audio", "application.name": "PipeWire ALSA [zoom]", "client.id": "87", "media.name": "ALSA Capture", "node.name": "alsa_capture.zoom"}}},
+  {"id": 110, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 60, "input-node-id": 100, "state": "active"}},
+  {"id": 111, "type": "PipeWire:Interface:Link", "info": {"output-node-id": 60, "input-node-id": 101, "state": "active"}}
+]

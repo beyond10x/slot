@@ -22,8 +22,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// Applications that capture without being a call: level meters, mixers,
-/// patchbays and filters.
+/// patchbays, filters, and Claude Code's voice input (`claude`), which
+/// records while the operator dictates.
 pub const DEFAULT_IGNORE: &[&str] = &[
+    "claude",
     "pavucontrol",
     "pwvucontrol",
     "easyeffects",
@@ -49,19 +51,53 @@ fn flag(props: &Value, key: &str) -> bool {
     }
 }
 
-fn ignored(name: &str, binary: &str, ignore: &[String]) -> bool {
+fn ignored(names: &[&str], ignore: &[String]) -> bool {
     ignore.iter().any(|i| {
-        let i = i.to_ascii_lowercase();
-        name.to_ascii_lowercase() == i || binary.to_ascii_lowercase() == i
+        names
+            .iter()
+            .any(|n| !n.is_empty() && n.eq_ignore_ascii_case(i))
     })
 }
 
+fn int(props: &Value, key: &str) -> Option<i64> {
+    match props.get(key)? {
+        Value::Number(n) => n.as_i64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// `/proc/<pid>/comm` of a process.
+pub fn comm(pid: i64) -> Option<String> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    Some(s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Names of the applications that capture from a microphone or a camera in
-/// a `pw-dump` document, sorted, without duplicates.
-pub fn capturing_apps(dump: &Value, ignore: &[String]) -> Vec<String> {
+/// a `pw-dump` document, sorted, without duplicates. `comm_of` names the
+/// process behind a client pid: an ALSA client calls itself `PipeWire ALSA
+/// [<binary>]`, so its process name is what the ignore list and the shown
+/// name use.
+pub fn capturing_apps(
+    dump: &Value,
+    ignore: &[String],
+    comm_of: &dyn Fn(i64) -> Option<String>,
+) -> Vec<String> {
     let Some(objects) = dump.as_array() else {
         return Vec::new();
     };
+    let mut client_pid: HashMap<i64, i64> = HashMap::new();
+    for o in objects {
+        if o.get("type").and_then(Value::as_str) != Some("PipeWire:Interface:Client") {
+            continue;
+        }
+        if let (Some(id), Some(pid)) = (
+            o.get("id").and_then(Value::as_i64),
+            int(&o["info"]["props"], "application.process.id"),
+        ) {
+            client_pid.insert(id, pid);
+        }
+    }
     let mut sources = HashSet::new();
     let mut streams: HashMap<i64, String> = HashMap::new();
     for o in objects {
@@ -93,8 +129,16 @@ pub fn capturing_apps(dump: &Value, ignore: &[String]) -> Vec<String> {
                 .or_else(|| prop(props, "node.name"))
                 .unwrap_or("unknown");
             let binary = prop(props, "application.process.binary").unwrap_or("");
-            if !ignored(app, binary, ignore) {
-                streams.insert(id, app.to_string());
+            let pid = int(props, "application.process.id")
+                .or_else(|| int(props, "client.id").and_then(|c| client_pid.get(&c).copied()));
+            let process = pid.and_then(comm_of).unwrap_or_default();
+            if !ignored(&[app, binary, &process], ignore) {
+                let shown = if app.starts_with("PipeWire ALSA") && !process.is_empty() {
+                    process
+                } else {
+                    app.to_string()
+                };
+                streams.insert(id, shown);
             }
         }
     }
@@ -145,7 +189,7 @@ pub fn camera_users(ignore: &[String]) -> Vec<String> {
         }
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
         let comm = comm.trim();
-        if comm.is_empty() || CAMERA_SERVICES.contains(&comm) || ignored(comm, comm, ignore) {
+        if comm.is_empty() || CAMERA_SERVICES.contains(&comm) || ignored(&[comm], ignore) {
             continue;
         }
         out.insert(comm.to_string());
@@ -187,7 +231,7 @@ pub fn pw_dump(deadline: Duration) -> Option<Value> {
 /// holders, sorted, without duplicates.
 pub fn probe(ignore: &[String]) -> Vec<String> {
     let mut apps: BTreeSet<String> = pw_dump(Duration::from_secs(3))
-        .map(|d| capturing_apps(&d, ignore))
+        .map(|d| capturing_apps(&d, ignore, &comm))
         .unwrap_or_default()
         .into_iter()
         .collect();
@@ -327,10 +371,31 @@ mod tests {
         DEFAULT_IGNORE.iter().map(|s| (*s).to_string()).collect()
     }
 
+    fn no_comm(_: i64) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn dictation_into_claude_code_is_no_call_and_alsa_clients_go_by_process() {
+        let comm_of = |pid: i64| match pid {
+            4100 => Some("claude".to_string()),
+            4200 => Some("zoom".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            capturing_apps(&fixture("pw-alsa.json"), &defaults(), &comm_of),
+            vec!["zoom".to_string()]
+        );
+        assert_eq!(
+            capturing_apps(&fixture("pw-alsa.json"), &[], &comm_of),
+            vec!["claude".to_string(), "zoom".to_string()]
+        );
+    }
+
     #[test]
     fn an_idle_desktop_is_no_call() {
         assert_eq!(
-            capturing_apps(&fixture("pw-idle.json"), &defaults()),
+            capturing_apps(&fixture("pw-idle.json"), &defaults(), &no_comm),
             Vec::<String>::new()
         );
     }
@@ -338,7 +403,7 @@ mod tests {
     #[test]
     fn a_running_capture_from_the_microphone_is_a_call() {
         assert_eq!(
-            capturing_apps(&fixture("pw-call.json"), &defaults()),
+            capturing_apps(&fixture("pw-call.json"), &defaults(), &no_comm),
             vec!["Chromium".to_string()]
         );
     }
@@ -346,12 +411,12 @@ mod tests {
     #[test]
     fn a_corked_stream_a_level_meter_and_a_sink_monitor_are_no_call() {
         assert_eq!(
-            capturing_apps(&fixture("pw-not-a-call.json"), &defaults()),
+            capturing_apps(&fixture("pw-not-a-call.json"), &defaults(), &no_comm),
             Vec::<String>::new()
         );
         let none: Vec<String> = Vec::new();
         assert_eq!(
-            capturing_apps(&fixture("pw-not-a-call.json"), &none),
+            capturing_apps(&fixture("pw-not-a-call.json"), &none, &no_comm),
             vec!["pavucontrol".to_string()],
             "only the ignore list keeps the level meter out"
         );
