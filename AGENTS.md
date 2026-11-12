@@ -105,12 +105,18 @@ An unknown `/api/` path answers 404, so a client can tell an older daemon from a
 Every commit, push, tag and GitHub write is `b10x-bot[bot]` through `b10x-gates bot --repository
 beyond10x/slot` and `b10x-gates api`. Never push, tag or write to GitHub as a person.
 
+Standing exception: agents working on slot commit, merge, tag and release without asking each
+time, under the operator's standing instruction of 2026-11-12 ("from time to time you issue some
+commits of your own code and cut releases"; "always update your documentation when you make a
+release"). Every commit still goes through the bot and a pull request below.
+
 `main` takes changes only through a pull request whose required checks passed
 (`common / Security and privacy`, `gate`, `Build documentation`); a direct push is refused.
 
 1. Push a branch as the bot and open the PR with `b10x-gates gh --repo . --repository
    beyond10x/slot -- pr create --base main --head <branch> --title … --body-file <file>`.
-2. `gh pr checks <n> -R beyond10x/slot --required --watch`.
+2. `gh pr checks <n> -R beyond10x/slot --required --watch`, run in the background: the session
+   must not block on it.
 3. Merge as the bot with a merge commit through the API: `{"merge_method":"merge","sha":"<head>"}`
    to `PUT /repos/beyond10x/slot/pulls/<n>/merge` with `b10x-gates api`. `gh pr merge` refuses
    (it reads the merge state without the bot's bypass), and a rebase merge makes GitHub the
@@ -142,6 +148,24 @@ Bare SemVer tags (`0.1.0`).
    target/release-assets/SHA256SUMS`.
 6. Report released only after the release author is `b10x-bot[bot]` and the downloaded assets
    pass `sha256sum -c`.
+
+### Concurrent releases
+
+Several agents may prepare releases at once. Version numbers are not reserved in advance.
+
+- A release PR takes the next minor (or patch) after the newest tag on `origin/main` only when it
+  is next in the merge queue and ready to merge.
+- The PR behind it waits for that merge, then soft-resets onto `origin/main`, bumps
+  `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`, `version=` in `website/docs/getting-started.md`
+  and the plugin manifests, and re-commits as the bot.
+- One agent owns the live reload at a time. It reloads only after the previous release is
+  installed, never while another reload is pending.
+
+## Live daemon
+
+Change the live daemon only through `slot` commands, `systemctl --user reload slot` and the HTTP
+API. Writing tokens into the live jobserver FIFO by hand is a last resort for a verified leak
+(every FIFO holder listed from `/proc/*/fd`, tokens counted), reported with the numbers.
 
 ## Never
 
