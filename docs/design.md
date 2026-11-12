@@ -347,3 +347,56 @@ the queue is non-empty) and does not oscillate.
    history in `jobs.jsonl` (median CPU seconds and run time per repository and argv prefix), so
    short checks are not stuck behind release builds.
 4. Whether memory, not CPU, is the binding limit for parallel link and test phases.
+
+## 12. Why dependencies compile again and again (measured 2026-11-12)
+
+Question: the live view shows the same dependency crates compiling in job after job. Is that
+avoidable work?
+
+Method: a sampler read `/proc` every 0.25 s for 15 minutes (11:36–11:51 CET) and recorded every
+`rustc` process with `--crate-name`: crate, `-C metadata`, `--out-dir`, working directory and the
+`RUSTC_WRAPPER`, `SLOT_JOB` and session variables. sccache counters were read before and after.
+On-disk fingerprints (`target/debug/.fingerprint/<crate>-<hash>/lib-<crate>.json`) were compared
+across 36 target directories. Caveat: sccache runs `rustc` itself to list a crate's inputs, so the
+sampled count includes those calls as well as real compiles.
+
+Findings:
+
+- 4576 of 5216 sampled `rustc` processes (88 %) ran inside slot jobs, one hour after the
+  `cargo`/`go` shim went in.
+- sccache in the window: 460 Rust hits, 289 misses, 1343 calls it cannot cache (822 "multiple
+  input files", 475 "crate-type": proc macros, binaries and test harnesses, which sccache never
+  caches).
+- 304 of 4262 sampled compiles (excluding these experiments) ran with `RUSTC_WRAPPER=""`, sccache
+  switched off by the session. One session gave its reason: the shared sccache server hung on
+  2026-11-10 and 2026-11-11. A hung sccache server stalls every build that uses it, so a health
+  check (`sccache --show-stats` answering within a few seconds) belongs next to idea 1.
+- One worktree's target directory held 11 builds of `reqwest` (3 feature sets, 2 profile hashes)
+  and 10 of `syn` (7 feature sets, 2 profile hashes). Feature sets differ because resolver 2
+  unifies features over the packages selected by `-p`, so `cargo test -p a` and `cargo build -p b`
+  build different variants. Profile hashes differ because some commands set
+  `CARGO_PROFILE_DEV_DEBUG=0` and others use the machine default (`line-tables-only`).
+
+Tested and rejected:
+
+- `SCCACHE_BASEDIRS`: building one workspace cold in two directories gave 77 of 88 Rust hits in
+  the second directory with and without it. Dependencies already hit across directories; the 11
+  misses are the workspace's own crates and build scripts.
+- `resolver.feature-unification = "workspace"` (cargo 1.99.1, stable): cargo parses the key and
+  rejects bad values, but five `cargo check -p` runs over ess compiled 128 units with it and 128
+  without, and left 5 `syn` variants either way. It takes effect only on nightly.
+
+Ideas, none built yet:
+
+1. Keep sccache on: the rust toolchain could warn in the job output when a job sets
+   `RUSTC_WRAPPER` empty while sccache is configured.
+2. One profile per worktree: warn when the same target directory sees jobs with different
+   `CARGO_PROFILE_*` values, since each one builds a full dependency tree.
+3. A workspace-hack crate (`cargo-hakari`) in workspaces with many `-p` selections collapses the
+   feature variants. Repository change; measure variants per crate before and after.
+4. Coalesce identical concurrent jobs: a second job with the same working directory, argv and
+   environment as one already running could attach to its output instead of running again.
+5. sccache size: the cache is at its 20 GiB limit, so least-recently-used entries are evicted.
+   Measure the miss rate after raising it to 40 GiB, against the disk floor of 25 GB free.
+6. Per-job cache numbers in the UI: units compiled, sccache hits and misses for each job, so
+   repeated work shows up where it happens.
