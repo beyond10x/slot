@@ -22,6 +22,7 @@ fn start(tokens: usize) -> Fixture {
         tokens,
         go_tokens: 4,
         test_threads: 2,
+        cpu_quota: false,
         state_dir: root.join("state"),
         ws_root: root.join("ws"),
         cache_root: root.join("cache"),
@@ -260,6 +261,7 @@ fn history_survives_restart() {
         tokens: 1,
         go_tokens: 4,
         test_threads: 2,
+        cpu_quota: false,
         state_dir: f.root.join("state"),
         ws_root: f.root.join("ws"),
         cache_root: f.root.join("cache"),
@@ -271,4 +273,58 @@ fn history_survives_restart() {
     let st = again.state();
     assert_eq!(st.done.len(), 1);
     assert_eq!(st.done[0].exit, 4);
+}
+
+#[test]
+fn headroom_lowers_the_limit_and_is_saved() {
+    let f = start(2);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let v = rt.block_on(Arc::clone(&f.server).set_headroom(50));
+    assert_eq!(v.effective_tokens, 1);
+    assert_eq!(v.headroom_percent, 50);
+    assert_eq!(v.cpu_quota_percent, None, "cpu quota is off in tests");
+    assert_eq!(f.server.state().limit, 1);
+    let first = send(&f.socket, sh(&f.root, "sleep 1"));
+    std::thread::sleep(Duration::from_millis(150));
+    let t0 = Instant::now();
+    let r = run(&f, sh(&f.root, "true"));
+    assert_eq!(r.code, 0);
+    assert!(
+        t0.elapsed() >= Duration::from_millis(700),
+        "second job ran beside the first with 1 of 2 tokens circulating: {:?}",
+        t0.elapsed()
+    );
+    assert_eq!(collect(first).code, 0);
+    assert_eq!(limits::load(&f.root.join("state")).headroom_percent, 50);
+    let v = rt.block_on(Arc::clone(&f.server).set_headroom(0));
+    assert_eq!(v.effective_tokens, 2);
+}
+
+#[test]
+fn settings_change_needs_json_from_the_daemons_own_origin() {
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    let mut h = HeaderMap::new();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    assert_eq!(
+        http::refuse_change(&h, 7411).map(|r| r.0),
+        Some(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+    );
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    assert_eq!(http::refuse_change(&h, 7411), None);
+    h.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://example.com"),
+    );
+    assert_eq!(
+        http::refuse_change(&h, 7411).map(|r| r.0),
+        Some(StatusCode::FORBIDDEN)
+    );
+    h.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://127.0.0.1:7411"),
+    );
+    assert_eq!(http::refuse_change(&h, 7411), None);
 }

@@ -15,6 +15,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_REMOTE` | `slot` | the slot executable on the remote host |
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
 | `SLOT_SOCKET` | `$XDG_RUNTIME_DIR/slot.sock` | the local daemon's socket |
+| `SLOT_HTTP` | `127.0.0.1:7411` | the daemon's web address for `slot status` and `slot headroom` |
 
 ## Read by the daemon
 

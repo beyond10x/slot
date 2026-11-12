@@ -102,7 +102,7 @@ The daemon reads the log back at start, so the web UI shows recent jobs across r
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
 shows:
 
-- slots in use out of the pool,
+- slots in use out of the pool, and the **headroom for you** slider ([Headroom](headroom.md)),
 - a timeline with one bar per job, coloured by toolchain; the pale part of a bar is the wait for
   a slot,
 - cores in use by slot jobs per toolchain, and by the whole host,
@@ -112,4 +112,5 @@ shows:
 
 It keeps the last 500 finished jobs in memory (`--keep-jobs`). The UI has no authentication;
 keep it on a loopback address. The same data is available as JSON from `/api/state`, as a stream
-of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/output`.
+of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/output`. `/api/limits`
+reads and sets the headroom.

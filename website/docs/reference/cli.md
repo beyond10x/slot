@@ -31,6 +31,7 @@ slot serve [OPTIONS]
 - `--tokens`: Build slots in the pool (jobserver tokens); default: the number of CPUs
 - `--go-tokens`: Slots a go job holds; go's -p is set to match (default `4`)
 - `--test-threads`: Threads a test runner in a job may use when the caller sets none: `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (go jobs get their slot count). Default: a quarter of the pool, at least 2
+- `--cpu-quota`: Whether a headroom also sets systemd `CPUQuota` on the daemon unit, a hard cap on every job together; `false` keeps only the token limit (default `true`)
 - `--state-dir`: Jobserver FIFO and job log
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs and caches for synced workspaces (default: `<state-dir>/cache`)
@@ -66,4 +67,15 @@ Show the pool and every queued and running job
 slot status [OPTIONS]
 ```
 
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+### `slot headroom`
+
+Show or set the headroom: the share of the CPU kept free for you
+
+```text
+slot headroom [OPTIONS] [PERCENT]
+```
+
+- `<PERCENT>`: New headroom, percent, 0 to 50; without it, prints the current one
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)

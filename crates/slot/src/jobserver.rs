@@ -25,6 +25,10 @@ pub struct Pool {
 #[derive(Default)]
 struct Inner {
     queue: VecDeque<Arc<Mutex<WaiterState>>>,
+    /// Tokens the daemon keeps out of circulation: size minus the limit.
+    reserve: usize,
+    /// Tokens the daemon holds back now; grows to `reserve` as tokens return.
+    held_back: usize,
 }
 
 struct WaiterState {
@@ -100,9 +104,62 @@ impl Pool {
         format!("fifo:{}", self.path.display())
     }
 
-    /// Queues a request for `n` tokens (capped at the pool size).
+    /// Tokens in circulation once every withheld token is back: the pool
+    /// size minus the reserve.
+    pub fn limit(&self) -> usize {
+        self.size - self.inner.lock().expect("jobserver lock").reserve
+    }
+
+    /// Tokens the daemon holds back now.
+    pub fn held_back(&self) -> usize {
+        self.inner.lock().expect("jobserver lock").held_back
+    }
+
+    /// Sets how many tokens circulate, 1 to the pool size. Lowering it takes
+    /// tokens out as running jobs return them (a token a process holds
+    /// cannot be revoked); raising it writes held-back tokens back at once.
+    /// Queued requests larger than the new limit shrink to it.
+    pub fn set_limit(&self, limit: usize) -> usize {
+        let limit = limit.clamp(1, self.size);
+        let mut inner = self.inner.lock().expect("jobserver lock");
+        inner.reserve = self.size - limit;
+        if inner.held_back > inner.reserve {
+            let back = inner.held_back - inner.reserve;
+            inner.held_back = inner.reserve;
+            self.write(back);
+        }
+        let mut done = false;
+        if let Some(h) = inner.queue.front() {
+            let mut st = h.lock().expect("waiter lock");
+            if !st.cancelled && !st.granted && st.n > limit {
+                st.n = limit;
+                if st.got >= st.n {
+                    let surplus = st.got - st.n;
+                    st.got = st.n;
+                    st.granted = true;
+                    if let Some(tx) = st.tx.take() {
+                        let _ = tx.send(());
+                    }
+                    self.write(surplus);
+                    done = true;
+                }
+            }
+        }
+        if done {
+            inner.queue.pop_front();
+        }
+        for w in inner.queue.iter().skip(usize::from(!done)) {
+            let mut st = w.lock().expect("waiter lock");
+            st.n = st.n.min(limit);
+        }
+        drop(inner);
+        self.wake.notify_one();
+        limit
+    }
+
+    /// Queues a request for `n` tokens (capped at the limit).
     pub fn acquire(&self, n: usize) -> Waiter {
-        let n = n.clamp(1, self.size);
+        let n = n.clamp(1, self.limit());
         let (tx, rx) = oneshot::channel();
         let state = Arc::new(Mutex::new(WaiterState {
             n,
@@ -173,7 +230,7 @@ impl Pool {
         if !inner.queue.is_empty() {
             return 0;
         }
-        let diff = self.size as i64 - self.free() as i64;
+        let diff = (self.size - inner.held_back) as i64 - self.free() as i64;
         if diff > 0 {
             self.write(diff as usize);
             return diff;
@@ -203,7 +260,7 @@ impl Pool {
         loop {
             {
                 let mut inner = self.inner.lock().expect("jobserver lock");
-                while Self::head(&mut inner).is_none() {
+                while Self::head(&mut inner).is_none() && inner.held_back >= inner.reserve {
                     inner = self.wake.wait(inner).expect("jobserver wait");
                 }
             }
@@ -211,6 +268,10 @@ impl Pool {
                 return;
             }
             let mut inner = self.inner.lock().expect("jobserver lock");
+            if inner.held_back < inner.reserve {
+                inner.held_back += 1;
+                continue;
+            }
             match Self::head(&mut inner) {
                 None => self.write(1),
                 Some(h) => {
@@ -284,6 +345,47 @@ mod tests {
         p.release(3);
         assert_eq!(p.reconcile(), -3);
         assert_eq!(p.free(), 4);
+    }
+
+    #[tokio::test]
+    async fn limit_withholds_and_returns_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 4).unwrap();
+        let mut a = p.acquire(3);
+        assert!(ready_within(&mut a, 1000).await);
+        assert_eq!(p.set_limit(2), 2);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.free(), 0, "the one free token is withheld");
+        assert_eq!(p.held_back(), 1);
+        p.release(3);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.held_back(), 2, "shrinks as tokens return");
+        assert_eq!(p.free(), 2);
+        let mut b = p.acquire(4);
+        assert_eq!(b.tokens(), 2, "requests are capped at the limit");
+        assert!(ready_within(&mut b, 1000).await);
+        p.release(2);
+        assert_eq!(p.set_limit(4), 4);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.held_back(), 0);
+        assert_eq!(p.free(), 4);
+        assert_eq!(p.reconcile(), 0);
+    }
+
+    #[tokio::test]
+    async fn lowering_the_limit_shrinks_a_queued_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 4).unwrap();
+        let mut a = p.acquire(2);
+        assert!(ready_within(&mut a, 1000).await);
+        let mut b = p.acquire(4);
+        assert!(!ready_within(&mut b, 200).await);
+        p.set_limit(2);
+        assert!(ready_within(&mut b, 1000).await, "2 of 2 is enough now");
+        p.release(2);
+        p.release(2);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.free() + p.held_back(), 4);
     }
 
     #[tokio::test]

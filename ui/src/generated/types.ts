@@ -130,6 +130,18 @@ cores: number,
  */
 tokens: number, 
 /**
+ * Tokens that circulate: the pool size less the headroom.
+ */
+limit: number, 
+/**
+ * Share of the CPU kept free for interactive work, percent.
+ */
+headroom_percent: number, 
+/**
+ * CPU quota on the daemon unit, percent of one core; null when not capped.
+ */
+cpu_quota_percent: number | null, 
+/**
  * Tokens free now.
  */
 free: number, 
@@ -257,6 +269,14 @@ t: number,
  * Pool size.
  */
 tokens: number, 
+/**
+ * Tokens that circulate: the pool size less the headroom.
+ */
+limit: number, 
+/**
+ * Share of the CPU kept free for interactive work, percent.
+ */
+headroom_percent: number, 
 /**
  * Tokens free.
  */

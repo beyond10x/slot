@@ -29,6 +29,14 @@ export const store = reactive({
   host: '',
   cores: 0,
   tokens: 0,
+  /** Tokens that circulate: the pool less the headroom. */
+  limit: 0,
+  /** Share of the CPU kept free for interactive work, percent, as the daemon has it. */
+  headroom: 0,
+  /** CPU quota on the daemon unit, percent of one core; null when not capped. */
+  cpuQuota: null as number | null,
+  /** Error of the last headroom change; empty when it went through. */
+  headroomError: '',
   free: 0,
   jobCores: 0,
   sysCpu: 0,
@@ -73,6 +81,9 @@ async function loadState(): Promise<void> {
   store.host = st.host;
   store.cores = st.cores;
   store.tokens = st.tokens;
+  store.limit = st.limit;
+  store.headroom = st.headroom_percent;
+  store.cpuQuota = st.cpu_quota_percent;
   store.free = st.free;
   store.toolchains = st.toolchains;
   store.clock = now();
@@ -84,6 +95,8 @@ function applyTick(m: Tick): void {
   if (m.t <= lastTick) return;
   lastTick = m.t;
   store.tokens = m.tokens;
+  store.limit = m.limit;
+  store.headroom = m.headroom_percent;
   store.free = m.free;
   store.jobCores = m.job_cores;
   store.sysCpu = m.sys_cpu;
@@ -193,4 +206,35 @@ export async function start(): Promise<void> {
 export function select(id: number | null): void {
   store.selected = id;
   if (id === null) store.followNewest = false;
+}
+
+let headroomTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Sends a new headroom to the daemon, 300 ms after the last call. */
+export function setHeadroom(percent: number): void {
+  clearTimeout(headroomTimer);
+  headroomTimer = setTimeout(() => {
+    void (async () => {
+      try {
+        const res = await fetch('api/limits', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ headroom_percent: percent }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).trim()}`);
+        const v = (await res.json()) as {
+          headroom_percent: number;
+          effective_tokens: number;
+          cpu_quota_percent: number | null;
+          note?: string;
+        };
+        store.headroom = v.headroom_percent;
+        store.limit = v.effective_tokens;
+        store.cpuQuota = v.cpu_quota_percent;
+        store.headroomError = v.headroom_percent > 0 && v.cpu_quota_percent === null ? `cpu quota not applied: ${v.note ?? ''}` : '';
+      } catch (e) {
+        store.headroomError = `headroom: ${(e as Error).message}`;
+      }
+    })();
+  }, 300);
 }

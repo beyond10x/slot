@@ -402,3 +402,33 @@ Ideas, none built yet:
    Measure the miss rate after raising it to 40 GiB, against the disk floor of 25 GB free.
 6. Per-job cache numbers in the UI: units compiled, sccache hits and misses for each job, so
    repeated work shows up where it happens.
+
+## 13. Headroom (0.3.0)
+
+Need: during a video call the desktop must keep CPU while agents keep building. The operator moves
+one slider; nothing else changes.
+
+Two limits, because neither is enough alone:
+
+- **Token limit.** The pool keeps `tokens` tokens; with headroom `h` only
+  `max(1, round(tokens × (100 − h) / 100))` circulate. The jobserver reader thread keeps the
+  surplus as it comes back (`held_back` grows to `reserve`); it cannot take a token a compiler
+  holds, so the limit takes effect over seconds. Raising the limit writes the held tokens back at
+  once. Queued requests larger than the new limit shrink to it, so no job waits for a token count
+  that can no longer exist. Reconciliation counts `size − held_back` as the expected total.
+- **CPU quota.** Tokens only count compilers that read the jobserver. Test binaries, linkers'
+  threads and node workers do not. `systemctl --user set-property --runtime slot.service
+  CPUQuota=(100 − h) × cores %` caps the whole cgroup subtree at once, enforced by the kernel.
+  `--runtime` writes a drop-in under `/run` that a reboot drops; the daemon re-applies the saved value
+  on start. An empty `CPUQuota=` clears it at 0 %.
+
+Gaps: jobs under `--memory-max` run in their own `systemd-run --scope` units outside
+`slot.service`, so the quota does not reach them; a daemon not under systemd gets the token limit
+only. Disk IO is not limited: the user manager delegates only `cpu memory pids` to user units, so
+`IOWeight` on `slot.service` has no effect without an `io` delegation drop-in for
+`user@.service`.
+
+Change control: `PUT /api/limits` changes how the whole machine behaves, so it requires a JSON
+content type (a cross-site form post cannot send one without a CORS preflight, which the daemon
+does not answer) and an `Origin` that is absent or the daemon's own `http://127.0.0.1:<port>` or
+`http://localhost:<port>`.

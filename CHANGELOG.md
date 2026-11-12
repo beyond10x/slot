@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — 2026-11-12
+
+- Headroom: a share of the CPU, 0 to 50 %, that builds leave free for interactive work such as a
+  video call. Set it with the **headroom for you** slider in the web UI, `slot headroom <percent>`
+  or `PUT /api/limits`. The daemon withholds that share of the pool's tokens and, when it runs as a
+  systemd user unit, sets `CPUQuota` on its own unit, which caps every job together. The value is
+  saved in `limits.json` and applied again after a restart. `slot serve --cpu-quota false` keeps
+  the token limit only.
+- `/api/state` and the event stream report `limit` (tokens that circulate) and
+  `headroom_percent`; `slot status` shows `X of Y slots (H% headroom)` while a headroom is set.
+- `PUT /api/limits` needs `Content-Type: application/json` and refuses a browser `Origin` other
+  than the daemon's own page.
+
 ## 0.2.0 — 2026-11-12
 
 - `contrib/slot-shim`: a `PATH` shim for `cargo` and `go` that sends build, check, test, clippy,

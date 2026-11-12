@@ -19,6 +19,10 @@ fn main() -> ExitCode {
             print!("{}", slot::status::render(&s));
             0
         }),
+        Cmd::Headroom(args) => slot::status::headroom(&args.http, args.percent).map(|v| {
+            print!("{}", slot::status::render_headroom(&v));
+            0
+        }),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
                 .into_iter()

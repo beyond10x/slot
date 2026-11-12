@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, useTemplateRef } from 'vue';
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import { fmtDur } from '../lib/format.ts';
+import { HEADROOM_STEP, MAX_HEADROOM, headroomCaption } from '../lib/headroom.ts';
 import { fifoQueue, queueSummary, waitStats } from '../lib/queue.ts';
-import { census, jobs, store } from '../store.ts';
+import { census, jobs, setHeadroom, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
 const WINDOWS: ReadonlyArray<[number, string]> = [
@@ -13,7 +14,24 @@ const WINDOWS: ReadonlyArray<[number, string]> = [
   [21600, '6 h'],
 ];
 
-const used = computed(() => Math.max(0, store.tokens - store.free));
+const limit = computed(() => store.limit || store.tokens);
+const used = computed(() => Math.max(0, limit.value - store.free));
+
+/** Slider value; follows the daemon except while the user moves it. */
+const draft = ref(store.headroom);
+let editedAt = 0;
+watch(
+  () => store.headroom,
+  (v) => {
+    if (Date.now() - editedAt > 1500) draft.value = v;
+  },
+);
+function onHeadroom(e: Event): void {
+  editedAt = Date.now();
+  draft.value = Number((e.target as HTMLInputElement).value);
+  setHeadroom(draft.value);
+}
+const caption = computed(() => headroomCaption(store.cores || store.tokens, store.tokens, draft.value));
 const running = computed(() => {
   let n = 0;
   for (const j of jobs.values()) if (j.state === 'running') n++;
@@ -39,9 +57,17 @@ onUnmounted(() => ro?.disconnect());
     <h1>slot · {{ store.host }}<template v-if="store.cores"> · {{ store.cores }} cores</template></h1>
     <span class="conn" :class="{ ok: store.connected }" title="event stream"></span>
     <span v-if="store.error" class="bad">{{ store.error }}</span>
-    <span>slots
-      <span class="tokens"><i v-for="k in store.tokens" :key="k" :class="{ on: k <= used }"></i></span>
-      <b>{{ used }}/{{ store.tokens }}</b></span>
+    <span :title="limit < store.tokens ? `${store.tokens - limit} slot(s) withheld for headroom` : 'slots in use'">slots
+      <span class="tokens"><i v-for="k in store.tokens" :key="k" :class="{ on: k <= used, off: k > limit }"></i></span>
+      <b>{{ used }}/{{ limit }}</b></span>
+    <label class="headroom"
+      title="Share of the CPU kept free for you (browser, video calls). Builds get the rest: fewer slots, and a CPU quota on all build jobs together.">
+      headroom for you
+      <input type="range" min="0" :max="MAX_HEADROOM" :step="HEADROOM_STEP" :value="draft"
+        aria-describedby="headroom-caption" @input="onHeadroom" />
+      <b>{{ draft }}%</b>
+      <span id="headroom-caption" class="muted">{{ caption }}</span></label>
+    <span v-if="store.headroomError" class="bad">{{ store.headroomError }}</span>
     <span>running <b>{{ running }}</b></span>
     <span>queue <b>{{ queue.length }}</b> · longest wait <b>{{ fmtDur(queue.longestS) }}</b></span>
     <span :title="`slot wait (start - enqueue) of ${waits.n} jobs finished in the last 60 min; gave up = cancelled while queued`">
@@ -68,6 +94,9 @@ b { font-variant-numeric: tabular-nums; }
 .tokens { display: inline-flex; gap: 2px; vertical-align: middle; }
 .tokens i { width: 9px; height: 14px; background: #e3e3e3; border-radius: 2px; }
 .tokens i.on { background: #444; }
+.tokens i.off { background: transparent; outline: 1px dashed #bbb; outline-offset: -1px; }
+.headroom { display: inline-flex; gap: 6px; align-items: center; }
+.headroom input { width: 110px; }
 .conn { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: #c33; }
 .conn.ok { background: #2a2; }
 .legend > span { margin-right: 12px; }

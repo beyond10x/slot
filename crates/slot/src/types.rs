@@ -116,6 +116,12 @@ pub struct State {
     pub cores: u32,
     /// Pool size.
     pub tokens: u32,
+    /// Tokens that circulate: the pool size less the headroom.
+    pub limit: u32,
+    /// Share of the CPU kept free for interactive work, percent.
+    pub headroom_percent: u32,
+    /// CPU quota on the daemon unit, percent of one core; null when not capped.
+    pub cpu_quota_percent: Option<u32>,
     /// Tokens free now.
     pub free: u32,
     /// Queued and running jobs.
@@ -145,6 +151,10 @@ pub enum Event {
         t: i64,
         /// Pool size.
         tokens: u32,
+        /// Tokens that circulate: the pool size less the headroom.
+        limit: u32,
+        /// Share of the CPU kept free for interactive work, percent.
+        headroom_percent: u32,
         /// Tokens free.
         free: u32,
         /// Jobs waiting for tokens.
