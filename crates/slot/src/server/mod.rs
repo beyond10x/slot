@@ -1,6 +1,7 @@
 //! `slot serve`: queues jobs on the jobserver pool, runs them, streams output
 //! to the client and publishes live state to the web UI.
 
+pub mod cache;
 mod http;
 pub mod limits;
 mod metrics;
@@ -91,6 +92,10 @@ pub struct Config {
     pub admission: admission::Limits,
     /// Longest time an upgrade stops admission while jobs run; zero never stops it.
     pub upgrade_hold: Duration,
+    /// Bytes the target directories of synced workspaces may take together
+    /// before the least recently used are deleted; 0 = no budget (the disk
+    /// floor still evicts).
+    pub cache_budget: u64,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -767,6 +772,9 @@ impl Server {
             id
         };
         self.publish(id);
+        if let Some(ws) = &req.workspace {
+            self.prepare_cache(&ws.id, &req.repo, &tx).await;
+        }
 
         let ahead = self.pool.waiting();
         let free = self.pool.free();
@@ -964,6 +972,11 @@ impl Server {
             JobState::Failed
         };
         let job = self.finish(id, state, code, cpu);
+        if let Some(ws) = &req.workspace {
+            let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
+            let ws = ws.id.clone();
+            tokio::task::spawn_blocking(move || cache.record_size(&ws));
+        }
         let msg = job.and_then(|j| {
             let wait = j.started_ms - j.enqueued_ms;
             (wait >= 2000).then(|| {
@@ -976,6 +989,65 @@ impl Server {
             })
         });
         (code, msg)
+    }
+
+    /// Workspace ids with a queued or running job.
+    fn busy_workspaces(&self) -> HashSet<String> {
+        let g = self.inner.lock().expect("server lock");
+        g.active
+            .values()
+            .filter(|l| l.job.remote)
+            .filter_map(|l| {
+                Path::new(&l.job.cwd)
+                    .strip_prefix(&self.cfg.ws_root)
+                    .ok()
+                    .and_then(|r| r.components().next())
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+
+    /// Before a remote job of workspace `ws` (repository `repo`) queues:
+    /// records the use, evicts least recently used target directories over
+    /// the budget or the disk floor, and seeds a new workspace's target
+    /// directory by reflink. Says what it did on the job's stderr and in the
+    /// journal.
+    async fn prepare_cache(&self, ws: &str, repo: &str, tx: &mpsc::UnboundedSender<Frame>) {
+        let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
+        let busy = self.busy_workspaces();
+        let budget = self.cfg.cache_budget;
+        let floor = self.cfg.admission.min_free_disk;
+        let (ws, repo) = (ws.to_string(), repo.to_string());
+        let Ok((gone, seeded)) = tokio::task::spawn_blocking(move || {
+            cache.touch(&ws, &repo, now_ms());
+            let gone = cache.evict(budget, floor, &busy);
+            let seeded = cache.seed(&ws, &repo, &busy);
+            (gone, seeded)
+        })
+        .await
+        else {
+            return;
+        };
+        for (id, bytes) in gone {
+            let msg = format!(
+                "slot: deleted the target directory of workspace {id} ({}), least recently used",
+                admission::gb(bytes)
+            );
+            eprintln!("{msg}");
+            let _ = tx.send(Frame::Info { msg });
+        }
+        match seeded {
+            Ok((src, took)) => {
+                let msg = format!(
+                    "slot: target directory seeded from workspace {src} by reflink in {:.1}s",
+                    took.as_secs_f64()
+                );
+                eprintln!("{msg}");
+                let _ = tx.send(Frame::Info { msg });
+            }
+            Err(e) if e.contains("reflink") => eprintln!("slot: target directory not seeded: {e}"),
+            Err(_) => {}
+        }
     }
 
     /// Why job `id` may not start now: its filesystems (`disks`) are short

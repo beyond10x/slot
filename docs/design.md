@@ -664,3 +664,15 @@ Found against the real server, missed by the ssh stand-in:
    was queued left the job without a working directory. Eviction of server target directories skips every workspace
    with a queued or running job for this reason.
 
+Seeding and eviction (`server/cache.rs`), measured on the same guest with the cache root on an
+8 GB xfs filesystem (reflinks), `--cache-budget 5`, three git worktrees of ess at one commit:
+
+| worktree | what slot did | result |
+|---|---|---|
+| first | nothing to seed from | 140 s, 204 units, target dir 4.9 GB |
+| second | seeded from the first by reflink in 0.4 s | 1 s, 0 units (sources older than the copied outputs) |
+| third | deleted the first (least recently used, 4.9 GB; total 9.7 GB over the 5 GB budget), seeded from the second by reflink in 3.8 s | 77 s, 11 units |
+
+The budget counts each target directory in full, so reflinked copies count once per worktree
+although they share blocks: xfs showed 4.2 GB used for two directories recorded as 9.7 GB.
+

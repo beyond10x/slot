@@ -138,6 +138,14 @@ pub struct ServeArgs {
     /// (from earlier runs of the same command) or none runs. 0 never holds.
     #[arg(long, default_value_t = 60, value_name = "SECONDS")]
     pub upgrade_hold: u64,
+    /// For remote clients: GB the target directories of synced workspaces
+    /// may take together. Before a remote job starts, the least recently
+    /// used target directories and their source copies are deleted while
+    /// the total is over this, or while the disk has less than
+    /// `--min-free-disk` free; a workspace with a queued or running job is
+    /// kept. 0: no budget, only the disk floor evicts.
+    #[arg(long, default_value_t = 0.0, value_name = "GB")]
+    pub cache_budget: f64,
 }
 
 /// `slot proxy` options.
@@ -269,6 +277,7 @@ impl ServeArgs {
                 min_free_disk: gb_bytes(self.min_free_disk),
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
+            cache_budget: gb_bytes(self.cache_budget),
         })
     }
 }
