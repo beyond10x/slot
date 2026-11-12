@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0 — 2026-11-12
+
+- `ignite` toolchain: `ignite test` and `ignite conformance` hold one slot per test job (`--jobs`,
+  else 4) and get `IGNITE_TEST_JOBS` set to the slots held (read by ignite 0.16.3 and later);
+  `ignite build` and other subcommands hold one slot; the jobserver is passed down so the Rust
+  target's cargo shares the pool. Before, a `slot ignite test` held one slot while its runner
+  started one test job per core.
+- `contrib/slot-shim` also covers `ignite build|test|conformance`; link it as `ignite` next to
+  `cargo` and `go`. The LLVM target's `clang` reads no jobserver and had run outside the pool.
+- The Claude Code hook also refuses, outside the pool: `tsc`, `vue-tsc`, `eslint`; `vite`,
+  `docusaurus`, `webpack`, `next`, `nuxt`, `astro`, `rollup`, `esbuild` with `build`;
+  package.json scripts named like a build (`pnpm build`, `yarn typecheck`, `npm run test:unit`);
+  `node --test` and `node <script> gate|test|check|…`; `zig build|test|build-exe|build-lib|build-obj`
+  (also `zig.sh`); `pytest` and `python -m pytest`; maven and gradle goals that compile or test;
+  `ignite build|test|conformance` without the shim. Watch, serve and print-only flags pass.
+- The host census counts `ignite`, `zig-compile`, `python-test` and `jvm-build`, so CPU of
+  those tools outside the pool shows in the census and `slot sessions`.
+- Measured coverage of every toolchain seen on one workstation, and why docker build, helm and
+  valgrind stay outside: `docs/design.md` § 17, and the agent integration page.
+
 ## 0.12.0 — 2026-11-12
 
 - Lost build slots come back while the pool is busy. A compiler killed while it held jobserver

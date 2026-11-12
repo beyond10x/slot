@@ -38,6 +38,8 @@ nothing, so a script or Taskfile that prefixes its own builds is safe to run thr
 | `slot go test ./...` | holds a fixed share (4 slots by default), and go's `-p` is set to match |
 | `slot task check`, `slot make` | the wrapper holds one slot and passes the pool down; cargo and make inside share it |
 | `slot yarn vitest run --maxWorkers=4`, `slot npx playwright test --workers=2` | holds one slot per worker; always pass the worker flag, since without it the runner starts about one worker per core while holding 4 slots |
+| `slot ignite test a.ignite --jobs 4`, `slot ignite build a.ignite` | test and conformance hold one slot per `--jobs` (4 without the flag); build holds one, and the Rust target's cargo shares the pool |
+| `slot pnpm build`, `slot npx tsc --noEmit`, `slot scripts/zig.sh build`, `slot pytest -q` | holds one slot |
 | anything else | holds one slot |
 
 Test binaries in rust, go and wrapper jobs get `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and
@@ -84,7 +86,12 @@ Run the command it names. It refuses `cargo` build, check, test, clippy, doc, be
 install subcommands and `go build`, `test`, `vet`, `install` (unless the PATH shim already sends
 them through slot), `make -j…`, `make` and `task` targets named like a build (`check`, `test`,
 `build`, `lint`, `gate`, `verify`, `generate`, `all`; not `deploy`, `dev`, `up`, `watch`), `npm test`, `yarn test`, `pnpm
-test`, and vitest, jest and `playwright test` through npx, bunx, yarn, pnpm or `node_modules/.bin`.
+test`, and vitest, jest and `playwright test` through npx, bunx, yarn, pnpm or `node_modules/.bin`;
+`tsc`, `vue-tsc`, `eslint`, and `vite`/`docusaurus`/`webpack`/`next` `build`; package.json scripts
+named like a build (`pnpm build`, `yarn typecheck`, `npm run test:unit`, not `dev` or `*:watch`);
+`node --test` and `node <script> gate|test|check|…`; `zig build|test` (also `scripts/zig.sh`);
+`pytest` and `python -m pytest`; `mvn`/`gradle` goals that compile or test; `ignite
+build|test|conformance` unless the PATH shim covers it.
 It looks into `bash -c '…'` and every part of `a && b; c | d`, and ignores quoted text, comments
 and heredoc bodies. `slot …`, `SLOT_SHIM_OFF=1 …` and every command inside a slot job (`SLOT_JOB`
 set) pass. The user sets `SLOT_HOOK=warn` (advice as context, nothing refused) or `SLOT_HOOK=off`;

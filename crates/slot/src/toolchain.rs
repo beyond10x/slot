@@ -75,6 +75,7 @@ pub fn registry(go_parallel: usize) -> Vec<Box<dyn Toolchain>> {
         Box::new(NodeTest {
             workers: NODE_TEST_WORKERS,
         }),
+        Box::new(Ignite { tokens: 1 }),
         Box::new(Generic),
     ]
 }
@@ -92,6 +93,9 @@ pub fn for_argv(argv: &[String], go_parallel: usize) -> Box<dyn Toolchain> {
         .unwrap_or_else(|| Box::new(Generic));
     if tc.name() == NodeTest::NAME {
         return Box::new(NodeTest::from_argv(argv));
+    }
+    if tc.name() == Ignite::NAME {
+        return Box::new(Ignite::from_argv(argv));
     }
     tc
 }
@@ -357,6 +361,94 @@ impl Toolchain for NodeTest {
     }
 }
 
+/// The Ignite compiler: `ignite build`, `ignite test`, `ignite conformance`.
+/// Its LLVM target runs `clang` once per compile and link, which reads no
+/// jobserver; its Rust target runs `cargo`, which gets the pool's jobserver
+/// from this job. `ignite test` and `ignite conformance` run the built tests
+/// `--jobs` at a time, the CPU count by default, so the job holds one slot
+/// per test job: `--jobs N`, else [`IGNITE_TEST_JOBS`], and the job's
+/// environment sets `IGNITE_TEST_JOBS` (read by ignite 0.16.3 and later) to
+/// the slots it holds. Every other subcommand holds one slot.
+pub struct Ignite {
+    /// Slots the job holds.
+    pub tokens: usize,
+}
+
+/// Test jobs an `ignite test` without `--jobs` is given.
+pub const IGNITE_TEST_JOBS: usize = 4;
+
+impl Ignite {
+    /// Toolchain name.
+    pub const NAME: &'static str = "ignite";
+
+    /// The subcommand of an `ignite` command line, if `argv` starts `ignite`.
+    pub fn subcommand(argv: &[String]) -> Option<&str> {
+        if base(argv) != "ignite" {
+            return None;
+        }
+        Some(
+            argv[1..]
+                .iter()
+                .map(String::as_str)
+                .find(|a| !a.starts_with('-'))
+                .unwrap_or(""),
+        )
+    }
+
+    /// The toolchain for one command line.
+    pub fn from_argv(argv: &[String]) -> Self {
+        let tokens = match Self::subcommand(argv) {
+            Some("test" | "conformance") => ignite_jobs(argv).unwrap_or(IGNITE_TEST_JOBS),
+            _ => 1,
+        };
+        Self { tokens }
+    }
+}
+
+/// `--jobs N` or `--jobs=N` on an `ignite test` command line.
+fn ignite_jobs(argv: &[String]) -> Option<usize> {
+    let mut it = argv.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        let value = match a.split_once('=') {
+            Some(("--jobs", v)) => v.to_string(),
+            _ if a == "--jobs" => it.next()?.clone(),
+            _ => continue,
+        };
+        return value.parse().ok().filter(|n| *n > 0);
+    }
+    None
+}
+
+impl Toolchain for Ignite {
+    fn name(&self) -> &'static str {
+        Self::NAME
+    }
+
+    fn matches(&self, argv: &[String]) -> bool {
+        Self::subcommand(argv).is_some()
+    }
+
+    fn tokens(&self) -> usize {
+        self.tokens.max(1)
+    }
+
+    fn env(&self, c: &Context, env: Vec<String>) -> Vec<String> {
+        let env = Generic.env(c, env);
+        default_threads(env, &["IGNITE_TEST_JOBS"], c.held.max(1))
+    }
+
+    fn client_env(&self, name: &str) -> bool {
+        name.starts_with("IGNITE_") || Cargo.client_env(name)
+    }
+
+    fn sync_excludes(&self) -> &'static [&'static str] {
+        &["/target/"]
+    }
+}
+
 /// Any other command (task, make, just). Holds one token and passes the
 /// jobserver down, so cargo started inside it shares the pool.
 pub struct Generic;
@@ -427,9 +519,44 @@ mod tests {
             ("/repo/node_modules/.bin/vitest", "node-test"),
             ("npx playwright install chromium", "other"),
             ("yarn typecheck", "other"),
+            ("ignite build x.ignite --target rust", "ignite"),
+            ("/opt/ignite/bin/ignite test a.ignite --jobs 3", "ignite"),
+            ("ignite-load run", "other"),
         ] {
             assert_eq!(for_argv(&argv(cmd), 4).name(), want, "{cmd}");
         }
+    }
+
+    #[test]
+    fn ignite_test_holds_one_slot_per_test_job() {
+        for (cmd, want) in [
+            ("ignite build a.ignite --release", 1),
+            ("ignite check a.ignite", 1),
+            ("ignite test a.ignite", IGNITE_TEST_JOBS),
+            ("ignite test a.ignite --jobs 6", 6),
+            ("ignite test --jobs=2 a.ignite", 2),
+            ("ignite conformance a.ignite --jobs 0", IGNITE_TEST_JOBS),
+            ("ignite test a.ignite -- --jobs 9", IGNITE_TEST_JOBS),
+        ] {
+            assert_eq!(for_argv(&argv(cmd), 4).tokens(), want, "{cmd}");
+        }
+        let c = Context {
+            jobserver_auth: "fifo:/p".into(),
+            held: 3,
+            free_tokens: 10,
+            test_threads: 5,
+            ..Context::default()
+        };
+        let env = Ignite { tokens: 3 }.env(&c, v(&["MAKEFLAGS=-j8"]));
+        assert!(env.contains(&"IGNITE_TEST_JOBS=3".to_string()), "{env:?}");
+        assert!(
+            env.contains(&"CARGO_MAKEFLAGS=-j --jobserver-auth=fifo:/p".to_string()),
+            "{env:?}"
+        );
+        assert!(!env.contains(&"MAKEFLAGS=-j8".to_string()), "{env:?}");
+        let mine = Ignite { tokens: 3 }.env(&c, v(&["IGNITE_TEST_JOBS=1"]));
+        assert_eq!(get(&mine, "IGNITE_TEST_JOBS"), Some("1"));
+        assert!(Ignite { tokens: 1 }.client_env("IGNITE_STD"));
     }
 
     #[test]

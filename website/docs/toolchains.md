@@ -1,6 +1,6 @@
 ---
 title: Toolchains
-description: How slot classifies a command as rust, go or other, what each toolchain sets, and how to add one.
+description: How slot classifies a command as rust, go, node-test, ignite or other, what each toolchain sets, and how to add one.
 ---
 
 # Toolchains
@@ -67,6 +67,21 @@ $ slot go env GOFLAGS
 
 A browser started by a playwright worker uses more than one core; one slot per worker undercounts
 it.
+
+## ignite
+
+- **Commands:** `ignite` (the Ignite compiler), any subcommand. The [PATH shim](agent-integration.md#make-it-the-default-the-path-shim)
+  sends `ignite build`, `test` and `conformance` through slot; `check`, `emit`, `plan`, `run`,
+  `host` and the rest run directly.
+- **Slots:** `ignite test` and `ignite conformance` hold one slot per test job: the value of
+  `--jobs`, else 4. Every other subcommand holds 1. The LLVM target runs `clang` once per compile
+  and link; the Rust target runs `cargo`, which reads more tokens from the FIFO.
+- **Sets:** `MAKEFLAGS` and `CARGO_MAKEFLAGS` with the jobserver, so the Rust target's cargo shares
+  the pool; `IGNITE_TEST_JOBS` to the slots held, unless already set (ignite 0.16.3 and later
+  read it as the default of `--jobs`; older versions run one test job per core); the test-thread
+  variables as for `other`.
+- **Crosses to a remote server:** `IGNITE_*` and the rust list.
+- **Not synced:** `/target/`.
 
 ## other
 

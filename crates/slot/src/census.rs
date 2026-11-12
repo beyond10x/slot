@@ -64,9 +64,23 @@ pub fn class_of(comm: &str, argv: &[String]) -> Option<&'static str> {
         }
         return None;
     }
+    if comm == "java"
+        && argv
+            .iter()
+            .any(|a| a.contains("org.gradle") || a.contains("plexus.classworlds"))
+    {
+        return Some("jvm-build");
+    }
+    if comm == "pytest"
+        || (comm.starts_with("python") && argv.iter().take(4).any(|a| a.ends_with("pytest")))
+    {
+        return Some("python-test");
+    }
     match comm {
         "helm" => Some("helm"),
         "buildkitd" | "docker-buildx" | "buildctl" => Some("container-build"),
+        "ignite" => Some("ignite"),
+        "zig" => Some("zig-compile"),
         _ => None,
     }
 }
@@ -496,6 +510,21 @@ mod tests {
             ),
             ("node", "node server.js", None),
             ("helm", "helm template x", Some("helm")),
+            ("ignite", "ignite test a.ignite", Some("ignite")),
+            ("zig", "zig build test", Some("zig-compile")),
+            (
+                "pytest",
+                "/usr/bin/python3 /venv/bin/pytest -q",
+                Some("python-test"),
+            ),
+            ("python3", "python3 -m pytest tests", Some("python-test")),
+            ("python3", "python3 -m http.server", None),
+            (
+                "java",
+                "java -cp x org.codehaus.plexus.classworlds.launcher.Launcher package",
+                Some("jvm-build"),
+            ),
+            ("java", "java -jar app.jar", None),
             ("ld.lld", "ld.lld -o x", Some("link")),
             ("cargo", "cargo test", None),
             ("bash", "bash -c x", None),

@@ -32,7 +32,7 @@ What it achieves:
 
 An instruction depends on every agent following it. On a machine where every agent session should
 build through slot, install the shim instead: [`contrib/slot-shim`](https://github.com/beyond10x/slot/blob/main/contrib/slot-shim),
-linked as `cargo` and `go` in a directory that agent shells put first on `PATH`.
+linked as `cargo`, `go` and `ignite` in a directory that agent shells put first on `PATH`.
 
 ```sh
 d=~/.local/share/slot
@@ -41,6 +41,7 @@ curl -fsSL -o "$d/slot-shim" https://raw.githubusercontent.com/beyond10x/slot/ma
 chmod +x "$d/slot-shim"
 ln -sfn ../slot-shim "$d/shims/cargo"
 ln -sfn ../slot-shim "$d/shims/go"
+ln -sfn ../slot-shim "$d/shims/ignite"
 ```
 
 Then put `$d/shims` first on `PATH` for agent shells only. For Claude Code, which sets
@@ -62,18 +63,48 @@ What the shim sends through slot:
   `install`, `rustc`, `llvm-cov`, `miri`; global flags such as `+nightly` or `--locked` before the
   subcommand are skipped when finding it.
 - `go build`, `test`, `vet`, `install`.
+- `ignite build`, `test`, `conformance`.
 
-Everything else runs directly: `cargo run`, `cargo fmt`, `cargo metadata`, `go run`, `go mod`. A
+Everything else runs directly: `cargo run`, `cargo fmt`, `cargo metadata`, `go run`, `go mod`,
+`ignite check`, `ignite run`. A
 command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` does not queue its
 cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
 `PATH` the shim runs the real command.
 
 ## Claude Code: refuse builds outside the pool
 
-The shim covers `cargo` and `go`. For everything else (`task`, `make`, vitest, jest, playwright)
-the [Claude Code plugin](claude-code-plugin.md) adds a `PreToolUse` hook that refuses a build
+The shim covers `cargo`, `go` and `ignite`. For everything else the
+[Claude Code plugin](claude-code-plugin.md) adds a `PreToolUse` hook that refuses a build
 command outside the pool and names the `slot` command to run instead, and `slot sessions` with the
-`slot-warden` agent to find sessions that still build outside it.
+`slot-warden` agent to find sessions that still build outside it. The hook refuses:
+
+- `task` and `make` targets whose name says build, check, test, lint, gate and the like;
+- vitest, jest and `playwright test`, and the TypeScript and lint tools `tsc`, `vue-tsc` and
+  `eslint`; `vite`, `docusaurus`, `webpack`, `next`, `nuxt`, `astro`, `rollup` and `esbuild` with
+  `build`;
+- package.json scripts run through npm, yarn or pnpm whose name says build, test, typecheck,
+  lint, check, e2e or gate (`pnpm build`, `npm run test:unit`), and `node --test`, or a repository
+  script called with such a subcommand (`node tools/ux.mjs gate`);
+- `zig build`, `zig test`, `zig build-exe|lib|obj`, also behind a repository's `zig.sh`;
+- `pytest` and `python -m pytest`;
+- maven and gradle goals that compile or test (`mvn package`, `./gradlew test`);
+- `ignite build|test|conformance` when the `ignite` shim is not installed.
+
+It lets a command through when it watches, serves or only prints (`--watch`, `serve`, `dev`,
+`start`, `--version`). `docker build` and `helm template` are not refused:
+[Toolchains outside the pool](#toolchains-outside-the-pool) says why.
+
+## Toolchains outside the pool
+
+Measured on one workstation shared by about 15 agent sessions, 2026-11-12 (11 h of census
+samples and 10 h of agent shell commands):
+
+- **docker and podman build** run in the container daemon, outside the job's process tree and
+  cgroup, so slot could neither count nor cap them. 0.01 core-hours outside the pool in 11 h.
+- **helm template and lint**: 0.05 core-hours, at most 0.6 cores at once.
+- **valgrind** and other profilers measure a program's run time; queueing them changes nothing
+  they measure, and a slot would only be held while they run.
+- **bazel**: no call seen.
 
 ## Remove the old workarounds
 
