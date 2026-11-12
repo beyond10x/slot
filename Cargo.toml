@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = ["crates/slot", "crates/slot-cli", "crates/slot-docs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/beyond10x/slot"
+authors = ["Beyond10x contributors"]
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
+b10x-slot = { path = "crates/slot" }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false }
+include_dir = "0.7"
+nix = { version = "0.30", features = ["fs", "signal", "process", "user", "hostname"] }
+rustix = { version = "1", features = ["fs", "stdio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+signal-hook = "0.3"
+tempfile = "3"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+ts-rs = "11"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+similar_names = "allow"
+too_many_lines = "allow"

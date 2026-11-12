@@ -1,0 +1,25 @@
+{
+  "format": "b10x-terminal/1",
+  "title": "Two jobs on a pool of four slots",
+  "recordedWith": "slot 0.1.0 built from source, slot serve --tokens 4 --http off",
+  "entries": [
+    {
+      "comment": "A go job holds 4 slots, and go's -p is set to what it holds.",
+      "command": "slot go env GOFLAGS",
+      "output": "-p=4",
+      "exitCode": 0
+    },
+    {
+      "comment": "Another shell's go job holds all 4 slots of this pool. This job queues, runs when a slot is free, and keeps its exit code.",
+      "command": "slot sh -c 'echo tests ran; exit 3'",
+      "output": "tests ran\nslot: job 3 waited 5s for a build slot, ran 0s",
+      "exitCode": 3
+    },
+    {
+      "comment": "--local runs the command directly, without the daemon.",
+      "command": "slot --local sh -c 'echo no daemon involved'",
+      "output": "no daemon involved",
+      "exitCode": 0
+    }
+  ]
+}

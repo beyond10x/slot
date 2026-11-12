@@ -1,0 +1,11 @@
+version: aep.project/5
+protocol: adp/1
+profile: development.standard
+protocols: git+https://github.com/beyond10x/aep.git#af11af152de1732383a5edee0da723bb72d9acb4
+planning_scope: "slot"
+store:
+  git: {}
+
+summary: >-
+  Shared build slots for every build on a machine: one jobserver pool daemon, a client, remote
+  mode over ssh, and a live web view of every job.

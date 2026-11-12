@@ -1,0 +1,26 @@
+:root {
+  --fg: #1a1a1a;
+  --mute: #666;
+  --line: #ddd;
+  --bg: #fff;
+  --panel: #f6f6f6;
+  --hdr: 46px;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; font: 13px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+h2 { font-size: 13px; margin: 10px 0 6px; color: var(--mute); font-weight: 600; }
+canvas { display: block; width: 100%; }
+select, button { font: inherit; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
+.bad { color: #b00; font-weight: 600; }
+.muted { color: var(--mute); }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid #eee; white-space: nowrap; }
+th { color: var(--mute); font-weight: 600; position: sticky; top: var(--hdr); background: var(--bg); }
+td.cmd { max-width: 420px; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 12px; }
+td.num, th.num { text-align: right; }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: #f3f3f3; }
+tbody tr.sel td { background: #e8f0fb; }
+tbody tr.empty { cursor: default; }

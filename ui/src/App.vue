@@ -1,0 +1,54 @@
+<script setup lang="ts">
+import { computed, watch } from 'vue';
+import { jobId, newestRunning } from './lib/job.ts';
+import { jobs, select, store } from './store.ts';
+import HeaderBar from './components/HeaderBar.vue';
+import TimelineChart from './components/TimelineChart.vue';
+import CoresChart from './components/CoresChart.vue';
+import QueueTable from './components/QueueTable.vue';
+import ActiveTable from './components/ActiveTable.vue';
+import DoneTable from './components/DoneTable.vue';
+import OutputPane from './components/OutputPane.vue';
+
+const newest = computed(() => {
+  const j = newestRunning(jobs.values());
+  return j ? jobId(j) : null;
+});
+
+watch(
+  [newest, () => store.followNewest],
+  ([id, on]) => {
+    if (on && id !== null && id !== store.selected) select(id);
+  },
+  { immediate: true },
+);
+</script>
+
+<template>
+  <HeaderBar />
+  <main :class="{ nopane: store.selected === null }">
+    <div>
+      <section>
+        <h2>Timeline: one bar per job. Pale part: waiting for a slot. Click a bar for its output.</h2>
+        <TimelineChart />
+        <h2>Cores in use: slot jobs (by toolchain) and whole host; below: jobs waiting for a slot</h2>
+        <CoresChart />
+      </section>
+      <section>
+        <h2>Queue: waiting for slots, served oldest first</h2>
+        <QueueTable />
+        <h2>Running</h2>
+        <ActiveTable />
+        <h2>Finished</h2>
+        <DoneTable />
+      </section>
+    </div>
+    <OutputPane v-if="store.selected !== null" :id="store.selected" :key="store.selected" />
+  </main>
+</template>
+
+<style scoped>
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 38%); }
+main.nopane { grid-template-columns: minmax(0, 1fr); }
+section { padding: 8px 14px; }
+</style>

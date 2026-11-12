@@ -1,0 +1,36 @@
+[package]
+name = "b10x-slot"
+description = "Shared build slots for every build on a machine: one jobserver pool, a queueing daemon, remote execution and a live web view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lib]
+name = "slot"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+include_dir.workspace = true
+nix.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+signal-hook.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

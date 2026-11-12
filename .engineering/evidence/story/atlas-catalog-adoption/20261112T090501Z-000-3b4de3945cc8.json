@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-12T09:05:01Z",
+  "actor": "human:timo",
+  "artifact": "story:atlas-catalog-adoption",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:acceptance-round-2",
+    "review": "review-result:acceptance-round-2",
+    "outcome": "fixed"
+  }
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=slot build daemon
+
+[Service]
+ExecStart=%h/.local/bin/slot serve
+Restart=on-failure
+CPUWeight=20
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

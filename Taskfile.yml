@@ -1,0 +1,58 @@
+version: '3'
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_INCREMENTAL: '0'
+
+tasks:
+  ui:
+    desc: Build the web UI into ui/dist.
+    dir: ui
+    cmds:
+      - pnpm install --frozen-lockfile
+      - pnpm build
+
+  ui-check:
+    desc: Typecheck and test the web UI.
+    dir: ui
+    cmds:
+      - pnpm install --frozen-lockfile
+      - pnpm check
+
+  generate:
+    desc: Regenerate the CLI reference and the UI types.
+    cmds:
+      - cargo run --locked -q -p b10x-slot-docs -- cli-reference
+      - cargo run --locked -q -p b10x-slot-docs -- ts-types
+
+  check:
+    desc: Run the complete offline repository gate.
+    cmds:
+      - task: ui-check
+      - task: ui
+      - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-targets --locked -- -D warnings
+      - cargo test --workspace --locked
+      - cargo run --locked -q -p b10x-slot-docs -- cli-reference --check
+      - cargo run --locked -q -p b10x-slot-docs -- ts-types --check
+
+  install:
+    desc: Build the UI and install slot into ~/.local/bin.
+    deps: [ui]
+    cmds:
+      - cargo install --locked --root {{.HOME}}/.local --path crates/slot-cli
+
+  service:
+    desc: Install and start the systemd user unit.
+    deps: [install]
+    cmds:
+      - install -D -m 0644 contrib/slot.service {{.HOME}}/.config/systemd/user/slot.service
+      - systemctl --user daemon-reload
+      - systemctl --user enable --now slot.service
+
+  site:
+    desc: Build the documentation site.
+    dir: website
+    cmds:
+      - npm ci
+      - npm run build

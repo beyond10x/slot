@@ -1,0 +1,6 @@
+/target/
+/ui/dist/
+/ui/node_modules/
+/website/build/
+/website/node_modules/
+/website/.docusaurus/

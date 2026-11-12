@@ -1,0 +1,115 @@
+---
+title: How it works
+description: The jobserver pool, how jobs take slots, the queue, the job log and the web UI.
+---
+
+# How it works
+
+```text
+slot cargo test ──unix socket──► slot serve
+                                   │ toolchain: rust, holds 1 slot
+                                   │ queue until the slot is free
+                                   │ start: MAKEFLAGS=-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo
+                                   │        cargo, rustc take more tokens from the FIFO
+◄── stdout, stderr, exit code ─────┘ job log: one JSON line
+```
+
+## The pool
+
+`slot serve` creates one named FIFO, `<state-dir>/jobserver.fifo`, and writes one token into it
+per slot. The number of slots is `--tokens`, by default the number of CPUs the daemon may use.
+
+This is the GNU-make jobserver protocol. Every job starts with
+
+```text
+MAKEFLAGS=-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo
+CARGO_MAKEFLAGS=-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo
+```
+
+A tool that speaks the protocol (cargo, rustc, GNU make 4.4 and newer) reads a token from the FIFO
+before it starts another unit of parallel work and writes it back when that work ends. All jobs
+read from the same FIFO, so all of them together never run more parallel work than there are
+slots. Twelve `cargo test` runs on a 20-slot pool share 20 slots; they do not get 20 each.
+
+The daemon drops the caller's `MAKEFLAGS`, `MFLAGS`, `CARGO_MAKEFLAGS` and `CARGO_BUILD_JOBS`
+before it starts a job. Any of them would let a job bypass the pool.
+
+## Slots per job
+
+Before a job starts, the daemon takes the slots the job's [toolchain](toolchains.md) asks for and
+holds them for the whole run:
+
+| toolchain | commands | slots held | parallelism beyond that |
+|---|---|---|---|
+| `rust` | `cargo`, `cargo-*`, `rustc` | 1 | cargo and rustc read more tokens from the FIFO |
+| `go` | `go`, `gotestsum`, `golangci-lint` | `--go-tokens`, default 4 | none: `GOFLAGS` gets `-p=<slots held>` |
+| `other` | anything else | 1 | jobserver clients started inside share the pool |
+
+A job never holds more slots than the pool has: a go job on a pool of 2 holds 2 and runs with
+`-p=2`.
+
+For `rust` jobs the daemon also sets `RUST_TEST_THREADS` and `NEXTEST_TEST_THREADS` to the number
+of free slots when the job starts, at least 2, unless the caller set them. The jobserver does not
+limit the threads of a test binary; this does.
+
+## The queue
+
+A job whose slots are not free waits. Jobs are admitted in the order they arrived. While a job
+waits, `slot` prints nothing; when it ends after a wait of two seconds or more, `slot` prints one
+line:
+
+```text
+slot: job 3 waited 5s for a build slot, ran 0s
+```
+
+When the client goes away (Ctrl-C, a killed agent, a closed ssh connection), the daemon cancels
+the job: it kills the job's process group and returns the job's slots.
+
+After a normal exit the daemon does not kill the process group. An sccache server that the job
+started lives in that group and serves later builds.
+
+When no job runs and none waits, every token must be back in the FIFO. The daemon checks this and
+restores tokens that a killed process took with it, or removes surplus ones, and logs
+`slot: jobserver reconciled by <n> tokens`.
+
+## Memory limit
+
+`slot serve --memory-max 24G` runs each job in a systemd scope with that `MemoryMax`, so an
+out-of-memory kill ends that job and not the daemon. It is off by default and has not been tested
+beyond starting jobs.
+
+## Job log
+
+Every finished job is one JSON line in `<state-dir>/jobs.jsonl`. This one is from a job that
+waited for a slot and exited with 3; the directory and client are shortened:
+
+```json
+{"id":3,"argv":["sh","-c","echo second job; exit 3"],"cwd":"<repo>","repo":"repo","session":"","client":"<host>:<pid>","toolchain":"other","remote":false,"tokens":1,"state":"failed","enqueued_ms":1794473158546,"started_ms":1794473163741,"ended_ms":1794473163763,"exit":3,"cpu_s":0.0,"compile_server_cpu_s":0.0,"peak_rss":0}
+```
+
+`enqueued_ms`, `started_ms` and `ended_ms` give the queue wait and the run time. `cpu_s` and
+`peak_rss` are measured from `/proc` for the job's processes. `session` is the agent session that
+started the job, when the client runs inside a Claude Code session (`CLAUDE_CODE_SESSION_ID`).
+
+`compile_server_cpu_s` is CPU time spent for this job inside an sccache server, which runs outside
+the job's process tree. Every job's environment carries `SLOT_JOB=<id>`; sccache passes the
+caller's environment to its compiler processes, so the daemon can attribute them to the job.
+
+The daemon reads the log back at start, so the web UI shows recent jobs across restarts.
+
+## Web UI
+
+The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
+shows:
+
+- slots in use out of the pool,
+- a timeline with one bar per job, coloured by toolchain; the pale part of a bar is the wait for
+  a slot,
+- cores in use by slot jobs per toolchain, and by the whole host,
+- running and queued jobs: repository, command, state, wait, elapsed time, cores, memory, session,
+- finished jobs: exit code, wait, duration, CPU seconds, average cores, peak memory,
+- the live output of a job, opened by clicking its bar.
+
+It keeps the last 500 finished jobs in memory (`--keep-jobs`). The UI has no authentication;
+keep it on a loopback address. The same data is available as JSON from `/api/state`, as a stream
+of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/output`.

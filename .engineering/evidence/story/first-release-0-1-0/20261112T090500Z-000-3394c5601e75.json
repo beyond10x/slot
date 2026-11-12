@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-12T09:05:00Z",
+  "actor": "human:timo",
+  "artifact": "story:first-release-0-1-0",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:acceptance-round-2",
+    "review": "review-result:acceptance-round-2",
+    "outcome": "fixed"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "format": "b10x-status/1",
+  "asOf": "2026-11-12",
+  "source": "CHANGELOG.md 0.1.0 and docs/design.md section 10",
+  "items": [
+    {
+      "area": "Pool",
+      "label": "One jobserver for every build",
+      "status": "shipped",
+      "detail": "slot serve owns one GNU-make jobserver FIFO; cargo, rustc and GNU make in every job draw from it.",
+      "href": "/docs/how-it-works#the-pool"
+    },
+    {
+      "area": "Pool",
+      "label": "Queue in arrival order",
+      "status": "shipped",
+      "detail": "A job waits until the slots it needs are free; jobs are admitted in the order they arrived.",
+      "href": "/docs/how-it-works#the-queue"
+    },
+    {
+      "area": "Toolchains",
+      "label": "rust, go and other",
+      "status": "shipped",
+      "detail": "cargo is a jobserver client, go holds a fixed share and runs with -p set to it, anything else holds one slot and passes the pool down.",
+      "href": "/docs/toolchains"
+    },
+    {
+      "area": "Observation",
+      "label": "Web UI",
+      "status": "shipped",
+      "detail": "Timeline, slot usage, cores per toolchain, active and finished jobs, live output on 127.0.0.1:7411.",
+      "href": "/docs/how-it-works#web-ui"
+    },
+    {
+      "area": "Observation",
+      "label": "Job log",
+      "status": "shipped",
+      "detail": "One JSON line per finished job: command, toolchain, slots held, queue wait, run time, CPU seconds, peak memory, exit code.",
+      "href": "/docs/how-it-works#job-log"
+    },
+    {
+      "area": "Remote",
+      "label": "Remote build server",
+      "status": "shipped",
+      "detail": "SLOT_HOST syncs the repository with rsync and runs the build through slot proxy over ssh; target directories stay on the server.",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Fetch artifacts back",
+      "status": "planned",
+      "detail": "Copy named build outputs from the server to the client after a successful build.",
+      "href": "/docs/remote-builds#not-built-yet"
+    },
+    {
+      "area": "Remote",
+      "label": "Target directory seeding and eviction",
+      "status": "planned",
+      "detail": "Seed a new workspace's target directory from the same repository, and delete old target directories under a disk budget.",
+      "href": "/docs/remote-builds#not-built-yet"
+    },
+    {
+      "area": "Remote",
+      "label": "Restricted ssh command",
+      "status": "planned",
+      "detail": "An authorized_keys forced command that accepts only the sync and run steps.",
+      "href": "/docs/remote-builds#not-built-yet"
+    },
+    {
+      "area": "Configuration",
+      "label": "Per-repository configuration",
+      "status": "planned",
+      "detail": "A file in the repository listing tests that must run with --local.",
+      "href": "/docs/agent-integration#tests-that-need-local-services"
+    }
+  ]
+}

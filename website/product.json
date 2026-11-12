@@ -1,0 +1,124 @@
+{
+  "format": "b10x-product-landing/1",
+  "product": {
+    "name": "slot",
+    "mark": "sl",
+    "eyebrow": "Shared build slots · 0.1.0",
+    "promise": [
+      "One pool of build slots for every build on a machine.",
+      "Builds queue instead of oversubscribing the CPU."
+    ],
+    "lede": "When several coding-agent sessions share one workstation, every cargo test and go test sizes itself to the whole machine, and a dozen of them run at once. slot runs every build through one daemon that owns a GNU-make jobserver: cargo and rustc draw their parallelism from one token pool, a go job holds a fixed share, anything else holds one slot. A build that has to wait is queued. Output and exit code are those of the command.",
+    "description": "Run every cargo, go and make build on a machine through one shared GNU-make jobserver pool, with a queue, a live web view and an optional remote build server.",
+    "actions": [
+      {
+        "label": "Get started",
+        "href": "/docs/getting-started",
+        "kind": "primary"
+      },
+      {
+        "label": "How it works",
+        "href": "/docs/how-it-works"
+      },
+      {
+        "label": "Agent integration",
+        "href": "/docs/agent-integration"
+      },
+      {
+        "label": "CLI reference",
+        "href": "/docs/reference/cli"
+      }
+    ],
+    "meta": "One Rust binary · Linux x86_64 and aarch64 · Apache-2.0",
+    "art": {
+      "kind": "terminal",
+      "session": "data/terminal.json",
+      "caption": "Recorded against a daemon with a pool of four slots."
+    },
+    "kpis": [
+      "shipped",
+      "planned"
+    ]
+  },
+  "sections": [
+    {
+      "kind": "flow",
+      "eyebrow": "How it works",
+      "title": "Prefix, queue, run, return.",
+      "lede": "The client is the same binary as the daemon. Prefixing a command with slot is the only change to how it is called.",
+      "steps": [
+        {
+          "label": "prefix",
+          "title": "Send the command",
+          "description": "slot cargo test sends the command, its directory and its environment to the daemon over a unix socket."
+        },
+        {
+          "label": "queue",
+          "title": "Wait for slots",
+          "description": "The daemon picks the toolchain from the command name and queues the job until the slots it needs are free."
+        },
+        {
+          "label": "run",
+          "title": "Share one pool",
+          "description": "The job starts with the jobserver in MAKEFLAGS and CARGO_MAKEFLAGS; cargo and rustc take more tokens from the same pool as they parallelise."
+        },
+        {
+          "label": "return",
+          "title": "Same output, same exit code",
+          "description": "stdout and stderr stream back to the caller, the exit code is passed through, and the job log records the run."
+        }
+      ]
+    },
+    {
+      "kind": "features",
+      "eyebrow": "What it does",
+      "title": "One scheduler instead of flock files and -j flags.",
+      "lede": "Sessions that cannot see each other stop guessing how many cores are free.",
+      "items": [
+        {
+          "title": "cargo and rustc on one jobserver",
+          "description": "cargo holds one slot and draws more from the shared FIFO, so all Rust builds together stay within the pool.",
+          "status": "shipped",
+          "href": "/docs/toolchains#rust"
+        },
+        {
+          "title": "go with a fixed share",
+          "description": "A go job holds four slots by default and runs with -p set to what it holds.",
+          "status": "shipped",
+          "href": "/docs/toolchains#go"
+        },
+        {
+          "title": "Wrappers pass the pool down",
+          "description": "slot task check holds one slot; cargo started inside the task shares the same pool.",
+          "status": "shipped",
+          "href": "/docs/toolchains#other"
+        },
+        {
+          "title": "Live web view",
+          "description": "Every queued and running job, slot usage, cores per toolchain and live output on 127.0.0.1:7411.",
+          "status": "shipped",
+          "href": "/docs/how-it-works#web-ui"
+        },
+        {
+          "title": "Remote build server",
+          "description": "Set SLOT_HOST and builds run on another machine; the repository is synced with rsync and target directories stay there.",
+          "status": "shipped",
+          "href": "/docs/remote-builds"
+        },
+        {
+          "title": "Runs anyway",
+          "description": "When the daemon cannot be reached, the command runs locally and slot prints one line saying so.",
+          "status": "shipped",
+          "href": "/docs/getting-started#when-the-daemon-is-not-running"
+        }
+      ]
+    },
+    {
+      "kind": "status",
+      "eyebrow": "Status",
+      "title": "0.1.0. What exists and what does not.",
+      "lede": "Shipped means in the code and covered by tests. Planned means not built.",
+      "items": "data/status.json"
+    }
+  ]
+}

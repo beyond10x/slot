@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run the repository gate
+        run: task check
+      - name: The tag, the workspace and the changelog agree
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "b10x-slot-cli") | .version')
+          test "$version" = "$GITHUB_REF_NAME" || { echo "::error::workspace is $version, tag is $GITHUB_REF_NAME" >&2; exit 1; }
+          grep -q "^## ${GITHUB_REF_NAME} — " CHANGELOG.md || { echo "::error::CHANGELOG.md has no dated ${GITHUB_REF_NAME} section" >&2; exit 1; }
+
+  package:
+    name: Package ${{ matrix.target }}
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 keeps the glibc floor lower than `ubuntu-latest` for downloaded binaries.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: ui/package.json
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Build the web UI, then build, smoke-test and package slot
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          (cd ui && pnpm install --frozen-lockfile && pnpm build)
+          cargo build --locked --release --bin slot --target "$TARGET"
+          bin="target/$TARGET/release/slot"
+          printed=$("$bin" --version | awk '{print $NF}')
+          if [ "$printed" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::the built binary reports $printed, but the release tag is $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          package="slot-$GITHUB_REF_NAME-$TARGET"
+          mkdir -p "dist/$package"
+          cp "$bin" LICENSE README.md "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: [gate, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify archives and write checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            test -f "slot-$GITHUB_REF_NAME-$target.tar.gz" || { echo "::error::missing slot-$GITHUB_REF_NAME-$target.tar.gz" >&2; exit 1; }
+          done
+          sha256sum slot-*.tar.gz > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            notes="${RUNNER_TEMP}/notes.md"
+            awk -v heading="## ${GITHUB_REF_NAME} — " '
+              index($0, heading) == 1 { found = 1; next }
+              found && /^## / { exit }
+              found { lines[++n] = $0 }
+              END {
+                first = 1; while (first <= n && lines[first] ~ /^[[:space:]]*$/) first++
+                last = n; while (last >= first && lines[last] ~ /^[[:space:]]*$/) last--
+                for (i = first; i <= last; i++) print lines[i]
+              }' CHANGELOG.md > "$notes"
+            test -s "$notes" || { echo "::error::CHANGELOG.md has no ${GITHUB_REF_NAME} notes" >&2; exit 1; }
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "slot $GITHUB_REF_NAME" --notes-file "$notes"
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
