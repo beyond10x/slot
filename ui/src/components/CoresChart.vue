@@ -65,7 +65,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   ctx.fillStyle = '#666';
   ctx.fillText(top + ' cores', 4, 2);
   ctx.fillText('line: host CPU in use', 70, 2);
-  if (!pts.length) ctx.fillText('collects from page load on', 4, 18);
+  if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
   ctx.fillStyle = QUEUE_COLOR;
   ctx.fillRect(4, QUEUE_TOP + 2, 9, 9);
   ctx.fillStyle = '#666';

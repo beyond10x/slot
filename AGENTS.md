@@ -59,6 +59,14 @@ Change this repository in a managed worktree (`worktree create --repo ../slot --
 Build with `CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0`, and finish the tree
 with `worktree finish --discard-cache --archive` when the change is merged.
 
+## Upgrading a running daemon
+
+Install the new binary over the old path, then `systemctl --user reload slot`. Reload sends
+SIGHUP: the daemon keeps taking jobs and re-executes the new binary, same pid, at the first moment
+no job is active. `systemctl --user restart slot` instead drains: the socket disappears, new
+`slot` calls run locally outside the pool, and the stop waits for the longest running job. Use it
+only when the unit file itself changed.
+
 ## Delivery
 
 Every commit, push, tag and GitHub write is `b10x-bot[bot]` through `b10x-gates bot --repository

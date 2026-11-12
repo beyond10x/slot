@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, useTemplateRef } from 'vue';
 import { fmtDur } from '../lib/format.ts';
 import { fifoQueue, queueSummary, waitStats } from '../lib/queue.ts';
-import { jobs, store } from '../store.ts';
+import { census, jobs, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
 const WINDOWS: ReadonlyArray<[number, string]> = [
@@ -49,6 +49,9 @@ onUnmounted(() => ro?.disconnect());
       <span class="muted">(60 min)</span></span>
     <span>job cores <b>{{ store.jobCores.toFixed(1) }}</b></span>
     <span>host CPU <b>{{ (store.sysCpu * 100).toFixed(0) }}</b>%</span>
+    <span v-if="census" title="CPU pressure (some avg10); cores of builds slot does not run; pool size the controller recommends, not enforced">
+      PSI cpu <b>{{ census.psi_cpu.toFixed(0) }}</b>% · unmanaged builds <b>{{ census.unmanaged_cores.toFixed(1) }}</b> cores
+      · recommended <b>{{ census.recommended_tokens }}/{{ store.tokens }}</b> <span class="muted">(observe)</span></span>
     <label>window
       <select v-model.number="store.windowS">
         <option v-for="[s, label] in WINDOWS" :key="s" :value="s">{{ label }}</option>

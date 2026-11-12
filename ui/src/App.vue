@@ -3,6 +3,7 @@ import { computed, watch } from 'vue';
 import { jobId, newestRunning } from './lib/job.ts';
 import { jobs, select, store } from './store.ts';
 import HeaderBar from './components/HeaderBar.vue';
+import HostPanel from './components/HostPanel.vue';
 import TimelineChart from './components/TimelineChart.vue';
 import CoresChart from './components/CoresChart.vue';
 import QueueTable from './components/QueueTable.vue';
@@ -28,6 +29,7 @@ watch(
   <HeaderBar />
   <main :class="{ nopane: store.selected === null }">
     <div>
+      <HostPanel />
       <section>
         <h2>Timeline: one bar per job. Pale part: waiting for a slot. Click a bar for its output.</h2>
         <TimelineChart />

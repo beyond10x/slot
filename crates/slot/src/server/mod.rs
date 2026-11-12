@@ -22,6 +22,7 @@ use nix::sys::wait::{Id, WaitPidFlag, waitid};
 use nix::unistd::Pid;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::census;
@@ -284,7 +285,10 @@ impl Server {
             self.cfg.tokens,
             self.pool.path().display()
         );
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut term = signal(SignalKind::terminate())?;
+        let mut hup = signal(SignalKind::hangup())?;
+        let mut idle_check = tokio::time::interval(Duration::from_millis(500));
+        let mut upgrade = false;
         loop {
             tokio::select! {
                 r = listener.accept() => {
@@ -293,10 +297,40 @@ impl Server {
                     tokio::spawn(async move { s.handle(stream).await });
                 }
                 _ = term.recv() => break,
+                _ = hup.recv() => {
+                    upgrade = true;
+                    eprintln!("slot: upgrade requested; re-executing at the first moment no job is active");
+                }
+                _ = idle_check.tick(), if upgrade => {
+                    let idle = self.inner.lock().expect("server lock").active.is_empty();
+                    if idle {
+                        drop(listener);
+                        return Err(self.reexec());
+                    }
+                }
             }
         }
         self.drain(listener).await;
         Ok(())
+    }
+
+    /// Replaces this process with the binary now installed at our path,
+    /// same pid and arguments. Called only while no job is active, so the
+    /// new process starts with a full pool and reloads history from the job
+    /// log. Returns only on failure.
+    fn reexec(&self) -> anyhow::Error {
+        let exe = std::fs::read_link("/proc/self/exe").map_or_else(
+            |_| PathBuf::from("slot"),
+            |p| {
+                let s = p.to_string_lossy();
+                PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s))
+            },
+        );
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let _ = std::fs::remove_file(&self.cfg.socket);
+        eprintln!("slot: idle, re-executing {}", exe.display());
+        let err = Command::new(&exe).args(&args).exec();
+        anyhow!("re-exec {}: {err}", exe.display())
     }
 
     /// Stops taking jobs and waits for running and queued ones to end.

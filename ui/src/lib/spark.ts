@@ -1,18 +1,20 @@
+import { mergeByT } from './history.ts';
+
 export interface Point {
   t: number;
   v: number;
 }
 
-/** Per-job recent samples, kept for `spanMs` behind the newest sample of each job. */
-export class SparkBuffer {
+/** Recent samples per key (job id, session), kept for `spanMs` behind the newest sample of each key. */
+export class SparkBuffer<K = number> {
   readonly spanMs: number;
-  private readonly byId = new Map<number, Point[]>();
+  private readonly byId = new Map<K, Point[]>();
 
   constructor(spanMs = 60_000) {
     this.spanMs = spanMs;
   }
 
-  push(id: number, t: number, v: number): void {
+  push(id: K, t: number, v: number): void {
     let pts = this.byId.get(id);
     if (!pts) {
       pts = [];
@@ -20,18 +22,32 @@ export class SparkBuffer {
     }
     if (pts.length && t <= pts[pts.length - 1].t) return;
     pts.push({ t, v });
-    let drop = 0;
-    while (drop < pts.length && pts[drop].t < t - this.spanMs) drop++;
-    if (drop) pts.splice(0, drop);
+    this.prune(pts);
   }
 
-  /** Forgets every job not in `ids` (they stopped running). */
-  retain(ids: ReadonlySet<number>): void {
+  /** Merges older points (sorted by t) under the ones already held; a point at an existing t is not added twice. */
+  seed(id: K, older: readonly Point[]): void {
+    const held = this.byId.get(id) ?? [];
+    const merged = mergeByT(older, held);
+    this.prune(merged);
+    if (merged.length) this.byId.set(id, merged);
+  }
+
+  /** Forgets every key not in `ids` (job stopped running, session gone). */
+  retain(ids: ReadonlySet<K>): void {
     for (const id of [...this.byId.keys()]) if (!ids.has(id)) this.byId.delete(id);
   }
 
-  get(id: number): readonly Point[] {
+  get(id: K): readonly Point[] {
     return this.byId.get(id) ?? [];
+  }
+
+  private prune(pts: Point[]): void {
+    if (!pts.length) return;
+    const newest = pts[pts.length - 1].t;
+    let drop = 0;
+    while (drop < pts.length && pts[drop].t < newest - this.spanMs) drop++;
+    if (drop) pts.splice(0, drop);
   }
 
   get size(): number {
