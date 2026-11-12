@@ -102,9 +102,15 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
 }
 
 fn serve(args: &slot::cli::ServeArgs) -> Result<()> {
+    // Before anything opens a descriptor: a handover's are adopted by number.
+    let inherited = slot::server::handover::take_inherited();
     let cfg = args.config()?;
     let rt = tokio_runtime()?;
-    rt.block_on(async move { slot::server::Server::new(cfg)?.run().await })
+    rt.block_on(async move {
+        slot::server::Server::with_inherited(cfg, inherited)?
+            .run()
+            .await
+    })
 }
 
 fn tokio_runtime() -> Result<slot::server::Runtime> {

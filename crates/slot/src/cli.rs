@@ -149,6 +149,12 @@ pub struct ServeArgs {
     /// kept. 0: no budget, only the disk floor evicts.
     #[arg(long, default_value_t = 0.0, value_name = "GB")]
     pub cache_budget: f64,
+    /// On `systemctl --user reload slot`, re-execute at once and hand the
+    /// running and queued jobs, their slots and their clients to the new
+    /// binary; `false`, or a new binary older than 0.11.0, uses the
+    /// `--upgrade-hold` rule instead.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub handover: bool,
 }
 
 /// `slot proxy` options.
@@ -298,6 +304,7 @@ impl ServeArgs {
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             cache_budget: gb_bytes(self.cache_budget),
+            handover: self.handover,
         })
     }
 }
