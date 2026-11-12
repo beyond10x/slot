@@ -5,9 +5,10 @@
 - Call mode: while a call uses the microphone or the camera, the headroom goes up to the call
   value (40 % by default) and back to the earlier value 2 minutes after the call. A call is a
   running PipeWire capture stream linked to a microphone or camera node, or a process holding
-  `/dev/video*`; level meters and mixers are ignored (`--call-ignore`). `slot headroom --call N`
-  sets the call value at run time (0 turns call mode off); a headroom set by hand during a call
-  stays. `slot headroom`, `slot status`, `/api/limits` and a badge in the web UI show it.
+  `/dev/video*`; level meters, mixers and Claude Code's voice input (process `claude`) are
+  ignored (`--call-ignore`), and an ALSA client is named by its process. `slot headroom --call
+  N` sets the call value at run time (0 turns call mode off); a headroom set by hand during a
+  call stays. `slot headroom`, `slot status`, `/api/limits` and a badge in the web UI show it.
 - sccache watchdog: the daemon watches the private jobserver of every sccache server of its
   user and writes back the tokens a server lost, once for 60 s it had none free, fewer compiles
   than its pool, a waiting client and under 5 % CPU. Each refill goes to the journal and
