@@ -154,7 +154,8 @@ Bare SemVer tags (`0.1.0`).
    (`crates/slot-docs/tests/docs_version.rs` fails otherwise), and every page that describes
    what the release changes (`toolchains.md`, `reference/environment.md`, `agent-integration.md`,
    `task generate` for the CLI reference), and the landing page: a shipped feature gets a line in
-   `website/data/status.json` (and a planned one turns `shipped`), a reader-facing one a card in
+   `website/data/status.json` (and a planned one turns `shipped`), its `source` range ends at the
+   new version (`website/ux/copy.test.ts` fails otherwise), a reader-facing one a card in
    `website/product.json`. `task check` green on that commit.
 2. Annotated tag on `main`, created and pushed as the bot.
 3. The tag push runs `.github/workflows/release.yml` (contents: read): `task check`; tag,
