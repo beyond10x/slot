@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.1.0
+version=0.2.0
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -99,7 +99,16 @@ slot: job 3 waited 5s for a build slot, ran 0s
 Ctrl-C, or any signal that ends `slot`, cancels the job: the daemon kills the job's process group
 and returns its slots to the pool.
 
-If the command's name is also a slot subcommand (`serve`, `proxy`, `run`), use `slot run`:
+`slot status` lists the pool and every queued and running job:
+
+```text
+20 slots, 4 free, 3 running, 1 queued
+#318   queued  rust       1 slot(s)      12s  webshop  cargo test -p api
+#316   running go         4 slot(s)   2m05s  payments-api  go test ./...
+```
+
+If the command's name is also a slot subcommand (`serve`, `proxy`, `run`, `status`), use
+`slot run`:
 
 ```console
 slot run serve --port 8080
@@ -119,6 +128,24 @@ on purpose, use `--local`:
 ```console
 slot --local cargo build
 ```
+
+## Upgrade
+
+Install the new binary over the old one, then reload the service:
+
+```console
+install -m 0755 "slot-$version-$target/slot" ~/.local/bin/slot.new
+mv ~/.local/bin/slot.new ~/.local/bin/slot
+systemctl --user reload slot
+```
+
+Reload sends SIGHUP. The daemon keeps taking jobs and replaces itself with the new binary, same
+process id, at the first moment no job is queued or running. On a machine that is never idle
+that can take hours; the old version keeps serving until then.
+
+`systemctl --user restart slot` stops at once instead: the socket disappears, new `slot` calls
+run locally outside the pool, and the stop waits for the longest running job. Use it only when
+the unit file changed.
 
 ## Next
 
