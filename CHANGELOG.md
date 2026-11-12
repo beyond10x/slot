@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 — 2026-11-12
+
+- Web UI: buttons 0 %, 20 % and 40 % beside the headroom slider set the headroom in one click.
+- Web UI: a refused headroom change (a daemon older than the page) puts the slider back on the
+  daemon's value; before, the caption kept showing the refused value as applied.
+- Web UI: the job number in the Queue, Running and Finished tables is a button that opens the
+  job's output, so finished and queued jobs open by keyboard too; the output text takes focus and
+  scrolls by keyboard; small buttons are at least 24 px.
+- Web UI: no sideways scroll at 1280 px, and the job tables no longer run under the output pane:
+  the command column takes the width that is left, long repository names are cut with the full
+  name in the hover title, below 1150 px the job panel drops the sparkline, memory and session
+  columns (the Sessions table its memory and sparkline), and below 900 px the Running table drops
+  its live-output button (the job number opens the same output).
+- Web UI: the panels appear once the jobs and the history have loaded, so the page no longer
+  jumps while it loads.
+- `task check` runs UX gates on the web UI (`ui/ux`): layout, axe-core accessibility and a
+  screen-only user that completes every scenario task by pointer and by keyboard, at 1366x768
+  and 1280x720, in DejaVu Sans on every host, with a ratchet on the measured values. The docs hero screenshots are rendered
+  from the same scenarios (`task ui-hero`).
+
 ## 0.5.2 — 2026-11-12
 
 - A client that gets SIGINT, SIGTERM or SIGHUP cancels its job and exits with 128 + the signal;
