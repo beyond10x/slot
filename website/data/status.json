@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-13",
-  "source": "CHANGELOG.md 0.1.0 to 0.16.0 and docs/design.md sections 10 to 18",
+  "source": "CHANGELOG.md 0.1.0 to 0.17.0 and docs/design.md sections 10 to 18",
   "items": [
     {
       "area": "Pool",
@@ -12,9 +12,9 @@
     },
     {
       "area": "Pool",
-      "label": "Queue in arrival order",
+      "label": "Queue by priority, then arrival",
       "status": "shipped",
-      "detail": "A job waits until the slots it needs are free; jobs are admitted in the order they arrived.",
+      "detail": "A job waits until the slots it needs are free; jobs are admitted by level (urgent, high, normal, low), in the order they arrived inside a level (0.17.0).",
       "href": "/docs/how-it-works#the-queue"
     },
     {
@@ -51,6 +51,20 @@
       "status": "shipped",
       "detail": "Tokens a killed compiler took with it are written back while jobs wait and no other process has the jobserver open (0.12.0).",
       "href": "/docs/how-it-works#the-queue"
+    },
+    {
+      "area": "Pool",
+      "label": "Job priority",
+      "status": "shipped",
+      "detail": "slot --priority <level> or SLOT_PRIORITY sets a job's level; slot priority set <repo> <level> keeps rules per repository; a job queued 30 minutes counts as high; an urgent job may borrow slots the headroom holds back (0.17.0).",
+      "href": "/docs/how-it-works#priority"
+    },
+    {
+      "area": "Pool",
+      "label": "Share of the pool",
+      "status": "shipped",
+      "detail": "slot usage and the web view sum slot time, CPU time, jobs and queue wait per project, repository or session over a window (0.17.0).",
+      "href": "/docs/how-it-works#usage"
     },
     {
       "area": "Pool",

@@ -195,8 +195,9 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.16.0 (`CHANGELOG.md`): one jobserver pool with a queue, admission by disk and
-memory, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`), the web view, remote mode, handover on reload, lost-token
+Done: 0.1.0 to 0.17.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+admission by disk and memory, headroom and call mode, headroom of the machine, slots named by the
+job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, handover on reload, lost-token
 recovery, and eviction of local target directories in dry run.
 
 Open, one line each, with where the design lives. A session starts with (e), then (b).
@@ -215,6 +216,10 @@ Open, one line each, with where the design lives. A session starts with (e), the
   newest release; reload only as § Upgrading a running daemon says.
 - (f) Headroom base `machine` (`slot headroom --base machine`): its `set-property` path has
   not run against a live `systemctl` in a test; read `slot status` after switching a host to it.
+- (g) A reload re-execs the new binary with the old process's own arguments (`std::env::args()`
+  in `server/mod.rs`), so a changed `ExecStart` option such as `--min-free-disk` takes effect only
+  at a full restart. Options that should change on reload belong in `limits.json`, like the
+  headroom.
 
 ## Never
 
