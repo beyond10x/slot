@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-13",
-  "source": "CHANGELOG.md 0.1.0 to 0.15.0 and docs/design.md sections 10 to 18",
+  "source": "CHANGELOG.md 0.1.0 to 0.16.0 and docs/design.md sections 10 to 18",
   "items": [
     {
       "area": "Pool",
@@ -53,6 +53,13 @@
       "href": "/docs/how-it-works#the-queue"
     },
     {
+      "area": "Pool",
+      "label": "A job names its slots",
+      "status": "shipped",
+      "detail": "slot --tokens N or SLOT_TOKENS=N holds N slots for a job, for a script that starts a container with --cpus N (0.16.0).",
+      "href": "/docs/toolchains#naming-the-slots"
+    },
+    {
       "area": "Toolchains",
       "label": "rust, go, node-test, ignite and other",
       "status": "shipped",
@@ -65,6 +72,13 @@
       "status": "shipped",
       "detail": "slot headroom N or the web UI slider keeps N % of the CPU out of builds, by slots and by a systemd CPU quota (0.3.0).",
       "href": "/docs/headroom"
+    },
+    {
+      "area": "Desktop",
+      "label": "Headroom of the machine",
+      "status": "shipped",
+      "detail": "slot headroom --base machine: the pool's CPU quota is lowered by the load measured outside it, down to 2 CPUs, so the whole machine stays under the target; status and the web view name the top cgroups outside (0.16.0).",
+      "href": "/docs/headroom#headroom-of-the-machine"
     },
     {
       "area": "Desktop",

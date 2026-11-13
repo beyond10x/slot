@@ -107,7 +107,7 @@
         },
         {
           "title": "Headroom for your desktop",
-          "description": "slot headroom 40 or one slider keeps 40 % of the CPU out of builds. While a call uses the microphone or camera, the daemon raises it to the call value and puts the old value back 2 minutes after.",
+          "description": "slot headroom 40 or one slider keeps 40 % of the CPU out of builds; with --base machine it counts the load outside the pool too. While a call uses the microphone or camera, the daemon raises it to the call value and puts the old value back 2 minutes after.",
           "status": "shipped",
           "href": "/docs/headroom"
         },
