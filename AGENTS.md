@@ -124,6 +124,9 @@ An unknown `/api/` path answers 404, so a client can tell an older daemon from a
 
 Every commit, push, tag and GitHub write is `b10x-bot[bot]` through `b10x-gates bot --repository
 beyond10x/slot` and `b10x-gates api`. Never push, tag or write to GitHub as a person.
+`b10x-gates gh` and `b10x-gates api` need `B10X_GATES_POLICY` set to the gates policy file;
+without it they stop with `protected file … unavailable`. A plain `git commit` is refused by a
+hook: commit with `b10x-gates bot --repository beyond10x/slot -- commit -F <file>`.
 
 Standing exception: agents working on slot commit, merge, tag and release without asking each
 time, under the operator's standing instruction of 2026-11-12 ("from time to time you issue some
@@ -192,8 +195,8 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.15.0 (`CHANGELOG.md`): one jobserver pool with a queue, admission by disk and
-memory, headroom and call mode, the web view, remote mode, handover on reload, lost-token
+Done: 0.1.0 to 0.16.0 (`CHANGELOG.md`): one jobserver pool with a queue, admission by disk and
+memory, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`), the web view, remote mode, handover on reload, lost-token
 recovery, and eviction of local target directories in dry run.
 
 Open, one line each, with where the design lives. A session starts with (e), then (b).
@@ -210,6 +213,8 @@ Open, one line each, with where the design lives. A session starts with (e), the
 - (e) The live daemon may still run an old binary: compare
   `ls -l /proc/$(systemctl --user show slot -p MainPID --value)/exe` and `slot status` with the
   newest release; reload only as § Upgrading a running daemon says.
+- (f) Headroom base `machine` (`slot headroom --base machine`): its `set-property` path has
+  not run against a live `systemctl` in a test; read `slot status` after switching a host to it.
 
 ## Never
 

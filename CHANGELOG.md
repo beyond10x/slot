@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.0 — 2026-11-13
 
 - `slot --tokens N <command…>` and `slot run --tokens N <command…>`, or `SLOT_TOKENS=N`: the job
   holds N slots in place of its toolchain's count. A script that starts `docker run --cpus 4`
