@@ -57,6 +57,10 @@ pub struct State {
     pub running: Vec<Running>,
     /// Jobs waiting for admission or slots, oldest first.
     pub queued: Vec<Queued>,
+    /// A reload was asked for while this handover ran: the new process
+    /// hands over again once it serves.
+    #[serde(default)]
+    pub reload: bool,
 }
 
 /// One client connection.
@@ -212,6 +216,36 @@ impl Inherited {
     }
 }
 
+/// SIGHUPs `slot serve` received that the server has not acted on yet.
+static HUP: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
+/// Catches SIGHUP from the start of `slot serve`, before the server's own
+/// handler exists. Without it a reload asked for while the new image
+/// starts (it may take seconds under load) would end the daemon, since
+/// SIGHUP's default action is to terminate. Call right after
+/// [`take_inherited`].
+pub fn catch_hup() -> Result<()> {
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGHUP, std::sync::Arc::clone(&flag))
+        .context("catch SIGHUP")?;
+    let _ = HUP.set(flag);
+    Ok(())
+}
+
+/// Whether a SIGHUP came since the last call; clears it.
+pub fn take_hup() -> bool {
+    HUP.get()
+        .is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Ignores SIGHUP until the new image installs [`catch_hup`]: an ignored
+/// disposition survives exec, a handler does not. Call before the state is
+/// written, then [`take_hup`] for a reload asked for meanwhile.
+pub fn ignore_hup() -> Result<()> {
+    sig::ignore_hup()
+}
+
 /// Call first thing in `slot serve`, before any descriptor is opened. With
 /// no [`ENV`] in the environment it returns `None` and does nothing.
 /// Otherwise it reads the state and adopts its descriptors; when the state
@@ -290,6 +324,21 @@ fn kill_children() {
     }
     for pid in kids {
         kill_group(pid);
+    }
+}
+
+/// Setting a signal disposition is `unsafe` in nix; ignoring is safe here
+/// since no handler code runs.
+#[allow(unsafe_code)]
+mod sig {
+    use anyhow::{Context as _, Result};
+    use nix::sys::signal::{SigHandler, Signal, signal};
+
+    pub(super) fn ignore_hup() -> Result<()> {
+        // SAFETY: SIG_IGN runs no code in signal context.
+        unsafe { signal(Signal::SIGHUP, SigHandler::SigIgn) }
+            .map(|_| ())
+            .context("ignore SIGHUP")
     }
 }
 

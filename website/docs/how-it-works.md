@@ -133,6 +133,27 @@ slot: job 12 waiting: 18.0 GB free on the filesystem of /srv/build/repo, builds 
 `memory`. The check runs again every 2 seconds, and once more after the slots are granted: a job
 that finds memory gone by then gives its slots back and waits again.
 
+## Freeing disk space
+
+The daemon also frees disk. Every minute it looks at the filesystems of the Cargo target
+directories jobs built into. When one has less than 40 GB free (`slot serve --evict-below`, in
+GB; 0 turns it off), it deletes target directories there, least recently built first, until the
+filesystem would have 50 GB free. It never deletes:
+
+- a target directory of a repository with a queued or running job;
+- one built in the last 2 hours;
+- a directory no job built into, or one without the `CACHEDIR.TAG` Cargo writes.
+
+A target directory inside a managed worktree is deleted with `worktree discard-cache`.
+
+Eviction starts as a dry run (`--evict-dry-run true`): the journal and `slot status` list what
+it would delete, and nothing is deleted. To let it delete, add `--evict-dry-run false` to the
+`slot serve` line of the service and reload.
+
+```text
+disk: 35.2 GB free, under 40.0 GB: dry run, would delete 3 target dir(s), 21.4 GB
+```
+
 ## Memory limit
 
 `slot serve --memory-max 24G` runs each job in a systemd scope with that `MemoryMax`, so an

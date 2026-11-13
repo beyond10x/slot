@@ -75,6 +75,9 @@ pub struct Job {
     /// Why a queued job waits besides slots (disk space, memory); empty otherwise.
     #[serde(default)]
     pub wait_reason: String,
+    /// Cargo target directory a local Rust job builds into; empty otherwise.
+    #[serde(default)]
+    pub target_dir: String,
 }
 
 /// Live numbers of one running job.
@@ -147,6 +150,9 @@ pub struct State {
     /// The sccache watchdog.
     #[serde(default)]
     pub sccache: SccacheWatch,
+    /// Eviction of local target directories.
+    #[serde(default)]
+    pub evict: crate::evict::Report,
     /// A pending upgrade, as one line; empty when none.
     #[serde(default)]
     pub upgrade: String,

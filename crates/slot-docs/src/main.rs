@@ -109,6 +109,8 @@ fn ts_types() -> String {
         Unit::decl(),
         LiveJob::decl(),
         SccacheWatch::decl(),
+        slot::evict::Eviction::decl(),
+        slot::evict::Report::decl(),
         State::decl(),
         CensusClass::decl(),
         CensusSession::decl(),

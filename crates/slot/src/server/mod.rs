@@ -103,6 +103,8 @@ pub struct Config {
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
     pub cache_budget: u64,
+    /// Eviction of local target directories under a disk floor.
+    pub evict: crate::evict::Settings,
     /// On reload, hand running and queued jobs to the new binary instead of
     /// waiting for an idle pool (`handover`); the bounded hold is the fallback.
     pub handover: bool,
@@ -267,6 +269,9 @@ struct Inner {
     /// Set once a handover took the job table: nothing finishes, reaps,
     /// starts or answers a client after it in this process.
     handing_over: bool,
+    /// Local target directories jobs built into: repository and last build,
+    /// Unix milliseconds. Eviction only ever deletes one of these.
+    targets: HashMap<PathBuf, (String, i64)>,
 }
 
 /// The daemon.
@@ -293,6 +298,10 @@ pub struct Server {
     inherited: Mutex<Option<handover::Inherited>>,
     /// Lost jobserver tokens written back since start.
     restored: AtomicU64,
+    /// What eviction of target directories did last.
+    evict: Mutex<crate::evict::Report>,
+    /// Target directories being deleted now: their jobs wait.
+    evicting: Mutex<HashSet<PathBuf>>,
 }
 
 /// The headroom in force, whether its CPU quota is applied, and call mode.
@@ -365,11 +374,13 @@ impl Server {
         let mut done = VecDeque::new();
         let mut next_id = 0;
         let mut memory = admission::History::default();
+        let mut targets = HashMap::new();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
                     memory.record(&job);
+                    record_target(&mut targets, &job);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
@@ -401,6 +412,7 @@ impl Server {
         let call_headroom = cfg.call_headroom;
         let sccache_watch = cfg.sccache_watch;
         let upgrade_hold = cfg.upgrade_hold;
+        let evict_settings = cfg.evict;
         Ok(Arc::new(Self {
             cfg,
             pool,
@@ -426,6 +438,7 @@ impl Server {
                 )),
                 memory,
                 handing_over: false,
+                targets,
             }),
             events,
             history: Mutex::new(VecDeque::new()),
@@ -452,6 +465,12 @@ impl Server {
             pause_pumps: Arc::new(AtomicBool::new(false)),
             inherited: Mutex::new(inherited),
             restored: AtomicU64::new(0),
+            evict: Mutex::new(crate::evict::Report {
+                floor: evict_settings.floor,
+                dry_run: evict_settings.dry_run,
+                ..crate::evict::Report::default()
+            }),
+            evicting: Mutex::new(HashSet::new()),
         }))
     }
 
@@ -558,7 +577,9 @@ impl Server {
         } else {
             (self.bind()?, None)
         };
+        let mut reload_now = false;
         if let Some(h) = inherited {
+            reload_now = h.state.reload;
             self.resume(h);
         }
         tokio::spawn(Arc::clone(&self).sampler());
@@ -578,6 +599,9 @@ impl Server {
         }
         tokio::spawn(Arc::clone(&self).call_watch());
         tokio::spawn(Arc::clone(&self).token_watch());
+        if self.cfg.evict.floor > 0 {
+            tokio::spawn(Arc::clone(&self).evict_watch());
+        }
         if self.cfg.sccache_watch {
             tokio::spawn(Arc::clone(&self).sccache_watch());
         }
@@ -603,35 +627,22 @@ impl Server {
         );
         let mut term = signal(SignalKind::terminate())?;
         let mut hup = signal(SignalKind::hangup())?;
+        // A SIGHUP that came while this image started, or while the old one
+        // handed over, is acted on now.
+        reload_now |= handover::take_hup();
         let mut idle_check = tokio::time::interval(Duration::from_millis(500));
         let mut upgrade = false;
         loop {
-            tokio::select! {
+            let reload = tokio::select! {
                 r = listener.accept() => {
                     let (stream, _) = r?;
                     let s = Arc::clone(&self);
                     tokio::spawn(async move { s.handle(stream).await });
+                    false
                 }
                 _ = term.recv() => break,
-                _ = hup.recv() => {
-                    if self.cfg.handover {
-                        match self.hand_over(&listener).await {
-                            Ok(never) => match never {},
-                            Err(Abort::Fatal(e)) => return Err(e),
-                            Err(Abort::Retry(why)) => {
-                                eprintln!("slot: handover not possible ({why}); using the bounded hold");
-                            }
-                        }
-                    }
-                    upgrade = true;
-                    eprintln!("slot: upgrade requested; re-executing once no job runs");
-                    let idle = self.nothing_running();
-                    let step = self.upgrade.lock().expect("upgrade lock").request(Instant::now(), idle);
-                    if self.upgrade_step(step) {
-                        drop(listener);
-                        return Err(self.reexec());
-                    }
-                }
+                _ = hup.recv() => true,
+                () = std::future::ready(()), if reload_now => true,
                 _ = idle_check.tick(), if upgrade => {
                     let idle = self.nothing_running();
                     let remaining = if idle { None } else { self.predicted_remaining() };
@@ -644,6 +655,34 @@ impl Server {
                         drop(listener);
                         return Err(self.reexec());
                     }
+                    false
+                }
+            };
+            if reload {
+                reload_now = false;
+                handover::take_hup();
+                if self.cfg.handover {
+                    match self.hand_over(&listener).await {
+                        Ok(never) => match never {},
+                        Err(Abort::Fatal(e)) => return Err(e),
+                        Err(Abort::Retry(why)) => {
+                            eprintln!(
+                                "slot: handover not possible ({why}); using the bounded hold"
+                            );
+                        }
+                    }
+                }
+                upgrade = true;
+                eprintln!("slot: upgrade requested; re-executing once no job runs");
+                let idle = self.nothing_running();
+                let step = self
+                    .upgrade
+                    .lock()
+                    .expect("upgrade lock")
+                    .request(Instant::now(), idle);
+                if self.upgrade_step(step) {
+                    drop(listener);
+                    return Err(self.reexec());
                 }
             }
         }
@@ -660,6 +699,7 @@ impl Server {
         let exe = installed_exe();
         let args: Vec<String> = std::env::args().skip(1).collect();
         let _ = std::fs::remove_file(&self.cfg.socket);
+        let _ = handover::ignore_hup();
         eprintln!("slot: idle, re-executing {}", exe.display());
         let err = Command::new(&exe)
             .args(&args)
@@ -817,6 +857,8 @@ impl Server {
         for fd in &keep {
             handover::keep_on_exec(fd.as_fd()).map_err(fatal)?;
         }
+        handover::ignore_hup().map_err(fatal)?;
+        state.reload = handover::take_hup();
         let path = handover::write(&self.cfg.state_dir, &state).map_err(fatal)?;
         eprintln!(
             "slot: handing {} running and {} queued job(s) and {} connection(s) to {} after {} ms",
@@ -1277,6 +1319,9 @@ impl Server {
         }
         let tc = toolchain::for_argv(&req.argv, self.cfg.go_tokens);
         let tokens = tc.tokens().clamp(1, self.pool.size());
+        let target_dir = (tc.name() == "rust" && req.workspace.is_none())
+            .then(|| crate::evict::target_dir(&req.argv, &req.env, &cwd))
+            .flatten();
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
         let id = {
             let mut g = self.inner.lock().expect("server lock");
@@ -1306,6 +1351,10 @@ impl Server {
                 compile_server_cpu_s: 0.0,
                 peak_rss: 0,
                 wait_reason: String::new(),
+                target_dir: target_dir
+                    .as_ref()
+                    .map(|t| t.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
             };
             g.active.insert(
                 id,
@@ -1356,6 +1405,11 @@ impl Server {
             msg: None,
             note_wait: false,
         };
+        if let Some(t) = &target_dir
+            && !self.target_free(t, &tx, gone.clone()).await
+        {
+            return self.finish(id, &tx, cancelled).ok();
+        }
         let held = loop {
             if !self.admission_open(gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
@@ -1795,6 +1849,7 @@ impl Server {
             let job = live.job.clone();
             g.metrics.record(&job);
             g.memory.record(&job);
+            record_target(&mut g.targets, &job);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -2230,6 +2285,139 @@ impl Server {
         }
     }
 
+    /// Waits while eviction deletes target directory `t`; false when the
+    /// client went away first.
+    async fn target_free(
+        &self,
+        t: &Path,
+        tx: &mpsc::UnboundedSender<Frame>,
+        gone: watch::Receiver<bool>,
+    ) -> bool {
+        let mut told = false;
+        while self.evicting.lock().expect("evicting lock").contains(t) {
+            if !told {
+                let _ = tx.send(Frame::Info {
+                    msg: format!(
+                        "slot: waiting: {} is being deleted to free disk space",
+                        t.display()
+                    ),
+                });
+                told = true;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+                () = client_gone(gone.clone()) => return false,
+            }
+        }
+        true
+    }
+
+    /// Every 60 s, when the filesystem of a target directory jobs built into
+    /// has less free space than the floor, deletes the least recently built
+    /// ones until it has the floor plus the margin; in a dry run it only
+    /// says which. See [`crate::evict`].
+    async fn evict_watch(self: Arc<Self>) {
+        let s = self.cfg.evict;
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_said = Vec::new();
+        loop {
+            tick.tick().await;
+            let (seen, busy_repos, busy_dirs) = {
+                let g = self.inner.lock().expect("server lock");
+                let repos: HashSet<String> =
+                    g.active.values().map(|l| l.job.repo.clone()).collect();
+                let dirs: HashSet<PathBuf> = g
+                    .active
+                    .values()
+                    .filter(|l| !l.job.target_dir.is_empty())
+                    .map(|l| PathBuf::from(&l.job.target_dir))
+                    .collect();
+                (g.targets.clone(), repos, dirs)
+            };
+            let known = seen.len() as u32;
+            let Ok((free, planned)) = tokio::task::spawn_blocking(move || {
+                evict_pass(&seen, &busy_repos, &busy_dirs, now_ms(), s)
+            })
+            .await
+            else {
+                continue;
+            };
+            let mut done = Vec::new();
+            for (c, bytes) in planned {
+                let action = if s.dry_run {
+                    "would delete".to_string()
+                } else {
+                    self.evict_one(&c).await
+                };
+                done.push(crate::evict::Eviction {
+                    path: c.path.to_string_lossy().into_owned(),
+                    bytes,
+                    last_ms: c.last_ms,
+                    action,
+                });
+            }
+            let said: Vec<(String, String)> = done
+                .iter()
+                .map(|e| (e.path.clone(), e.action.clone()))
+                .collect();
+            if !done.is_empty() && (said != last_said || !s.dry_run) {
+                for e in &done {
+                    eprintln!(
+                        "slot: disk: {} free, under {}: {} {} ({}, last built {} ago)",
+                        admission::gb(free),
+                        admission::gb(s.floor),
+                        e.action,
+                        e.path,
+                        admission::gb(e.bytes),
+                        crate::status::secs(now_ms() - e.last_ms)
+                    );
+                }
+            }
+            last_said = said;
+            let mut r = self.evict.lock().expect("evict lock");
+            r.known = known;
+            r.free = free;
+            r.checked_ms = now_ms();
+            if !done.is_empty() || free >= s.floor {
+                r.deleted_bytes += done
+                    .iter()
+                    .filter(|e| e.action == "deleted" || e.action == "discard-cache")
+                    .map(|e| e.bytes)
+                    .sum::<u64>();
+                r.last = done;
+            }
+        }
+    }
+
+    /// Deletes one target directory unless a job of its repository or
+    /// directory started meanwhile; returns what happened.
+    async fn evict_one(&self, c: &crate::evict::Candidate) -> String {
+        {
+            let g = self.inner.lock().expect("server lock");
+            let busy = g
+                .active
+                .values()
+                .any(|l| l.job.repo == c.repo || Path::new(&l.job.target_dir) == c.path.as_path());
+            if busy {
+                return "kept: a job started".into();
+            }
+            self.evicting
+                .lock()
+                .expect("evicting lock")
+                .insert(c.path.clone());
+        }
+        let path = c.path.clone();
+        let r = tokio::task::spawn_blocking(move || crate::evict::remove(&path))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        self.evicting.lock().expect("evicting lock").remove(&c.path);
+        match r {
+            Ok(a) => a.to_string(),
+            Err(e) => format!("failed: {e}"),
+        }
+    }
+
     /// Watches for calls and moves the headroom: up when one starts, back
     /// [`Config::call_off_after`] after the last capture.
     async fn call_watch(self: Arc<Self>) {
@@ -2348,6 +2536,7 @@ impl Server {
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),
             sccache: self.sccache.lock().expect("sccache lock").clone(),
+            evict: self.evict.lock().expect("evict lock").clone(),
             upgrade: self
                 .upgrade
                 .lock()
@@ -2571,6 +2760,67 @@ impl Attached {
             gone: Arc::clone(&self.gone_tx),
             frames: self.tx.clone(),
         }
+    }
+}
+
+/// One eviction look, blocking: the lowest free space among the
+/// filesystems of known target directories, and per filesystem under the
+/// floor the candidates to delete with their sizes. Sizes are measured
+/// oldest first and only until enough would be freed.
+fn evict_pass(
+    seen: &HashMap<PathBuf, (String, i64)>,
+    busy_repos: &HashSet<String>,
+    busy_dirs: &HashSet<PathBuf>,
+    now: i64,
+    s: crate::evict::Settings,
+) -> (u64, Vec<(crate::evict::Candidate, u64)>) {
+    use crate::evict;
+    let free = seen
+        .keys()
+        .filter(|p| p.exists())
+        .filter_map(|p| admission::disk_free(p))
+        .min()
+        .unwrap_or(0);
+    let cands: Vec<evict::Candidate> =
+        evict::candidates(seen, busy_repos, busy_dirs, now, s.min_idle)
+            .into_iter()
+            .filter(|c| evict::is_target_dir(&c.path))
+            .collect();
+    let mut out = Vec::new();
+    for group in evict::by_device(cands).into_values() {
+        let Some(fs_free) = group.first().and_then(|c| admission::disk_free(&c.path)) else {
+            continue;
+        };
+        if fs_free >= s.floor {
+            continue;
+        }
+        let goal = s.floor.saturating_add(s.margin);
+        let mut sized = Vec::new();
+        let mut have = fs_free;
+        for c in group {
+            if have >= goal {
+                break;
+            }
+            let b = evict::dir_size(&c.path);
+            have = have.saturating_add(b);
+            sized.push((c, b));
+        }
+        out.extend(evict::plan(fs_free, s, &sized).into_iter().cloned());
+    }
+    (free, out)
+}
+
+/// Notes that `job` built into its target directory.
+fn record_target(targets: &mut HashMap<PathBuf, (String, i64)>, job: &Job) {
+    if job.target_dir.is_empty() || job.started_ms == 0 {
+        return;
+    }
+    let when = job.ended_ms.max(job.started_ms);
+    let e = targets
+        .entry(PathBuf::from(&job.target_dir))
+        .or_insert_with(|| (job.repo.clone(), when));
+    if when >= e.1 {
+        *e = (job.repo.clone(), when);
     }
 }
 

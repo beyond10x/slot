@@ -67,6 +67,7 @@ pub enum Cmd {
 
 /// `slot serve` options.
 #[derive(Debug, Clone, Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ServeArgs {
     /// Unix socket clients connect to.
     #[arg(long, env = "SLOT_SOCKET", default_value_os_t = paths::default_socket())]
@@ -149,6 +150,17 @@ pub struct ServeArgs {
     /// kept. 0: no budget, only the disk floor evicts.
     #[arg(long, default_value_t = 0.0, value_name = "GB")]
     pub cache_budget: f64,
+    /// When the filesystem of a local Cargo target directory has less free
+    /// space than this, GB, delete target directories that jobs built into,
+    /// least recently built first, until it has 10 GB more. Directories of a
+    /// repository with a queued or running job, or built in the last 2 h,
+    /// are kept. 0 turns it off.
+    #[arg(long, default_value_t = 40.0, value_name = "GB")]
+    pub evict_below: f64,
+    /// Only report in the journal and `slot status` which target
+    /// directories eviction would delete; `false` deletes them.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub evict_dry_run: bool,
     /// On `systemctl --user reload slot`, re-execute at once and hand the
     /// running and queued jobs, their slots and their clients to the new
     /// binary; `false`, or a new binary older than 0.11.0, uses the
@@ -304,6 +316,12 @@ impl ServeArgs {
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             cache_budget: gb_bytes(self.cache_budget),
+            evict: crate::evict::Settings {
+                floor: gb_bytes(self.evict_below),
+                margin: 10 * crate::admission::GB,
+                min_idle: std::time::Duration::from_secs(2 * 3600),
+                dry_run: self.evict_dry_run,
+            },
             handover: self.handover,
         })
     }

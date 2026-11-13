@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.15.0 — 2026-11-13
+
+- Disk-budget eviction of local Cargo target directories. Every 60 s, when the filesystem of a
+  target directory that jobs built into has less than `--evict-below` free (GB, default 40, 0
+  off), the daemon picks the least recently built target directories until the filesystem would
+  have 10 GB more than that. It keeps a directory whose repository has a queued or running job
+  or that was built in the last 2 h, and deletes only a directory Cargo tagged with
+  `CACHEDIR.TAG` that a logged job built into. A target directory of a managed worktree goes
+  through `worktree discard-cache`. `--evict-dry-run` is on by default: the journal and
+  `slot status` say what would be deleted and nothing is. Jobs in the log carry `target_dir`.
+- A second `systemctl --user reload slot` while a handover runs no longer ends the daemon: it
+  is ignored while the new image starts, caught from then on, and runs as one more handover.
+
 ## 0.14.0 — 2026-11-12
 
 - The web view shows a pending upgrade in its header, the line `slot status` prints

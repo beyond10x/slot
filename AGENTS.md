@@ -190,6 +190,27 @@ Change the live daemon only through `slot` commands, `systemctl --user reload sl
 API. Writing tokens into the live jobserver FIFO by hand is a last resort for a verified leak
 (every FIFO holder listed from `/proc/*/fd`, tokens counted), reported with the numbers.
 
+## Open work
+
+Done: 0.1.0 to 0.15.0 (`CHANGELOG.md`): one jobserver pool with a queue, admission by disk and
+memory, headroom and call mode, the web view, remote mode, handover on reload, lost-token
+recovery, and eviction of local target directories in dry run.
+
+Open, one line each, with where the design lives. A session starts with (e), then (b).
+
+- (a) Priority classes and the rest of the conductor contract (labels, version endpoint, OpenAPI,
+  strict mode, run report, write token, prompt-prefix hook): the conductor repository,
+  `docs/design/slot-integration.md`.
+- (b) Eviction: switch `--evict-dry-run` off once its journal lines (`slot: disk: …`) list only
+  directories that may go: `docs/design.md` § 18.
+- (c) Warnings for an empty `RUSTC_WRAPPER` while sccache is configured and for mixed
+  `CARGO_PROFILE_*` in one target directory: `docs/design.md` § 12, ideas 1 and 2, not built.
+- (d) I/O and disk and cache sizes in the live view: about ½ to 1 day each; `io.stat` needs a
+  root `Delegate=` drop-in for the user manager.
+- (e) The live daemon may still run an old binary: compare
+  `ls -l /proc/$(systemctl --user show slot -p MainPID --value)/exe` and `slot status` with the
+  newest release; reload only as § Upgrading a running daemon says.
+
 ## Never
 
 - Never put private names, home paths, host names or planning ids in source, a page, a crate
