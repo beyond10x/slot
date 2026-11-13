@@ -82,6 +82,14 @@ pub struct Job {
     /// Cargo target directory a local Rust job builds into; empty otherwise.
     #[serde(default)]
     pub target_dir: String,
+    /// The level a queued job is ordered by: the rule for its repository,
+    /// else its own `--priority`, raised to `high` once it waited longer
+    /// than `--promote-after`. `normal` from a daemon without levels.
+    #[serde(default)]
+    pub priority: Priority,
+    /// Whether `priority` is `high` only because the job waited that long.
+    #[serde(default)]
+    pub promoted: bool,
 }
 
 /// Live numbers of one running job.
@@ -139,6 +147,56 @@ impl HeadroomBase {
             Self::Pool => "pool",
             Self::Machine => "machine",
         }
+    }
+}
+
+/// Which queued job gets free slots first: every `urgent` job before every
+/// `high` one, `high` before `normal`, `normal` before `low`; first in,
+/// first out inside one level.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    TS,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    /// Repair work on the pool itself: starts before every other job, and
+    /// with no slot free on one the headroom holds back.
+    Urgent,
+    /// Starts before every `normal` and `low` job.
+    High,
+    /// The default.
+    #[default]
+    Normal,
+    /// Starts after every `high` and `normal` job.
+    Low,
+}
+
+impl Priority {
+    /// `urgent`, `high`, `normal` or `low`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Urgent => "urgent",
+            Self::High => "high",
+            Self::Normal => "normal",
+            Self::Low => "low",
+        }
+    }
+}
+
+impl std::fmt::Display for Priority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

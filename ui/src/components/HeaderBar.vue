@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import { fmtDur } from '../lib/format.ts';
 import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineLine } from '../lib/headroom.ts';
-import { fifoQueue, queueSummary, waitStats } from '../lib/queue.ts';
+import { queueSummary, servedQueue, waitStats } from '../lib/queue.ts';
 import { census, jobs, setHeadroom, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
@@ -48,7 +48,7 @@ const running = computed(() => {
   for (const j of jobs.values()) if (j.state === 'running') n++;
   return n;
 });
-const queue = computed(() => queueSummary(fifoQueue(jobs.values()), store.clock));
+const queue = computed(() => queueSummary(servedQueue(jobs.values()), store.clock));
 const waits = computed(() => waitStats(jobs.values(), store.clock));
 const pct = (v: number | null): string => (v === null ? '–' : fmtDur(v));
 

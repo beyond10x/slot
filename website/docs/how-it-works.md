@@ -54,13 +54,50 @@ limit the threads of a test binary; this does.
 
 ## The queue
 
-A job whose slots are not free waits. Jobs are admitted in the order they arrived. While a job
-waits, `slot` prints nothing; when it ends after a wait of two seconds or more, `slot` prints one
-line:
+A job whose slots are not free waits. While a job waits, `slot` prints nothing; when it ends
+after a wait of two seconds or more, `slot` prints one line:
 
 ```text
 slot: job 3 waited 5s for a build slot, ran 0s
 ```
+
+### Priority
+
+Every job has a level: `urgent`, `high`, `normal` (the default) or `low`. Queued `urgent` jobs get
+free slots first, then `high`, `normal` and `low` ones; inside a level, jobs are admitted in the
+order they arrived. A `normal` or `low` job that has waited more than 30 minutes (`slot serve
+--promote-after`, in seconds; 0 turns it off) counts as `high`, ahead of every `high` job that
+arrived after it, so no level waits forever. A running job is never stopped for a queued one.
+
+`urgent` is for repair work on the pool itself. When no slot is free, an `urgent` job starts at
+once on a slot the [headroom](headroom.md) holds back, instead of waiting for a running job to
+end. At most the held-back slots (the pool less the slots in circulation) are in use that way at a
+time; each goes back to the held-back set when its job ends. Without headroom nothing is held
+back, and an `urgent` job only goes to the head of the queue.
+
+A job asks for its level with `slot --priority <level> <command…>`, `slot run --priority <level>`
+or `SLOT_PRIORITY=<level>`; the flag wins over the variable. A rule for the job's repository wins
+over both:
+
+```sh
+slot priority set repo-a high    # every job of repo-a
+slot priority set 'web-*' low    # a glob: * is any run of characters
+slot priority unset 'web-*'
+slot priority list
+```
+
+A pattern matches the repository name `slot status` shows. An exact name wins over a glob, a
+longer glob over a shorter one. The rule table starts empty, changes without a restart, re-ranks
+the queued jobs at once, and is kept in `priority.json` in the state directory. `GET` and `PUT`
+`/api/priority` read and change it (`{"pattern": "repo-a", "level": "high"}`; a `null` level
+removes the rule). `slot status` ends each queued line with the job's level, and `high (waited)`
+for a job raised because it waited; the web UI's queue has a `level` column. Both list the queue
+in the order it is served.
+
+The first job in that order takes slots as they come free and keeps them until it has all it
+asked for: a job that needs 4 slots is not overtaken by later 1-slot jobs of its level or below,
+even while one of them would fit. A later job of a higher level does overtake it, and takes the
+slots it gathered; after 30 minutes the waiting job is `high` itself.
 
 When the client goes away (Ctrl-C, a killed agent, a closed ssh connection), the daemon cancels
 the job: it kills the job's process group and returns the job's slots. `slot cancel <id>` does the
@@ -219,6 +256,7 @@ shows:
   a slot,
 - cores in use by slot jobs per toolchain, and by the whole host,
 - running and queued jobs: repository, command, state, wait, elapsed time, cores, memory, session,
+  and for a queued job its level,
 - finished jobs: exit code, wait, duration, CPU seconds, average cores, peak memory,
 - the share of the pool per project, repository or session for today, the last 24 hours or the
   last 7 days ([Usage](#usage)),
@@ -228,4 +266,4 @@ shows:
 It keeps the last 500 finished jobs in memory (`--keep-jobs`). The UI has no authentication;
 keep it on a loopback address. The same data is available as JSON from `/api/state`, as a stream
 of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/output`. `/api/limits`
-reads and sets the headroom.
+reads and sets the headroom, `/api/priority` the [priority rules](#priority).

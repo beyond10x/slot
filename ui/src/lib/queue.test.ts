@@ -2,20 +2,20 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job } from '../generated/types.ts';
 import { jobId } from './job.ts';
-import { fifoQueue, percentile, queueSummary, waitStats } from './queue.ts';
+import { levelText, percentile, queueSummary, servedQueue, waitStats } from './queue.ts';
 
 function job(over: Partial<Job>): Job {
   return {
     id: 1, argv: ['cargo', 'build'], cwd: '/w', repo: 'r', session: '', client: '', toolchain: 'rust', remote: false,
     tokens: 1, state: 'queued', enqueued_ms: 1000, started_ms: 0, ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', ...over,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, ...over,
   };
 }
 
 const H = 3_600_000;
 
 test('queue holds only queued jobs, oldest request first', () => {
-  const q = fifoQueue([
+  const q = servedQueue([
     job({ id: 1, enqueued_ms: 500, state: 'running', started_ms: 600 }),
     job({ id: 2, enqueued_ms: 3000 }),
     job({ id: 3, enqueued_ms: 1000 }),
@@ -25,8 +25,29 @@ test('queue holds only queued jobs, oldest request first', () => {
 });
 
 test('equal request times are served by id', () => {
-  const q = fifoQueue([job({ id: 9, enqueued_ms: 1000 }), job({ id: 7, enqueued_ms: 1000 })]);
+  const q = servedQueue([job({ id: 9, enqueued_ms: 1000 }), job({ id: 7, enqueued_ms: 1000 })]);
   assert.deepEqual(q.map(jobId), [7, 9]);
+});
+
+test('urgent, high, normal, then low, oldest first inside a level', () => {
+  const q = servedQueue([
+    job({ id: 1, enqueued_ms: 100, priority: 'low' }),
+    job({ id: 2, enqueued_ms: 200 }),
+    job({ id: 3, enqueued_ms: 300, priority: 'high' }),
+    job({ id: 4, enqueued_ms: 50, priority: 'high', promoted: true }),
+    job({ id: 5, enqueued_ms: 150 }),
+    job({ id: 6, enqueued_ms: 400, priority: 'urgent' }),
+  ]);
+  assert.deepEqual(q.map(jobId), [6, 4, 3, 5, 2, 1]);
+});
+
+test('a job from a daemon without levels is normal', () => {
+  const old = job({ id: 1 }) as Partial<Job>;
+  delete old.priority;
+  delete old.promoted;
+  assert.equal(levelText(old as Job), 'normal');
+  assert.equal(levelText(job({ priority: 'high', promoted: true })), 'high · waited');
+  assert.equal(levelText(job({ priority: 'low' })), 'low');
 });
 
 test('percentile of nothing is null', () => {

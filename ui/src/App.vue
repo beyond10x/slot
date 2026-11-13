@@ -39,7 +39,7 @@ watch(
         <CoresChart />
       </section>
       <section>
-        <h2>Queue: waiting for slots, served oldest first</h2>
+        <h2>Queue: waiting for slots, by level, oldest first</h2>
         <QueueTable />
         <h2>Running</h2>
         <ActiveTable />

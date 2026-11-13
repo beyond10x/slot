@@ -36,6 +36,11 @@ pub struct Request {
     /// ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u32>,
+    /// `slot --priority <level>`: the job's own queue level. A rule of the
+    /// daemon's table for the repository wins over it. Daemons that predate
+    /// it ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<crate::types::Priority>,
 }
 
 /// A repository synced to the server.
@@ -104,5 +109,22 @@ mod tests {
         };
         let back: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back.tokens, Some(4));
+    }
+
+    #[test]
+    fn a_request_from_an_older_client_has_no_priority() {
+        use crate::types::Priority;
+        let r: Request = serde_json::from_str(r#"{"argv":["sh","build.sh"],"env":[]}"#).unwrap();
+        assert_eq!(r.priority, None);
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(!line.contains("priority"), "{line}");
+        let r = Request {
+            priority: Some(Priority::Low),
+            ..r
+        };
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(line.contains(r#""priority":"low""#), "{line}");
+        let back: Request = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.priority, Some(Priority::Low));
     }
 }

@@ -20,6 +20,7 @@ fn main() -> ExitCode {
             cli.local,
             &cli.fetch,
             args.tokens.or(cli.tokens),
+            args.priority.or(cli.priority),
         )),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
@@ -31,6 +32,7 @@ fn main() -> ExitCode {
                 0
             })
         }
+        Cmd::Priority(cmd) => priority(&cmd),
         Cmd::Cancel(args) => Ok(client::cancel(args.id, &Settings::from_env())),
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);
@@ -48,7 +50,13 @@ fn main() -> ExitCode {
                 .into_iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            Ok(build(&argv, cli.local, &cli.fetch, cli.tokens))
+            Ok(build(
+                &argv,
+                cli.local,
+                &cli.fetch,
+                cli.tokens,
+                cli.priority,
+            ))
         }
     };
     match result {
@@ -60,14 +68,33 @@ fn main() -> ExitCode {
     }
 }
 
-fn build(argv: &[String], local: bool, fetch: &[String], tokens: Option<u32>) -> i32 {
+fn build(
+    argv: &[String],
+    local: bool,
+    fetch: &[String],
+    tokens: Option<u32>,
+    priority: Option<slot::types::Priority>,
+) -> i32 {
     if local {
         return client::run_local(argv);
     }
     let mut s = Settings::from_env();
     s.fetch = fetch.to_vec();
     s.tokens = tokens;
+    s.priority = priority;
     client::run(argv, &s)
+}
+
+/// `slot priority set|unset|list`: changes the rules, then prints them.
+fn priority(cmd: &slot::cli::PriorityCmd) -> Result<i32> {
+    use slot::cli::PriorityCmd;
+    let v = match cmd {
+        PriorityCmd::Set(a) => slot::status::priority(&a.http, Some((&a.pattern, Some(a.level))))?,
+        PriorityCmd::Unset(a) => slot::status::priority(&a.http, Some((&a.pattern, None)))?,
+        PriorityCmd::List(a) => slot::status::priority(&a.http, None)?,
+    };
+    print!("{}", slot::status::render_priority(&v));
+    Ok(0)
 }
 
 /// `slot shell`: the forced command of a build server's ssh key. Exits

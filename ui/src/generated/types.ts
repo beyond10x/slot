@@ -2,6 +2,8 @@
 
 export type JobState = "queued" | "running" | "ok" | "failed" | "cancelled";
 
+export type Priority = "urgent" | "high" | "normal" | "low";
+
 export type Job = { 
 /**
  * Job id, increasing.
@@ -83,7 +85,17 @@ wait_reason: string,
 /**
  * Cargo target directory a local Rust job builds into; empty otherwise.
  */
-target_dir: string, };
+target_dir: string, 
+/**
+ * The level a queued job is ordered by: the rule for its repository,
+ * else its own `--priority`, raised to `high` once it waited longer
+ * than `--promote-after`. `normal` from a daemon without levels.
+ */
+priority: Priority, 
+/**
+ * Whether `priority` is `high` only because the job waited that long.
+ */
+promoted: boolean, };
 
 export type Unit = { 
 /**

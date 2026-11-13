@@ -201,7 +201,7 @@ recovery, and eviction of local target directories in dry run.
 
 Open, one line each, with where the design lives. A session starts with (e), then (b).
 
-- (a) Priority classes and the rest of the conductor contract (labels, version endpoint, OpenAPI,
+- (a) The rest of the conductor contract (job priority is built; labels, version endpoint, OpenAPI,
   strict mode, run report, write token, prompt-prefix hook): the conductor repository,
   `docs/design/slot-integration.md`.
 - (b) Eviction: switch `--evict-dry-run` off once its journal lines (`slot: disk: …`) list only

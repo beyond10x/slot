@@ -17,6 +17,7 @@ slot [OPTIONS] <COMMAND>
 
 - `--local`: Run the command here, without the daemon (default `false`)
 - `--tokens`: Slots the job holds, in place of the count slot derives from the command. For work the daemon cannot see, such as a script that starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The daemon caps it at the slots in circulation (the pool less the headroom), so the job never waits forever. Ignored with `--local` (env `SLOT_TOKENS`)
+- `--priority`: The job's queue level: queued `urgent` jobs get free slots first, then `high`, `normal` and `low` ones; with no slot free, an `urgent` job starts on one the headroom holds back. A rule set with `slot priority set` for the job's repository wins over it. Ignored with `--local` (env `SLOT_PRIORITY`)
 - `--fetch`: With `SLOT_HOST` set: after the job exits 0, copy PATH back from the build server into the checkout. PATH is relative to the repository root; `target/…` is read from the job's target directory on the server. Repeat for more paths. Without `SLOT_HOST` the output is already here and this does nothing
 
 ### `slot serve`
@@ -46,6 +47,7 @@ slot serve [OPTIONS]
 - `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off (default `25`)
 - `--min-free-memory`: A job waits while available memory, less what jobs that started in the last 30 s still take, is below its expected peak (from earlier runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway (default `4`)
 - `--upgrade-hold`: After `systemctl --user reload slot`, the longest time no new job starts while jobs still run, seconds. Then jobs start again, and the next hold begins when the running jobs are expected to end within it (from earlier runs of the same command) or none runs. 0 never holds (default `60`)
+- `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes (default `1800`)
 - `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
 - `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. Directories of a repository with a queued or running job, or built in the last 2 h, are kept. 0 turns it off (default `40`)
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete; `false` deletes them (default `true`)
@@ -83,6 +85,7 @@ slot run [OPTIONS] <COMMAND>...
 ```
 
 - `--tokens`: Slots the job holds, as `slot --tokens N`; capped at the slots in circulation. Ignored with `--local`
+- `--priority`: The job's queue level, as `slot --priority LEVEL`
 - `<COMMAND>`: The command and its arguments
 
 ### `slot status`
@@ -106,6 +109,47 @@ slot headroom [OPTIONS] [PERCENT]
 - `<PERCENT>`: New headroom, percent, 0 to 50; without it, prints the current one
 - `--call`: Headroom during a call, percent, 0 to 50; 0 turns call mode off
 - `--base`: What the headroom is a share of: `pool` caps the pool at a fixed quota; `machine` lowers the pool's quota by the CPU used outside the pool, so the whole machine keeps the headroom free
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+### `slot priority`
+
+Show or change the priority rules: the queue level of every job of a repository
+
+```text
+slot priority [OPTIONS] <COMMAND>
+```
+
+#### `slot priority set`
+
+Give every job of the repositories PATTERN matches the level LEVEL
+
+```text
+slot priority set [OPTIONS] <PATTERN> <LEVEL>
+```
+
+- `<PATTERN>`: Repository name or glob, such as `repo-a` or `web-*`
+- `<LEVEL>`: `urgent`, `high`, `normal` or `low`
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+#### `slot priority unset`
+
+Remove the rule for PATTERN
+
+```text
+slot priority unset [OPTIONS] <PATTERN>
+```
+
+- `<PATTERN>`: The pattern of the rule, as `slot priority list` shows it
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+#### `slot priority list`
+
+List the rules
+
+```text
+slot priority list [OPTIONS]
+```
+
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cancel`

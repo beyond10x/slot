@@ -8,6 +8,25 @@
   them differ.
 - Every job records its `project`: the namespace of its repository's git remote, or `project =`
   in `.slot.toml`. Several repositories of one project and all their worktrees share it.
+- Job priority. Every job has a queue level, `urgent`, `high`, `normal` (the default) or `low`:
+  `slot --priority <level> <command…>`, `slot run --priority <level>` or `SLOT_PRIORITY`, the
+  flag winning over the variable. Queued `urgent` jobs get free slots first, then `high`,
+  `normal` and `low`, first in first out inside a level; a running job is never stopped. An
+  `urgent` job, for repair work on the pool, starts with no slot free on one the headroom holds
+  back, at most `pool − limit` of them at a time, and they go back to the held-back set when
+  it ends.
+  `slot priority set <pattern> <level>`, `unset <pattern>` and `list` keep a rule table per
+  repository (exact name or a glob with `*`) that wins over the job's own level, changes
+  without a restart, re-ranks the queue at once and is saved in `priority.json` beside
+  `limits.json`; `GET` and `PUT /api/priority` read and change it. The table starts empty.
+  A job queued more than 30 minutes (`slot serve --promote-after`, seconds, 0 off) counts as
+  `high`, ahead of every `high` job that arrived after it, so a stream of `high` jobs cannot
+  starve a `low` one. The head of the queue still gathers slots until it has all it asked for,
+  so a multi-slot job is not overtaken by later 1-slot jobs of its level or below; a later
+  higher job overtakes it and takes the slots it gathered. `slot status` ends each queued line
+  with the level and lists the queue in the order it is served; the web UI's queue has a
+  `level` column and the same order. The request carries `priority` and jobs carry `priority`
+  and `promoted`, all defaulting, so older clients and daemons keep working.
 
 ## 0.16.0 — 2026-11-13
 

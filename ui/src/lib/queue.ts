@@ -1,11 +1,28 @@
-import type { Job } from '../generated/types.ts';
+import type { Job, Priority } from '../generated/types.ts';
 import { isActive, jobId, times } from './job.ts';
 
-/** Queued jobs in the order the pool serves them: oldest request first, id breaks ties. */
-export function fifoQueue(list: Iterable<Job>): Job[] {
+const RANK: Record<Priority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+
+/** A job's queue level; `normal` from a daemon that predates levels. */
+export function level(j: Job): Priority {
+  return j.priority ?? 'normal';
+}
+
+/** The level as the queue shows it: `high · waited` for a job raised because it waited. */
+export function levelText(j: Job): string {
+  return j.promoted ? `${level(j)} · waited` : level(j);
+}
+
+/**
+ * Queued jobs in the order the pool serves them: urgent, high, normal, then low,
+ * oldest request first inside a level, id breaks ties.
+ */
+export function servedQueue(list: Iterable<Job>): Job[] {
   const q: Job[] = [];
   for (const j of list) if (j.state === 'queued') q.push(j);
-  return q.sort((a, b) => times(a).queued - times(b).queued || jobId(a) - jobId(b));
+  return q.sort(
+    (a, b) => RANK[level(a)] - RANK[level(b)] || times(a).queued - times(b).queued || jobId(a) - jobId(b),
+  );
 }
 
 /** Nearest-rank percentile (0 < p <= 100) of ascending values; null when empty. */
