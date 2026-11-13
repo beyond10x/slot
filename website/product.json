@@ -54,7 +54,7 @@
         {
           "label": "queue",
           "title": "Wait for slots",
-          "description": "The daemon picks the toolchain from the command name and queues the job until the slots it needs are free."
+          "description": "The daemon picks the toolchain from the command name and queues the job by its priority until the slots it needs are free."
         },
         {
           "label": "run",
@@ -101,7 +101,7 @@
         },
         {
           "title": "Live web view",
-          "description": "Every queued and running job, slot usage, cores per toolchain and live output on 127.0.0.1:7411.",
+          "description": "Every queued and running job with its level, slot usage, cores per toolchain, live output and each project's share of the pool on 127.0.0.1:7411.",
           "status": "shipped",
           "href": "/docs/how-it-works#web-ui"
         },

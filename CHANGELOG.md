@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 — 2026-11-13
 
 - `slot usage` and `GET /api/usage`: slot time, CPU time, jobs and median queue wait per project,
   repository or session over a window, from the job log; the web UI shows the same as **Share of
