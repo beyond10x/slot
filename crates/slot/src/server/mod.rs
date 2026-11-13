@@ -320,6 +320,17 @@ struct Headroom {
     call_note: String,
 }
 
+/// Slots a job takes. The client's `--tokens` replaces the toolchain's
+/// count and is capped at `limit`, the tokens in circulation, so the job
+/// can always start; the toolchain's count is capped at the pool `size`
+/// (the jobserver caps a request at the limit when it queues).
+fn job_tokens(toolchain: usize, requested: Option<u32>, size: usize, limit: usize) -> usize {
+    match requested {
+        Some(n) => (n as usize).clamp(1, limit.max(1)),
+        None => toolchain.clamp(1, size),
+    }
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1318,7 +1329,13 @@ impl Server {
             return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
         }
         let tc = toolchain::for_argv(&req.argv, self.cfg.go_tokens);
-        let tokens = tc.tokens().clamp(1, self.pool.size());
+        let limit = self.pool.limit();
+        let tokens = job_tokens(tc.tokens(), req.tokens, self.pool.size(), limit);
+        if let Some(n) = req.tokens.filter(|&n| n as usize > limit) {
+            let _ = tx.send(Frame::Info {
+                msg: format!("slot: --tokens {n} capped at {limit}, the slots in circulation"),
+            });
+        }
         let target_dir = (tc.name() == "rust" && req.workspace.is_none())
             .then(|| crate::evict::target_dir(&req.argv, &req.env, &cwd))
             .flatten();

@@ -17,11 +17,19 @@ use crate::paths;
 /// GNU-make jobserver, so cargo, rustc and make draw parallelism from the
 /// same pool and the machine is never oversubscribed.
 #[derive(Debug, Parser)]
-#[command(name = "slot", version, args_conflicts_with_subcommands = true)]
+#[command(name = "slot", version)]
 pub struct Cli {
     /// Run the command here, without the daemon.
     #[arg(long, global = true)]
     pub local: bool,
+
+    /// Slots the job holds, in place of the count slot derives from the
+    /// command. For work the daemon cannot see, such as a script that
+    /// starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The
+    /// daemon caps it at the slots in circulation (the pool less the
+    /// headroom), so the job never waits forever. Ignored with `--local`.
+    #[arg(long, env = "SLOT_TOKENS", value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub tokens: Option<u32>,
 
     /// With `SLOT_HOST` set: after the job exits 0, copy PATH back from
     /// the build server into the checkout. PATH is relative to the
@@ -197,6 +205,10 @@ pub struct ShellArgs {
 /// `slot run` arguments.
 #[derive(Debug, Clone, Args)]
 pub struct RunArgs {
+    /// Slots the job holds, as `slot --tokens N`; capped at the slots in
+    /// circulation. Ignored with `--local`.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub tokens: Option<u32>,
     /// The command and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -324,5 +336,40 @@ impl ServeArgs {
             },
             handover: self.handover,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("slot").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn job_tokens_parse_before_a_command_and_on_run() {
+        let cli = parse(&["--tokens", "4", "sh", "build.sh"]).unwrap();
+        assert_eq!(cli.tokens, Some(4));
+        assert!(matches!(cli.command, Cmd::External(ref a) if a == &["sh", "build.sh"]));
+        let cli = parse(&["run", "--tokens", "3", "sh", "--tokens", "9"]).unwrap();
+        let Cmd::Run(run) = cli.command else {
+            panic!("not run")
+        };
+        assert_eq!(run.tokens, Some(3));
+        assert_eq!(run.command, ["sh", "--tokens", "9"]);
+        let cli = parse(&["sh", "build.sh", "--tokens", "2"]).unwrap();
+        assert_eq!(cli.tokens, None, "after the command it is the command's");
+        assert!(parse(&["--tokens", "0", "sh"]).is_err());
+        assert!(parse(&["run", "--tokens", "x", "sh"]).is_err());
+    }
+
+    #[test]
+    fn serve_keeps_its_own_tokens() {
+        let cli = parse(&["serve", "--tokens", "8"]).unwrap();
+        let Cmd::Serve(s) = cli.command else {
+            panic!("not serve")
+        };
+        assert_eq!(s.tokens, Some(8));
     }
 }

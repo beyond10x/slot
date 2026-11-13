@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `slot --tokens N <command…>` and `slot run --tokens N <command…>`, or `SLOT_TOKENS=N`: the job
+  holds N slots in place of its toolchain's count. A script that starts `docker run --cpus 4`
+  held one slot while the container, outside the daemon's cgroup, used 4 CPUs. The daemon caps
+  N at the slots in circulation and says so, so the job never waits forever. Remote mode
+  forwards it; `--local` ignores it. The request carries it in a new field `tokens`, which an
+  older daemon ignores.
+
 ## 0.15.0 — 2026-11-13
 
 - Disk-budget eviction of local Cargo target directories. Every 60 s, when the filesystem of a

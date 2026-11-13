@@ -384,6 +384,35 @@ fn go_job_holds_at_most_the_pool() {
 }
 
 #[test]
+fn requested_tokens_replace_the_toolchains() {
+    let f = start(4);
+    let mut req = sh(&f.root, "true");
+    req.tokens = Some(3);
+    let r = run(&f, req);
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(f.server.state().done[0].tokens, 3);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(f.server.pool().free(), 4, "all slots back");
+}
+
+#[test]
+fn requested_tokens_are_capped_at_the_limit() {
+    let f = start(4);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    assert_eq!(
+        rt.block_on(Arc::clone(&f.server).set_headroom(50))
+            .effective_tokens,
+        2
+    );
+    let mut req = sh(&f.root, "true");
+    req.tokens = Some(9);
+    let r = run(&f, req);
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(f.server.state().done[0].tokens, 2);
+    assert!(r.info.contains("capped at 2"), "{r:?}");
+}
+
+#[test]
 fn history_survives_restart() {
     let f = start(1);
     assert_eq!(run(&f, sh(&f.root, "exit 4")).code, 4);

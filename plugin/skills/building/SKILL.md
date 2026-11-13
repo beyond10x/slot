@@ -41,6 +41,7 @@ nothing, so a script or Taskfile that prefixes its own builds is safe to run thr
 | `slot ignite test a.ignite --jobs 4`, `slot ignite build a.ignite` | test and conformance hold one slot per `--jobs` (4 without the flag); build holds one, and the Rust target's cargo shares the pool |
 | `slot pnpm build`, `slot npx tsc --noEmit`, `slot scripts/zig.sh build`, `slot pytest -q` | holds one slot |
 | anything else | holds one slot |
+| `slot --tokens 4 ./build.sh` for a script that starts `docker run --cpus 4` | holds the 4 slots named, capped at the slots in circulation; use it for any command whose CPUs the daemon cannot see |
 
 Test binaries in rust, go and wrapper jobs get `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and
 `GOMAXPROCS` from the daemon (a quarter of the pool; go jobs their slot count). Set them yourself

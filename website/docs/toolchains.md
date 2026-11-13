@@ -103,6 +103,25 @@ holds one slot while its workers use as many cores as the runner starts (one nod
 1153 % CPU on 2026-11-12). Pass a worker flag inside the task, or call the runner directly
 (`slot npx playwright test --workers=2`) so the job holds one slot per worker.
 
+## Naming the slots
+
+Work outside the daemon's view is not counted either: a script that starts
+`docker run --cpus 4 …` is an `other` job and holds one slot, while the container, outside the
+daemon's cgroup, uses 4 CPUs. Name the slots the job needs:
+
+```sh
+slot --tokens 4 ./build.sh
+slot run --tokens 4 ./build.sh
+SLOT_TOKENS=4 slot ./build.sh
+```
+
+`--tokens N` (N at least 1) replaces the toolchain's count for that job; the flag wins over
+`SLOT_TOKENS`, which is for wrappers that cannot change the command line. The daemon caps it at
+the slots in circulation (the pool less the [headroom](headroom.md)) and says so in one line, so
+the job never waits for slots that do not exist. In remote mode the same value goes to the
+server's daemon; with `--local` it is ignored. A daemon older than the client ignores it, and the
+job holds the toolchain's count.
+
 All toolchains also pass `TERM`, `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TZ`, `LANG` and
 `LC_ALL` to a remote server. A name that looks like a credential (`CARGO_REGISTRY_TOKEN`) is
 held back even when it matches a toolchain's prefix. `SLOT_ENV` adds more names; see
