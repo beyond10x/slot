@@ -20,6 +20,11 @@ cwd: string,
  */
 repo: string, 
 /**
+ * Project: the namespace of the repository's remote, or `.slot.toml`'s
+ * `project`; empty when unknown (`crate::project`).
+ */
+project?: string, 
+/**
  * Agent session id.
  */
 session: string, 
@@ -304,6 +309,72 @@ quota_floor: boolean,
  * than the target.
  */
 over_target: boolean, };
+
+export type By = "project" | "repo" | "session";
+
+export type UsageRow = { 
+/**
+ * Project, repository or session id; empty for jobs with none.
+ */
+key: string, 
+/**
+ * Session title, for rows grouped by session.
+ */
+title: string, 
+/**
+ * Jobs that started in the window.
+ */
+jobs: number, 
+/**
+ * Run seconds × slots held, inside the window.
+ */
+slot_s: number, 
+/**
+ * CPU seconds of jobs that started in the window.
+ */
+cpu_s: number, 
+/**
+ * Queue wait seconds of jobs that started in the window.
+ */
+wait_s: number, 
+/**
+ * Median queue wait, seconds.
+ */
+wait_p50_s: number, 
+/**
+ * Longest queue wait, seconds.
+ */
+wait_max_s: number, 
+/**
+ * `slot_s` over the total, 0 to 1.
+ */
+slot_share: number, 
+/**
+ * `cpu_s` over the total, 0 to 1.
+ */
+cpu_share: number, };
+
+export type Usage = { 
+/**
+ * Window start, Unix milliseconds.
+ */
+from_ms: number, 
+/**
+ * Window end, Unix milliseconds.
+ */
+to_ms: number, 
+/**
+ * What the rows are grouped by.
+ */
+by: By, 
+/**
+ * All jobs together (`key` empty).
+ */
+total: UsageRow, 
+/**
+ * One row per group, most slot time first.
+ */
+rows: Array<UsageRow>, };
 
 export type CensusClass = { 
 /**

@@ -40,6 +40,10 @@ pub struct Job {
     pub cwd: String,
     /// Repository name.
     pub repo: String,
+    /// Project: the namespace of the repository's remote, or `.slot.toml`'s
+    /// `project`; empty when unknown (`crate::project`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
     /// Agent session id.
     #[serde(default)]
     pub session: String,

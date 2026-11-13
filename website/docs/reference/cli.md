@@ -131,6 +131,20 @@ slot sessions [OPTIONS]
 - `--min-cores`: Leave out sessions below this many cores outside slot, unless a command of theirs runs now; builds outside any agent session are left out below it in any case (default `0.5`)
 - `--json`: Print JSON instead of text (default `false`)
 
+### `slot usage`
+
+Show how the pool was shared: slot time, CPU time and queue wait per project, repository or session, from the job log
+
+```text
+slot usage [OPTIONS]
+```
+
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+- `--since`: Window ending now: a number followed by m, h or d (default `24h`)
+- `--by`: Group by project (the namespace of the repository's remote), repo or session (default `project`)
+- `--top`: Rows to print (default `15`)
+- `--json`: Print JSON instead of text (default `false`)
+
 ### `slot hook`
 
 Agent hooks: refuse a build command that would run outside the pool

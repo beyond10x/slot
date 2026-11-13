@@ -56,6 +56,20 @@ pub fn get(addr: &str, path: &str) -> Result<String> {
     request(addr, "GET", path, None)
 }
 
+/// Reads `GET /api/usage` for the last `since_ms` milliseconds, grouped by `by`.
+pub fn fetch_usage(addr: &str, since_ms: i64, by: crate::usage::By) -> Result<crate::usage::Usage> {
+    let to = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let by = serde_json::to_value(by)?
+        .as_str()
+        .unwrap_or("project")
+        .to_string();
+    let path = format!("/api/usage?from={}&to={to}&by={by}", to - since_ms);
+    let body = request(addr, "GET", &path, None)?;
+    serde_json::from_str(&body).with_context(|| format!("{addr}: /api/usage"))
+}
+
 /// Reads `GET /api/state` from the daemon's web address.
 pub fn fetch(addr: &str) -> Result<State> {
     let body = request(addr, "GET", "/api/state", None)?;
@@ -335,6 +349,7 @@ mod tests {
             argv: vec!["cargo".into(), "test".into()],
             cwd: "/w".into(),
             repo: "demo".into(),
+            project: String::new(),
             session: String::new(),
             client: String::new(),
             toolchain: "rust".into(),

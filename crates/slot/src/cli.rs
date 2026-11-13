@@ -65,6 +65,9 @@ pub enum Cmd {
     Cancel(CancelArgs),
     /// List agent sessions that build outside the pool, with their commands.
     Sessions(SessionsArgs),
+    /// Show how the pool was shared: slot time, CPU time and queue wait per
+    /// project, repository or session, from the job log.
+    Usage(UsageArgs),
     /// Agent hooks: refuse a build command that would run outside the pool.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -267,6 +270,26 @@ pub struct SessionsArgs {
     /// builds outside any agent session are left out below it in any case.
     #[arg(long, default_value_t = 0.5)]
     pub min_cores: f64,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `slot usage` options.
+#[derive(Debug, Clone, Args)]
+pub struct UsageArgs {
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+    /// Window ending now: a number followed by m, h or d.
+    #[arg(long, default_value = "24h")]
+    pub since: String,
+    /// Group by project (the namespace of the repository's remote), repo or session.
+    #[arg(long, default_value = "project")]
+    pub by: String,
+    /// Rows to print.
+    #[arg(long, default_value_t = 15)]
+    pub top: usize,
     /// Print JSON instead of text.
     #[arg(long)]
     pub json: bool,

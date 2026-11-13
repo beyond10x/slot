@@ -5,6 +5,9 @@
 //! local = ["cargo test -p integration", "go test ./e2e/..."]
 //! ```
 //!
+//! `project = "web"` names the project the repository belongs to, for the
+//! usage view; without it the project is the namespace of the git remote.
+//!
 //! `local` lists command prefixes that run on this machine's daemon even
 //! when `SLOT_HOST` sends every other build to a build server: tests that
 //! need docker, a database or a port on localhost. A prefix matches when its
@@ -24,6 +27,10 @@ pub struct RepoConfig {
     /// Command prefixes that never go to a remote host.
     #[serde(default)]
     pub local: Vec<String>,
+    /// Project the repository belongs to, over the namespace of its remote
+    /// (`crate::project`).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 impl RepoConfig {

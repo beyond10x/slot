@@ -1,5 +1,5 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
-import type { Chunk, Event, HostCensus, Job, LiveJob, State } from '../src/generated/types.ts';
+import type { Chunk, Event, HostCensus, Job, LiveJob, State, Usage, UsageRow } from '../src/generated/types.ts';
 import { POOL_BASE } from '../src/lib/headroom.ts';
 import type { MachineNumbers } from '../src/lib/headroom.ts';
 
@@ -30,6 +30,8 @@ export interface Scenario {
   steps: Step[];
   output: Record<number, { chunks: Chunk[]; end: string }>;
   task: Task | null;
+  /** Answer of `api/usage`; empty when absent. */
+  usage?: Usage;
 }
 
 export const T0 = Date.UTC(2026, 10, 12, 9, 0, 0);
@@ -302,9 +304,38 @@ function machineHeadroom(): Scenario {
   };
 }
 
+export const EMPTY_USAGE: Usage = {
+  from_ms: T0 - 86_400_000, to_ms: T0, by: 'project',
+  total: { key: '', title: '', jobs: 0, slot_s: 0, cpu_s: 0, wait_s: 0, wait_p50_s: 0, wait_max_s: 0, slot_share: 0, cpu_share: 0 },
+  rows: [],
+};
+
+function poolShare(): Scenario {
+  const base = busyFailed();
+  const slotTotal = 400_000;
+  const cpuTotal = 360_000;
+  const r = (key: string, slot: number, cpu: number, jobs: number, wait: number): UsageRow => ({
+    key, title: '', jobs, slot_s: slot, cpu_s: cpu, wait_s: wait * jobs, wait_p50_s: wait, wait_max_s: wait * 6,
+    slot_share: slot / slotTotal, cpu_share: cpu / cpuTotal,
+  });
+  const rows = [
+    r(REPOS[0], 146_000, 93_000, 1338, 46), r(REPOS[1], 94_000, 94_000, 189, 60), r(REPOS[2], 37_000, 70_000, 327, 69),
+    r(REPOS[3], 30_000, 4_000, 338, 81), r(REPOS[4], 93_000, 99_000, 2597, 62),
+  ];
+  const usage: Usage = {
+    from_ms: T0 - 86_400_000, to_ms: T0, by: 'project', rows,
+    total: { key: '', title: '', jobs: 4789, slot_s: slotTotal, cpu_s: cpuTotal, wait_s: 0, wait_p50_s: 42, wait_max_s: 385, slot_share: 1, cpu_share: 1 },
+  };
+  return {
+    ...base, name: 'pool-share', anchor: false,
+    card: 'One project holds more than a third of the pool. Read how the slot time was shared.',
+    task: null, usage,
+  };
+}
+
 export const SCENARIOS: Scenario[] = [
   busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), crowded(), callMode(), upgradePending(), idle(),
-  machineHeadroom(),
+  machineHeadroom(), poolShare(),
 ];
 
 /** Scenarios whose output pane is open from the start. */

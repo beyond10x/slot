@@ -180,6 +180,33 @@ caller's environment to its compiler processes, so the daemon can attribute them
 
 The daemon reads the log back at start, so the web UI shows recent jobs across restarts.
 
+`project` is the namespace of the repository's git remote: every path segment of the origin URL
+but the last, so `git@forge.example:team-a/api.git` and `git@forge.example:team-a/web.git` are both
+project `team-a`, and so is every worktree of them. `project = "web"` in the repository's
+`.slot.toml` names the project instead. A job without a remote has no `project` field.
+
+## Usage
+
+`slot usage` shows how the pool was shared over a window, from the job log:
+
+```text
+$ slot usage --since 24h
+4789 jobs, 110.9 slot-h, 89.4 cpu-h, by project
+project                       jobs  slot-h  share  cpu-h  share wait p50
+team-a                        1338    40.6  36.6%   23.1  25.8%      46s
+team-b                         189    26.2  23.6%   21.1  23.6%      60s
+```
+
+- **slot time** is run time × slots held, clipped to the window: the share of the pool a group took.
+- **CPU time** is the measured CPU of the group's jobs. It can be far below the slot time when
+  jobs hold slots while they wait on something else (a cluster, a network call).
+- **wait p50** is the median queue wait of the group's jobs.
+
+`--by project` (default), `--by repo` or `--by session`; `--since 90m`, `24h` (default) or `7d`;
+`--json` for the whole answer. A job logged before jobs carried a project is grouped by the
+project of its directory now, or by its repository name when the directory is gone. The same data
+is `GET /api/usage?from=<ms>&to=<ms>&by=project` and the **Share of the pool** table in the web UI.
+
 ## Web UI
 
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
@@ -193,6 +220,8 @@ shows:
 - cores in use by slot jobs per toolchain, and by the whole host,
 - running and queued jobs: repository, command, state, wait, elapsed time, cores, memory, session,
 - finished jobs: exit code, wait, duration, CPU seconds, average cores, peak memory,
+- the share of the pool per project, repository or session for today, the last 24 hours or the
+  last 7 days ([Usage](#usage)),
 - the live output of a job, opened by clicking its bar or its job number in a table; the job number
   is a button, so the keyboard reaches it with Tab.
 

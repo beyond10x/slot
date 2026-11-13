@@ -28,6 +28,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/metrics", get(metrics))
         .route("/api/history", get(history))
         .route("/api/limits", get(limits_get).put(limits_put))
+        .route("/api/usage", get(usage))
         .fallback(get(asset))
         .with_state(s);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -37,6 +38,44 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
 
 async fn state(State(s): State<Arc<Server>>) -> impl IntoResponse {
     axum::Json(s.state())
+}
+
+async fn usage(
+    State(s): State<Arc<Server>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let (from, to, by) = match crate::usage::query(&params, super::now_ms()) {
+        Ok(q) => q,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
+    };
+    let path = s.cfg.state_dir.join("jobs.jsonl");
+    let titles = s.inner.lock().expect("server lock").titles.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path).ok();
+        let mut resolve = |cwd: &str| crate::project::resolve(std::path::Path::new(cwd));
+        let mut u = match file {
+            Some(f) => {
+                crate::usage::aggregate(std::io::BufReader::new(f), from, to, by, &mut resolve)
+            }
+            None => crate::usage::Usage {
+                from_ms: from,
+                to_ms: to,
+                by,
+                ..Default::default()
+            },
+        };
+        if by == crate::usage::By::Session {
+            for r in &mut u.rows {
+                r.title = titles.get(&r.key).cloned().unwrap_or_default();
+            }
+        }
+        u
+    })
+    .await;
+    match built {
+        Ok(u) => axum::Json(u).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("slot: {e}\n")).into_response(),
+    }
 }
 
 async fn limits_get(State(s): State<Arc<Server>>) -> impl IntoResponse {

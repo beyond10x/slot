@@ -701,3 +701,43 @@ fn eviction_touches_only_target_dirs_jobs_built_into() {
     assert!(untagged.join("keep").exists());
     assert!(std::fs::symlink_metadata(&link).is_ok());
 }
+
+#[test]
+fn a_job_logs_the_project_of_its_directory() {
+    let f = start(2);
+    let repo = f.root.join("api");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@forge.example:team-a/api.git",
+        ][..],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    // git runs off the request path; a job that lasts a second has its project.
+    let r = run(&f, sh(&repo, "sleep 1"));
+    assert_eq!(r.code, 0);
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    assert!(log.contains("\"project\":\"team-a\""), "{log}");
+    let u = crate::usage::aggregate(
+        log.as_bytes(),
+        0,
+        i64::MAX,
+        crate::usage::By::Project,
+        &mut |_| String::new(),
+    );
+    assert_eq!(u.rows.len(), 1);
+    assert_eq!(u.rows[0].key, "team-a");
+}
