@@ -45,6 +45,11 @@ pub fn project_of(config: &RepoConfig, origin: Option<&str>) -> String {
 
 static CACHE: LazyLock<Mutex<HashMap<PathBuf, String>>> = LazyLock::new(Mutex::default);
 
+/// The project of `cwd` if [`resolve`] already looked it up, without running git.
+pub fn cached(cwd: &Path) -> Option<String> {
+    CACHE.lock().expect("project cache").get(cwd).cloned()
+}
+
 /// The project of the directory `cwd`, from git and `.slot.toml`; cached per
 /// directory for the life of the process. Empty when `cwd` is not in a git
 /// repository with a remote.
@@ -154,7 +159,9 @@ mod tests {
         ]);
         let sub = repo.join("src");
         std::fs::create_dir(&sub).unwrap();
+        assert_eq!(cached(&sub), None, "nothing looked up yet");
         assert_eq!(resolve(&sub), "team-a");
+        assert_eq!(cached(&sub).as_deref(), Some("team-a"));
         run(&[
             "remote",
             "set-url",
