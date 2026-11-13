@@ -29,6 +29,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/history", get(history))
         .route("/api/limits", get(limits_get).put(limits_put))
         .route("/api/usage", get(usage))
+        .route("/api/priority", get(priority_get).put(priority_put))
         .fallback(get(asset))
         .with_state(s);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -126,6 +127,25 @@ async fn limits_put(State(s): State<Arc<Server>>, headers: HeaderMap, body: Byte
         }
     }
     axum::Json(s.update_limits(req).await).into_response()
+}
+
+async fn priority_get(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    axum::Json(s.priority_view())
+}
+
+async fn priority_put(State(s): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
+    let port = s.cfg.http.map_or(0, |a| a.port());
+    if let Some(r) = refuse_change(&headers, port) {
+        return r.into_response();
+    }
+    let req: super::priority::Request = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
+    };
+    match s.set_priority(&req) {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e}\n")).into_response(),
+    }
 }
 
 async fn metrics(State(s): State<Arc<Server>>) -> impl IntoResponse {

@@ -18,36 +18,14 @@ fn start(tokens: usize) -> Fixture {
 }
 
 fn start_with(tokens: usize, admission: crate::admission::Limits) -> Fixture {
+    start_cfg(tokens, |c| c.admission = admission)
+}
+
+fn start_cfg(tokens: usize, change: impl FnOnce(&mut Config)) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    let cfg = Config {
-        socket: root.join("s"),
-        http: None,
-        tokens,
-        go_tokens: 4,
-        test_threads: 2,
-        cpu_quota: false,
-        state_dir: root.join("state"),
-        ws_root: root.join("ws"),
-        cache_root: root.join("cache"),
-        memory_max: None,
-        keep_jobs: 100,
-        cpu_weight: None,
-        call_headroom: 0,
-        call_off_after: Duration::from_secs(120),
-        call_ignore: Vec::new(),
-        sccache_watch: false,
-        admission,
-        upgrade_hold: Duration::from_secs(60),
-        cache_budget: 0,
-        evict: crate::evict::Settings {
-            floor: 0,
-            margin: 0,
-            min_idle: Duration::from_secs(7200),
-            dry_run: true,
-        },
-        handover: true,
-    };
+    let mut cfg = config(&root, tokens);
+    change(&mut cfg);
     let server = Server::new(cfg.clone()).unwrap();
     let s = Arc::clone(&server);
     std::thread::spawn(move || {
@@ -66,6 +44,39 @@ fn start_with(tokens: usize, admission: crate::admission::Limits) -> Fixture {
         root,
         server,
         socket: cfg.socket,
+    }
+}
+
+fn config(root: &Path, tokens: usize) -> Config {
+    Config {
+        socket: root.join("s"),
+        http: None,
+        tokens,
+        go_tokens: 4,
+        test_threads: 2,
+        cpu_quota: false,
+        state_dir: root.join("state"),
+        ws_root: root.join("ws"),
+        cache_root: root.join("cache"),
+        memory_max: None,
+        keep_jobs: 100,
+        cpu_weight: None,
+        call_headroom: 0,
+        call_off_after: Duration::from_secs(120),
+        call_ignore: Vec::new(),
+        sccache_watch: false,
+        admission: crate::admission::Limits::default(),
+        upgrade_hold: Duration::from_secs(60),
+        promote_after: Duration::from_secs(1800),
+        clock: now_ms,
+        cache_budget: 0,
+        evict: crate::evict::Settings {
+            floor: 0,
+            margin: 0,
+            min_idle: Duration::from_secs(7200),
+            dry_run: true,
+        },
+        handover: true,
     }
 }
 
@@ -435,6 +446,8 @@ fn history_survives_restart() {
         sccache_watch: false,
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
+        promote_after: Duration::from_secs(1800),
+        clock: now_ms,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -739,4 +752,232 @@ fn a_job_logs_the_project_of_its_directory() {
     );
     assert_eq!(u.rows.len(), 1);
     assert_eq!(u.rows[0].key, "team-a");
+}
+
+/// Polls `cond` for up to 5 s.
+fn wait_for(what: &str, cond: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+/// A job that holds its slot until the file `go` exists in `cwd`.
+fn holder(f: &Fixture) -> UnixStream {
+    let c = send(
+        &f.socket,
+        sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done"),
+    );
+    wait_for("the holder to run", || {
+        f.server
+            .state()
+            .active
+            .iter()
+            .any(|j| j.state == JobState::Running)
+    });
+    c
+}
+
+/// Queues a job of repository `repo` at its own level `level` that writes
+/// `name` to the file `order`, and waits until it waits for a slot.
+fn queue(f: &Fixture, name: &str, repo: &str, level: Option<Priority>) -> UnixStream {
+    let before = f.server.pool().waiting();
+    let mut r = sh(&f.root, &format!("echo {name} >> order"));
+    r.repo = repo.into();
+    r.priority = level;
+    let c = send(&f.socket, r);
+    wait_for("the job to queue", || {
+        f.server.pool().waiting() == before + 1
+    });
+    c
+}
+
+/// Lets the holder go, waits for every job, and returns the names in the
+/// order the jobs ran.
+fn run_all(f: &Fixture, holder: UnixStream, queued: Vec<UnixStream>) -> Vec<String> {
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(holder).code, 0);
+    for c in queued {
+        assert_eq!(collect(c).code, 0);
+    }
+    std::fs::read_to_string(f.root.join("order"))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// Level and promotion of the queued job of repository `repo`.
+fn level_of(f: &Fixture, repo: &str) -> (Priority, bool) {
+    let st = f.server.state();
+    let j = st
+        .active
+        .iter()
+        .find(|j| j.repo == repo)
+        .expect("no such job");
+    (j.priority, j.promoted)
+}
+
+#[test]
+fn queued_jobs_start_by_level_then_arrival() {
+    use Priority::{High, Low, Normal, Urgent};
+    let f = start(1);
+    let h = holder(&f);
+    let queued = vec![
+        queue(&f, "l1", "repo-a", Some(Low)),
+        queue(&f, "n1", "repo-a", None),
+        queue(&f, "h1", "repo-a", Some(High)),
+        queue(&f, "n2", "repo-a", Some(Normal)),
+        queue(&f, "h2", "repo-a", Some(High)),
+        queue(&f, "u1", "repo-a", Some(Urgent)),
+    ];
+    assert_eq!(run_all(&f, h, queued), ["u1", "h1", "h2", "n1", "n2", "l1"]);
+}
+
+#[test]
+fn a_rule_set_at_run_time_wins_over_the_jobs_own_level() {
+    let f = start(1);
+    let h = holder(&f);
+    let queued = vec![
+        queue(&f, "api", "api", Some(Priority::High)),
+        queue(&f, "web", "web", None),
+    ];
+    let set = |pattern: &str, level| {
+        f.server
+            .set_priority(&priority::Request {
+                pattern: pattern.into(),
+                level,
+            })
+            .unwrap()
+    };
+    set("ap*", Some(Priority::Low));
+    assert_eq!(
+        level_of(&f, "api"),
+        (Priority::Low, false),
+        "queued jobs re-ranked"
+    );
+    assert_eq!(level_of(&f, "web"), (Priority::Normal, false));
+    assert_eq!(run_all(&f, h, queued), ["web", "api"]);
+}
+
+#[test]
+fn priority_rules_survive_a_daemon_restart() {
+    let f = start(1);
+    for (pattern, level) in [
+        ("repo-a", Some(Priority::High)),
+        ("web-*", Some(Priority::Low)),
+        ("api", Some(Priority::Low)),
+        ("api", None),
+    ] {
+        f.server
+            .set_priority(&priority::Request {
+                pattern: pattern.into(),
+                level,
+            })
+            .unwrap();
+    }
+    assert!(f.root.join("state").join(priority::FILE).exists());
+    let again = Server::new(Config {
+        socket: f.root.join("s2"),
+        ..config(&f.root, 1)
+    })
+    .unwrap();
+    let rules: Vec<(String, Priority)> = again
+        .priority_view()
+        .rules
+        .into_iter()
+        .map(|r| (r.pattern, r.level))
+        .collect();
+    assert_eq!(
+        rules,
+        [
+            ("repo-a".to_string(), Priority::High),
+            ("web-*".to_string(), Priority::Low)
+        ]
+    );
+}
+
+/// The starvation bound: with no slot free and `high` jobs arriving before
+/// and after, a `low` job that has waited past `--promote-after` (30 min,
+/// measured on a clock the test moves) starts before every `high` job that
+/// came after it.
+#[test]
+fn a_low_job_starts_after_30_minutes_despite_a_stream_of_high_jobs() {
+    static SKEW_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(1, |c| c.clock = clock);
+    let h = holder(&f);
+    let mut queued = vec![
+        queue(&f, "low", "repo-a", Some(Priority::Low)),
+        queue(&f, "h1", "web", Some(Priority::High)),
+    ];
+    SKEW_MS.store(29 * 60_000, Ordering::SeqCst);
+    f.server.rerank();
+    assert_eq!(level_of(&f, "repo-a"), (Priority::Low, false), "29 min");
+    SKEW_MS.store(31 * 60_000, Ordering::SeqCst);
+    f.server.rerank();
+    assert_eq!(level_of(&f, "repo-a"), (Priority::High, true), "31 min");
+    queued.push(queue(&f, "h2", "api", Some(Priority::High)));
+    assert_eq!(run_all(&f, h, queued), ["low", "h1", "h2"]);
+}
+
+#[test]
+fn a_running_job_is_not_preempted() {
+    let f = start(1);
+    let h = holder(&f);
+    let high = queue(&f, "high", "web", Some(Priority::High));
+    f.server.rerank();
+    {
+        let g = f.server.inner.lock().unwrap();
+        let running: Vec<(i64, usize)> = g
+            .active
+            .values()
+            .filter(|l| l.job.state == JobState::Running)
+            .map(|l| (l.job.id, l.held))
+            .collect();
+        assert_eq!(running, [(1, 1)], "the holder keeps its slot");
+    }
+    assert_eq!(f.server.pool().free(), 0);
+    assert_eq!(run_all(&f, h, vec![high]), ["high"]);
+}
+
+/// With 0 slots free, an `urgent` job runs at once on a slot the headroom
+/// holds back, while a `normal` job queued before it keeps waiting.
+#[test]
+fn an_urgent_job_starts_with_no_slot_free() {
+    let f = start(2);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    assert_eq!(
+        rt.block_on(Arc::clone(&f.server).set_headroom(50))
+            .effective_tokens,
+        1
+    );
+    wait_for("the held-back token", || f.server.pool().held_back() == 1);
+    let h = holder(&f);
+    assert_eq!(f.server.pool().free(), 0);
+    let normal = queue(&f, "normal", "web", None);
+    let mut r = sh(&f.root, "echo urgent >> order");
+    r.repo = "api".into();
+    r.priority = Some(Priority::Urgent);
+    let urgent = send(&f.socket, r);
+    urgent
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let u = collect(urgent);
+    assert_eq!(
+        (u.code, u.started),
+        (0, true),
+        "the urgent job waited: {u:?}"
+    );
+    assert_eq!(level_of(&f, "web"), (Priority::Normal, false));
+    assert_eq!(f.server.pool().waiting(), 1, "the normal job still waits");
+    wait_for("the token back in the held-back set", || {
+        f.server.pool().held_back() == 1
+    });
+    assert_eq!(run_all(&f, h, vec![normal]), ["urgent", "normal"]);
 }

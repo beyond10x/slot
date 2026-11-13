@@ -451,6 +451,28 @@
         "value": 0,
         "tolerance": 0
       }
+    },
+    "task:priority": {
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      }
     }
   }
 }

@@ -42,6 +42,7 @@ nothing, so a script or Taskfile that prefixes its own builds is safe to run thr
 | `slot pnpm build`, `slot npx tsc --noEmit`, `slot scripts/zig.sh build`, `slot pytest -q` | holds one slot |
 | anything else | holds one slot |
 | `slot --tokens 4 ./build.sh` for a script that starts `docker run --cpus 4` | holds the 4 slots named, capped at the slots in circulation; use it for any command whose CPUs the daemon cannot see |
+| `slot --priority low cargo build --release` (or `SLOT_PRIORITY=low`) | queues behind `normal` and `high` jobs (`high` goes first, `urgent` is for repairing the pool and may use held-back slots); a rule from `slot priority set <repo> <level>` wins, and after 30 min of waiting any job counts as `high` |
 
 Test binaries in rust, go and wrapper jobs get `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and
 `GOMAXPROCS` from the daemon (a quarter of the pool; go jobs their slot count). Set them yourself
@@ -49,7 +50,7 @@ only when a suite needs a specific value; yours is kept.
 
 Leave out commands that do not build: `git`, `cargo fmt`, `cargo metadata`, editors and
 rust-analyzer. When the command's own name is a slot subcommand (`serve`, `proxy`, `run`,
-`status`, `headroom`, `sessions`, `hook`), use `slot run <command…>`.
+`status`, `headroom`, `sessions`, `usage`, `priority`, `hook`), use `slot run <command…>`.
 
 The job's standard input is empty: an interactive command (a prompt, a REPL) does not work through
 slot. Interrupting `slot` (Ctrl-C, a tool timeout, killing it) cancels the job, kills its process

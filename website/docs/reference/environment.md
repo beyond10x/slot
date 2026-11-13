@@ -16,7 +16,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
 | `SLOT_SOCKET` | `$XDG_RUNTIME_DIR/slot.sock` | the local daemon's socket |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`. See [Toolchains](../toolchains.md#naming-the-slots). |
-| `SLOT_HTTP` | `127.0.0.1:7411` | the daemon's web address for `slot status`, `slot headroom` and `slot sessions` |
+| `SLOT_PRIORITY` | unset (`normal`) | a job's queue level, `urgent`, `high`, `normal` or `low`, as `slot --priority` (which wins over it); a rule set with `slot priority set` for the repository wins over both; ignored with `--local`. See [Priority](../how-it-works.md#priority). |
+| `SLOT_HTTP` | `127.0.0.1:7411` | the daemon's web address for `slot status`, `slot headroom`, `slot priority` and `slot sessions` |
 | `SLOT_HOOK` | `block` | mode of `slot hook claude-pre-tool-use`: `block` refuses a build outside the pool, `warn` only adds advice, `off` allows everything. See [Claude Code plugin](../claude-code-plugin.md). |
 
 ## Read by the daemon

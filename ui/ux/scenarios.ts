@@ -63,7 +63,7 @@ function job(id: number, over: Partial<Job> = {}): Job {
     id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], session,
     client: 'ws:1', toolchain, remote: false, tokens: toolchain === 'rust' ? 4 : 2, state: 'running',
     enqueued_ms: s(-400 + id), started_ms: s(-380 + id), ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', ...over,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, ...over,
   };
 }
 
@@ -210,6 +210,28 @@ function queuePosition(): Scenario {
   };
 }
 
+function queueLevels(): Scenario {
+  const running = [job(160), job(161), job(162), job(163), job(164), job(165)];
+  const waiting = [
+    { ...queued(166, -1900), priority: 'high' as const, promoted: true },
+    queued(167, -80),
+    { ...queued(168, -60), priority: 'low' as const },
+    { ...queued(169, -40), priority: 'high' as const },
+    queued(170, -20),
+    { ...queued(171, -5), priority: 'high' as const },
+    { ...queued(172, -2), priority: 'urgent' as const },
+  ];
+  const finished = Array.from({ length: 8 }, (_, i) => done(150 + i, -400 + i * 30));
+  const st = state([...running, ...waiting], finished, 20, 0);
+  return {
+    name: 'queue-levels', anchor: false,
+    card: 'An agent asks why its build (job 168) has not started although later builds have. Find its place in the queue.',
+    state: st, history: history(running, 20, 20, 0, 7),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 20, 0, 7, 1)] }],
+    output: {}, task: { kind: 'queue-position', job: 168, position: 7 },
+  };
+}
+
 function crowded(): Scenario {
   const longArgv = [
     'cargo', 'test', '--workspace', '--all-targets', '--features', 'postgres,tls-rustls,metrics,tracing-subscriber',
@@ -334,7 +356,7 @@ function poolShare(): Scenario {
 }
 
 export const SCENARIOS: Scenario[] = [
-  busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), crowded(), callMode(), upgradePending(), idle(),
+  busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), queueLevels(), crowded(), callMode(), upgradePending(), idle(),
   machineHeadroom(), poolShare(),
 ];
 

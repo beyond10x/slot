@@ -1,5 +1,6 @@
-//! `slot --tokens N`, `slot run --tokens N` and `SLOT_TOKENS` reach the
-//! request the client sends; `--local` runs without the daemon.
+//! `slot --tokens N`, `slot run --tokens N` and `SLOT_TOKENS`, and the same
+//! for `--priority` and `SLOT_PRIORITY`, reach the request the client sends;
+//! `--local` runs without the daemon.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
@@ -39,6 +40,7 @@ fn request(args: &[&str], env: &[(&str, &str)]) -> Option<Request> {
         .env_remove("SLOT_JOB")
         .env_remove("SLOT_HOST")
         .env_remove("SLOT_TOKENS")
+        .env_remove("SLOT_PRIORITY")
         .current_dir(dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -68,6 +70,45 @@ fn the_flag_and_the_variable_reach_the_request() {
         Some(6)
     );
     assert_eq!(tokens(&["true"], &[]), None);
+}
+
+#[test]
+fn the_priority_flag_and_variable_reach_the_request() {
+    use slot::types::Priority;
+    let level =
+        |args: &[&str], env: &[(&str, &str)]| request(args, env).expect("no request").priority;
+    assert_eq!(
+        level(&["--priority", "high", "true"], &[]),
+        Some(Priority::High)
+    );
+    assert_eq!(
+        level(&["run", "--priority", "low", "true"], &[]),
+        Some(Priority::Low)
+    );
+    assert_eq!(
+        level(&["true"], &[("SLOT_PRIORITY", "low")]),
+        Some(Priority::Low)
+    );
+    assert_eq!(
+        level(&["run", "true"], &[("SLOT_PRIORITY", "high")]),
+        Some(Priority::High)
+    );
+    assert_eq!(
+        level(
+            &["--priority", "normal", "true"],
+            &[("SLOT_PRIORITY", "low")]
+        ),
+        Some(Priority::Normal),
+        "the flag wins over the variable"
+    );
+    assert_eq!(
+        level(
+            &["run", "--priority", "high", "true"],
+            &[("SLOT_PRIORITY", "low")]
+        ),
+        Some(Priority::High)
+    );
+    assert_eq!(level(&["true"], &[]), None);
 }
 
 #[test]

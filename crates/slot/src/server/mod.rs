@@ -7,6 +7,7 @@ mod http;
 pub mod limits;
 pub mod machine;
 mod metrics;
+pub mod priority;
 mod ring;
 mod upgrade;
 
@@ -46,7 +47,7 @@ use crate::proto::{Frame, Request};
 use crate::rewrite::Rewriter;
 use crate::toolchain::{self, Context};
 use crate::types::{
-    Event, HeadroomBase, HostCensus, Job, JobState, LiveJob, SccacheWatch, State, Unit,
+    Event, HeadroomBase, HostCensus, Job, JobState, LiveJob, Priority, SccacheWatch, State, Unit,
 };
 
 pub use ring::Ring;
@@ -102,6 +103,12 @@ pub struct Config {
     pub admission: admission::Limits,
     /// Longest time an upgrade stops admission while jobs run; zero never stops it.
     pub upgrade_hold: Duration,
+    /// A queued job that waited longer than this is ordered as `high`;
+    /// zero never promotes.
+    pub promote_after: Duration,
+    /// The clock a queued job's wait is measured by for that, ms since the
+    /// epoch: [`now_ms`] outside tests.
+    pub clock: fn() -> i64,
     /// Bytes the target directories of synced workspaces may take together
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
@@ -315,6 +322,8 @@ pub struct Server {
     uid: u32,
     /// Held while a `CPUQuota` is set, so two settings never cross.
     quota_lock: tokio::sync::Mutex<()>,
+    /// The priority rules, as saved in `priority.json`.
+    rules: Mutex<Vec<priority::Rule>>,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -367,7 +376,8 @@ impl Headroom {
     }
 }
 
-fn now_ms() -> i64 {
+/// Milliseconds since the epoch.
+pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
@@ -391,6 +401,7 @@ impl Server {
         std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))?;
         let fifo = cfg.state_dir.join("jobserver.fifo");
         let saved = limits::load(&cfg.state_dir);
+        let rules = priority::load(&cfg.state_dir);
         let adopted = inherited.as_mut().and_then(|h| {
             if h.state.pool.size != cfg.tokens {
                 eprintln!(
@@ -526,6 +537,7 @@ impl Server {
                 .and_then(|s| machine::own_cgroup(&s)),
             uid: nix::unistd::getuid().as_raw(),
             quota_lock: tokio::sync::Mutex::new(()),
+            rules: Mutex::new(rules),
         }))
     }
 
@@ -654,6 +666,7 @@ impl Server {
         }
         tokio::spawn(Arc::clone(&self).call_watch());
         tokio::spawn(Arc::clone(&self).token_watch());
+        tokio::spawn(Arc::clone(&self).priority_watch());
         if self.cfg.evict.floor > 0 {
             tokio::spawn(Arc::clone(&self).evict_watch());
         }
@@ -1395,6 +1408,7 @@ impl Server {
                 (g.next_id, now_ms())
             };
             let expect_rss = g.memory.expected(&req.repo, &req.argv, tc.name());
+            let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
             let job = Job {
                 id,
                 argv: req.argv.clone(),
@@ -1419,6 +1433,8 @@ impl Server {
                     .as_ref()
                     .map(|t| t.to_string_lossy().into_owned())
                     .unwrap_or_default(),
+                priority,
+                promoted,
             };
             g.active.insert(
                 id,
@@ -1448,7 +1464,7 @@ impl Server {
             self.prepare_cache(&ws.id, &req.repo, &tx).await;
         }
 
-        let ahead = self.pool.waiting();
+        let ahead = self.pool.waiting_before(self.queued_level(id));
         let free = self.pool.free();
         if ahead > 0 || free < tokens {
             let _ = tx.send(Frame::Info {
@@ -1481,10 +1497,19 @@ impl Server {
             if !self.resources_ready(id, &disks, &tx, gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
             }
-            let mut waiter = self.pool.acquire(tokens);
-            if let Some(l) = self.inner.lock().expect("server lock").active.get_mut(&id) {
-                l.waiter = Some(waiter.handle());
-            }
+            // Queued under the server lock, so a re-rank sees the waiter.
+            let mut waiter = {
+                let mut g = self.inner.lock().expect("server lock");
+                let level = g
+                    .active
+                    .get(&id)
+                    .map_or(Priority::Normal, |l| l.job.priority);
+                let w = self.pool.acquire_at(tokens, level);
+                if let Some(l) = g.active.get_mut(&id) {
+                    l.waiter = Some(w.handle());
+                }
+                w
+            };
             tokio::select! {
                 () = waiter.ready() => {}
                 () = client_gone(gone.clone()) => {
@@ -2286,6 +2311,101 @@ impl Server {
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
             eprintln!("slot: save {}: {e}", limits::FILE);
         }
+    }
+
+    /// The level a queued job of `repo` that asked for `own` and queued at
+    /// `enqueued_ms` is ordered by now, and whether it was promoted.
+    fn level_of(&self, repo: &str, own: Option<Priority>, enqueued_ms: i64) -> (Priority, bool) {
+        let now = (self.cfg.clock)();
+        let waited = Duration::from_millis(u64::try_from(now - enqueued_ms).unwrap_or(0));
+        let rules = self.rules.lock().expect("rules lock");
+        priority::level(&rules, repo, own, waited, self.cfg.promote_after)
+    }
+
+    /// The level job `id` is queued at.
+    fn queued_level(&self, id: i64) -> Priority {
+        let g = self.inner.lock().expect("server lock");
+        g.active
+            .get(&id)
+            .map_or(Priority::Normal, |l| l.job.priority)
+    }
+
+    /// Recomputes the level of every queued job from the rules and its wait,
+    /// and reorders the pool's queue to match.
+    fn rerank(&self) {
+        let changed: Vec<i64> = {
+            let mut g = self.inner.lock().expect("server lock");
+            let queued: Vec<(i64, String, Option<Priority>, i64)> = g
+                .active
+                .values()
+                .filter(|l| l.job.state == JobState::Queued)
+                .map(|l| {
+                    (
+                        l.job.id,
+                        l.job.repo.clone(),
+                        l.req.as_ref().and_then(|r| r.priority),
+                        l.job.enqueued_ms,
+                    )
+                })
+                .collect();
+            let mut changed = Vec::new();
+            for (id, repo, own, enqueued_ms) in queued {
+                let (level, promoted) = self.level_of(&repo, own, enqueued_ms);
+                let Some(l) = g.active.get_mut(&id) else {
+                    continue;
+                };
+                if let Some(w) = &l.waiter {
+                    self.pool.set_level(w, level);
+                }
+                if (l.job.priority, l.job.promoted) != (level, promoted) {
+                    l.job.priority = level;
+                    l.job.promoted = promoted;
+                    changed.push(id);
+                }
+            }
+            changed
+        };
+        for id in changed {
+            self.publish(id);
+        }
+    }
+
+    /// Every second: promotes queued jobs that waited past `--promote-after`.
+    async fn priority_watch(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            self.rerank();
+        }
+    }
+
+    /// The priority rules, as `GET /api/priority` answers.
+    pub fn priority_view(&self) -> priority::View {
+        priority::View {
+            rules: self.rules.lock().expect("rules lock").clone(),
+            promote_after_s: self.cfg.promote_after.as_secs(),
+        }
+    }
+
+    /// Sets or removes a priority rule (`slot priority set|unset`), saves the
+    /// rules and re-ranks the queued jobs.
+    pub fn set_priority(&self, req: &priority::Request) -> Result<priority::View, String> {
+        let pattern = req.pattern.trim();
+        if pattern.is_empty() {
+            return Err("slot: the pattern is empty".into());
+        }
+        let saved = {
+            let mut rules = self.rules.lock().expect("rules lock");
+            priority::set(&mut rules, pattern, req.level).then(|| rules.clone())
+        };
+        if let Some(rules) = saved {
+            if let Err(e) = priority::save(&self.cfg.state_dir, &rules) {
+                eprintln!("slot: save {}: {e}", priority::FILE);
+            }
+            self.rerank();
+        }
+        Ok(self.priority_view())
     }
 
     /// Every 15 s while requests wait, writes back jobserver tokens that a

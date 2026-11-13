@@ -328,6 +328,8 @@ mod tests {
             peak_rss: 0,
             wait_reason: String::new(),
             target_dir: String::new(),
+            priority: crate::types::Priority::default(),
+            promoted: false,
         };
         serde_json::to_string(&j).unwrap()
     }

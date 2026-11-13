@@ -91,6 +91,9 @@ pub struct Settings {
     /// `--tokens N` or `SLOT_TOKENS`: slots the job holds in place of its
     /// toolchain's count; the daemon caps it.
     pub tokens: Option<u32>,
+    /// `--priority <level>` or `SLOT_PRIORITY`: the job's own queue level;
+    /// a rule of the daemon's table for the repository wins over it.
+    pub priority: Option<crate::types::Priority>,
 }
 
 impl Settings {
@@ -134,6 +137,7 @@ impl Settings {
             socket: var("SLOT_SOCKET").map_or_else(paths::default_socket, PathBuf::from),
             fetch: Vec::new(),
             tokens: None,
+            priority: None,
         }
     }
 }
@@ -155,6 +159,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                 .unwrap_or_default()
         }),
         tokens: s.tokens,
+        priority: s.priority,
         ..Request::default()
     };
     if let Some(host) = s

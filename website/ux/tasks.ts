@@ -72,6 +72,13 @@ export const TASKS: Task[] = [
     answers: [['docs/claude-code-plugin', 'claude plugin install slot@slot']],
     anchor: false,
   },
+  {
+    id: 'priority',
+    question: 'How do I make the builds of one repository start first?',
+    words: ['priority', 'how it works', 'queue'],
+    answers: [['docs/how-it-works', 'slot priority set repo-a high']],
+    anchor: false,
+  },
 ];
 
 /** Links a reader tries when no link names the task: the site's own way into the docs. */

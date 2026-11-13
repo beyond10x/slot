@@ -31,6 +31,14 @@ pub struct Cli {
     #[arg(long, env = "SLOT_TOKENS", value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tokens: Option<u32>,
 
+    /// The job's queue level: queued `urgent` jobs get free slots first,
+    /// then `high`, `normal` and `low` ones; with no slot free, an `urgent`
+    /// job starts on one the headroom holds back. A rule set with `slot
+    /// priority set` for the job's repository wins over it. Ignored with
+    /// `--local`.
+    #[arg(long, env = "SLOT_PRIORITY", value_name = "LEVEL", value_enum)]
+    pub priority: Option<crate::types::Priority>,
+
     /// With `SLOT_HOST` set: after the job exits 0, copy PATH back from
     /// the build server into the checkout. PATH is relative to the
     /// repository root; `target/…` is read from the job's target directory
@@ -60,6 +68,10 @@ pub enum Cmd {
     Status(StatusArgs),
     /// Show or set the headroom: the share of the CPU kept free for you.
     Headroom(HeadroomArgs),
+    /// Show or change the priority rules: the queue level of every job of a
+    /// repository.
+    #[command(subcommand)]
+    Priority(PriorityCmd),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
@@ -153,6 +165,10 @@ pub struct ServeArgs {
     /// (from earlier runs of the same command) or none runs. 0 never holds.
     #[arg(long, default_value_t = 60, value_name = "SECONDS")]
     pub upgrade_hold: u64,
+    /// A queued `normal` or `low` job that has waited longer than this is
+    /// ordered as `high`, so no level waits forever; 0 never promotes.
+    #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
+    pub promote_after: u64,
     /// For remote clients: GB the target directories of synced workspaces
     /// may take together. Before a remote job starts, the least recently
     /// used target directories and their source copies are deleted while
@@ -212,6 +228,9 @@ pub struct RunArgs {
     /// circulation. Ignored with `--local`.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub tokens: Option<u32>,
+    /// The job's queue level, as `slot --priority LEVEL`.
+    #[arg(long, value_name = "LEVEL", value_enum)]
+    pub priority: Option<crate::types::Priority>,
     /// The command and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -238,6 +257,52 @@ pub struct HeadroomArgs {
     /// pool, so the whole machine keeps the headroom free.
     #[arg(long, value_enum)]
     pub base: Option<crate::types::HeadroomBase>,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+/// `slot priority` subcommands. A rule's pattern matches the repository name
+/// `slot status` shows: the exact name, or a glob where `*` is any run of
+/// characters. An exact name wins over a glob, a longer glob over a shorter
+/// one. A rule wins over the level a job asks for itself, and a change
+/// re-ranks the queued jobs.
+#[derive(Debug, Clone, Subcommand)]
+pub enum PriorityCmd {
+    /// Give every job of the repositories PATTERN matches the level LEVEL.
+    Set(PrioritySetArgs),
+    /// Remove the rule for PATTERN.
+    Unset(PriorityUnsetArgs),
+    /// List the rules.
+    List(PriorityListArgs),
+}
+
+/// `slot priority set` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct PrioritySetArgs {
+    /// Repository name or glob, such as `repo-a` or `web-*`.
+    pub pattern: String,
+    /// `urgent`, `high`, `normal` or `low`.
+    #[arg(value_enum)]
+    pub level: crate::types::Priority,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+/// `slot priority unset` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct PriorityUnsetArgs {
+    /// The pattern of the rule, as `slot priority list` shows it.
+    pub pattern: String,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+/// `slot priority list` options.
+#[derive(Debug, Clone, Args)]
+pub struct PriorityListArgs {
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -355,6 +420,8 @@ impl ServeArgs {
                 min_free_disk: gb_bytes(self.min_free_disk),
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
+            promote_after: std::time::Duration::from_secs(self.promote_after),
+            clock: crate::server::now_ms,
             cache_budget: gb_bytes(self.cache_budget),
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
@@ -390,6 +457,29 @@ mod tests {
         assert_eq!(cli.tokens, None, "after the command it is the command's");
         assert!(parse(&["--tokens", "0", "sh"]).is_err());
         assert!(parse(&["run", "--tokens", "x", "sh"]).is_err());
+    }
+
+    #[test]
+    fn job_priority_parses_before_a_command_and_on_run() {
+        use crate::types::Priority;
+        let cli = parse(&["--priority", "high", "sh", "build.sh"]).unwrap();
+        assert_eq!(cli.priority, Some(Priority::High));
+        let cli = parse(&["run", "--priority", "low", "sh", "--priority", "x"]).unwrap();
+        let Cmd::Run(run) = cli.command else {
+            panic!("not run")
+        };
+        assert_eq!(run.priority, Some(Priority::Low));
+        assert_eq!(run.command, ["sh", "--priority", "x"]);
+        let cli = parse(&["--priority", "normal", "true"]).unwrap();
+        assert_eq!(cli.priority, Some(Priority::Normal));
+        let cli = parse(&["--priority", "urgent", "sh"]).unwrap();
+        assert_eq!(cli.priority, Some(Priority::Urgent));
+        assert!(parse(&["--priority", "asap", "sh"]).is_err());
+        let cli = parse(&["priority", "set", "web-*", "low"]).unwrap();
+        let Cmd::Priority(PriorityCmd::Set(a)) = cli.command else {
+            panic!("not priority set")
+        };
+        assert_eq!((a.pattern.as_str(), a.level), ("web-*", Priority::Low));
     }
 
     #[test]

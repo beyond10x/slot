@@ -7,7 +7,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 pub use crate::server::limits::View as LimitsView;
-use crate::types::{HeadroomBase, Job, JobState, State};
+pub use crate::server::priority::View as PriorityView;
+use crate::types::{HeadroomBase, Job, JobState, Priority, State};
 
 /// One HTTP/1.0 request to the daemon's web address; the body of a 200
 /// answer. A daemon older than the client answers an API path it does not
@@ -105,6 +106,40 @@ pub fn headroom(
         )?
     };
     serde_json::from_str(&body).with_context(|| format!("{addr}: /api/limits"))
+}
+
+/// Reads the priority rules, or first sets (`Some(level)`) or removes
+/// (`None`) the rule for a pattern.
+pub fn priority(addr: &str, change: Option<(&str, Option<Priority>)>) -> Result<PriorityView> {
+    let body = match change {
+        None => request(addr, "GET", "/api/priority", None)?,
+        Some((pattern, level)) => {
+            let body = serde_json::json!({ "pattern": pattern, "level": level }).to_string();
+            request(addr, "PUT", "/api/priority", Some(&body))?
+        }
+    };
+    serde_json::from_str(&body).with_context(|| format!("{addr}: /api/priority"))
+}
+
+/// `slot priority list`: one line per rule, then the promotion limit.
+pub fn render_priority(v: &PriorityView) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if v.rules.is_empty() {
+        out.push_str("no priority rules: every job is normal unless it asks otherwise\n");
+    }
+    let width = v.rules.iter().map(|r| r.pattern.len()).max().unwrap_or(0);
+    for r in &v.rules {
+        let _ = writeln!(out, "{:<width$}  {}", r.pattern, r.level);
+    }
+    if v.promote_after_s > 0 {
+        let _ = writeln!(
+            out,
+            "a job queued longer than {} goes as high",
+            secs(v.promote_after_s as i64 * 1000)
+        );
+    }
+    out
 }
 
 /// The call mode line of `slot headroom` and `slot status`; empty from a
@@ -230,6 +265,13 @@ fn line(j: &Job, now: i64) -> String {
         j.repo,
         cmd
     );
+    if j.state == JobState::Queued {
+        s.push_str("  ");
+        s.push_str(j.priority.as_str());
+        if j.promoted {
+            s.push_str(" (waited)");
+        }
+    }
     if !j.wait_reason.is_empty() {
         s.push_str("\n       waiting: ");
         s.push_str(&j.wait_reason);
@@ -287,13 +329,15 @@ fn evict_line(r: &crate::evict::Report) -> Option<String> {
     ))
 }
 
-/// The pool line, then one line per queued or running job, queued first.
+/// The pool line, then one line per queued or running job, queued first,
+/// in the order they get slots: by level, then by arrival.
 pub fn render(s: &State) -> String {
-    let queued: Vec<&Job> = s
+    let mut queued: Vec<&Job> = s
         .active
         .iter()
         .filter(|j| j.state == JobState::Queued)
         .collect();
+    queued.sort_by_key(|j| (j.priority, j.id));
     let running: Vec<&Job> = s
         .active
         .iter()
@@ -365,6 +409,8 @@ mod tests {
             peak_rss: 0,
             wait_reason: String::new(),
             target_dir: String::new(),
+            priority: crate::types::Priority::Normal,
+            promoted: false,
         }
     }
 
@@ -610,5 +656,83 @@ mod tests {
         assert!(lines[1].contains("2m30s"), "{out}");
         assert!(lines[2].starts_with("#7     running"), "{out}");
         assert!(lines[2].contains("2m00s"), "{out}");
+    }
+
+    #[test]
+    fn queued_jobs_show_their_level_in_start_order() {
+        let mut high = job(9, JobState::Queued, 1);
+        high.priority = Priority::High;
+        let mut aged = job(5, JobState::Queued, 1);
+        aged.priority = Priority::High;
+        aged.promoted = true;
+        let mut low = job(3, JobState::Queued, 1);
+        low.priority = Priority::Low;
+        let normal = job(4, JobState::Queued, 1);
+        let mut running = job(2, JobState::Running, 1);
+        running.priority = Priority::Low;
+        let s = State {
+            tokens: 4,
+            limit: 4,
+            active: vec![running, low, normal, aged, high],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out.lines().skip(1).collect();
+        assert!(
+            lines[0].starts_with("#5 ") && lines[0].ends_with("cargo test  high (waited)"),
+            "{out}"
+        );
+        assert!(
+            lines[1].starts_with("#9 ") && lines[1].ends_with("cargo test  high"),
+            "{out}"
+        );
+        assert!(
+            lines[2].starts_with("#4 ") && lines[2].ends_with("cargo test  normal"),
+            "{out}"
+        );
+        assert!(
+            lines[3].starts_with("#3 ") && lines[3].ends_with("cargo test  low"),
+            "{out}"
+        );
+        assert!(
+            lines[4].starts_with("#2 ") && lines[4].ends_with("cargo test"),
+            "running: {out}"
+        );
+    }
+
+    #[test]
+    fn a_job_from_an_older_daemon_is_normal() {
+        let mut v = serde_json::to_value(job(3, JobState::Queued, 1)).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("priority");
+        o.remove("promoted");
+        let j: Job = serde_json::from_value(v).unwrap();
+        assert_eq!((j.priority, j.promoted), (Priority::Normal, false));
+    }
+
+    #[test]
+    fn the_priority_list() {
+        let v = PriorityView {
+            rules: vec![
+                crate::server::priority::Rule {
+                    pattern: "repo-a".into(),
+                    level: Priority::High,
+                },
+                crate::server::priority::Rule {
+                    pattern: "web-*".into(),
+                    level: Priority::Low,
+                },
+            ],
+            promote_after_s: 1800,
+        };
+        assert_eq!(
+            render_priority(&v),
+            "repo-a  high\nweb-*   low\na job queued longer than 30m00s goes as high\n"
+        );
+        assert_eq!(
+            render_priority(&PriorityView::default()),
+            "no priority rules: every job is normal unless it asks otherwise\n"
+        );
     }
 }
