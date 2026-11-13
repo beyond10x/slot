@@ -104,6 +104,7 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
 fn serve(args: &slot::cli::ServeArgs) -> Result<()> {
     // Before anything opens a descriptor: a handover's are adopted by number.
     let inherited = slot::server::handover::take_inherited();
+    slot::server::handover::catch_hup()?;
     let cfg = args.config()?;
     let rt = tokio_runtime()?;
     rt.block_on(async move {

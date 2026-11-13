@@ -59,7 +59,7 @@ function job(id: number, over: Partial<Job> = {}): Job {
     id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], session,
     client: 'ws:1', toolchain, remote: false, tokens: toolchain === 'rust' ? 4 : 2, state: 'running',
     enqueued_ms: s(-400 + id), started_ms: s(-380 + id), ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', ...over,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', ...over,
   };
 }
 
@@ -130,6 +130,7 @@ function state(active: Job[], doneJobs: Job[], tokens: number, headroom: number,
     cpu_quota_percent: headroom ? (100 - headroom) * 20 : null, free: Math.max(0, limit - used), active,
     done: doneJobs, now_ms: T0, toolchains: ['rust', 'go', 'node-test', 'generic'], call_apps: callApps,
     sccache: { enabled: true, servers: 1, short: 0, refills: 0, tokens: 0, last_refill_ms: 0 }, upgrade: '',
+    evict: { floor: 0, dry_run: true, known: 0, free: 0, checked_ms: 0, last: [], deleted_bytes: 0 },
   };
 }
 

@@ -140,7 +140,7 @@ pub fn render_headroom(v: &LimitsView) -> String {
     )
 }
 
-fn secs(ms: i64) -> String {
+pub(crate) fn secs(ms: i64) -> String {
     let s = (ms / 1000).max(0);
     if s >= 3600 {
         format!("{}h{:02}m", s / 3600, s / 60 % 60)
@@ -193,6 +193,40 @@ fn sccache_line(w: &crate::types::SccacheWatch, now: i64) -> String {
     )
 }
 
+/// `disk: 32.0 GB free, under 40.0 GB: dry run, would delete 2 target dir(s), 31.0 GB`;
+/// nothing when eviction is off or never looked.
+fn evict_line(r: &crate::evict::Report) -> Option<String> {
+    if r.floor == 0 || r.checked_ms == 0 {
+        return None;
+    }
+    let mode = if r.dry_run { "dry run, " } else { "" };
+    let deleted = if r.deleted_bytes > 0 {
+        format!(
+            ", {} deleted since start",
+            crate::admission::gb(r.deleted_bytes)
+        )
+    } else {
+        String::new()
+    };
+    if r.free >= r.floor && r.last.is_empty() {
+        return Some(format!(
+            "disk: {} free, eviction below {} ({mode}{} target dir(s) known){deleted}\n",
+            crate::admission::gb(r.free),
+            crate::admission::gb(r.floor),
+            r.known
+        ));
+    }
+    let bytes: u64 = r.last.iter().map(|e| e.bytes).sum();
+    let verb = if r.dry_run { "would delete" } else { "deleted" };
+    Some(format!(
+        "disk: {} free, under {}: {mode}{verb} {} target dir(s), {}{deleted}\n",
+        crate::admission::gb(r.free),
+        crate::admission::gb(r.floor),
+        r.last.len(),
+        crate::admission::gb(bytes)
+    ))
+}
+
 /// The pool line, then one line per queued or running job, queued first.
 pub fn render(s: &State) -> String {
     let queued: Vec<&Job> = s
@@ -232,6 +266,9 @@ pub fn render(s: &State) -> String {
     if w.enabled && (w.servers > 0 || w.refills > 0) {
         out.push_str(&sccache_line(w, s.now_ms));
     }
+    if let Some(l) = evict_line(&s.evict) {
+        out.push_str(&l);
+    }
     for j in queued.iter().chain(running.iter()) {
         out.push_str(&line(j, s.now_ms));
         out.push('\n');
@@ -263,6 +300,7 @@ mod tests {
             compile_server_cpu_s: 0.0,
             peak_rss: 0,
             wait_reason: String::new(),
+            target_dir: String::new(),
         }
     }
 

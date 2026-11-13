@@ -40,6 +40,12 @@ fn start_with(tokens: usize, admission: crate::admission::Limits) -> Fixture {
         admission,
         upgrade_hold: Duration::from_secs(60),
         cache_budget: 0,
+        evict: crate::evict::Settings {
+            floor: 0,
+            margin: 0,
+            min_idle: Duration::from_secs(7200),
+            dry_run: true,
+        },
         handover: true,
     };
     let server = Server::new(cfg.clone()).unwrap();
@@ -401,6 +407,12 @@ fn history_survives_restart() {
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
         cache_budget: 0,
+        evict: crate::evict::Settings {
+            floor: 0,
+            margin: 0,
+            min_idle: Duration::from_secs(7200),
+            dry_run: true,
+        },
         handover: true,
     })
     .unwrap();
@@ -560,4 +572,72 @@ fn settings_change_needs_json_from_the_daemons_own_origin() {
         HeaderValue::from_static("http://127.0.0.1:7411"),
     );
     assert_eq!(http::refuse_change(&h, 7411), None);
+}
+
+/// Eviction deletes only tagged target directories a job built into:
+/// not their siblings, not a directory the log names without a Cargo tag,
+/// not a symlink to a target directory, not a busy or recent one.
+#[test]
+fn eviction_touches_only_target_dirs_jobs_built_into() {
+    let d = tempfile::tempdir().unwrap();
+    let tag = |t: &Path| {
+        std::fs::create_dir_all(t).unwrap();
+        std::fs::write(
+            t.join("CACHEDIR.TAG"),
+            format!("{}\n", crate::evict::CACHEDIR_SIGNATURE),
+        )
+        .unwrap();
+        std::fs::write(t.join("blob"), vec![0u8; 4096]).unwrap();
+    };
+    let w = d.path().join("w");
+    let old = w.join("old/target");
+    let untagged = w.join("untagged/target");
+    let link = w.join("link/target");
+    let busy = w.join("busy/target");
+    let recent = w.join("recent/target");
+    let unseen = w.join("unseen/target");
+    for t in [&old, &busy, &recent, &unseen] {
+        tag(t);
+    }
+    std::fs::create_dir_all(&untagged).unwrap();
+    std::fs::write(untagged.join("keep"), b"x").unwrap();
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&unseen, &link).unwrap();
+    let src = w.join("old/src/main.rs");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, b"fn main() {}").unwrap();
+
+    let h = 3_600_000;
+    let now = 100 * h;
+    let mut seen = HashMap::new();
+    for (p, repo, ms) in [
+        (&old, "old", now - 50 * h),
+        (&untagged, "untagged", now - 60 * h),
+        (&link, "link", now - 70 * h),
+        (&busy, "busy", now - 80 * h),
+        (&recent, "recent", now - h),
+    ] {
+        seen.insert(p.clone(), (repo.to_string(), ms));
+    }
+    let s = crate::evict::Settings {
+        floor: u64::MAX / 4,
+        margin: 0,
+        min_idle: Duration::from_secs(7200),
+        dry_run: false,
+    };
+    let busy_repos: HashSet<String> = ["busy".to_string()].into();
+    let (_, planned) = evict_pass(&seen, &busy_repos, &HashSet::new(), now, s);
+    let paths: Vec<&Path> = planned.iter().map(|(c, _)| c.path.as_path()).collect();
+    assert_eq!(paths, [old.as_path()]);
+    assert!(planned[0].1 >= 4096);
+    for (c, _) in &planned {
+        assert_eq!(crate::evict::remove(&c.path), Ok("deleted"));
+    }
+    assert!(!old.exists());
+    assert!(src.exists(), "the source beside the target dir stays");
+    for kept in [&untagged, &busy, &recent, &unseen] {
+        assert!(kept.exists(), "{} kept", kept.display());
+    }
+    assert!(untagged.join("keep").exists());
+    assert!(std::fs::symlink_metadata(&link).is_ok());
 }

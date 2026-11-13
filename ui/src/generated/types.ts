@@ -74,7 +74,11 @@ peak_rss: number,
 /**
  * Why a queued job waits besides slots (disk space, memory); empty otherwise.
  */
-wait_reason: string, };
+wait_reason: string, 
+/**
+ * Cargo target directory a local Rust job builds into; empty otherwise.
+ */
+target_dir: string, };
 
 export type Unit = { 
 /**
@@ -146,6 +150,55 @@ tokens: number,
  */
 last_refill_ms: number, };
 
+export type Eviction = { 
+/**
+ * The target directory.
+ */
+path: string, 
+/**
+ * Its size, bytes.
+ */
+bytes: number, 
+/**
+ * When a job last built into it, Unix milliseconds.
+ */
+last_ms: number, 
+/**
+ * `deleted`, `would delete`, `discard-cache` (a managed worktree) or
+ * why it failed.
+ */
+action: string, };
+
+export type Report = { 
+/**
+ * Free bytes below which eviction starts; 0 = off.
+ */
+floor: number, 
+/**
+ * Only reporting, not deleting.
+ */
+dry_run: boolean, 
+/**
+ * Target directories seen in the job log.
+ */
+known: number, 
+/**
+ * Lowest free space of their filesystems at the last look, bytes.
+ */
+free: number, 
+/**
+ * Time of the last look, Unix milliseconds.
+ */
+checked_ms: number, 
+/**
+ * What the last pass deleted, or would have.
+ */
+last: Array<Eviction>, 
+/**
+ * Bytes deleted since the daemon started.
+ */
+deleted_bytes: number, };
+
 export type State = { 
 /**
  * Host name.
@@ -201,6 +254,10 @@ toolchains: Array<string>,
  * The sccache watchdog.
  */
 sccache: SccacheWatch, 
+/**
+ * Eviction of local target directories.
+ */
+evict: Report, 
 /**
  * A pending upgrade, as one line; empty when none.
  */

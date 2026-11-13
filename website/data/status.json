@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-12",
-  "source": "CHANGELOG.md 0.1.0 to 0.14.0 and docs/design.md sections 10 to 16",
+  "asOf": "2026-11-13",
+  "source": "CHANGELOG.md 0.1.0 to 0.15.0 and docs/design.md sections 10 to 18",
   "items": [
     {
       "area": "Pool",
@@ -30,6 +30,13 @@
       "status": "shipped",
       "detail": "A job queues while its filesystem has under 25 GB free or available memory is below its expected peak (0.5.0).",
       "href": "/docs/how-it-works#waiting-for-disk-and-memory"
+    },
+    {
+      "area": "Pool",
+      "label": "Frees disk from old target directories",
+      "status": "shipped",
+      "detail": "Under 40 GB free, the least recently built Cargo target directories that jobs used are deleted until 50 GB are free; the first release only reports what it would delete (0.15.0).",
+      "href": "/docs/how-it-works#freeing-disk-space"
     },
     {
       "area": "Pool",

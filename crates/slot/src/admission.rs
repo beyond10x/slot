@@ -217,6 +217,7 @@ mod tests {
             compile_server_cpu_s: 0.0,
             peak_rss: rss,
             wait_reason: String::new(),
+            target_dir: String::new(),
         }
     }
 

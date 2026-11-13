@@ -95,6 +95,48 @@ impl Daemon {
         n
     }
 
+    /// Child processes of the daemon: the jobs it started.
+    fn children(&self) -> usize {
+        let pid = self.child.id();
+        std::fs::read_dir(format!("/proc/{pid}/task")).map_or(0, |d| {
+            d.flatten()
+                .map(|t| {
+                    std::fs::read_to_string(t.path().join("children"))
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .count()
+                })
+                .sum()
+        })
+    }
+
+    /// Open sockets of the daemon: the listener and one per client.
+    fn sockets(&self) -> usize {
+        let pid = self.child.id();
+        std::fs::read_dir(format!("/proc/{pid}/fd")).map_or(0, |d| {
+            d.flatten()
+                .filter(|f| {
+                    std::fs::read_link(f.path())
+                        .is_ok_and(|l| l.to_string_lossy().starts_with("socket:"))
+                })
+                .count()
+        })
+    }
+
+    /// Waits until `ok` holds; the condition, not a fixed sleep, so a
+    /// loaded machine only makes the test slower.
+    fn wait_until(&self, what: &str, within: Duration, ok: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + within;
+        while !ok(self) {
+            assert!(
+                Instant::now() < deadline,
+                "{what} within {within:?}:\n{}",
+                self.log()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn logged(&self, needle: &str) -> Vec<(i64, i32)> {
         std::fs::read_to_string(self.state().join("jobs.jsonl"))
             .unwrap_or_default()
@@ -175,11 +217,17 @@ fn reloads_keep_running_and_queued_jobs_their_output_and_slots() {
         clients.push((tag.clone(), d.client(&counter(&tag, 7))));
         std::thread::sleep(Duration::from_millis(5));
     }
-    std::thread::sleep(Duration::from_millis(1000));
+    d.wait_until(
+        "20 jobs running and 40 clients connected",
+        Duration::from_secs(60),
+        |d| d.children() == 20 && d.sockets() > 40,
+    );
     d.reload();
-    std::thread::sleep(Duration::from_millis(1000));
+    d.wait_until("the first handover", Duration::from_secs(60), |d| {
+        d.log().contains("took over")
+    });
     d.reload();
-    let done = wait_all(clients, Duration::from_secs(60));
+    let done = wait_all(clients, Duration::from_secs(120));
     let log = d.log();
     assert!(
         log.matches("handing ").count() >= 2,
@@ -238,4 +286,38 @@ fn a_finished_job_logged_before_the_reload_is_not_logged_again() {
     assert_eq!(d.logged("echo quick").len(), 1);
     assert_eq!(d.free_tokens(), 2, "{}", d.log());
     assert!(!d.log().contains("reconciled"), "{}", d.log());
+}
+
+#[test]
+fn a_burst_of_reloads_never_ends_the_daemon() {
+    let mut d = Daemon::start(4, &[]);
+    let pid = d.child.id();
+    let mut clients = Vec::new();
+    for i in 0..8 {
+        let tag = format!("b{i}-");
+        clients.push((tag.clone(), d.client(&counter(&tag, 3))));
+    }
+    d.wait_until("4 jobs running", Duration::from_secs(60), |d| {
+        d.children() == 4
+    });
+    for _ in 0..6 {
+        d.reload();
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    let done = wait_all(clients, Duration::from_secs(120));
+    let log = d.log();
+    for (tag, code, out, err) in &done {
+        assert_eq!(*code, 3, "client {tag}: {err}\n{log}");
+        assert!(*out == expected(tag), "client {tag} output differs:\n{log}");
+    }
+    assert!(log.matches("handing ").count() >= 2, "{log}");
+    assert!(
+        d.child.try_wait().unwrap().is_none(),
+        "the daemon ended:\n{log}"
+    );
+    assert_eq!(d.child.id(), pid);
+    assert_eq!(d.logged("echo b").len(), 8, "{log}");
+    d.wait_until("every slot back", Duration::from_secs(10), |d| {
+        d.free_tokens() == 4
+    });
 }

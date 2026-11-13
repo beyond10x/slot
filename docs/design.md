@@ -287,6 +287,8 @@ command prefixes (0.7.0), `--fetch` (0.8.0), reflink seeding and budget eviction
 dirs (0.9.0), and the forced command, named `slot shell` instead of a separate `slot-shell`
 binary (0.10.0).
 
+Built later on the workstation: disk-budget eviction of local target dirs (0.15.0, § 18).
+
 Not built yet:
 - Memory limit per job exists as `--memory-max` (systemd scope) but is off by default and untested.
 
@@ -575,10 +577,22 @@ with these differences:
   cannot take the tokens they hold. Queued jobs keep their id and queue time.
 - The headroom of a call in progress is not carried: the new process starts from the saved
   headroom and call mode raises it again within 5 s.
+- A second reload during a handover (0.15.0). Up to 0.14.0 a SIGHUP that came while the new
+  image started, before its tokio handler existed, met SIGHUP's default action and ended the
+  daemon; one that came while the old image handed over was dropped. Now `slot serve` installs a
+  flag handler right after `take_inherited`; the old image sets SIGHUP to ignored before it
+  writes the state (an ignored disposition survives `exec`, a handler does not) and records a
+  SIGHUP that came during the handover as `reload` in the state; the new image hands over again
+  when either is set. A SIGHUP in the microseconds between the ignore and the new image's
+  handler is lost, never fatal.
 
 Measured by `crates/slot-cli/tests/handover.rs`: 20 running and 20 queued jobs, each printing a
-counter every 10 ms, through two reloads 1 s apart: every client got all 300 lines once and its
-exit code, 40 jobs logged once each, and 20 of 20 tokens in the FIFO at the end.
+counter every 10 ms, through two reloads, the second right after the first handover finished:
+every client got all 300 lines once and its exit code, 40 jobs logged once each, and 20 of 20
+tokens in the FIFO at the end. A second test sends 6 reloads 30 ms apart to 4 running and 4
+queued jobs: the daemon keeps its pid and every client gets its output and exit code. The first
+version waited 1 s between the reloads and failed 1 of 5 runs on a loaded machine with one
+handover logged instead of two.
 
 The design as written before it was built:
 
@@ -774,4 +788,32 @@ uses `available_parallelism`, which in `slot.service` is the CPU quota, not the 
 
 Measured after: rerun the census and the 3-day count a week after the release; the hook's refusals
 on the same 3 days of commands are in the pull request.
+
+## 18. Disk-budget eviction of local target dirs (0.15.0)
+
+Need: the workstation's `/` fills with target directories of worktrees nobody builds in any more;
+§ 14 makes jobs wait for disk but nothing frees it.
+
+- **Which directories.** Only target directories a logged job built into. For each local Rust job
+  the daemon resolves the target directory (`--target-dir`, `CARGO_TARGET_DIR`,
+  `CARGO_BUILD_TARGET_DIR`, else `target/` beside the workspace root found from
+  `--manifest-path` or the working directory) and stores it in the job's `target_dir`. At start
+  the map of directory to last build time comes from `jobs.jsonl`.
+- **When.** Every 60 s, per filesystem (device id): when free space is under `--evict-below`
+  (GB, default 40, 0 off), directories go least recently built first until free space plus their
+  sizes reaches the floor plus 10 GB. Sizes are measured only until that goal is met.
+- **Kept.** A directory whose repository has a queued or running job, a directory a queued or
+  running job builds into, and one built in the last 2 h. Before each deletion the check repeats
+  under the server lock.
+- **What counts as a target directory.** Absolute, at least three levels deep, a real directory
+  (not a symlink), with a `CACHEDIR.TAG` whose first line is Cargo's signature. Anything else is
+  never deleted, whatever the log says.
+- **How.** When the directory's parent is a managed worktree (`worktree discard-cache --dry-run
+  --json <tree>` exits 0), `worktree discard-cache <tree>` deletes it; otherwise
+  `remove_dir_all`. A job that wants a directory while it is being deleted waits with
+  `slot: waiting: <dir> is being deleted to free disk space`.
+- **Dry run.** `--evict-dry-run` defaults to true in the first release: the journal says
+  `slot: disk: … free, under …: would delete <dir> (<size>, last built … ago)` when the list
+  changes, and `slot status` shows a `disk:` line. Set it to false once the journal has shown
+  only directories that may go.
 
