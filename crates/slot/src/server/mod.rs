@@ -1384,7 +1384,7 @@ impl Server {
         let target_dir = (tc.name() == "rust" && req.workspace.is_none())
             .then(|| crate::evict::target_dir(&req.argv, &req.env, &cwd))
             .flatten();
-        let project = crate::project::resolve(&cwd);
+        let project = crate::project::cached(&cwd).unwrap_or_default();
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
         let id = {
             let mut g = self.inner.lock().expect("server lock");
@@ -1443,6 +1443,17 @@ impl Server {
             );
             id
         };
+        if crate::project::cached(&cwd).is_none() {
+            // git runs off the request path: a job is queued without waiting for it.
+            let s = Arc::clone(self);
+            let dir = cwd.clone();
+            std::thread::spawn(move || {
+                let p = crate::project::resolve(&dir);
+                if let Some(l) = s.inner.lock().expect("server lock").active.get_mut(&id) {
+                    l.job.project = p;
+                }
+            });
+        }
         self.publish(id);
         if let Some(ws) = &req.workspace {
             self.prepare_cache(&ws.id, &req.repo, &tx).await;

@@ -726,7 +726,8 @@ fn a_job_logs_the_project_of_its_directory() {
                 .success()
         );
     }
-    let r = run(&f, sh(&repo, "true"));
+    // git runs off the request path; a job that lasts a second has its project.
+    let r = run(&f, sh(&repo, "sleep 1"));
     assert_eq!(r.code, 0);
     let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
     assert!(log.contains("\"project\":\"team-a\""), "{log}");
