@@ -233,7 +233,25 @@ fn reloads_keep_running_and_queued_jobs_their_output_and_slots() {
         log.matches("handing ").count() >= 2,
         "two handovers expected:\n{log}"
     );
-    assert!(log.contains("took over 20 running and 20 queued"), "{log}");
+    // A client counted in `sockets()` may not be queued yet when the first
+    // reload comes, so the count queued varies; what is handed over must be
+    // what the next binary takes over.
+    let first = |prefix: &str| {
+        let rest = &log[log
+            .find(prefix)
+            .unwrap_or_else(|| panic!("{prefix}:\n{log}"))
+            + prefix.len()..];
+        let n: Vec<usize> = rest
+            .split_whitespace()
+            .take(4)
+            .filter_map(|w| w.parse().ok())
+            .collect();
+        (n[0], n[1])
+    };
+    let (running, queued) = first("handing ");
+    assert_eq!((running, queued), first("took over "), "{log}");
+    assert_eq!(running, 20, "{log}");
+    assert!(queued > 0, "nothing queued at the first reload:\n{log}");
     assert!(!log.contains("reconciled"), "tokens went missing:\n{log}");
     for (tag, code, out, err) in &done {
         assert_eq!(*code, 7, "client {tag}: {err}");
