@@ -1,7 +1,7 @@
 // Drives the built page through a scenario with no daemon: fixed responses, a fake EventSource, a fixed clock.
 import type { Page } from '@playwright/test';
 import type { Scenario } from './scenarios.ts';
-import { T0 } from './scenarios.ts';
+import { EMPTY_USAGE, T0 } from './scenarios.ts';
 
 /** DejaVu Sans: installed with Playwright's browser dependencies, and wider than Noto Sans. */
 export const FONT_CSS = "body, button, input, select { font-family: 'DejaVu Sans', sans-serif !important; }";
@@ -78,6 +78,7 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
   const limitPuts: unknown[] = [];
   await page.route('**/api/state', (r) => r.fulfill({ json: sc.state }));
   await page.route('**/api/history', (r) => r.fulfill({ json: sc.history }));
+  await page.route('**/api/usage**', (r) => r.fulfill({ json: sc.usage ?? EMPTY_USAGE }));
   await page.route('**/api/limits', async (r) => {
     const body = r.request().postDataJSON() as { headroom_percent: number };
     limitPuts.push(body);

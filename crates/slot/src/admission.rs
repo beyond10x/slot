@@ -203,6 +203,7 @@ mod tests {
             argv: cmd.split(' ').map(String::from).collect(),
             cwd: "/w".into(),
             repo: repo.into(),
+            project: String::new(),
             session: String::new(),
             client: String::new(),
             toolchain: tc.into(),

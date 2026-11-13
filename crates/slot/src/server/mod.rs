@@ -1384,6 +1384,7 @@ impl Server {
         let target_dir = (tc.name() == "rust" && req.workspace.is_none())
             .then(|| crate::evict::target_dir(&req.argv, &req.env, &cwd))
             .flatten();
+        let project = crate::project::resolve(&cwd);
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
         let id = {
             let mut g = self.inner.lock().expect("server lock");
@@ -1399,6 +1400,7 @@ impl Server {
                 argv: req.argv.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 repo: req.repo.clone(),
+                project: project.clone(),
                 session: req.session.clone(),
                 client: req.client.clone(),
                 toolchain: tc.name().to_string(),

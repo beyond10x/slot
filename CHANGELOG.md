@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `slot usage` and `GET /api/usage`: slot time, CPU time, jobs and median queue wait per project,
+  repository or session over a window, from the job log; the web UI shows the same as **Share of
+  the pool**. Slot time and CPU time are both shown because jobs that hold slots while idle make
+  them differ.
+- Every job records its `project`: the namespace of its repository's git remote, or `project =`
+  in `.slot.toml`. Several repositories of one project and all their worktrees share it.
+
 ## 0.16.0 — 2026-11-13
 
 - `slot --tokens N <command…>` and `slot run --tokens N <command…>`, or `SLOT_TOKENS=N`: the job

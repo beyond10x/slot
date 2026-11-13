@@ -10,6 +10,7 @@ import QueueTable from './components/QueueTable.vue';
 import ActiveTable from './components/ActiveTable.vue';
 import DoneTable from './components/DoneTable.vue';
 import OutputPane from './components/OutputPane.vue';
+import UsageTable from './components/UsageTable.vue';
 
 const newest = computed(() => {
   const j = newestRunning(jobs.values());
@@ -44,6 +45,10 @@ watch(
         <ActiveTable />
         <h2>Finished</h2>
         <DoneTable />
+      </section>
+      <section>
+        <h2>Share of the pool: slot time (run time × slots held) and CPU per project, repository or session</h2>
+        <UsageTable />
       </section>
     </div>
     <OutputPane v-if="store.selected !== null" :id="store.selected" :key="store.selected" />

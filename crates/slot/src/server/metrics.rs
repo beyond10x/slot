@@ -273,6 +273,7 @@ mod tests {
             argv: vec![],
             cwd: String::new(),
             repo: String::new(),
+            project: String::new(),
             session: String::new(),
             client: String::new(),
             toolchain: "rust".into(),
