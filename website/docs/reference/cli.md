@@ -12,11 +12,11 @@ Run builds on one shared pool of build slots.
 `slot <command…>` sends the command to the slot daemon, which queues it until enough slots are free, runs it, streams its output back and exits with its code. Every build that goes through the daemon shares one GNU-make jobserver, so cargo, rustc and make draw parallelism from the same pool and the machine is never oversubscribed.
 
 ```text
-slot [OPTIONS]
-       slot <COMMAND>
+slot [OPTIONS] <COMMAND>
 ```
 
 - `--local`: Run the command here, without the daemon (default `false`)
+- `--tokens`: Slots the job holds, in place of the count slot derives from the command. For work the daemon cannot see, such as a script that starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The daemon caps it at the slots in circulation (the pool less the headroom), so the job never waits forever. Ignored with `--local` (env `SLOT_TOKENS`)
 - `--fetch`: With `SLOT_HOST` set: after the job exits 0, copy PATH back from the build server into the checkout. PATH is relative to the repository root; `target/…` is read from the job's target directory on the server. Repeat for more paths. Without `SLOT_HOST` the output is already here and this does nothing
 
 ### `slot serve`
@@ -82,6 +82,7 @@ Run a build command; use this when the command's name is also a slot subcommand
 slot run [OPTIONS] <COMMAND>...
 ```
 
+- `--tokens`: Slots the job holds, as `slot --tokens N`; capped at the slots in circulation. Ignored with `--local`
 - `<COMMAND>`: The command and its arguments
 
 ### `slot status`

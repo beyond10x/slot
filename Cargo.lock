@@ -144,6 +144,7 @@ dependencies = [
  "anyhow",
  "b10x-slot",
  "clap",
+ "serde_json",
  "tempfile",
 ]
 

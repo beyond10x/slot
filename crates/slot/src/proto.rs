@@ -31,6 +31,11 @@ pub struct Request {
     /// "empty command".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel: Option<i64>,
+    /// `slot --tokens N`: slots the job holds instead of the toolchain's
+    /// count, capped at the slots in circulation. Daemons that predate it
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u32>,
 }
 
 /// A repository synced to the server.
@@ -81,4 +86,23 @@ pub enum Frame {
         /// Exit code; 128 + signal for a signalled process.
         code: i32,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_from_an_older_client_has_no_job_tokens() {
+        let r: Request = serde_json::from_str(r#"{"argv":["sh","build.sh"],"env":[]}"#).unwrap();
+        assert_eq!(r.tokens, None);
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(!line.contains("tokens"), "{line}");
+        let r = Request {
+            tokens: Some(4),
+            ..r
+        };
+        let back: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back.tokens, Some(4));
+    }
 }

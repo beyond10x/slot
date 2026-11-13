@@ -88,6 +88,9 @@ pub struct Settings {
     /// `--fetch` paths, relative to the repository root, copied back from
     /// the server after a remote job exits 0.
     pub fetch: Vec<String>,
+    /// `--tokens N` or `SLOT_TOKENS`: slots the job holds in place of its
+    /// toolchain's count; the daemon caps it.
+    pub tokens: Option<u32>,
 }
 
 impl Settings {
@@ -130,6 +133,7 @@ impl Settings {
                 .unwrap_or_default(),
             socket: var("SLOT_SOCKET").map_or_else(paths::default_socket, PathBuf::from),
             fetch: Vec::new(),
+            tokens: None,
         }
     }
 }
@@ -150,6 +154,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default()
         }),
+        tokens: s.tokens,
         ..Request::default()
     };
     if let Some(host) = s
