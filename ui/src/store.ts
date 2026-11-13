@@ -2,7 +2,8 @@ import { reactive, shallowReactive, shallowRef } from 'vue';
 import type { Event, HostCensus, Job, LiveJob, State } from './generated/types.ts';
 import { coresSample, mergeByT, parseHistory } from './lib/history.ts';
 import type { Sample, Tick } from './lib/history.ts';
-import { notJsonError } from './lib/headroom.ts';
+import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
+import type { MachineNumbers } from './lib/headroom.ts';
 import { familyOrder, hostSample } from './lib/host.ts';
 import type { HostSample } from './lib/host.ts';
 import { isActive, jobId } from './lib/job.ts';
@@ -38,6 +39,8 @@ export const store = reactive({
   callApps: [] as string[],
   /** CPU quota on the daemon unit, percent of one core; null when not capped. */
   cpuQuota: null as number | null,
+  /** The machine base's numbers; `headroom_base` is `pool` on a daemon older than 0.16. */
+  machine: { ...POOL_BASE } as MachineNumbers,
   /** A pending upgrade, as one line from the daemon; empty when none. */
   upgrade: '',
   /** Error of the last headroom change; empty when it went through. */
@@ -94,6 +97,7 @@ async function loadState(): Promise<void> {
   store.headroom = st.headroom_percent;
   store.callApps = st.call_apps ?? [];
   store.cpuQuota = st.cpu_quota_percent;
+  store.machine = machineNumbers(st);
   store.upgrade = st.upgrade ?? '';
   store.free = st.free;
   store.toolchains = st.toolchains;
@@ -111,6 +115,9 @@ function applyTick(m: Tick): void {
   store.callApps = m.call_apps ?? [];
   // An older daemon sends no upgrade in its ticks; the line from the snapshot stands.
   if (m.upgrade !== undefined) store.upgrade = m.upgrade;
+  // Likewise the quota: a daemon older than 0.16 sends none in its ticks.
+  if (m.cpu_quota_percent !== undefined) store.cpuQuota = m.cpu_quota_percent;
+  store.machine = machineNumbers(m);
   store.free = m.free;
   store.jobCores = m.job_cores;
   store.sysCpu = m.sys_cpu;

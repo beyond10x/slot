@@ -26,7 +26,7 @@ fn main() -> ExitCode {
             0
         }),
         Cmd::Headroom(args) => {
-            slot::status::headroom(&args.http, args.percent, args.call).map(|v| {
+            slot::status::headroom(&args.http, args.percent, args.call, args.base).map(|v| {
                 print!("{}", slot::status::render_headroom(&v));
                 0
             })

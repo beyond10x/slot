@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 pub use crate::server::limits::View as LimitsView;
-use crate::types::{Job, JobState, State};
+use crate::types::{HeadroomBase, Job, JobState, State};
 
 /// One HTTP/1.0 request to the daemon's web address; the body of a 200
 /// answer. A daemon older than the client answers an API path it does not
@@ -62,14 +62,23 @@ pub fn fetch(addr: &str) -> Result<State> {
     serde_json::from_str(&body).with_context(|| format!("{addr}: /api/state"))
 }
 
-/// Reads the headroom, or sets the headroom and the call headroom first.
-pub fn headroom(addr: &str, percent: Option<u8>, call: Option<u8>) -> Result<LimitsView> {
+/// Reads the headroom, or sets the headroom, the call headroom and the base
+/// first.
+pub fn headroom(
+    addr: &str,
+    percent: Option<u8>,
+    call: Option<u8>,
+    base: Option<HeadroomBase>,
+) -> Result<LimitsView> {
     let mut fields = Vec::new();
     if let Some(p) = percent {
         fields.push(format!(r#""headroom_percent":{p}"#));
     }
     if let Some(c) = call {
         fields.push(format!(r#""call_headroom_percent":{c}"#));
+    }
+    if let Some(b) = base {
+        fields.push(format!(r#""headroom_base":"{}""#, b.as_str()));
     }
     let body = if fields.is_empty() {
         request(addr, "GET", "/api/limits", None)?
@@ -126,18 +135,55 @@ fn note(n: &str) -> String {
 
 /// `slot headroom`: the headroom line and the call mode line.
 pub fn render_headroom(v: &LimitsView) -> String {
+    let machine = v.headroom_base == HeadroomBase::Machine;
     let quota = match v.cpu_quota_percent {
+        Some(q) if machine => format!(
+            "cpu quota {q}% ({:.1} cores) now, following the CPU used outside the pool",
+            f64::from(q) / 100.0
+        ),
         Some(q) => format!("cpu quota {q}% ({:.1} cores)", f64::from(q) / 100.0),
         None if v.headroom_percent == 0 => "no cpu quota".to_string(),
         None => format!("cpu quota not applied: {}", v.note),
     };
     format!(
-        "headroom {}%: builds get {} of {} slots, {quota}\n{}",
+        "headroom {}% of the {}: builds get {} of {} slots, {quota}\n{}",
         v.headroom_percent,
+        v.headroom_base.as_str(),
         v.effective_tokens,
         v.tokens,
         render_call(v)
     )
+}
+
+/// The machine line of `slot status`; `None` on the pool base or with no
+/// headroom.
+pub fn machine_line(s: &State) -> Option<String> {
+    if s.headroom_base != HeadroomBase::Machine || s.target_cores <= 0.0 {
+        return None;
+    }
+    let quota = match s.cpu_quota_percent {
+        Some(q) if s.quota_floor => format!("{:.1} (floor)", f64::from(q) / 100.0),
+        Some(q) => format!("{:.1}", f64::from(q) / 100.0),
+        None => "not applied".to_string(),
+    };
+    let owners: Vec<String> = s
+        .outside
+        .iter()
+        .map(|o| format!("{} {:.1}", o.name, o.cores))
+        .collect();
+    Some(format!(
+        "machine{}: {:.1} of {} CPUs busy, target {:.1}, pool quota {quota}, outside {:.1}{}\n",
+        if s.over_target { " (over target)" } else { "" },
+        s.busy_cores,
+        s.cores,
+        s.target_cores,
+        s.outside_cores,
+        if owners.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", owners.join(", "))
+        }
+    ))
 }
 
 pub(crate) fn secs(ms: i64) -> String {
@@ -258,6 +304,9 @@ pub fn render(s: &State) -> String {
         out.push_str(&s.call_apps.join(", "));
         out.push_str(" in a call, headroom raised\n");
     }
+    if let Some(l) = machine_line(s) {
+        out.push_str(&l);
+    }
     if !s.upgrade.is_empty() {
         out.push_str(&s.upgrade);
         out.push('\n');
@@ -315,10 +364,11 @@ mod tests {
             note: String::new(),
             call_headroom_percent: 40,
             call: crate::server::limits::CallView::default(),
+            headroom_base: crate::types::HeadroomBase::Pool,
         };
         assert_eq!(
             render_headroom(&v),
-            "headroom 30%: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)\n\
+            "headroom 30% of the pool: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)\n\
              call mode 40%: no call\n"
         );
         v.call.active = true;
@@ -379,14 +429,19 @@ mod tests {
         let addr = answer_once(
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\r\n<!doctype html>",
         );
-        let e = headroom(&addr, Some(30), None).unwrap_err().to_string();
+        let e = headroom(&addr, Some(30), None, None)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("older than this client"), "{e}");
         let addr = answer_once(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"headroom_percent\":30,\
              \"cpu_quota_percent\":null,\"effective_tokens\":14,\"tokens\":20,\"systemd\":false,\
              \"note\":\"\"}",
         );
-        assert_eq!(headroom(&addr, None, None).unwrap().effective_tokens, 14);
+        assert_eq!(
+            headroom(&addr, None, None, None).unwrap().effective_tokens,
+            14
+        );
     }
 
     #[test]
@@ -433,6 +488,77 @@ mod tests {
             ..State::default()
         };
         assert_eq!(render(&s), "4 slots, 4 free, 0 running, 0 queued\n");
+    }
+
+    #[test]
+    fn the_machine_line_names_the_load_outside_the_pool() {
+        use crate::types::{HeadroomBase, OutsideOwner};
+        let mut s = State {
+            cores: 20,
+            tokens: 20,
+            limit: 11,
+            headroom_percent: 45,
+            free: 11,
+            headroom_base: HeadroomBase::Machine,
+            cpu_quota_percent: Some(200),
+            busy_cores: 18.24,
+            target_cores: 11.0,
+            outside_cores: 9.1,
+            outside: vec![
+                OutsideOwner {
+                    name: "session-3.scope".into(),
+                    cores: 5.9,
+                },
+                OutsideOwner {
+                    name: "docker 3f2a1b2c3d4e".into(),
+                    cores: 3.2,
+                },
+            ],
+            quota_floor: true,
+            over_target: true,
+            ..State::default()
+        };
+        assert_eq!(
+            render(&s),
+            "11 of 20 slots (45% headroom), 11 free, 0 running, 0 queued\n\
+             machine (over target): 18.2 of 20 CPUs busy, target 11.0, pool quota 2.0 (floor), \
+             outside 9.1: session-3.scope 5.9, docker 3f2a1b2c3d4e 3.2\n"
+        );
+        s.over_target = false;
+        s.quota_floor = false;
+        s.cpu_quota_percent = Some(430);
+        s.outside.clear();
+        assert!(
+            render(&s).contains(
+                "machine: 18.2 of 20 CPUs busy, target 11.0, pool quota 4.3, outside 9.1\n"
+            )
+        );
+        s.cpu_quota_percent = None;
+        assert!(render(&s).contains("pool quota not applied,"));
+        s.headroom_base = HeadroomBase::Pool;
+        assert!(!render(&s).contains("machine"));
+    }
+
+    #[test]
+    fn headroom_shows_its_base() {
+        let mut v = LimitsView {
+            headroom_percent: 45,
+            cpu_quota_percent: Some(430),
+            effective_tokens: 11,
+            tokens: 20,
+            systemd: true,
+            note: String::new(),
+            call_headroom_percent: 0,
+            call: crate::server::limits::CallView::default(),
+            headroom_base: crate::types::HeadroomBase::Machine,
+        };
+        assert_eq!(
+            render_headroom(&v).lines().next().unwrap(),
+            "headroom 45% of the machine: builds get 11 of 20 slots, cpu quota 430% (4.3 cores) \
+             now, following the CPU used outside the pool"
+        );
+        v.headroom_base = crate::types::HeadroomBase::Pool;
+        assert!(render_headroom(&v).starts_with("headroom 45% of the pool: builds get 11"));
     }
 
     #[test]

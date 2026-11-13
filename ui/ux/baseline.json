@@ -309,6 +309,44 @@
         "value": 0.005,
         "tolerance": 0.01
       }
+    },
+    "machine-headroom": {
+      "gates.problems": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.time_to_act_steps.max": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "actions_per_fix.max": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      }
     }
   }
 }

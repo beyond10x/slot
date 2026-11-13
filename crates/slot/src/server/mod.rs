@@ -5,6 +5,7 @@ pub mod cache;
 pub mod handover;
 mod http;
 pub mod limits;
+pub mod machine;
 mod metrics;
 mod ring;
 mod upgrade;
@@ -44,7 +45,9 @@ use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
 use crate::rewrite::Rewriter;
 use crate::toolchain::{self, Context};
-use crate::types::{Event, HostCensus, Job, JobState, LiveJob, SccacheWatch, State, Unit};
+use crate::types::{
+    Event, HeadroomBase, HostCensus, Job, JobState, LiveJob, SccacheWatch, State, Unit,
+};
 
 pub use ring::Ring;
 
@@ -272,6 +275,10 @@ struct Inner {
     /// Local target directories jobs built into: repository and last build,
     /// Unix milliseconds. Eviction only ever deletes one of these.
     targets: HashMap<PathBuf, (String, i64)>,
+    /// Machine base: the cgroup readings and their averages.
+    machine: machine::Monitor,
+    /// Machine base: the numbers of the last tick.
+    machine_shown: machine::Shown,
 }
 
 /// The daemon.
@@ -302,7 +309,16 @@ pub struct Server {
     evict: Mutex<crate::evict::Report>,
     /// Target directories being deleted now: their jobs wait.
     evicting: Mutex<HashSet<PathBuf>>,
+    /// The daemon's cgroup v2 path, from `/proc/self/cgroup`.
+    own_cgroup: Option<String>,
+    /// The daemon's user id, which names its login sessions' cgroups.
+    uid: u32,
+    /// Held while a `CPUQuota` is set, so two settings never cross.
+    quota_lock: tokio::sync::Mutex<()>,
 }
+
+/// Root of the cgroup v2 hierarchy.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// The headroom in force, whether its CPU quota is applied, and call mode.
 #[derive(Debug, Clone, Default)]
@@ -310,6 +326,10 @@ struct Headroom {
     percent: u8,
     quota: Option<u32>,
     note: String,
+    /// What the headroom is a share of.
+    base: HeadroomBase,
+    /// Machine base: the quota last set, CPUs, and when.
+    machine_applied: Option<(f64, Instant)>,
     /// Headroom during a call; 0 = call mode off.
     call_percent: u8,
     /// `call_percent` as saved through the API; `None` = the daemon default.
@@ -328,6 +348,22 @@ fn job_tokens(toolchain: usize, requested: Option<u32>, size: usize, limit: usiz
     match requested {
         Some(n) => (n as usize).clamp(1, limit.max(1)),
         None => toolchain.clamp(1, size),
+    }
+}
+
+impl Headroom {
+    /// Records the outcome of setting `quota`.
+    fn record_quota(&mut self, quota: Option<u32>, applied: Result<(), String>) {
+        match applied {
+            Ok(()) => {
+                self.quota = quota;
+                self.note = String::new();
+            }
+            Err(e) => {
+                self.quota = None;
+                self.note = e;
+            }
+        }
     }
 }
 
@@ -450,6 +486,8 @@ impl Server {
                 memory,
                 handing_over: false,
                 targets,
+                machine: machine::Monitor::default(),
+                machine_shown: machine::Shown::default(),
             }),
             events,
             history: Mutex::new(VecDeque::new()),
@@ -463,6 +501,7 @@ impl Server {
                     .unwrap_or(call_headroom)
                     .min(limits::MAX_HEADROOM),
                 call_saved: saved.call_headroom_percent,
+                base: saved.base,
                 ..Headroom::default()
             }),
             upgrading: watch::Sender::new(false),
@@ -482,6 +521,11 @@ impl Server {
                 ..crate::evict::Report::default()
             }),
             evicting: Mutex::new(HashSet::new()),
+            own_cgroup: std::fs::read_to_string("/proc/self/cgroup")
+                .ok()
+                .and_then(|s| machine::own_cgroup(&s)),
+            uid: nix::unistd::getuid().as_raw(),
+            quota_lock: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -620,7 +664,8 @@ impl Server {
         if h > 0 {
             let v = self.apply_headroom(h, false).await;
             eprintln!(
-                "slot: headroom {h}%: {} of {} tokens, cpu quota {}",
+                "slot: headroom {h}% of the {}: {} of {} tokens, cpu quota {}",
+                v.headroom_base.as_str(),
                 v.effective_tokens,
                 v.tokens,
                 v.cpu_quota_percent
@@ -1958,12 +2003,28 @@ impl Server {
             tick.tick().await;
             let dt = last.elapsed().as_secs_f64();
             last = Instant::now();
-            let Ok((snap, sys)) =
-                tokio::task::spawn_blocking(|| (Snapshot::scan(), procstat::system_cpu())).await
+            let (base, percent) = {
+                let h = self.headroom.lock().expect("headroom lock");
+                (h.base, h.percent)
+            };
+            // The cgroup tree is read only while the machine base is in force.
+            let own = (base == HeadroomBase::Machine && percent > 0)
+                .then(|| self.own_cgroup.clone())
+                .flatten();
+            let uid = self.uid;
+            let Ok((snap, sys, cgroups)) = tokio::task::spawn_blocking(move || {
+                (
+                    Snapshot::scan(),
+                    procstat::system_cpu(),
+                    own.map(|o| machine::read(Path::new(CGROUP_ROOT), uid, &o)),
+                )
+            })
+            .await
             else {
                 continue;
             };
             let mut new_ids = Vec::new();
+            let mut machine_quota = None;
             let event = {
                 let mut g = self.inner.lock().expect("server lock");
                 let (pb, pt) = g.sys_prev;
@@ -1971,6 +2032,16 @@ impl Server {
                     g.sys_cpu = (sys.0 - pb) as f64 / (sys.1 - pt) as f64;
                 }
                 g.sys_prev = sys;
+                if let Some(r) = cgroups {
+                    let busy = g.sys_cpu * f64::from(self.cores);
+                    if let Some(now) = g.machine.sample(&r, busy, dt) {
+                        g.machine_shown = machine::shown(now, self.cores, percent);
+                        machine_quota = Some(g.machine_shown.quota);
+                    }
+                } else {
+                    g.machine = machine::Monitor::default();
+                    g.machine_shown = machine::Shown::default();
+                }
                 let extra = compile_server_work(&mut g, &snap);
                 let mut jobs = Vec::new();
                 let mut total = 0.0;
@@ -2038,7 +2109,19 @@ impl Server {
                 census.unmanaged_smoothed = g.controller.unmanaged();
                 g.window.recommend(census.recommended_tokens);
                 g.last_census = census.clone();
+                let m = g.machine_shown.clone();
+                // Read before the literal: its guard would live to the end of
+                // it, and `headroom_percent` and `call_apps` lock again.
+                let quota = self.headroom.lock().expect("headroom lock").quota;
                 Event::Tick {
+                    cpu_quota_percent: quota,
+                    headroom_base: base,
+                    busy_cores: m.busy,
+                    target_cores: m.target,
+                    outside_cores: m.outside,
+                    outside: m.owners,
+                    quota_floor: m.floor,
+                    over_target: m.over,
                     t: now_ms(),
                     tokens: self.cfg.tokens as u32,
                     limit: self.pool.limit() as u32,
@@ -2058,6 +2141,9 @@ impl Server {
                 }
             };
             self.send(&event);
+            if let Some(q) = machine_quota {
+                self.plan_machine_quota(q);
+            }
             for id in new_ids {
                 let s = Arc::clone(&self);
                 tokio::task::spawn_blocking(move || {
@@ -2126,6 +2212,7 @@ impl Server {
                 ends_in_s: h.call.ends_in(now, self.cfg.call_off_after),
                 note: h.call_note,
             },
+            headroom_base: h.base,
         }
     }
 
@@ -2146,9 +2233,20 @@ impl Server {
         self.apply_headroom(percent, true).await
     }
 
-    /// Applies a `PUT /api/limits` body: the call headroom first, then the
-    /// headroom.
+    /// Applies a `PUT /api/limits` body: the base first, then the call
+    /// headroom, then the headroom.
     pub async fn update_limits(self: Arc<Self>, req: limits::Request) -> limits::View {
+        if let Some(b) = req.headroom_base {
+            let changed = {
+                let mut h = self.headroom.lock().expect("headroom lock");
+                std::mem::replace(&mut h.base, b) != b
+            };
+            self.save_limits();
+            if changed && req.headroom_percent.is_none() {
+                let p = self.headroom_percent();
+                self.apply_headroom(p, false).await;
+            }
+        }
         if let Some(c) = req.call_headroom_percent {
             let c = c.min(limits::MAX_HEADROOM);
             let action = {
@@ -2180,6 +2278,7 @@ impl Server {
             limits::Saved {
                 headroom_percent: h.saved_percent,
                 call_headroom_percent: h.call_saved,
+                base: h.base,
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -2492,7 +2591,9 @@ impl Server {
     }
 
     /// Sets the headroom: lowers the circulating tokens, saves it when
-    /// `persist`, and sets `CPUQuota` on the daemon's unit when there is one.
+    /// `persist`, and sets `CPUQuota` on the daemon's unit when there is one:
+    /// `(100 − h) × cores` percent on the pool base, the target less the
+    /// smoothed CPU used outside the pool on the machine base.
     async fn apply_headroom(self: &Arc<Self>, percent: u8, persist: bool) -> limits::View {
         let percent = percent.min(limits::MAX_HEADROOM);
         self.pool
@@ -2501,45 +2602,105 @@ impl Server {
             self.headroom.lock().expect("headroom lock").saved_percent = percent;
             self.save_limits();
         }
-        let quota = limits::cpu_quota_percent(self.cores, percent);
-        let slice = self.cfg.memory_max.is_some();
-        let applied = if self.cfg.cpu_quota {
-            tokio::task::spawn_blocking(move || {
-                let unit = own_unit();
-                limits::apply_quota(unit.as_deref(), quota)?;
-                // Jobs under --memory-max run in scopes in JOB_SLICE, outside
-                // the daemon's unit: the same quota covers them there.
-                if slice && unit.is_some() {
-                    limits::apply_quota(Some(JOB_SLICE), quota)?;
-                }
-                Ok(())
-            })
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()))
-        } else {
-            Err("cpu quota disabled (--cpu-quota false)".into())
+        let _serial = self.quota_lock.lock().await;
+        let base = self.headroom.lock().expect("headroom lock").base;
+        let machine_q = (base == HeadroomBase::Machine && percent > 0).then(|| {
+            let outside = self
+                .inner
+                .lock()
+                .expect("server lock")
+                .machine
+                .outside()
+                .unwrap_or(0.0);
+            machine::quota(machine::target_cores(self.cores, percent), outside).cores
+        });
+        let quota = match machine_q {
+            Some(q) => Some(machine::quota_percent(q)),
+            None => limits::cpu_quota_percent(self.cores, percent),
         };
+        let applied = self.set_quota(quota).await;
         {
             let mut h = self.headroom.lock().expect("headroom lock");
             h.percent = percent;
-            match applied {
-                Ok(()) => {
-                    h.quota = quota;
-                    h.note = String::new();
-                }
-                Err(e) => {
-                    h.quota = None;
-                    h.note = e;
-                }
-            }
+            h.machine_applied = machine_q.map(|q| (q, Instant::now()));
+            h.record_quota(quota, applied);
         }
         self.limits()
+    }
+
+    /// Sets or clears `CPUQuota` on the daemon's unit, and on [`JOB_SLICE`]
+    /// when jobs run there.
+    async fn set_quota(&self, quota: Option<u32>) -> Result<(), String> {
+        if !self.cfg.cpu_quota {
+            return Err("cpu quota disabled (--cpu-quota false)".into());
+        }
+        let slice = self.cfg.memory_max.is_some();
+        tokio::task::spawn_blocking(move || {
+            let unit = own_unit();
+            limits::apply_quota(unit.as_deref(), quota)?;
+            // Jobs under --memory-max run in scopes in JOB_SLICE, outside
+            // the daemon's unit: the same quota covers them there.
+            if slice && unit.is_some() {
+                limits::apply_quota(Some(JOB_SLICE), quota)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()))
+    }
+
+    /// Machine base, each tick: sets the quota `q` CPUs when it moved by
+    /// [`machine::MIN_STEP_CORES`] and [`machine::MIN_APPLY_GAP`] passed since
+    /// the last one, so `systemctl` runs at most every 10 s.
+    fn plan_machine_quota(self: &Arc<Self>, q: f64) {
+        if !self.cfg.cpu_quota {
+            return;
+        }
+        let now = Instant::now();
+        {
+            let mut h = self.headroom.lock().expect("headroom lock");
+            if h.base != HeadroomBase::Machine
+                || h.percent == 0
+                || !machine::should_apply(h.machine_applied, q, now)
+            {
+                return;
+            }
+            h.machine_applied = Some((q, now));
+        }
+        let s = Arc::clone(self);
+        tokio::spawn(async move {
+            let _serial = s.quota_lock.lock().await;
+            {
+                // The base or the headroom may have changed meanwhile.
+                let h = s.headroom.lock().expect("headroom lock");
+                if h.base != HeadroomBase::Machine || h.percent == 0 {
+                    return;
+                }
+            }
+            let quota = Some(machine::quota_percent(q));
+            let applied = s.set_quota(quota).await;
+            s.headroom
+                .lock()
+                .expect("headroom lock")
+                .record_quota(quota, applied);
+        });
     }
 
     /// The `GET /api/state` snapshot.
     pub fn state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
+        let m = &g.machine_shown;
+        // A guard taken inside the struct literal would live until its end,
+        // and the calls below lock the headroom again.
+        let base = self.headroom.lock().expect("headroom lock").base;
         State {
+            headroom_base: base,
+            busy_cores: m.busy,
+            target_cores: m.target,
+            outside_cores: m.outside,
+            outside: m.owners.clone(),
+            quota_floor: m.floor,
+            over_target: m.over,
             host: self.host.clone(),
             cores: self.cores,
             tokens: self.cfg.tokens as u32,

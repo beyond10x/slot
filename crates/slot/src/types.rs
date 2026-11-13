@@ -113,6 +113,42 @@ pub struct Unit {
     pub secs: u32,
 }
 
+/// What the headroom is a share of.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum HeadroomBase {
+    /// The pool: a fixed `CPUQuota` of `(100 − h) × cores` percent on the
+    /// daemon's unit.
+    #[default]
+    Pool,
+    /// The machine: the pool's `CPUQuota` follows the CPU used outside the
+    /// pool, so the whole host keeps the headroom free.
+    Machine,
+}
+
+impl HeadroomBase {
+    /// `pool` or `machine`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pool => "pool",
+            Self::Machine => "machine",
+        }
+    }
+}
+
+/// CPU of one top-level cgroup outside the pool: a desktop application, a
+/// login session, a docker container or `system.slice`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct OutsideOwner {
+    /// Cgroup name, for example `session-3.scope` or `docker 3f2a1b2c3d4e`.
+    pub name: String,
+    /// Smoothed CPUs.
+    pub cores: f64,
+}
+
 /// Snapshot served at `GET /api/state`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 pub struct State {
@@ -156,6 +192,29 @@ pub struct State {
     /// A pending upgrade, as one line; empty when none.
     #[serde(default)]
     pub upgrade: String,
+    /// What the headroom is a share of; `pool` from a daemon older than 0.16.
+    #[serde(default)]
+    pub headroom_base: HeadroomBase,
+    /// Machine base: CPUs busy on the host over the last second; 0 otherwise.
+    #[serde(default)]
+    pub busy_cores: f64,
+    /// Machine base: CPUs the host may use with the headroom kept free; 0
+    /// when the machine base is not in force (pool base or no headroom).
+    #[serde(default)]
+    pub target_cores: f64,
+    /// Machine base: smoothed CPUs used outside the pool.
+    #[serde(default)]
+    pub outside_cores: f64,
+    /// Machine base: the busiest cgroups outside the pool, at most 5.
+    #[serde(default)]
+    pub outside: Vec<OutsideOwner>,
+    /// Machine base: the pool's quota is held at its floor of 2 CPUs.
+    #[serde(default)]
+    pub quota_floor: bool,
+    /// Machine base: the pool is at its floor and the host is still busier
+    /// than the target.
+    #[serde(default)]
+    pub over_target: bool,
 }
 
 /// One message on `GET /api/events`.
@@ -201,6 +260,31 @@ pub enum Event {
         /// that does not send it.
         #[serde(default)]
         upgrade: String,
+        /// CPU quota on the daemon unit, percent of one core; null when not
+        /// capped, and from a daemon older than 0.16.
+        #[serde(default)]
+        cpu_quota_percent: Option<u32>,
+        /// What the headroom is a share of.
+        #[serde(default)]
+        headroom_base: HeadroomBase,
+        /// Machine base: CPUs busy on the host over the last second.
+        #[serde(default)]
+        busy_cores: f64,
+        /// Machine base: CPUs the host may use; 0 when not in force.
+        #[serde(default)]
+        target_cores: f64,
+        /// Machine base: smoothed CPUs used outside the pool.
+        #[serde(default)]
+        outside_cores: f64,
+        /// Machine base: the busiest cgroups outside the pool.
+        #[serde(default)]
+        outside: Vec<OutsideOwner>,
+        /// Machine base: the pool's quota is held at its floor.
+        #[serde(default)]
+        quota_floor: bool,
+        /// Machine base: at the floor and still over the target.
+        #[serde(default)]
+        over_target: bool,
     },
 }
 

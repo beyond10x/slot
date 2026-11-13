@@ -495,6 +495,49 @@ content type (a cross-site form post cannot send one without a CORS preflight, w
 does not answer) and an `Origin` that is absent or the daemon's own `http://127.0.0.1:<port>` or
 `http://localhost:<port>`.
 
+### 13.2 Headroom of the machine (unreleased)
+
+Need: the operator means the headroom as headroom of the machine. Measured on a 20-CPU
+workstation at 45 %: the machine ran 93 to 99 % busy. `slot.service` used 6 to 7 CPUs, inside
+its 11-CPU quota; a docker container a pooled job started 3 to 4 (its cgroup is
+`/sys/fs/cgroup/docker/<id>`, outside the unit); sccache servers outside the unit, compiling
+for pooled cargo jobs, 1 to 2.7; the desktop session scope 6 to 7. The quota caps only the
+unit's cgroup subtree.
+
+A base setting, `pool` (default, everything above) or `machine`, saved in `limits.json` as
+`base` (absent = `pool`), set by `slot headroom --base` or `headroom_base` in
+`PUT /api/limits`, applied at once without a restart. On the machine base, in the sampler tick
+(`server/machine.rs`, pure functions tested against a `tempfile` cgroup tree):
+
+- target `T = cores × (100 − h) / 100`, `h` the headroom in force (the call value during a
+  call);
+- outside `O = busy − pool`: `busy` from `/proc/stat` (all but idle and iowait, as
+  `procstat::system_cpu`), `pool` the `usage_usec` delta of the daemon's cgroup (path from
+  `/proc/self/cgroup`) plus `slot.slice` beside the user manager's units, where jobs under
+  `--memory-max` run;
+- `O` smoothed by an exponential moving average, time constant 30 s;
+- quota `Q = clamp(T − O, 2, T)` CPUs (`T` when `T < 2`), set through the same
+  `systemctl --user set-property --runtime` only when it differs from the last set value by
+  0.5 CPU or more and 10 s passed (`systemctl` is a process: never every tick). A setting from
+  the API or call mode applies at once with the current average. The token count follows `h`
+  as on the pool base.
+
+Per owner, each tick: `usage_usec` of every child of `user@<uid>.service/app.slice` but the
+daemon's unit, every `session-*.scope` under `user-<uid>.slice`, every `docker/<id>` (shown by
+its 12-character id) and `system.slice` as one; averaged the same way, top 5 shown. A path
+that is missing or unreadable is left out, so a host without docker or without a login session
+shows fewer. The cgroup tree is read only while the machine base is in force with a headroom
+above 0; switching back to `pool` sets the fixed quota again and drops the averages.
+
+State and tick carry `headroom_base`, `busy_cores`, `target_cores` (0 when not in force),
+`outside_cores`, `outside` (`{name, cores}`), `quota_floor` and `over_target` (Q at its floor
+and `busy > T`: what runs outside the pool uses the headroom and slot cannot take it back);
+the tick also `cpu_quota_percent`. `slot status` and the web header print one line from them.
+
+Limits: the pool is never squeezed below 2 CPUs, so a machine loaded from outside stays over
+the target. CPU of children of `user@.service` outside `app.slice` (`session.slice`,
+`background.slice`) counts in `O` but is not named.
+
 
 ## 14. Admission by disk and memory (0.5.0)
 

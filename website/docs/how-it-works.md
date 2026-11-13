@@ -186,7 +186,8 @@ The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off`
 shows:
 
 - slots in use out of the pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
-  ([Headroom](headroom.md)),
+  ([Headroom](headroom.md)); on the machine base, the line with the CPUs busy on the host, the
+  target, the pool's quota and the busiest owners outside the pool,
 - a timeline with one bar per job, coloured by toolchain; the pale part of a bar is the wait for
   a slot,
 - cores in use by slot jobs per toolchain, and by the whole host,
