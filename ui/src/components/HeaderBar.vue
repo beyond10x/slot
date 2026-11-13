@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import { fmtDur } from '../lib/format.ts';
-import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption } from '../lib/headroom.ts';
+import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineLine } from '../lib/headroom.ts';
 import { fifoQueue, queueSummary, waitStats } from '../lib/queue.ts';
 import { census, jobs, setHeadroom, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
@@ -39,7 +39,10 @@ function pick(percent: number): void {
   setHeadroom(percent);
 }
 const onHeadroom = (e: Event): void => pick(Number((e.target as HTMLInputElement).value));
-const caption = computed(() => headroomCaption(store.cores || store.tokens, store.tokens, draft.value));
+const caption = computed(() =>
+  headroomCaption(store.cores || store.tokens, store.tokens, draft.value, store.machine.headroom_base),
+);
+const machine = computed(() => machineLine(store.machine, store.cores, store.cpuQuota));
 const running = computed(() => {
   let n = 0;
   for (const j of jobs.values()) if (j.state === 'running') n++;
@@ -84,6 +87,9 @@ onUnmounted(() => ro?.disconnect());
       title="Call mode: a call uses the microphone or the camera, so the headroom is raised; it goes back 2 min after the call. Moving the slider now keeps your value.">
       call · {{ store.callApps.join(', ') }}</span>
     <span v-if="store.headroomError" class="bad">{{ store.headroomError }}</span>
+    <span v-if="machine" class="machine" :class="{ over: store.machine.over_target }" data-ux-region="machine" role="status"
+      title="Headroom of the machine: the pool's CPU quota is the target less what runs outside the pool, at least 2 CPUs. Over target: the pool is at that floor and the machine is still busier.">
+      {{ machine }}</span>
     <span v-if="store.upgrade" class="upgrade" data-ux-region="upgrade" role="status"
       title="The daemon re-executes a new binary at the first moment no job runs; until then it may hold new jobs.">
       {{ store.upgrade }}</span>
@@ -119,6 +125,8 @@ b { font-variant-numeric: tabular-nums; }
 .headroom input { width: 110px; }
 .call { padding: 1px 7px; border-radius: 9px; background: #e6f0ff; color: #1d4f91; }
 .upgrade { padding: 1px 7px; border-radius: 9px; background: #fff3d6; color: #6b4500; }
+.machine { padding: 1px 7px; border-radius: 9px; background: #eef1f4; color: #2b3a48; overflow-wrap: anywhere; }
+.machine.over { background: #fde8e6; color: #8a1c12; }
 .presets { display: inline-flex; gap: 2px; }
 .presets button { min-width: 24px; min-height: 24px; padding: 0 6px; border: 1px solid #bbb; border-radius: 3px; background: #fff;
   color: var(--fg); cursor: pointer; font-variant-numeric: tabular-nums; }

@@ -150,6 +150,18 @@ tokens: number,
  */
 last_refill_ms: number, };
 
+export type HeadroomBase = "pool" | "machine";
+
+export type OutsideOwner = { 
+/**
+ * Cgroup name, for example `session-3.scope` or `docker 3f2a1b2c3d4e`.
+ */
+name: string, 
+/**
+ * Smoothed CPUs.
+ */
+cores: number, };
+
 export type Eviction = { 
 /**
  * The target directory.
@@ -261,7 +273,37 @@ evict: Report,
 /**
  * A pending upgrade, as one line; empty when none.
  */
-upgrade: string, };
+upgrade: string, 
+/**
+ * What the headroom is a share of; `pool` from a daemon older than 0.16.
+ */
+headroom_base: HeadroomBase, 
+/**
+ * Machine base: CPUs busy on the host over the last second; 0 otherwise.
+ */
+busy_cores: number, 
+/**
+ * Machine base: CPUs the host may use with the headroom kept free; 0
+ * when the machine base is not in force (pool base or no headroom).
+ */
+target_cores: number, 
+/**
+ * Machine base: smoothed CPUs used outside the pool.
+ */
+outside_cores: number, 
+/**
+ * Machine base: the busiest cgroups outside the pool, at most 5.
+ */
+outside: Array<OutsideOwner>, 
+/**
+ * Machine base: the pool's quota is held at its floor of 2 CPUs.
+ */
+quota_floor: boolean, 
+/**
+ * Machine base: the pool is at its floor and the host is still busier
+ * than the target.
+ */
+over_target: boolean, };
 
 export type CensusClass = { 
 /**
@@ -412,7 +454,40 @@ census: HostCensus,
  * A pending upgrade, as one line; empty when none, and from a daemon
  * that does not send it.
  */
-upgrade: string, };
+upgrade: string, 
+/**
+ * CPU quota on the daemon unit, percent of one core; null when not
+ * capped, and from a daemon older than 0.16.
+ */
+cpu_quota_percent: number | null, 
+/**
+ * What the headroom is a share of.
+ */
+headroom_base: HeadroomBase, 
+/**
+ * Machine base: CPUs busy on the host over the last second.
+ */
+busy_cores: number, 
+/**
+ * Machine base: CPUs the host may use; 0 when not in force.
+ */
+target_cores: number, 
+/**
+ * Machine base: smoothed CPUs used outside the pool.
+ */
+outside_cores: number, 
+/**
+ * Machine base: the busiest cgroups outside the pool.
+ */
+outside: Array<OutsideOwner>, 
+/**
+ * Machine base: the pool's quota is held at its floor.
+ */
+quota_floor: boolean, 
+/**
+ * Machine base: at the floor and still over the target.
+ */
+over_target: boolean, };
 
 export type Chunk = { 
 /**

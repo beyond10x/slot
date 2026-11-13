@@ -9,5 +9,9 @@ export const census = (over: Partial<HostCensus> = {}): HostCensus => ({
 
 /** Test fixture: an idle tick at `t`. */
 export function tick(t: number, over: Partial<Tick> = {}): Tick {
-  return { type: 'tick', t, tokens: 20, limit: 20, headroom_percent: 0, call_apps: [], free: 20, waiting: 0, sys_cpu: 0, job_cores: 0, jobs: [], census: census(), upgrade: '', ...over };
+  return {
+    type: 'tick', t, tokens: 20, limit: 20, headroom_percent: 0, call_apps: [], free: 20, waiting: 0, sys_cpu: 0, job_cores: 0, jobs: [],
+    census: census(), upgrade: '', cpu_quota_percent: null, headroom_base: 'pool', busy_cores: 0, target_cores: 0, outside_cores: 0,
+    outside: [], quota_floor: false, over_target: false, ...over,
+  };
 }

@@ -105,6 +105,7 @@ slot headroom [OPTIONS] [PERCENT]
 
 - `<PERCENT>`: New headroom, percent, 0 to 50; without it, prints the current one
 - `--call`: Headroom during a call, percent, 0 to 50; 0 turns call mode off
+- `--base`: What the headroom is a share of: `pool` caps the pool at a fixed quota; `machine` lowers the pool's quota by the CPU used outside the pool, so the whole machine keeps the headroom free
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cancel`

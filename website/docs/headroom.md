@@ -20,11 +20,11 @@ From a shell:
 
 ```shell-session
 $ slot headroom 30
-headroom 30%: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)
+headroom 30% of the pool: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)
 $ slot headroom
-headroom 30%: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)
+headroom 30% of the pool: builds get 14 of 20 slots, cpu quota 1400% (14.0 cores)
 $ slot headroom 0
-headroom 0%: builds get 20 of 20 slots, no cpu quota
+headroom 0% of the pool: builds get 20 of 20 slots, no cpu quota
 ```
 
 The value is saved in `limits.json` in the state directory and survives a restart of the daemon.
@@ -37,7 +37,7 @@ headroom already above the call value stays as it is.
 
 ```shell-session
 $ slot headroom
-headroom 40%: builds get 12 of 20 slots, cpu quota 1200% (12.0 cores)
+headroom 40% of the pool: builds get 12 of 20 slots, cpu quota 1200% (12.0 cores)
 call mode 40%: call on (Chromium), headroom 40%, back to 20% after the call
 $ slot headroom --call 30
 $ slot headroom --call 0
@@ -83,10 +83,40 @@ Two limits, both lifted again at 0 %:
 
 The slot count shapes the queue; the quota is what holds the CPU free.
 
+## Headroom of the machine
+
+The quota above caps the pool only. A docker container a build started, a compile server
+outside the daemon's unit and your desktop all run outside it, so at 45 % the machine can still
+be 95 % busy. With the machine base the headroom is kept free on the whole machine:
+
+```shell-session
+$ slot headroom --base machine
+headroom 45% of the machine: builds get 11 of 20 slots, cpu quota 1100% (11.0 cores) now, following the CPU used outside the pool
+$ slot status
+11 of 20 slots (45% headroom), 2 free, 4 running, 0 queued
+machine (over target): 18.2 of 20 CPUs busy, target 11.0, pool quota 2.0 (floor), outside 9.1: session-3.scope 5.9, docker 3f2a1b2c3d4e 3.2
+$ slot headroom --base pool
+```
+
+Each second the daemon reads the CPUs busy on the host (`/proc/stat`) and the CPU of its own
+cgroup (`cpu.stat`). The difference is the CPU used outside the pool, averaged over about 30
+seconds. The pool's quota is then the target, `cores × (100 − headroom) / 100`, less that
+outside load, never below 2 CPUs and never above the target. The daemon sets a new quota only
+when it moved by half a CPU or more, at most every 10 seconds. The slot count is the same as on
+the pool base.
+
+`slot status` and the web UI header show the line above: what is busy, the target, the quota
+now, and the five busiest owners outside the pool (applications in your `app.slice`, login
+sessions, docker containers, `system.slice`). `over target` means the pool is down to its
+floor and the machine is still busier than the target: what runs outside the pool uses the
+headroom, and slot cannot take it back.
+
+The base is saved with the headroom. `slot headroom --base pool` puts the fixed quota back.
+
 ## Not covered
 
 - Builds that do not run through slot. The web UI shows them as unmanaged cores in the host
-  census.
+  census. On the machine base their CPU lowers the pool's quota.
 - A daemon not started by systemd: only the slot limit applies, and `slot headroom` says
   `cpu quota not applied: not running in a systemd user unit`.
 - Memory and disk IO. The headroom limits CPU only.
@@ -95,8 +125,8 @@ The slot count shapes the queue; the quota is what holds the CPU free.
 
 ## Who may change it
 
-`PUT /api/limits` accepts `{"headroom_percent": N, "call_headroom_percent": M}` (either field
-may be left out) only with `Content-Type: application/json`,
+`PUT /api/limits` accepts `{"headroom_percent": N, "call_headroom_percent": M,
+"headroom_base": "machine"}` (any field may be left out) only with `Content-Type: application/json`,
 and refuses a browser request whose `Origin` is not the daemon's own page. A web page on another
 site cannot change the headroom by posting to `127.0.0.1`. Any local program that can reach the
 port can, as it can read the job list.

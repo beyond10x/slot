@@ -555,6 +555,7 @@ fn the_call_headroom_is_saved_beside_the_headroom() {
     let v = rt.block_on(Arc::clone(&f.server).update_limits(limits::Request {
         headroom_percent: None,
         call_headroom_percent: Some(30),
+        headroom_base: None,
     }));
     assert_eq!(v.call_headroom_percent, 30);
     assert_eq!(v.headroom_percent, 20, "no call: the headroom stays");
@@ -566,12 +567,42 @@ fn the_call_headroom_is_saved_beside_the_headroom() {
     let v = rt.block_on(Arc::clone(&f.server).update_limits(limits::Request {
         headroom_percent: Some(10),
         call_headroom_percent: Some(0),
+        headroom_base: None,
     }));
     assert_eq!((v.headroom_percent, v.call_headroom_percent), (10, 0));
     assert_eq!(
         limits::load(&f.root.join("state")).call_headroom_percent,
         Some(0)
     );
+}
+
+#[test]
+fn the_headroom_base_is_set_at_runtime_saved_and_shown() {
+    use crate::types::HeadroomBase;
+    let f = start(4);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    assert_eq!(f.server.limits().headroom_base, HeadroomBase::Pool);
+    rt.block_on(Arc::clone(&f.server).set_headroom(25));
+    let v = rt.block_on(Arc::clone(&f.server).update_limits(limits::Request {
+        headroom_base: Some(HeadroomBase::Machine),
+        ..limits::Request::default()
+    }));
+    assert_eq!(v.headroom_base, HeadroomBase::Machine);
+    assert_eq!((v.headroom_percent, v.effective_tokens), (25, 3));
+    let saved = limits::load(&f.root.join("state"));
+    assert_eq!(
+        (saved.headroom_percent, saved.base),
+        (25, HeadroomBase::Machine)
+    );
+    assert_eq!(f.server.state().headroom_base, HeadroomBase::Machine);
+    let v = rt.block_on(Arc::clone(&f.server).update_limits(limits::Request {
+        headroom_base: Some(HeadroomBase::Pool),
+        ..limits::Request::default()
+    }));
+    assert_eq!(v.headroom_base, HeadroomBase::Pool);
+    assert_eq!(limits::load(&f.root.join("state")).base, HeadroomBase::Pool);
+    let st = f.server.state();
+    assert_eq!((st.target_cores, st.outside.len()), (0.0, 0));
 }
 
 #[test]

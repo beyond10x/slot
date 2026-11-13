@@ -230,6 +230,11 @@ pub struct HeadroomArgs {
     /// Headroom during a call, percent, 0 to 50; 0 turns call mode off.
     #[arg(long, value_name = "PERCENT")]
     pub call: Option<u8>,
+    /// What the headroom is a share of: `pool` caps the pool at a fixed
+    /// quota; `machine` lowers the pool's quota by the CPU used outside the
+    /// pool, so the whole machine keeps the headroom free.
+    #[arg(long, value_enum)]
+    pub base: Option<crate::types::HeadroomBase>,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,

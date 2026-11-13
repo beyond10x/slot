@@ -1,5 +1,7 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
 import type { Chunk, Event, HostCensus, Job, LiveJob, State } from '../src/generated/types.ts';
+import { POOL_BASE } from '../src/lib/headroom.ts';
+import type { MachineNumbers } from '../src/lib/headroom.ts';
 
 export type Tick = Extract<Event, { type: 'tick' }>;
 
@@ -112,7 +114,7 @@ function tick(
   return {
     type: 'tick', t, tokens, limit, headroom_percent: headroom, call_apps: callApps, free: Math.max(0, limit - used), waiting,
     sys_cpu: 0.55 + (k % 4) * 0.05, job_cores: live.reduce((a, l) => a + l.cores, 0), jobs: live,
-    census: census(running, k), upgrade: '',
+    census: census(running, k), upgrade: '', cpu_quota_percent: headroom ? (100 - headroom) * 20 : null, ...POOL_BASE,
   };
 }
 
@@ -130,7 +132,7 @@ function state(active: Job[], doneJobs: Job[], tokens: number, headroom: number,
     cpu_quota_percent: headroom ? (100 - headroom) * 20 : null, free: Math.max(0, limit - used), active,
     done: doneJobs, now_ms: T0, toolchains: ['rust', 'go', 'node-test', 'generic'], call_apps: callApps,
     sccache: { enabled: true, servers: 1, short: 0, refills: 0, tokens: 0, last_refill_ms: 0 }, upgrade: '',
-    evict: { floor: 0, dry_run: true, known: 0, free: 0, checked_ms: 0, last: [], deleted_bytes: 0 },
+    evict: { floor: 0, dry_run: true, known: 0, free: 0, checked_ms: 0, last: [], deleted_bytes: 0 }, ...POOL_BASE,
   };
 }
 
@@ -277,8 +279,32 @@ function idle(): Scenario {
   };
 }
 
+function machineHeadroom(): Scenario {
+  const running = [job(150), job(151), job(152), job(153)];
+  const waiting = [queued(154, -30)];
+  const finished = Array.from({ length: 5 }, (_, i) => done(140 + i, -300 + i * 40));
+  const machine = (k: number): MachineNumbers & { cpu_quota_percent: number } => ({
+    headroom_base: 'machine', busy_cores: 18.2 + (k % 3) * 0.1, target_cores: 11, outside_cores: 9.1, quota_floor: true, over_target: true,
+    outside: [
+      { name: 'session-3.scope', cores: 5.9 }, { name: 'docker 3f2a1b2c3d4e', cores: 3.2 },
+      { name: 'system.slice', cores: 0.4 }, { name: 'app-editor.scope', cores: 0.2 },
+    ],
+    cpu_quota_percent: 200,
+  });
+  const st = { ...state([...running, ...waiting], finished, 20, 45), ...machine(0) };
+  const t = (sec: number, k: number): Tick => ({ ...tick(s(sec), running, 20, 11, 45, 1, k), ...machine(k) });
+  return {
+    name: 'machine-headroom', anchor: false,
+    card: 'The headroom is 45 % of the machine, yet the machine is nearly full. Find out whether slot is holding builds back and what uses the rest.',
+    state: st, history: history(running, 20, 11, 45, 1).map((h, k) => ({ ...h, ...machine(k) })),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [t(1, 1)] }, { moment: 'next tick', dt_s: 1, events: [t(2, 2)] }],
+    output: {}, task: { kind: 'see', expect: 'over target' },
+  };
+}
+
 export const SCENARIOS: Scenario[] = [
   busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), crowded(), callMode(), upgradePending(), idle(),
+  machineHeadroom(),
 ];
 
 /** Scenarios whose output pane is open from the start. */

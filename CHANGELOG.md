@@ -8,6 +8,20 @@
   N at the slots in circulation and says so, so the job never waits forever. Remote mode
   forwards it; `--local` ignores it. The request carries it in a new field `tokens`, which an
   older daemon ignores.
+- Headroom of the machine. `slot headroom --base machine` (or `"headroom_base": "machine"` in
+  `PUT /api/limits`) makes the headroom a share of the whole machine instead of the pool: each
+  tick the daemon takes the CPUs busy on the host less its own cgroup's CPU as the load outside
+  the pool, averages it over 30 s, and sets the pool's `CPUQuota` to the target less that load,
+  between 2 CPUs and the target, at most every 10 s and only on a change of half a CPU. The base
+  is saved in `limits.json` and changes without a restart; `pool`, the default, keeps the fixed
+  quota. The pool's quota alone left a machine at 45 % headroom 93 to 99 % busy: a docker
+  container a build started, compile servers outside the unit and the desktop ran outside it.
+- `slot status` and the web header show, on the machine base, one line: CPUs busy, the target,
+  the pool's quota, the load outside the pool and its five busiest owners (applications,
+  login sessions, docker containers, `system.slice`), marked `over target` when the pool is at
+  its floor and the machine is still busier. `slot headroom` names the base. State and ticks
+  carry `headroom_base`, `busy_cores`, `target_cores`, `outside_cores`, `outside`,
+  `quota_floor` and `over_target`; ticks also `cpu_quota_percent`.
 
 ## 0.15.0 — 2026-11-13
 

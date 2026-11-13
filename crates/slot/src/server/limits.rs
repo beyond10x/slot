@@ -5,11 +5,15 @@
 //! user unit, sets `CPUQuota` on that unit to `(100 - h) * cores` percent. Every
 //! job runs inside the unit's cgroup, so the quota is a hard cap on all of them
 //! together, test binaries and compile servers started by a job included.
+//! That is the `pool` base; on the `machine` base the quota follows the CPU
+//! used outside the pool instead (`server::machine`).
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use serde::{Deserialize, Serialize};
+
+pub use crate::types::HeadroomBase;
 
 /// Largest headroom accepted, percent.
 pub const MAX_HEADROOM: u8 = 50;
@@ -26,6 +30,9 @@ pub struct Saved {
     /// daemon's `--call-headroom`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_headroom_percent: Option<u8>,
+    /// What the headroom is a share of; the pool in a file from before 0.16.
+    #[serde(default)]
+    pub base: HeadroomBase,
 }
 
 /// Reads the saved headroom; 0 when the file is missing or unreadable.
@@ -36,6 +43,7 @@ pub fn load(dir: &Path) -> Saved {
         .map(|s| Saved {
             headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
             call_headroom_percent: s.call_headroom_percent.map(|c| c.min(MAX_HEADROOM)),
+            base: s.base,
         })
         .unwrap_or_default()
 }
@@ -87,6 +95,9 @@ pub struct Request {
     /// mode off.
     #[serde(default)]
     pub call_headroom_percent: Option<u8>,
+    /// What the headroom is a share of, `pool` or `machine`.
+    #[serde(default)]
+    pub headroom_base: Option<HeadroomBase>,
 }
 
 /// Call mode as `GET /api/limits` shows it.
@@ -130,6 +141,9 @@ pub struct View {
     /// Call mode now.
     #[serde(default)]
     pub call: CallView,
+    /// What the headroom is a share of; `pool` from a daemon older than 0.16.
+    #[serde(default)]
+    pub headroom_base: HeadroomBase,
 }
 
 /// Whether a browser request from `origin` may change settings. A request
@@ -171,6 +185,7 @@ mod tests {
             Saved {
                 headroom_percent: 35,
                 call_headroom_percent: None,
+                base: HeadroomBase::Pool,
             },
         )
         .unwrap();
@@ -181,6 +196,7 @@ mod tests {
             Saved {
                 headroom_percent: 20,
                 call_headroom_percent: Some(0),
+                base: HeadroomBase::Pool,
             },
         )
         .unwrap();
@@ -189,6 +205,27 @@ mod tests {
         assert_eq!(load(dir.path()).headroom_percent, MAX_HEADROOM);
         std::fs::write(dir.path().join(FILE), "garbage").unwrap();
         assert_eq!(load(dir.path()).headroom_percent, 0);
+    }
+
+    #[test]
+    fn the_base_survives_a_restart_and_defaults_to_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), r#"{"headroom_percent":30}"#).unwrap();
+        assert_eq!(load(dir.path()).base, HeadroomBase::Pool);
+        save(
+            dir.path(),
+            Saved {
+                headroom_percent: 45,
+                call_headroom_percent: None,
+                base: HeadroomBase::Machine,
+            },
+        )
+        .unwrap();
+        let s = load(dir.path());
+        assert_eq!((s.headroom_percent, s.base), (45, HeadroomBase::Machine));
+        let r: Request = serde_json::from_str(r#"{"headroom_base":"machine"}"#).unwrap();
+        assert_eq!(r.headroom_base, Some(HeadroomBase::Machine));
+        assert!(serde_json::from_str::<Request>(r#"{"headroom_base":"host"}"#).is_err());
     }
 
     #[test]
