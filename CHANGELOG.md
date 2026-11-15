@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.18.0 — 2026-11-15
 
 - `slot gate --dir <dir>`: builds in a sandbox that cannot reach the daemon's socket (no
   `AF_UNIX`, no network) queue in the pool through FIFOs in a directory shared with the host, and
