@@ -11,6 +11,7 @@ pub mod census;
 pub mod cli;
 pub mod client;
 pub mod evict;
+pub mod gate;
 pub mod hook;
 pub mod jobserver;
 pub mod paths;

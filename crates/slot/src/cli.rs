@@ -62,6 +62,14 @@ pub enum Cmd {
     /// ssh forced command for a build server: runs only the sync, fetch,
     /// proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`.
     Shell(ShellArgs),
+    /// Serve gate directories: builds in a sandbox that can open FIFOs there,
+    /// but cannot reach the daemon's socket, queue in the pool and run in
+    /// their sandbox. The client sets `SLOT_GATE=<dir>`.
+    Gate(GateArgs),
+    /// The process the daemon runs for a gated job: holds its slots until
+    /// the sandboxed client closes the FIFO. Started by the daemon only.
+    #[command(hide = true)]
+    Hold(HoldArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -219,6 +227,36 @@ pub struct ShellArgs {
     /// Target dirs of synced workspaces (default: `<state-dir>/cache`).
     #[arg(long)]
     pub cache_root: Option<PathBuf>,
+}
+
+/// `slot gate` options.
+#[derive(Debug, Clone, Args)]
+pub struct GateArgs {
+    /// A directory the sandbox sees at the same path, on the filesystem of
+    /// the daemon's state directory (the pool FIFO is hard-linked into
+    /// it). Repeat for more sandboxes; `SLOT_GATE_DIRS` lists them
+    /// separated by `:`.
+    #[arg(
+        long,
+        required = true,
+        value_name = "DIR",
+        env = "SLOT_GATE_DIRS",
+        value_delimiter = ':'
+    )]
+    pub dir: Vec<PathBuf>,
+    /// The daemon's socket.
+    #[arg(long, env = "SLOT_SOCKET", default_value_os_t = paths::default_socket())]
+    pub socket: PathBuf,
+    /// The daemon's state directory, which holds the pool FIFO.
+    #[arg(long, default_value_os_t = paths::default_state_dir())]
+    pub state_dir: PathBuf,
+}
+
+/// `slot hold` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct HoldArgs {
+    /// The job's hold FIFO in a gate directory.
+    pub fifo: PathBuf,
 }
 
 /// `slot run` arguments.

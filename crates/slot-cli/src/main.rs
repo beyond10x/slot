@@ -15,6 +15,8 @@ fn main() -> ExitCode {
         Cmd::Serve(args) => serve(&args).map(|()| 0),
         Cmd::Proxy(args) => proxy(&args.socket),
         Cmd::Shell(args) => Ok(shell(&args)),
+        Cmd::Gate(args) => gate(&args),
+        Cmd::Hold(args) => Ok(slot::gate::hold(&args.fifo)),
         Cmd::Run(args) => Ok(build(
             &args.command,
             cli.local,
@@ -83,6 +85,18 @@ fn build(
     s.tokens = tokens;
     s.priority = priority;
     client::run(argv, &s)
+}
+
+/// `slot gate`: serves the gate directories until killed.
+fn gate(args: &slot::cli::GateArgs) -> Result<i32> {
+    let exe = std::env::current_exe().context("the slot binary's path")?;
+    slot::gate::serve(
+        &args.dir,
+        &args.socket,
+        &args.state_dir.join("jobserver.fifo"),
+        &exe,
+    )?;
+    Ok(0)
 }
 
 /// `slot priority set|unset|list`: changes the rules, then prints them.

@@ -30,9 +30,16 @@ use crate::types::Priority;
 const READ_POLL_MS: u16 = 100;
 /// Processes other than `own` that have the FIFO at `path` open, from
 /// `/proc/<pid>/fd`. Processes of other users are not readable and not
-/// counted; the FIFO is mode 0600, so they cannot open it either.
+/// counted; the FIFO is mode 0600, so they cannot open it either. A
+/// descriptor counts by the FIFO's device and inode, not its path: a
+/// sandboxed build opens it through a hard link `slot gate` made (§ 19),
+/// and its `/proc` link names that path as the sandbox sees it.
 pub fn holders(path: &Path, own: u32) -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt;
     let mut out = Vec::new();
+    let Ok(want) = std::fs::metadata(path).map(|m| (m.dev(), m.ino())) else {
+        return out;
+    };
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return out;
     };
@@ -48,7 +55,7 @@ pub fn holders(path: &Path, own: u32) -> Vec<u32> {
         };
         if fds
             .flatten()
-            .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == path))
+            .any(|fd| std::fs::metadata(fd.path()).is_ok_and(|m| (m.dev(), m.ino()) == want))
         {
             out.push(pid);
         }

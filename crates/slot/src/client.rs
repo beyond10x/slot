@@ -162,6 +162,11 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         priority: s.priority,
         ..Request::default()
     };
+    if let Some(dir) = crate::gate::dir_from_env() {
+        req.cwd = cwd.to_string_lossy().into_owned();
+        req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+        return crate::gate::submit(&dir, &req);
+    }
     if let Some(host) = s
         .host
         .as_ref()

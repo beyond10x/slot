@@ -1386,7 +1386,14 @@ impl Server {
         {
             return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
         }
-        let tc = toolchain::for_argv(&req.argv, self.cfg.go_tokens);
+        // A gated job is shown, counted and sized by the command its client
+        // runs in a sandbox; the daemon starts only `req.argv`, the hold.
+        let shown = req
+            .hold_for
+            .clone()
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| req.argv.clone());
+        let tc = toolchain::for_argv(&shown, self.cfg.go_tokens);
         let limit = self.pool.limit();
         let tokens = job_tokens(tc.tokens(), req.tokens, self.pool.size(), limit);
         if let Some(n) = req.tokens.filter(|&n| n as usize > limit) {
@@ -1395,7 +1402,7 @@ impl Server {
             });
         }
         let target_dir = (tc.name() == "rust" && req.workspace.is_none())
-            .then(|| crate::evict::target_dir(&req.argv, &req.env, &cwd))
+            .then(|| crate::evict::target_dir(&shown, &req.env, &cwd))
             .flatten();
         let project = crate::project::cached(&cwd).unwrap_or_default();
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
@@ -1407,11 +1414,11 @@ impl Server {
                 g.next_id += 1;
                 (g.next_id, now_ms())
             };
-            let expect_rss = g.memory.expected(&req.repo, &req.argv, tc.name());
+            let expect_rss = g.memory.expected(&req.repo, &shown, tc.name());
             let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
             let job = Job {
                 id,
-                argv: req.argv.clone(),
+                argv: shown.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 repo: req.repo.clone(),
                 project: project.clone(),
