@@ -41,6 +41,14 @@ pub struct Request {
     /// it ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<crate::types::Priority>,
+    /// Set by `slot gate` for a client in a sandbox: the command the
+    /// client runs there. `argv` is then `slot hold <fifo>`, which keeps
+    /// the job's slots while the sandboxed command runs. The daemon shows,
+    /// counts and sizes the job by this command and starts `argv`. A daemon
+    /// that predates it shows and sizes the job as `slot hold`, but still
+    /// runs nothing but the hold process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_for: Option<Vec<String>>,
 }
 
 /// A repository synced to the server.

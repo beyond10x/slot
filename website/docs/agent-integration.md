@@ -32,7 +32,7 @@ What it achieves:
 
 An instruction depends on every agent following it. On a machine where every agent session should
 build through slot, install the shim instead: [`contrib/slot-shim`](https://github.com/beyond10x/slot/blob/main/contrib/slot-shim),
-linked as `cargo`, `go` and `ignite` in a directory that agent shells put first on `PATH`.
+linked as `cargo`, `go`, `ignite` and `make` in a directory that agent shells put first on `PATH`.
 
 ```sh
 d=~/.local/share/slot
@@ -42,6 +42,7 @@ chmod +x "$d/slot-shim"
 ln -sfn ../slot-shim "$d/shims/cargo"
 ln -sfn ../slot-shim "$d/shims/go"
 ln -sfn ../slot-shim "$d/shims/ignite"
+ln -sfn ../slot-shim "$d/shims/make"   # optional: every make call
 ```
 
 Then put `$d/shims` first on `PATH` for agent shells only. For Claude Code, which sets
@@ -64,12 +65,36 @@ What the shim sends through slot:
   subcommand are skipped when finding it.
 - `go build`, `test`, `vet`, `install`.
 - `ignite build`, `test`, `conformance`.
+- `make`, every target, when linked as `make`.
 
 Everything else runs directly: `cargo run`, `cargo fmt`, `cargo metadata`, `go run`, `go mod`,
 `ignite check`, `ignite run`. A
 command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` does not queue its
 cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
 `PATH` the shim runs the real command.
+
+## Builds in a sandbox: the gate
+
+An agent in a sandbox that refuses `socket(AF_UNIX)` and has no network cannot reach the daemon,
+so `slot` would run its builds outside the pool. If the sandbox can open FIFOs in a directory it
+shares with the host at the same path, the gate brings it into the pool while the build keeps
+running in the sandbox:
+
+```sh
+slot gate --dir /path/the/sandbox/sees/slot-gate
+```
+
+The directory must be on the filesystem of the daemon's state directory: the gate hard-links the
+pool's jobserver FIFO into it. In the sandbox, set `SLOT_GATE` to the directory and put `slot` and
+the shim on `PATH`; `slot <command…>` then queues through the gate's FIFOs, waits for its slots,
+and runs the command itself with `MAKEFLAGS` and `CARGO_MAKEFLAGS` pointed at the linked FIFO.
+On the host the daemon runs only `slot hold`, which keeps the job's slots until the sandboxed
+command exits and then exits with its code; nothing of the command runs on the host. A cancelled
+job ends the command in the sandbox; a client that dies frees its slots. Without a gate serving
+the directory, the command runs in the sandbox outside the pool, with one line on stderr.
+[`contrib/slot-gate.service`](https://github.com/beyond10x/slot/blob/main/contrib/slot-gate.service)
+runs the gate as a user service; it reads `SLOT_GATE_DIRS=<dir>[:<dir>…]` from
+`~/.config/slot/gate.env`.
 
 ## Claude Code: refuse builds outside the pool
 

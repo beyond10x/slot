@@ -1,10 +1,11 @@
 #!/bin/sh
-# PATH shim: installed as `cargo`, `go` and `ignite` in a directory placed first on PATH,
+# PATH shim: installed as `cargo`, `go`, `ignite` and `make` in a directory placed first on PATH,
 # it sends build commands through slot and runs everything else directly.
 #
 # Through slot: cargo build|b|check|c|test|t|clippy|doc|d|bench|nextest|install|rustc|llvm-cov|miri
 #               go build|test|vet|install
 #               ignite build|test|conformance
+#               make, every target
 # Directly:     every other subcommand (run, fmt, metadata, …), any command inside a slot
 #               job (SLOT_JOB set), SLOT_SHIM_OFF=1, or when `slot` is not on PATH.
 
@@ -52,7 +53,7 @@ case $name:$sub in
   cargo:doc | cargo:d | cargo:bench | cargo:nextest | cargo:install | cargo:rustc | \
   cargo:llvm-cov | cargo:miri | \
   go:build | go:test | go:vet | go:install | \
-  ignite:build | ignite:test | ignite:conformance)
+  ignite:build | ignite:test | ignite:conformance | make:*)
     exec slot run -- "$real" "$@"
     ;;
 esac

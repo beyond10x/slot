@@ -1,0 +1,11 @@
+[Unit]
+Description=slot gate: sandboxed builds queue in the slot pool
+After=slot.service
+
+[Service]
+EnvironmentFile=%h/.config/slot/gate.env
+ExecStart=%h/.local/bin/slot gate
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

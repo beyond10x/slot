@@ -1,0 +1,194 @@
+//! `slot gate`: a client that cannot reach the daemon's socket queues
+//! through FIFOs, holds its slots through `slot hold`, and runs its command
+//! itself (`docs/design.md` § 19).
+
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+const SLOT: &str = env!("CARGO_BIN_EXE_slot");
+
+struct Setup {
+    daemon: Child,
+    gate: Child,
+    dir: tempfile::TempDir,
+}
+
+impl Setup {
+    fn start(tokens: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let log = std::fs::File::create(dir.path().join("daemon.log")).unwrap();
+        let daemon = Command::new(SLOT)
+            .args(["serve", "--http", "off", "--cpu-quota", "false"])
+            .args(["--tokens", &tokens.to_string()])
+            .args(["--call-headroom", "0", "--sccache-watch", "false"])
+            .args(["--min-free-disk", "0", "--min-free-memory", "0"])
+            .arg("--socket")
+            .arg(dir.path().join("sock"))
+            .arg("--state-dir")
+            .arg(dir.path().join("state"))
+            .env_remove("SLOT_JOB")
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        wait_for(&dir.path().join("sock"));
+        let log = std::fs::File::create(dir.path().join("gate.log")).unwrap();
+        let gate = Command::new(SLOT)
+            .arg("gate")
+            .arg("--dir")
+            .arg(dir.path().join("gate"))
+            .arg("--socket")
+            .arg(dir.path().join("sock"))
+            .arg("--state-dir")
+            .arg(dir.path().join("state"))
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .unwrap();
+        wait_for(&dir.path().join("gate").join("requests.fifo"));
+        // The FIFO exists before the gate opens it; give it a moment.
+        std::thread::sleep(Duration::from_millis(200));
+        Self { daemon, gate, dir }
+    }
+
+    fn gate_dir(&self) -> PathBuf {
+        self.dir.path().join("gate")
+    }
+
+    /// A client as a sandbox runs it: `SLOT_GATE` set, the socket out of
+    /// reach.
+    fn client(&self, script: &str) -> Child {
+        Command::new(SLOT)
+            .args(["sh", "-c", script])
+            .env("SLOT_GATE", self.gate_dir())
+            .env("SLOT_SOCKET", self.dir.path().join("no-such-socket"))
+            .env_remove("SLOT_JOB")
+            .env_remove("SLOT_HOST")
+            .current_dir(self.dir.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    fn jobs(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("state").join("jobs.jsonl"))
+            .unwrap_or_default()
+    }
+
+    fn logs(&self) -> String {
+        let r = |n: &str| std::fs::read_to_string(self.dir.path().join(n)).unwrap_or_default();
+        format!("daemon:\n{}\ngate:\n{}", r("daemon.log"), r("gate.log"))
+    }
+}
+
+impl Drop for Setup {
+    fn drop(&mut self) {
+        let _ = self.gate.kill();
+        let _ = self.daemon.kill();
+        let _ = self.gate.wait();
+        let _ = self.daemon.wait();
+    }
+}
+
+fn wait_for(p: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !p.exists() {
+        assert!(Instant::now() < deadline, "{} did not appear", p.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn finish(c: Child) -> Output {
+    c.wait_with_output().unwrap()
+}
+
+#[test]
+fn a_gated_job_runs_in_the_client_with_the_pool_jobserver() {
+    let s = Setup::start(2);
+    let c = s.client("echo auth=$CARGO_MAKEFLAGS; echo job=$SLOT_JOB; echo parent=$PPID; exit 3");
+    let client_pid = c.id();
+    let out = finish(c);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{stdout}\n{stderr}\n{}",
+        s.logs()
+    );
+    let fifo = s.gate_dir().join("jobserver.fifo");
+    assert!(
+        stdout.contains(&format!("auth=-j --jobserver-auth=fifo:{}", fifo.display())),
+        "{stdout}"
+    );
+    assert!(stdout.contains("job=1"), "{stdout}");
+    // The command is the client's child, not the daemon's.
+    assert!(stdout.contains(&format!("parent={client_pid}")), "{stdout}");
+    // The job is booked under the client's command, with its exit code.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !s.jobs().contains("\"exit\":3") {
+        assert!(Instant::now() < deadline, "{}\n{}", s.jobs(), s.logs());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let jobs = s.jobs();
+    assert!(jobs.contains(r#""argv":["sh","-c","#), "{jobs}");
+    // Nothing of the request is left behind.
+    let left: Vec<String> = std::fs::read_dir(s.gate_dir())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "jobserver.fifo" && n != "requests.fifo")
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_gated_job_holds_its_slot_until_the_client_ends() {
+    let s = Setup::start(1);
+    let marker = s.dir.path().join("first-done");
+    let first = s.client(&format!("sleep 1; touch {}", marker.display()));
+    std::thread::sleep(Duration::from_millis(300));
+    // The pool has one slot: the second job starts only after the first.
+    let second = s.client(&format!(
+        "test -e {} && echo after || echo overlap",
+        marker.display()
+    ));
+    let a = finish(first);
+    let b = finish(second);
+    assert_eq!(a.status.code(), Some(0), "{}", s.logs());
+    let out = String::from_utf8_lossy(&b.stdout);
+    assert!(out.contains("after"), "{out}\n{}", s.logs());
+}
+
+#[test]
+fn a_killed_client_frees_its_slot() {
+    let s = Setup::start(1);
+    let mut first = s.client("sleep 5");
+    std::thread::sleep(Duration::from_millis(500));
+    first.kill().unwrap();
+    let _ = first.wait();
+    let t = Instant::now();
+    let out = finish(s.client("echo ran"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("ran"));
+    assert!(t.elapsed() < Duration::from_secs(10), "{}", s.logs());
+}
+
+#[test]
+fn without_a_gate_the_client_runs_outside_the_pool_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::new(SLOT)
+        .args(["sh", "-c", "echo here"])
+        .env("SLOT_GATE", dir.path())
+        .env_remove("SLOT_JOB")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("here"));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ran outside the pool"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

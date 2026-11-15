@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.18.0 — 2026-11-15
+
+- `slot gate --dir <dir>`: builds in a sandbox that cannot reach the daemon's socket (no
+  `AF_UNIX`, no network) queue in the pool through FIFOs in a directory shared with the host, and
+  run in the sandbox. The client sets `SLOT_GATE=<dir>`; the daemon starts only `slot hold`, which
+  keeps the job's slots until the sandboxed command exits. The gate hard-links the pool's FIFO
+  into the directory, so cargo, rustc and make in the sandbox draw from the same jobserver.
+  `contrib/slot-gate.service` runs it. The request carries `hold_for`, defaulting, so older
+  daemons and clients keep working. Design: `docs/design.md` § 19.
+- The lost-token watch counts a process as holding the pool FIFO by device and inode, so a
+  sandboxed compiler holding it through the gate's link is seen.
+- `contrib/slot-shim` sends `make` through slot when linked as `make`.
+
 ## 0.17.0 — 2026-11-13
 
 - `slot usage` and `GET /api/usage`: slot time, CPU time, jobs and median queue wait per project,

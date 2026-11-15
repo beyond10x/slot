@@ -860,3 +860,46 @@ Need: the workstation's `/` fills with target directories of worktrees nobody bu
   changes, and `slot status` shows a `disk:` line. Set it to false once the journal has shown
   only directories that may go.
 
+
+## 19. Builds in a sandbox: the gate (0.18.0)
+
+Need: agent sessions that run in a sandbox (bubblewrap with user, pid and network namespaces and a
+seccomp filter that refuses `socket(AF_UNIX)`) could not reach the daemon's socket or its HTTP
+port, so `slot` ran their builds outside the pool. The build must stay in the sandbox: running it
+through the daemon would run it on the host, outside the sandbox.
+
+What the sandbox can do: open FIFOs and files in directories bound in at the same path as on the
+host. A FIFO is an inode, so a hard link to the pool's FIFO in such a directory is the same
+jobserver: a cargo in the sandbox draws and returns the same tokens as every other job.
+
+- **`slot gate --dir <dir>`** runs on the host, beside the daemon. It hard-links
+  `<state-dir>/jobserver.fifo` to `<dir>/jobserver.fifo` (and again whenever the daemon recreated
+  the FIFO at a full restart), creates `<dir>/requests.fifo` and keeps it open read-write, so it
+  never sees end-of-file.
+- **Client** (`SLOT_GATE=<dir>`): makes `<id>.reply` and `<id>.hold` FIFOs, opens the hold FIFO
+  read-write (it stays that FIFO's only writer), writes the request to `<id>.json` and the id as
+  one line to `requests.fifo` (under `PIPE_BUF`, so lines of concurrent clients do not mix). No
+  reader on `requests.fifo` (`ENXIO`) means no gate: the command runs in the sandbox outside the
+  pool, with one stderr line, as with a daemon that is down.
+- **Gate → daemon**: one ordinary socket connection per request, with `argv` =
+  `slot hold <dir>/<id>.hold` and `hold_for` = the client's command. The daemon queues, books and
+  shows the job by `hold_for` (toolchain, slots, memory estimate, target directory) and starts only
+  `argv`. A daemon older than 0.18.0 ignores `hold_for` and still starts only the hold process.
+  The gate copies the daemon's frames to `<id>.reply`; when the client's reader is gone (`POLLERR`
+  on the reply FIFO) it closes the connection, which cancels the job.
+- **`slot hold`**: writes its environment, which is the job's (jobserver, `SLOT_JOB`, the
+  toolchain's settings), to `<id>.env`, then reads the hold FIFO to end-of-file and exits with
+  the code of its last `exit <code>` line, 130 without one.
+- **Client after `start`**: reads `<id>.env`, points `--jobserver-auth` at `<dir>/jobserver.fifo`
+  and runs the command as its own child. When it exits, the client writes `exit <code>` and closes
+  the hold FIFO, waits up to 5 s for the daemon's `exit` frame and exits with the command's code.
+  An `exit` frame while the command runs is a cancel: SIGTERM, SIGKILL after 5 s. A client killed
+  outright closes the hold FIFO with it, so the hold process ends and the slots go back.
+- **Lost tokens**: a compiler in the sandbox holds the FIFO through the link, and its `/proc` fd
+  link names the sandbox's path. `jobserver::holders` therefore compares device and inode, not
+  the path, so the 15 s lost-token watch does not write back tokens a sandboxed compiler holds.
+
+Not covered: CPU and memory of the sandboxed command are not sampled into the job (the hold
+process is idle); the sandbox's own cgroup limits apply. The gate does not authenticate clients:
+whoever can write to the directory can queue jobs, which is the sandbox the directory is shared
+with.

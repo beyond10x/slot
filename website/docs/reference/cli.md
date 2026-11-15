@@ -76,6 +76,18 @@ slot shell [OPTIONS]
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs of synced workspaces (default: `<state-dir>/cache`)
 
+### `slot gate`
+
+Serve gate directories: builds in a sandbox that can open FIFOs there, but cannot reach the daemon's socket, queue in the pool and run in their sandbox. The client sets `SLOT_GATE=<dir>`
+
+```text
+slot gate [OPTIONS] --dir <DIR>
+```
+
+- `--dir`: A directory the sandbox sees at the same path, on the filesystem of the daemon's state directory (the pool FIFO is hard-linked into it). Repeat for more sandboxes; `SLOT_GATE_DIRS` lists them separated by `:` (env `SLOT_GATE_DIRS`)
+- `--socket`: The daemon's socket (env `SLOT_SOCKET`)
+- `--state-dir`: The daemon's state directory, which holds the pool FIFO
+
 ### `slot run`
 
 Run a build command; use this when the command's name is also a slot subcommand
