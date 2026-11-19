@@ -50,7 +50,7 @@ slot serve [OPTIONS]
 - `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes (default `1800`)
 - `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
 - `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. Directories of a repository with a queued or running job, or built in the last 2 h, are kept. 0 turns it off (default `40`)
-- `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete; `false` deletes them (default `true`)
+- `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
 
 ### `slot proxy`

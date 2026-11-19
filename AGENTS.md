@@ -200,13 +200,11 @@ admission by disk and memory, headroom and call mode, headroom of the machine, s
 job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, the gate for builds in a sandbox, handover on reload, lost-token
 recovery, and eviction of local target directories in dry run.
 
-Open, one line each, with where the design lives. A session starts with (e), then (b).
+Open, one line each, with where the design lives. A session starts with (e).
 
 - (a) The rest of the conductor contract (job priority is built; labels, version endpoint, OpenAPI,
   strict mode, run report, write token, prompt-prefix hook): the conductor repository,
   `docs/design/slot-integration.md`.
-- (b) Eviction: switch `--evict-dry-run` off once its journal lines (`slot: disk: …`) list only
-  directories that may go: `docs/design.md` § 18.
 - (c) Warnings for an empty `RUSTC_WRAPPER` while sccache is configured and for mixed
   `CARGO_PROFILE_*` in one target directory: `docs/design.md` § 12, ideas 1 and 2, not built.
 - (d) I/O and disk and cache sizes in the live view: about ½ to 1 day each; `io.stat` needs a

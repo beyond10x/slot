@@ -193,8 +193,9 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 40.0, value_name = "GB")]
     pub evict_below: f64,
     /// Only report in the journal and `slot status` which target
-    /// directories eviction would delete; `false` deletes them.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    /// directories eviction would delete. `dry_run` in
+    /// `<state-dir>/evict.json`, read every minute, wins over this.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     pub evict_dry_run: bool,
     /// On `systemctl --user reload slot`, re-execute at once and hand the
     /// running and queued jobs, their slots and their clients to the new
@@ -478,6 +479,21 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("slot").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn eviction_deletes_by_default() {
+        let Cmd::Serve(a) = parse(&["serve"]).unwrap().command else {
+            panic!("not serve")
+        };
+        assert!(!a.evict_dry_run);
+        let Cmd::Serve(a) = parse(&["serve", "--evict-dry-run", "true"])
+            .unwrap()
+            .command
+        else {
+            panic!("not serve")
+        };
+        assert!(a.evict_dry_run);
     }
 
     #[test]

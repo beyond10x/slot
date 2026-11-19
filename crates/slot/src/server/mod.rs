@@ -2573,12 +2573,16 @@ impl Server {
     /// ones until it has the floor plus the margin; in a dry run it only
     /// says which. See [`crate::evict`].
     async fn evict_watch(self: Arc<Self>) {
-        let s = self.cfg.evict;
+        let flag = self.cfg.evict.dry_run;
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_said = Vec::new();
         loop {
             tick.tick().await;
+            let s = crate::evict::Settings {
+                dry_run: crate::evict::dry_run(&self.cfg.state_dir, flag),
+                ..self.cfg.evict
+            };
             let (seen, busy_repos, busy_dirs) = {
                 let g = self.inner.lock().expect("server lock");
                 let repos: HashSet<String> =
@@ -2618,6 +2622,9 @@ impl Server {
                 .map(|e| (e.path.clone(), e.action.clone()))
                 .collect();
             if !done.is_empty() && (said != last_said || !s.dry_run) {
+                if s.dry_run {
+                    eprintln!("slot: {}", crate::evict::off_summary(free, s.floor, &done));
+                }
                 for e in &done {
                     eprintln!(
                         "slot: disk: {} free, under {}: {} {} ({}, last built {} ago)",
@@ -2633,6 +2640,7 @@ impl Server {
             last_said = said;
             let mut r = self.evict.lock().expect("evict lock");
             r.known = known;
+            r.dry_run = s.dry_run;
             r.free = free;
             r.checked_ms = now_ms();
             if !done.is_empty() || free >= s.floor {

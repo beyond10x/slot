@@ -295,7 +295,8 @@ fn sccache_line(w: &crate::types::SccacheWatch, now: i64) -> String {
     )
 }
 
-/// `disk: 32.0 GB free, under 40.0 GB: dry run, would delete 2 target dir(s), 31.0 GB`;
+/// `disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB`, or in
+/// a dry run `disk: … eviction is off (dry run), would free 31.0 GB in 2 dir(s)`;
 /// nothing when eviction is off or never looked.
 fn evict_line(r: &crate::evict::Report) -> Option<String> {
     if r.floor == 0 || r.checked_ms == 0 {
@@ -318,10 +319,15 @@ fn evict_line(r: &crate::evict::Report) -> Option<String> {
             r.known
         ));
     }
+    if r.dry_run {
+        return Some(format!(
+            "{}{deleted}\n",
+            crate::evict::off_summary(r.free, r.floor, &r.last)
+        ));
+    }
     let bytes: u64 = r.last.iter().map(|e| e.bytes).sum();
-    let verb = if r.dry_run { "would delete" } else { "deleted" };
     Some(format!(
-        "disk: {} free, under {}: {mode}{verb} {} target dir(s), {}{deleted}\n",
+        "disk: {} free, under {}: deleted {} target dir(s), {}{deleted}\n",
         crate::admission::gb(r.free),
         crate::admission::gb(r.floor),
         r.last.len(),
@@ -412,6 +418,39 @@ mod tests {
             priority: crate::types::Priority::Normal,
             promoted: false,
         }
+    }
+
+    #[test]
+    fn a_dry_run_under_the_floor_says_eviction_is_off() {
+        let gb = crate::admission::GB;
+        let e = |bytes| crate::evict::Eviction {
+            path: "/w/a/target".into(),
+            bytes,
+            last_ms: 0,
+            action: "would delete".into(),
+        };
+        let mut r = crate::evict::Report {
+            floor: 40 * gb,
+            dry_run: true,
+            known: 35,
+            free: 32 * gb,
+            checked_ms: 1,
+            last: vec![e(20 * gb), e(11 * gb)],
+            deleted_bytes: 0,
+        };
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 32.0 GB free, under 40.0 GB: eviction is off (dry run), \
+             would free 31.0 GB in 2 dir(s)\n"
+        );
+        r.dry_run = false;
+        r.last.iter_mut().for_each(|e| e.action = "deleted".into());
+        r.deleted_bytes = 31 * gb;
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB, \
+             31.0 GB deleted since start\n"
+        );
     }
 
     #[test]

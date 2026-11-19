@@ -183,12 +183,21 @@ filesystem would have 50 GB free. It never deletes:
 
 A target directory inside a managed worktree is deleted with `worktree discard-cache`.
 
-Eviction starts as a dry run (`--evict-dry-run true`): the journal and `slot status` list what
-it would delete, and nothing is deleted. To let it delete, add `--evict-dry-run false` to the
-`slot serve` line of the service and reload.
+Eviction deletes by default. To only see what it would delete, run it as a dry run: either
+`slot serve --evict-dry-run true`, or a file `evict.json` in the daemon's state directory
+(`~/.local/state/slot` by default), which a provisioning tool can write without touching the
+service's command line:
+
+```json
+{ "dry_run": true }
+```
+
+The daemon reads the file at every look, so a change applies within a minute without a reload;
+when the file sets `dry_run`, it wins over the flag. Under the floor, a dry run says in the journal
+and in `slot status` that eviction is off and what it would free, then lists the directories:
 
 ```text
-disk: 35.2 GB free, under 40.0 GB: dry run, would delete 3 target dir(s), 21.4 GB
+disk: 35.2 GB free, under 40.0 GB: eviction is off (dry run), would free 21.4 GB in 3 dir(s)
 ```
 
 ## Memory limit

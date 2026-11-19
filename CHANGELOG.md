@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Eviction of local target directories deletes by default: `--evict-dry-run` defaults to false.
+  `<state-dir>/evict.json` (`{"dry_run": true}`) turns the dry run on or off without changing the
+  service's command line; the daemon reads it every minute, no reload needed, and it wins over
+  the flag. A dry run under the floor says so plainly in the journal and in `slot status`:
+  `eviction is off (dry run), would free <n> GB in <k> dir(s)`.
+
 ## 0.18.0 — 2026-11-15
 
 - `slot gate --dir <dir>`: builds in a sandbox that cannot reach the daemon's socket (no

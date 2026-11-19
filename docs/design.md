@@ -855,10 +855,13 @@ Need: the workstation's `/` fills with target directories of worktrees nobody bu
   --json <tree>` exits 0), `worktree discard-cache <tree>` deletes it; otherwise
   `remove_dir_all`. A job that wants a directory while it is being deleted waits with
   `slot: waiting: <dir> is being deleted to free disk space`.
-- **Dry run.** `--evict-dry-run` defaults to true in the first release: the journal says
-  `slot: disk: … free, under …: would delete <dir> (<size>, last built … ago)` when the list
-  changes, and `slot status` shows a `disk:` line. Set it to false once the journal has shown
-  only directories that may go.
+- **Dry run.** `--evict-dry-run` defaulted to true from 0.15.0 to 0.18.0; it defaults to false
+  since the safety checks above held on the journal. `<state-dir>/evict.json` with
+  `{"dry_run": true|false}` overrides the flag; the daemon reads it at every look (no reload) and
+  never writes it, so a provisioning tool owns it. In a dry run under the floor the journal says
+  `slot: disk: … free, under …: eviction is off (dry run), would free <n> GB in <k> dir(s)`, then
+  `would delete <dir> (<size>, last built … ago)` per directory, when the list changes; `slot
+  status` shows the same summary as its `disk:` line.
 
 
 ## 19. Builds in a sandbox: the gate (0.18.0)

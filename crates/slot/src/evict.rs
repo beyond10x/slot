@@ -6,7 +6,8 @@
 //! plus a margin. It never deletes a directory whose repository has a job
 //! queued or running, one built in the last two hours, or a path that no job
 //! of the log built into. A path must carry Cargo's `CACHEDIR.TAG` to count
-//! as a target directory. The first release only says what it would delete.
+//! as a target directory. A dry run (`--evict-dry-run`, or [`FILE`]) only says
+//! what it would delete.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt as _;
@@ -31,6 +32,43 @@ pub struct Settings {
     pub min_idle: Duration,
     /// Only report what would be deleted.
     pub dry_run: bool,
+}
+
+/// File in the state directory that overrides `--evict-dry-run`.
+pub const FILE: &str = "evict.json";
+
+/// What [`FILE`] holds. The daemon reads it and never writes it, so a
+/// provisioning tool or an operator owns it.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+struct FileSettings {
+    /// Only report what would be deleted; `None` leaves `--evict-dry-run`.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+/// Whether eviction only reports: `dry_run` of [`FILE`] in `state_dir`
+/// when it sets one, else `flag` (`--evict-dry-run`). Read at every pass, so
+/// a change applies without a reload.
+pub fn dry_run(state_dir: &Path, flag: bool) -> bool {
+    std::fs::read_to_string(state_dir.join(FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str::<FileSettings>(&s).ok())
+        .and_then(|f| f.dry_run)
+        .unwrap_or(flag)
+}
+
+/// `disk: 32.0 GB free, under 40.0 GB: eviction is off (dry run), would
+/// free 31.0 GB in 2 dir(s)`: what a dry run under the floor says in the
+/// journal and in `slot status`.
+pub fn off_summary(free: u64, floor: u64, done: &[Eviction]) -> String {
+    let bytes: u64 = done.iter().map(|e| e.bytes).sum();
+    format!(
+        "disk: {} free, under {}: eviction is off (dry run), would free {} in {} dir(s)",
+        crate::admission::gb(free),
+        crate::admission::gb(floor),
+        crate::admission::gb(bytes),
+        done.len()
+    )
 }
 
 /// What `slot status` and the web UI show about eviction.
@@ -325,6 +363,42 @@ mod tests {
     fn tagged(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("CACHEDIR.TAG"), format!("{CACHEDIR_SIGNATURE}\n")).unwrap();
+    }
+
+    #[test]
+    fn the_dry_run_follows_the_state_dir_file_over_the_flag() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!dry_run(d.path(), false), "no file: the flag");
+        assert!(dry_run(d.path(), true), "no file: the flag");
+        std::fs::write(d.path().join(FILE), r#"{"dry_run": true}"#).unwrap();
+        assert!(dry_run(d.path(), false));
+        std::fs::write(d.path().join(FILE), r#"{"dry_run": false}"#).unwrap();
+        assert!(!dry_run(d.path(), true));
+        std::fs::write(d.path().join(FILE), "{}").unwrap();
+        assert!(dry_run(d.path(), true), "field left out: the flag");
+        std::fs::write(d.path().join(FILE), "not json").unwrap();
+        assert!(!dry_run(d.path(), false), "unreadable: the flag");
+    }
+
+    #[test]
+    fn a_dry_run_under_the_floor_says_eviction_is_off_and_what_it_would_free() {
+        let e = |path: &str, bytes| Eviction {
+            path: path.into(),
+            bytes,
+            last_ms: 0,
+            action: "would delete".into(),
+        };
+        let done = [e("/w/a/target", 20 * GB), e("/w/b/target", 11 * GB)];
+        assert_eq!(
+            off_summary(32 * GB, 40 * GB, &done),
+            "disk: 32.0 GB free, under 40.0 GB: eviction is off (dry run), \
+             would free 31.0 GB in 2 dir(s)"
+        );
+        assert_eq!(
+            off_summary(39 * GB, 40 * GB, &[]),
+            "disk: 39.0 GB free, under 40.0 GB: eviction is off (dry run), \
+             would free 0.0 GB in 0 dir(s)"
+        );
     }
 
     #[test]
