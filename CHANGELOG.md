@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.0 — 2026-11-19
 
 - Eviction of local target directories deletes by default: `--evict-dry-run` defaults to false.
   `<state-dir>/evict.json` (`{"dry_run": true}`) turns the dry run on or off without changing the

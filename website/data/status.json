@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-15",
-  "source": "CHANGELOG.md 0.1.0 to 0.18.0 and docs/design.md sections 10 to 19",
+  "asOf": "2026-11-19",
+  "source": "CHANGELOG.md 0.1.0 to 0.19.0 and docs/design.md sections 10 to 19",
   "items": [
     {
       "area": "Pool",
@@ -72,6 +72,13 @@
       "status": "shipped",
       "detail": "slot --tokens N or SLOT_TOKENS=N holds N slots for a job, for a script that starts a container with --cpus N (0.16.0).",
       "href": "/docs/toolchains#naming-the-slots"
+    },
+    {
+      "area": "Pool",
+      "label": "Disk eviction of local target directories",
+      "status": "shipped",
+      "detail": "Under the disk floor the daemon deletes the least recently used target directories by default; evict.json in the state directory turns on a dry run without a reload (0.19.0).",
+      "href": "/docs/how-it-works#freeing-disk-space"
     },
     {
       "area": "Toolchains",
