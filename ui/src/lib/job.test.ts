@@ -67,13 +67,23 @@ test('a subdirectory of a linked checkout shows the repository and worktree acro
   assert.match(tooltipText(j, undefined, 4000), /^#1 rust parser · worktree grammar\n/);
 });
 
-test('a job outside Git and a historic guess have distinct labels', () => {
+test('a directory outside Git and an older job without a recorded name have distinct labels', () => {
   const directory = job({ cwd: '/work/bench', repo: '', checkout: { kind: 'directory' } });
-  const historic = job({ cwd: '/work/bench', repo: 'bench', checkout: undefined });
+  const historic = job({ cwd: '/work/bench', repo: '', checkout: undefined });
   assert.equal(checkoutLabel(directory), 'No repository');
   assert.equal(checkoutLabel(historic), 'Repository unknown');
   assert.equal(barLabel(historic), 'Repository unknown: cargo build --release -p');
   assert.match(tooltipText(directory, undefined, 4000), /\n\/work\/bench\n/);
+});
+
+test('historical names stay visible and unverified in rows, timeline bars and hover details', () => {
+  for (const repo of ['slot', 'impl-gate']) {
+    const historic = job({ cwd: `/work/${repo}`, repo, checkout: undefined });
+    const label = `Unverified · ${repo}`;
+    assert.equal(checkoutLabel(historic, '\n'), label);
+    assert.equal(barLabel(historic), `${label}: cargo build --release -p`);
+    assert.equal(tooltipText(historic, undefined, 4000).split('\n')[0], `#1 rust ${label}`);
+  }
 });
 
 test('tooltip shows exit only for finished jobs and live numbers when given', () => {

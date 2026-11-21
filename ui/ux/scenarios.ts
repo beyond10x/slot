@@ -153,7 +153,9 @@ function busyFailed(): Scenario {
     queued(48, -10),
   ];
   const finished = Array.from({ length: 12 }, (_, i) => done(28 + i, -300 + i * 20));
-  finished[9] = done(37, -120, { state: 'failed', exit: 101, cwd: '/jobs/batch-07', repo: 'batch-07', checkout: undefined });
+  finished[8] = done(36, -140, { repo: '', checkout: undefined });
+  finished[9] = done(37, -120, { state: 'failed', exit: 101, cwd: '/jobs/impl-gate', repo: 'impl-gate', checkout: undefined });
+  finished[10] = done(38, -100, { cwd: '/work/checkout', repo: 'checkout', checkout: undefined });
   const failed42 = job(42, {
     repo: 'ledger', cwd: '/trees/tax-rounding/crates/core', checkout: { kind: 'worktree', name: 'tax-rounding' },
     argv: ['cargo', 'build', '-p', 'ledger-core'], toolchain: 'rust', tokens: 4,

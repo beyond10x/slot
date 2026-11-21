@@ -257,8 +257,12 @@ is `GET /api/usage?from=<ms>&to=<ms>&by=project` and the **Share of the pool** t
 
 The job tables show the Git repository that owns the working directory.
 A linked worktree also shows its directory name, including for detached HEAD.
-A build outside Git shows **No repository**. Jobs from older clients show
-**Repository unknown** because their recorded name could be a directory name.
+A build outside Git shows **No repository**. Jobs from older clients keep their
+recorded names with an **Unverified** label because the name may identify a directory.
+An older job with an empty name shows **Repository unknown**.
+
+During a daemon handover, Slot passes the last 900 chart samples and recent job output to the next process.
+An older sender can only pass the data its version captured. The job log survives either upgrade.
 
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
 shows:

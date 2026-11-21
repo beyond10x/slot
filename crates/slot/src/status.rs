@@ -259,6 +259,7 @@ fn line(j: &Job, now: i64) -> String {
         Some(Checkout::Repository) => j.repo.clone(),
         Some(Checkout::Worktree { name }) => format!("{} (worktree {name})", j.repo),
         Some(Checkout::Directory) => "no repository".into(),
+        None if !j.repo.is_empty() => format!("unverified · {}", j.repo),
         None => "repository unknown".into(),
     };
     let mut s = format!(
@@ -425,6 +426,15 @@ mod tests {
             priority: crate::types::Priority::Normal,
             promoted: false,
         }
+    }
+
+    #[test]
+    fn status_preserves_the_unverified_label_of_an_old_job() {
+        let mut old = job(2, JobState::Queued, 1);
+        old.checkout = None;
+        assert!(line(&old, 1000).contains("unverified · demo"));
+        old.repo.clear();
+        assert!(line(&old, 1000).contains("repository unknown"));
     }
 
     #[test]

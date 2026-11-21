@@ -13,7 +13,7 @@ export function checkoutLabel(j: Job, separator = ' · '): string {
     case 'repository': return j.repo;
     case 'worktree': return `${j.repo}${separator}worktree ${j.checkout.name}`;
     case 'directory': return 'No repository';
-    default: return 'Repository unknown';
+    default: return j.repo ? `Unverified · ${j.repo}` : 'Repository unknown';
   }
 }
 

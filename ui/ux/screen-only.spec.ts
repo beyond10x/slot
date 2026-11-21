@@ -20,8 +20,12 @@ test('job tables distinguish repository, worktree, directory and historical jobs
   await expect(row(40).getByRole('cell', { name: 'No repository', exact: true })).toHaveAttribute('title', /\/jobs\/build-cache/);
   await expect(row(41).getByRole('cell', { name: 'checkout', exact: true })).toBeVisible();
   await expect(row(47).getByRole('cell', { name: 'ledger worktree invoices', exact: true })).toBeVisible();
-  await expect(row(37).getByRole('cell', { name: 'Repository unknown', exact: true })).toHaveAttribute('title', /\/jobs\/batch-07/);
+  await expect(row(36).getByRole('cell', { name: 'Repository unknown', exact: true })).toBeVisible();
+  await expect(row(37).getByRole('cell', { name: 'Unverified · impl-gate', exact: true })).toHaveAttribute('title', /\/jobs\/impl-gate/);
+  await expect(row(38).getByRole('cell', { name: 'Unverified · checkout', exact: true })).toBeVisible();
   await expect(row(42).getByRole('cell', { name: 'ledger worktree tax-rounding', exact: true })).toBeVisible();
+  await row(37).getByRole('button').click();
+  await expect(page.getByRole('complementary').getByText(/^#37 Unverified · impl-gate:/)).toBeVisible();
 });
 
 test('pool share labels identify wholly and partly unverified groups', async ({ page, baseURL }) => {
