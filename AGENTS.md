@@ -91,6 +91,9 @@ Tests use `tempfile` directories, never a fixed path under `/tmp`.
 ## Builds and worktrees
 
 Change this repository in a managed worktree (`worktree create --repo ../slot --purpose …`).
+Run `git fetch origin` first and pass `--base origin/main`: the default base is the local
+`HEAD`, and a local `main` that was not pulled gives a tree many releases old (a UX round
+and a review were once started on 0.10.0 while `origin/main` was 0.19.0).
 Build with `CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0`, and finish the tree
 with `worktree finish --discard-cache --archive` when the change is merged.
 
@@ -218,6 +221,12 @@ Open, one line each, with where the design lives. A session starts with (e).
   in `server/mod.rs`), so a changed `ExecStart` option such as `--min-free-disk` takes effect only
   at a full restart. Options that should change on reload belong in `limits.json`, like the
   headroom.
+- (h) Lost jobserver tokens stay lost while any process has the FIFO open (one period of
+  172 minutes with 8 tokens gone): `story:lost-tokens-return-on-a-busy-pool`.
+- (i) Jobs that use no CPU hold 29 % of the slot-hours while requests wait:
+  `story:idle-slots-are-lent-to-the-queue`.
+- (j) Jobs that run under 5 s carry half of the queue wait:
+  `story:short-jobs-start-ahead-of-long-ones`.
 
 ## Never
 
