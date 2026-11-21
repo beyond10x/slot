@@ -60,7 +60,7 @@ function job(id: number, over: Partial<Job> = {}): Job {
   const [toolchain, argv] = CMDS[id % CMDS.length];
   const [session] = SESSIONS[id % SESSIONS.length];
   return {
-    id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], session,
+    id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], checkout: { kind: 'repository' }, session,
     client: 'ws:1', toolchain, remote: false, tokens: toolchain === 'rust' ? 4 : 2, state: 'running',
     enqueued_ms: s(-400 + id), started_ms: s(-380 + id), ended_ms: 0, exit: 0, cpu_s: 0,
     compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, ...over,
@@ -146,12 +146,17 @@ const COMPILE_ERROR: Chunk[] = [
 ];
 
 function busyFailed(): Scenario {
-  const running = [job(40), job(41), job(43), job(44), job(45)];
-  const waiting = [queued(46, -40), queued(47, -25), queued(48, -10)];
+  const running = [job(40, { cwd: '/jobs/build-cache', repo: '', checkout: { kind: 'directory' } }), job(41), job(43), job(44), job(45)];
+  const waiting = [
+    queued(46, -40),
+    { ...queued(47, -25), cwd: '/trees/invoices/packages/core', repo: 'ledger', checkout: { kind: 'worktree' as const, name: 'invoices' } },
+    queued(48, -10),
+  ];
   const finished = Array.from({ length: 12 }, (_, i) => done(28 + i, -300 + i * 20));
-  finished[9] = done(37, -120, { state: 'failed', exit: 101 });
+  finished[9] = done(37, -120, { state: 'failed', exit: 101, cwd: '/jobs/batch-07', repo: 'batch-07', checkout: undefined });
   const failed42 = job(42, {
-    repo: 'ledger', cwd: '/work/ledger', argv: ['cargo', 'build', '-p', 'ledger-core'], toolchain: 'rust', tokens: 4,
+    repo: 'ledger', cwd: '/trees/tax-rounding/crates/core', checkout: { kind: 'worktree', name: 'tax-rounding' },
+    argv: ['cargo', 'build', '-p', 'ledger-core'], toolchain: 'rust', tokens: 4,
     state: 'failed', exit: 101, ended_ms: s(4), cpu_s: 210, peak_rss: 900 * 2 ** 20,
   });
   const st = state([...running, ...waiting], finished, 20, 0);
@@ -174,7 +179,7 @@ function busyFailed(): Scenario {
     card: 'An agent says its build failed a moment ago. Open that build\'s output and read the error.',
     state: st, history: history(running, 20, 20, 0, 3), steps,
     output: { 42: { chunks: COMPILE_ERROR, end: 'exit 101' } },
-    task: { kind: 'open-output', job: 42, expect: ['error[E0308]', 'exit 101'] },
+    task: { kind: 'open-output', job: 42, expect: ['ledger · worktree tax-rounding', 'error[E0308]', 'exit 101'] },
   };
 }
 
@@ -328,7 +333,7 @@ function machineHeadroom(): Scenario {
 
 export const EMPTY_USAGE: Usage = {
   from_ms: T0 - 86_400_000, to_ms: T0, by: 'project',
-  total: { key: '', title: '', jobs: 0, slot_s: 0, cpu_s: 0, wait_s: 0, wait_p50_s: 0, wait_max_s: 0, slot_share: 0, cpu_share: 0 },
+  total: { key: '', title: '', jobs: 0, unverified_repo_jobs: 0, slot_s: 0, cpu_s: 0, wait_s: 0, wait_p50_s: 0, wait_max_s: 0, slot_share: 0, cpu_share: 0 },
   rows: [],
 };
 
@@ -337,16 +342,18 @@ function poolShare(): Scenario {
   const slotTotal = 400_000;
   const cpuTotal = 360_000;
   const r = (key: string, slot: number, cpu: number, jobs: number, wait: number): UsageRow => ({
-    key, title: '', jobs, slot_s: slot, cpu_s: cpu, wait_s: wait * jobs, wait_p50_s: wait, wait_max_s: wait * 6,
+    key, title: '', jobs, unverified_repo_jobs: 0, slot_s: slot, cpu_s: cpu, wait_s: wait * jobs, wait_p50_s: wait, wait_max_s: wait * 6,
     slot_share: slot / slotTotal, cpu_share: cpu / cpuTotal,
   });
   const rows = [
     r(REPOS[0], 146_000, 93_000, 1338, 46), r(REPOS[1], 94_000, 94_000, 189, 60), r(REPOS[2], 37_000, 70_000, 327, 69),
     r(REPOS[3], 30_000, 4_000, 338, 81), r(REPOS[4], 93_000, 99_000, 2597, 62),
   ];
+  rows[1].unverified_repo_jobs = rows[1].jobs;
+  rows[2].unverified_repo_jobs = 4;
   const usage: Usage = {
     from_ms: T0 - 86_400_000, to_ms: T0, by: 'project', rows,
-    total: { key: '', title: '', jobs: 4789, slot_s: slotTotal, cpu_s: cpuTotal, wait_s: 0, wait_p50_s: 42, wait_max_s: 385, slot_share: 1, cpu_share: 1 },
+    total: { key: '', title: '', jobs: 4789, unverified_repo_jobs: 0, slot_s: slotTotal, cpu_s: cpuTotal, wait_s: 0, wait_p50_s: 42, wait_max_s: 385, slot_share: 1, cpu_share: 1 },
   };
   return {
     ...base, name: 'pool-share', anchor: false,

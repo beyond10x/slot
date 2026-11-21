@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { fmtDur } from '../lib/format.ts';
-import { cmdText, jobId, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobId, waitS } from '../lib/job.ts';
 import { level, levelText, servedQueue } from '../lib/queue.ts';
 import { jobs, select, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
@@ -12,6 +12,7 @@ const rows = computed(() => {
     id: jobId(j),
     pos: k + 1,
     job: j,
+    checkout: checkoutLabel(j, '\n'),
     cmd: cmdText(j),
     wait: fmtDur(waitS(j, t)),
     level: levelText(j),
@@ -34,7 +35,7 @@ const rows = computed(() => {
         <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id)">{{ r.id }}</button></td>
         <td><ToolDot :name="r.job.toolchain" /></td>
         <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
-        <td class="repo" :title="r.job.repo">{{ r.job.repo }}</td>
+        <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`">{{ r.checkout }}</td>
         <td class="muted opt">{{ r.job.session.slice(0, 8) }}</td>
         <td :class="{ muted: r.normal }">{{ r.level }}</td>
         <td class="num">{{ r.job.tokens }}</td>

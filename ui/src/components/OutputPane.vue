@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vu
 import type { Chunk } from '../generated/types.ts';
 import { Terminal, lineHtml, lineIsErr } from '../lib/ansi.ts';
 import type { Segment } from '../lib/ansi.ts';
-import { cmdText, isActive } from '../lib/job.ts';
+import { checkoutLabel, cmdText, isActive } from '../lib/job.ts';
 import { atBottom, revealDelta } from '../lib/scroll.ts';
 import { jobs, select, store } from '../store.ts';
 
@@ -15,7 +15,7 @@ const props = defineProps<{ id: number }>();
 const job = computed(() => jobs.get(props.id));
 const title = computed(() => {
   const j = job.value;
-  return j ? `#${props.id} ${j.repo}: ${cmdText(j)}` : `#${props.id}`;
+  return j ? `#${props.id} ${checkoutLabel(j)}: ${cmdText(j)}` : `#${props.id}`;
 });
 
 type Stream = 'connecting' | 'live' | 'ended' | 'unavailable';

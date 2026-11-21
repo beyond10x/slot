@@ -7,8 +7,18 @@ export const isActive = (s: JobState): boolean => s === 'queued' || s === 'runni
 
 export const cmdText = (j: Job): string => j.argv.join(' ');
 
+/** Identify the checkout from recorded Git metadata. Older jobs only recorded a guessed name. */
+export function checkoutLabel(j: Job, separator = ' · '): string {
+  switch (j.checkout?.kind) {
+    case 'repository': return j.repo;
+    case 'worktree': return `${j.repo}${separator}worktree ${j.checkout.name}`;
+    case 'directory': return 'No repository';
+    default: return 'Repository unknown';
+  }
+}
+
 /** Label drawn inside a wide timeline bar. */
-export const barLabel = (j: Job): string => (j.repo ? j.repo + ': ' : '') + j.argv.slice(0, 4).join(' ');
+export const barLabel = (j: Job): string => `${checkoutLabel(j)}: ${j.argv.slice(0, 4).join(' ')}`;
 
 export interface Times {
   queued: number;
@@ -63,7 +73,7 @@ export function newestRunning(list: Iterable<Job>): Job | undefined {
 export function tooltipText(j: Job, l: LiveJob | undefined, now: number): string {
   const run = runS(j, now);
   const lines = [
-    `#${jobId(j)} ${j.toolchain} ${j.repo}`,
+    `#${jobId(j)} ${j.toolchain} ${checkoutLabel(j)}`,
     cmdText(j),
     j.cwd,
     `state ${j.state}` + (isActive(j.state) ? '' : ` exit ${j.exit}`),

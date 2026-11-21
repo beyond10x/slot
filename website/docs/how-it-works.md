@@ -255,6 +255,11 @@ is `GET /api/usage?from=<ms>&to=<ms>&by=project` and the **Share of the pool** t
 
 ## Web UI
 
+The job tables show the Git repository that owns the working directory.
+A linked worktree also shows its directory name, including for detached HEAD.
+A build outside Git shows **No repository**. Jobs from older clients show
+**Repository unknown** because their recorded name could be a directory name.
+
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
 shows:
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Jobs show their Git repository and linked worktree name. Directories outside
+  Git and historical jobs with unverified repository names have explicit labels.
+
 ## 0.19.0 — 2026-11-19
 
 - Eviction of local target directories deletes by default: `--evict-dry-run` defaults to false.

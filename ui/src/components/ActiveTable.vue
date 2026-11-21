@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue';
 import { fmtBytes, fmtDur } from '../lib/format.ts';
-import { cmdText, jobId, runS, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobId, runS, waitS } from '../lib/job.ts';
 import { phase } from '../lib/units.ts';
 import { jobs, live, select, sparks, store } from '../store.ts';
 import CoresSpark from './CoresSpark.vue';
@@ -31,6 +31,7 @@ const rows = computed(() => {
     return {
       id,
       job: j,
+      checkout: checkoutLabel(j, '\n'),
       live: l,
       open: toggled.get(id) ?? busiest.has(id),
       cmd: cmdText(j),
@@ -68,7 +69,7 @@ function toggle(id: number, open: boolean): void {
           </td>
           <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id)">{{ r.id }}</button></td>
           <td><ToolDot :name="r.job.toolchain" /></td>
-          <td class="repo" :title="r.job.repo">{{ r.job.repo }}</td>
+          <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`">{{ r.checkout }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
           <td class="opt2">
             <button type="button" class="live" :class="{ on: store.selected === r.id }" title="watch this job's output live"

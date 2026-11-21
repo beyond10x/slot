@@ -1421,6 +1421,7 @@ impl Server {
                 argv: shown.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 repo: req.repo.clone(),
+                checkout: req.checkout.clone(),
                 project: project.clone(),
                 session: req.session.clone(),
                 client: req.client.clone(),
@@ -2585,8 +2586,12 @@ impl Server {
             };
             let (seen, busy_repos, busy_dirs) = {
                 let g = self.inner.lock().expect("server lock");
-                let repos: HashSet<String> =
-                    g.active.values().map(|l| l.job.repo.clone()).collect();
+                let repos: HashSet<String> = g
+                    .active
+                    .values()
+                    .filter(|l| !l.job.repo.is_empty())
+                    .map(|l| l.job.repo.clone())
+                    .collect();
                 let dirs: HashSet<PathBuf> = g
                     .active
                     .values()
@@ -2659,10 +2664,10 @@ impl Server {
     async fn evict_one(&self, c: &crate::evict::Candidate) -> String {
         {
             let g = self.inner.lock().expect("server lock");
-            let busy = g
-                .active
-                .values()
-                .any(|l| l.job.repo == c.repo || Path::new(&l.job.target_dir) == c.path.as_path());
+            let busy = g.active.values().any(|l| {
+                (!c.repo.is_empty() && l.job.repo == c.repo)
+                    || Path::new(&l.job.target_dir) == c.path.as_path()
+            });
             if busy {
                 return "kept: a job started".into();
             }
