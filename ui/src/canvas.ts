@@ -1,8 +1,39 @@
 import { axisStepMs, axisTicks, fmtClock } from './lib/format.ts';
+import type { RecordedBucket } from './lib/history.ts';
 
 /** Height of the time axis strip at the bottom of a chart, px. */
 export const AXIS = 20;
 export const FONT = '11px system-ui, sans-serif';
+export const RECORDED_CPU = '#436789';
+export const RECORDED_QUEUE = '#78639a';
+
+/** A separate horizontal stroke for each recorded interval; missing intervals remain blank. */
+export function drawRecorded(ctx: CanvasRenderingContext2D, buckets: readonly RecordedBucket[],
+  field: 'host_cores' | 'waiting', X: (t: number) => number, Y: (v: number) => number): void {
+  ctx.fillStyle = field === 'waiting' ? RECORDED_QUEUE : RECORDED_CPU;
+  for (const b of buckets) {
+    const x = X(b.t);
+    ctx.fillRect(x, Math.round(Y(b[field])) - 1, X(b.t + b.n * 1000) - x, 2);
+  }
+}
+
+/** Connect adjacent ticks only. A single isolated measurement still gets a mark. */
+export function drawExact<T extends { t: number }>(ctx: CanvasRenderingContext2D, points: readonly T[],
+  X: (t: number) => number, y: (p: T) => number, step = false): void {
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const prev = points[i - 1];
+    const x = X(p.t);
+    if (prev && p.t - prev.t < 2000) {
+      if (step) ctx.lineTo(x, y(prev));
+      ctx.lineTo(x, y(p));
+    } else {
+      ctx.moveTo(x - 0.5, y(p));
+      ctx.lineTo(x + 0.5, y(p));
+    }
+  });
+  ctx.stroke();
+}
 
 /** Sizes the backing store to CSS width x `h` at device pixel ratio; returns the CSS width. */
 export function sizeCanvas(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, h: number): number {

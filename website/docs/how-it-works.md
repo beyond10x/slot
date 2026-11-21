@@ -264,6 +264,11 @@ An older job with an empty name shows **Repository unknown**.
 During a daemon handover, Slot passes the last 900 chart samples and recent job output to the next process.
 An older sender can only pass the data its version captured. The job log survives either upgrade.
 
+The CPU and queue chart also reads up to six hours of ten-second averages from
+the census log. Select **6 h** to see the full window. Historical samples show
+mean host CPU in cores and mean queued jobs. The toolchain breakdown is available
+during periods covered by the one-second live samples.
+
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
 shows:
 

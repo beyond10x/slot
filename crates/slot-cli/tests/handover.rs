@@ -253,6 +253,42 @@ fn dashboard_output_contains(addr: SocketAddr, id: i64, marker: &str) -> bool {
 }
 
 #[test]
+fn chart_history_reads_persisted_cpu_and_queue_windows() {
+    let bind = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = bind.local_addr().unwrap();
+    drop(bind);
+    let d = Daemon::start_with_http(2, &[], &addr.to_string());
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let first = serde_json::json!({"t":now-60_000,"host_cores":12.25,"waiting":4.2,"n":10});
+    let second = serde_json::json!({"t":now-20_000,"host_cores":9.75,"waiting":1.5,"n":10});
+    {
+        let mut log = std::fs::File::create(d.state().join("census.jsonl")).unwrap();
+        let too_old =
+            serde_json::json!({"t":now-6*3_600_000-60_000,"host_cores":4.0,"waiting":1.0,"n":10});
+        writeln!(log, "{too_old}\n{second}").unwrap();
+        // An invalid line wider than the initial tail forces another read;
+        // the complete in-range row before it must still be found.
+        log.write_all(&vec![b'x'; 1 << 20]).unwrap();
+        writeln!(log, "\n{{\"t\":{now},\"event\":\"tokens_restored\"}}").unwrap();
+        writeln!(log, "{first}").unwrap();
+        let unfinished = serde_json::json!({"t":now,"host_cores":8.0,"waiting":2.0,"n":10});
+        write!(log, "{unfinished}").unwrap();
+    }
+    d.wait_until("chart history API", Duration::from_secs(2), |_| {
+        http_get(addr, "/api/chart-history").is_some()
+    });
+    let samples: serde_json::Value =
+        serde_json::from_reader(http_get(addr, "/api/chart-history").unwrap()).unwrap();
+    assert_eq!(samples, serde_json::json!([first, second]));
+}
+
+#[test]
 fn reload_keeps_dashboard_history_and_output() {
     let bind = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = bind.local_addr().unwrap();

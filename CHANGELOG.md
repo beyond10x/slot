@@ -8,6 +8,8 @@
 
 - Daemon handovers preserve recent chart samples and job output when the sending daemon supports it.
 
+- The CPU and queue chart uses the saved ten-second census for up to six hours of history after a reload.
+
 ## 0.19.0 — 2026-11-19
 
 - Eviction of local target directories deletes by default: `--evict-dry-run` defaults to false.

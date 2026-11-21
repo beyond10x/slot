@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { tick } from './fixtures.ts';
-import { coresSample, mergeByT, parseHistory } from './history.ts';
+import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './history.ts';
 import { SparkBuffer } from './spark.ts';
 
 const ts = (xs: ReadonlyArray<{ t: number }>) => xs.map((x) => x.t);
@@ -32,6 +32,19 @@ test('merge caps to the newest entries', () => {
 test('empty inputs', () => {
   assert.deepEqual(mergeByT([], []), []);
   assert.deepEqual(ts(mergeByT([], [{ t: 1 }])), [1]);
+});
+
+test('recorded averages preserve fractional queue values and exclude incomplete measurements', () => {
+  const row = { t: 5000, host_cores: 0, waiting: 1.4, n: 10 };
+  assert.deepEqual(parseRecordedHistory([row, null, { ...row, t: 10_000, waiting: null },
+    { ...row, t: 3000, n: 0 }, { ...row, t: 2000, host_cores: -1 }, { ...row, waiting: 1.5 }]),
+  [{ ...row, waiting: 1.5 }]);
+});
+
+test('draw whole recorded intervals in the visible window, with exact data winning every overlap', () => {
+  const buckets = [0, 10_000, 20_000, 30_000, 40_000, 60_000].map((t) => ({ t, n: 10, host_cores: 5, waiting: 2.3 }));
+  const exact = [{ t: 20_000 }, { t: 35_000 }, { t: 50_000 }];
+  assert.deepEqual(ts(recordedWindow(buckets, exact, 10_001, 60_000)), [10_000, 40_000]);
 });
 
 test('history parsing keeps well-formed ticks, sorted, one per t', () => {

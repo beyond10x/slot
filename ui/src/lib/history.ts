@@ -10,6 +10,35 @@ export interface Sample {
   waiting: number;
 }
 
+/** Census averages over the n one-second observations beginning at t. */
+export interface RecordedBucket {
+  t: number;
+  n: number;
+  host_cores: number;
+  waiting: number;
+}
+
+/** Invalid or missing measurements leave holes in the chart. */
+export function parseRecordedHistory(data: unknown): RecordedBucket[] {
+  if (!Array.isArray(data)) return [];
+  const buckets = data.filter((b): b is RecordedBucket =>
+    b !== null && typeof b === 'object' && Number.isSafeInteger(b.t) &&
+    Number.isSafeInteger(b.n) && b.n > 0 && b.n <= 10 &&
+    Number.isFinite(b.host_cores) && b.host_cores >= 0 && Number.isFinite(b.waiting) && b.waiting >= 0);
+  return mergeByT([], buckets.sort((a, b) => a.t - b.t));
+}
+
+/** A bucket describes its full interval. An exact tick in it takes priority over that mean. */
+export function recordedWindow(buckets: readonly RecordedBucket[], exact: readonly { t: number }[], from: number, to: number): RecordedBucket[] {
+  let i = 0;
+  return buckets.filter((b) => {
+    const end = b.t + b.n * 1000;
+    if (end <= from || b.t >= to) return false;
+    while (i < exact.length && exact[i].t < b.t) i++;
+    return i === exact.length || exact[i].t >= end;
+  });
+}
+
 /**
  * Merges two lists sorted by `t` into one sorted list with one entry per `t`
  * (the `newer` list wins a tie), keeping at most the last `max` entries.

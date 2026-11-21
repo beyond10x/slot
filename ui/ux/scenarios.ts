@@ -1,6 +1,7 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
 import type { Chunk, Event, HostCensus, Job, LiveJob, State, Usage, UsageRow } from '../src/generated/types.ts';
 import { POOL_BASE } from '../src/lib/headroom.ts';
+import type { RecordedBucket } from '../src/lib/history.ts';
 import type { MachineNumbers } from '../src/lib/headroom.ts';
 
 export type Tick = Extract<Event, { type: 'tick' }>;
@@ -27,6 +28,7 @@ export interface Scenario {
   card: string;
   state: State;
   history: Tick[];
+  chartHistory?: RecordedBucket[];
   steps: Step[];
   output: Record<number, { chunks: Chunk[]; end: string }>;
   task: Task | null;
@@ -371,3 +373,11 @@ export const SCENARIOS: Scenario[] = [
 
 /** Scenarios whose output pane is open from the start. */
 export const OPEN_PANE: Record<string, number> = { crowded: 100 };
+
+/** Freshly opened tab: persisted averages, a gap, recent exact history, and a new live tick. */
+export function recordedCharts(): Scenario {
+  return {
+    ...idle(), name: 'recorded-charts', history: [tick(s(-5), [], 20, 20, 0, 3, 0)],
+    chartHistory: [-18_000, -300, -10].map((sec) => ({ t: s(sec), host_cores: 7, waiting: 1.5, n: 10 })),
+  };
+}

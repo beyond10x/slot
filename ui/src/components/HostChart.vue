@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, useTemplateRef } from 'vue';
-import { AXIS, FONT, animate, drawAxis, sizeCanvas } from '../canvas.ts';
+import { AXIS, FONT, RECORDED_CPU, animate, drawAxis, drawExact, drawRecorded, sizeCanvas } from '../canvas.ts';
 import { familyColor, stack } from '../lib/host.ts';
-import { hostSeries, now, store } from '../store.ts';
+import { chartWindow, now, store } from '../store.ts';
 
 const H = 160;
 const TOP_PAD = 16;
@@ -32,10 +32,10 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, stripes: Canv
   ctx.clearRect(0, 0, w, H);
   drawAxis(ctx, w, H, t0, t1);
   const X = (t: number) => Math.max(0, ((t - t0) / win) * w);
-  const pts = hostSeries.filter((p) => p.t >= t0 - 2000);
+  const { host: pts, buckets, maxHost } = chartWindow.value;
   const last = pts[pts.length - 1];
   const pool = last?.tokens ?? store.tokens;
-  let top = Math.max(1, store.cores, pool);
+  let top = Math.max(1, store.cores, pool, maxHost);
   for (const p of pts) top = Math.max(top, p.hostCores);
   const Y = (v: number) => H - AXIS - (v / top) * (H - AXIS - TOP_PAD);
   const bw = Math.max(1, w / store.windowS);
@@ -61,20 +61,13 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, stripes: Canv
 
   ctx.strokeStyle = '#222';
   ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  pts.forEach((p, i) => {
-    if (i) ctx.lineTo(X(p.t), Y(p.hostCores));
-    else ctx.moveTo(X(p.t), Y(p.hostCores));
-  });
-  ctx.stroke();
+  drawRecorded(ctx, buckets, 'host_cores', X, Y);
+  drawExact(ctx, pts, X, (p) => Y(p.hostCores));
 
   if (pool > 0) {
     ctx.strokeStyle = '#c4302b';
     ctx.setLineDash([5, 4]);
-    ctx.beginPath();
-    ctx.moveTo(0, Y(pool));
-    ctx.lineTo(w, Y(pool));
-    ctx.stroke();
+    drawExact(ctx, pts, X, (p) => Y(p.tokens), true);
     ctx.setLineDash([]);
   }
 
@@ -82,7 +75,10 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, stripes: Canv
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#666';
   ctx.fillText(`${top.toFixed(0)} cores · line: all processes on the host · dashed: pool ${pool}`, 4, 2);
-  if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
+  if (buckets.length) {
+    ctx.fillStyle = RECORDED_CPU;
+    ctx.fillText('10 s recorded averages · all processes', 4, 16);
+  } else if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
 }
 
 let stop = (): void => undefined;
@@ -97,5 +93,5 @@ onUnmounted(() => stop());
 </script>
 
 <template>
-  <canvas ref="cv" style="height: 160px"></canvas>
+  <canvas ref="cv" role="img" aria-label="Host CPU by tool family and recorded host totals" style="height: 160px"></canvas>
 </template>
