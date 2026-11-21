@@ -30,8 +30,9 @@ test('job tables distinguish repository, worktree, directory and historical jobs
 
 test('pool share labels identify wholly and partly unverified groups', async ({ page, baseURL }) => {
   await open(page, baseURL ?? '/', SCENARIOS.find((s) => s.name === 'pool-share')!);
-  await expect(page.getByRole('cell', { name: 'Unverified · checkout', exact: true })).toBeVisible();
-  await expect(page.getByRole('cell', { name: '4 of 327 unverified · docs-site', exact: true })).toBeVisible();
+  const usage = page.getByRole('table').filter({ has: page.getByRole('columnheader', { name: 'share of slot time' }) });
+  await expect(usage.getByRole('cell', { name: 'Unverified · checkout', exact: true })).toBeVisible();
+  await expect(usage.getByRole('cell', { name: '4 of 327 unverified · docs-site', exact: true })).toBeVisible();
 });
 
 for (const sc of SCENARIOS) {
