@@ -113,8 +113,8 @@ pub fn verdict(command: &str, env: &Env) -> Verdict {
 }
 
 fn check_script(script: &str, env: &Env, depth: usize) -> Verdict {
-    for words in simple_commands(script) {
-        if let v @ Verdict::Refuse(_) = check_command(&words, env, depth) {
+    for command in commands(script) {
+        if let v @ Verdict::Refuse(_) = check_command(&command, env, depth) {
             return v;
         }
     }
@@ -136,14 +136,31 @@ fn is_assignment(w: &str) -> bool {
     }
 }
 
-fn check_command(words: &[String], env: &Env, depth: usize) -> Verdict {
+/// Shell keywords that stand in front of a command (`if ! x; then y; fi`,
+/// `while x; do y; done`, `{ x; }`).
+const KEYWORDS: &[&str] = &[
+    "if", "then", "elif", "else", "while", "until", "do", "!", "{",
+];
+
+/// A shell's flag cluster that ends in `c` (`-c`, `-lc`, `-euc`): the next
+/// word is a script.
+fn takes_script(flag: &str) -> bool {
+    flag.starts_with('-') && !flag.starts_with("--") && flag.ends_with('c')
+}
+
+fn check_command(command: &Command, env: &Env, depth: usize) -> Verdict {
+    let words = &command.words;
     let mut i = 0;
     let mut shim_off = false;
-    // Leading assignments and wrappers that run the rest of the line.
+    // Leading keywords, assignments and wrappers that run the rest of the line.
     loop {
         let Some(w) = words.get(i) else {
             return Verdict::Allow;
         };
+        if KEYWORDS.contains(&w.as_str()) {
+            i += 1;
+            continue;
+        }
         if is_assignment(w) {
             if w == "SLOT_SHIM_OFF=1" {
                 shim_off = true;
@@ -161,7 +178,8 @@ fn check_command(words: &[String], env: &Env, depth: usize) -> Verdict {
                     if words[i] == "SLOT_SHIM_OFF=1" {
                         shim_off = true;
                     }
-                    i += 1;
+                    let takes = matches!(words[i].as_str(), "-u" | "--unset" | "-C" | "--chdir");
+                    i += if takes { 2 } else { 1 };
                 }
             }
             "time" | "nohup" | "command" | "exec" => i += 1,
@@ -175,7 +193,9 @@ fn check_command(words: &[String], env: &Env, depth: usize) -> Verdict {
             "timeout" => {
                 i += 1;
                 while words.get(i).is_some_and(|a| a.starts_with('-')) {
-                    i += 1;
+                    let takes =
+                        matches!(words[i].as_str(), "-k" | "--kill-after" | "-s" | "--signal");
+                    i += if takes { 2 } else { 1 };
                 }
                 i += 1;
             }
@@ -188,20 +208,18 @@ fn check_command(words: &[String], env: &Env, depth: usize) -> Verdict {
     let cmd = &words[i..];
     let prog = base(&cmd[0]);
     let args = &cmd[1..];
-    let line = cmd.join(" ");
+    let line = command.raw[i..].join(" ");
     // `slot …` itself falls through to Allow.
     match prog {
         "bash" | "sh" | "zsh" | "dash" if depth < 3 => {
-            match args
-                .iter()
-                .position(|a| a == "-c" || a == "-lc" || a == "-ec")
-            {
+            match args.iter().position(|a| takes_script(a)) {
                 Some(p) => args
                     .get(p + 1)
                     .map_or(Verdict::Allow, |s| check_script(s, env, depth + 1)),
                 None => Verdict::Allow,
             }
         }
+        "eval" if depth < 3 => check_script(&args.join(" "), env, depth + 1),
         "cargo" if !env.cargo_shim => match cargo_sub(args) {
             Some(sub) if CARGO_BUILD.contains(&sub) => refuse(&line, None),
             _ => Verdict::Allow,
@@ -527,29 +545,50 @@ fn refuse(line: &str, add_flag: Option<&str>) -> Verdict {
     ))
 }
 
+/// One simple command: its words after quote removal, and the same words as
+/// they were written, for the advice.
+#[derive(Debug, Default)]
+struct Command {
+    words: Vec<String>,
+    raw: Vec<String>,
+}
+
 /// Splits a shell command line into simple commands (lists of words), on
 /// `;`, `&`, `&&`, `|`, `||`, newlines and parentheses. Quotes and
 /// backslashes are honoured; heredoc bodies and comments are dropped.
 /// Command substitutions inside double quotes are not examined.
 pub fn simple_commands(src: &str) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = Vec::new();
-    let mut words: Vec<String> = Vec::new();
+    commands(src).into_iter().map(|c| c.words).collect()
+}
+
+fn commands(src: &str) -> Vec<Command> {
+    let mut out: Vec<Command> = Vec::new();
+    let mut cmd = Command::default();
     let mut word = String::new();
-    let mut in_word = false;
+    let mut start: Option<usize> = None;
     let mut heredocs: Vec<String> = Vec::new();
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0;
-    let flush_word = |word: &mut String, in_word: &mut bool, words: &mut Vec<String>| {
-        if *in_word {
-            words.push(std::mem::take(word));
-            *in_word = false;
+    let flush_word =
+        |word: &mut String, start: &mut Option<usize>, cmd: &mut Command, end: usize| {
+            if let Some(s) = start.take() {
+                cmd.words.push(std::mem::take(word));
+                cmd.raw
+                    .push(chars[s..end.min(chars.len())].iter().collect());
+            }
+        };
+    // The digits of `2>&1` or `0<in` name a file descriptor; they are not a word.
+    let drop_descriptor = |word: &mut String, start: &mut Option<usize>, end: usize| {
+        if start.is_some_and(|s| chars[s..end].iter().all(char::is_ascii_digit)) {
+            word.clear();
+            *start = None;
         }
     };
     while i < chars.len() {
         let c = chars[i];
         match c {
             '\'' => {
-                in_word = true;
+                start.get_or_insert(i);
                 i += 1;
                 while i < chars.len() && chars[i] != '\'' {
                     word.push(chars[i]);
@@ -557,7 +596,7 @@ pub fn simple_commands(src: &str) -> Vec<Vec<String>> {
                 }
             }
             '"' => {
-                in_word = true;
+                start.get_or_insert(i);
                 i += 1;
                 while i < chars.len() && chars[i] != '"' {
                     if chars[i] == '\\' && i + 1 < chars.len() {
@@ -570,18 +609,19 @@ pub fn simple_commands(src: &str) -> Vec<Vec<String>> {
             '\\' => {
                 if i + 1 < chars.len() && chars[i + 1] != '\n' {
                     word.push(chars[i + 1]);
-                    in_word = true;
+                    start.get_or_insert(i);
                 }
                 i += 1;
             }
-            '#' if !in_word => {
+            '#' if start.is_none() => {
                 while i < chars.len() && chars[i] != '\n' {
                     i += 1;
                 }
                 continue;
             }
             '<' if chars.get(i + 1) == Some(&'<') && chars.get(i + 2) != Some(&'<') => {
-                flush_word(&mut word, &mut in_word, &mut words);
+                drop_descriptor(&mut word, &mut start, i);
+                flush_word(&mut word, &mut start, &mut cmd, i);
                 i += 2;
                 if chars.get(i) == Some(&'-') {
                     i += 1;
@@ -605,9 +645,9 @@ pub fn simple_commands(src: &str) -> Vec<Vec<String>> {
                 continue;
             }
             '\n' => {
-                flush_word(&mut word, &mut in_word, &mut words);
-                if !words.is_empty() {
-                    out.push(std::mem::take(&mut words));
+                flush_word(&mut word, &mut start, &mut cmd, i);
+                if !cmd.words.is_empty() {
+                    out.push(std::mem::take(&mut cmd));
                 }
                 i += 1;
                 // Skip heredoc bodies that start on the next line.
@@ -627,14 +667,15 @@ pub fn simple_commands(src: &str) -> Vec<Vec<String>> {
                 continue;
             }
             ';' | '&' | '|' | '(' | ')' => {
-                flush_word(&mut word, &mut in_word, &mut words);
-                if !words.is_empty() {
-                    out.push(std::mem::take(&mut words));
+                flush_word(&mut word, &mut start, &mut cmd, i);
+                if !cmd.words.is_empty() {
+                    out.push(std::mem::take(&mut cmd));
                 }
             }
             '<' | '>' => {
                 // A redirection ends the word; its target is not a command word.
-                flush_word(&mut word, &mut in_word, &mut words);
+                drop_descriptor(&mut word, &mut start, i);
+                flush_word(&mut word, &mut start, &mut cmd, i);
                 while chars
                     .get(i + 1)
                     .is_some_and(|c| *c == '>' || *c == '&' || *c == '<')
@@ -653,26 +694,17 @@ pub fn simple_commands(src: &str) -> Vec<Vec<String>> {
                 }
                 continue;
             }
-            c if c.is_whitespace() => flush_word(&mut word, &mut in_word, &mut words),
+            c if c.is_whitespace() => flush_word(&mut word, &mut start, &mut cmd, i),
             c => {
                 word.push(c);
-                in_word = true;
+                start.get_or_insert(i);
             }
         }
         i += 1;
     }
-    flush_word(&mut word, &mut in_word, &mut words);
-    if !words.is_empty() {
-        out.push(words);
-    }
-    // A redirection like `2>&1` leaves a stray digit word before it.
-    for w in &mut out {
-        if w.last()
-            .is_some_and(|l| l.chars().all(|c| c.is_ascii_digit()))
-            && w.len() > 1
-        {
-            w.pop();
-        }
+    flush_word(&mut word, &mut start, &mut cmd, i);
+    if !cmd.words.is_empty() {
+        out.push(cmd);
     }
     out
 }
@@ -909,5 +941,138 @@ mod tests {
             vec!["x".into(), "y z".into()],
         ];
         assert_eq!(got, want);
+    }
+
+    fn allowed<'a>(cmds: &[&'a str]) -> Vec<&'a str> {
+        let pass = |c: &&str| verdict(c, &bare()) == Verdict::Allow;
+        cmds.iter().copied().filter(pass).collect()
+    }
+
+    fn advised(cmd: &str) -> String {
+        let Verdict::Refuse(m) = verdict(cmd, &bare()) else {
+            return "allowed".into();
+        };
+        let from = m.find("Run `").map_or(0, |p| p + 5);
+        let to = m.rfind("` instead").unwrap_or(m.len());
+        m[from..to].to_string()
+    }
+
+    #[test]
+    fn refuses_a_build_behind_a_shell_keyword() {
+        let cmds = [
+            "for p in a b; do task check; done",
+            "while true; do task test; done",
+            "if ! npx vitest run; then echo x; fi",
+            "! task check",
+            "{ task check; } 2>&1 | tail -5",
+            "until task check; do sleep 5; done",
+            "if true; then ls; else task check; fi",
+            "if false; then ls; elif task check; then ls; fi",
+            "for p in a b\ndo\n  task check\ndone",
+        ];
+        assert_eq!(allowed(&cmds), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn refuses_a_build_behind_timeout_options_with_a_value() {
+        let cmds = [
+            "timeout -k 5 60 task check",
+            "timeout -s KILL 60 task check",
+            "timeout --kill-after=5 60 task check",
+            "timeout --signal KILL 60 task check",
+            "timeout --kill-after 5 --foreground 60 task check",
+        ];
+        assert_eq!(allowed(&cmds), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn refuses_a_build_behind_env_options_with_a_value() {
+        let cmds = [
+            "env -u FOO task check",
+            "env -C dir task check",
+            "env --unset FOO A=1 task check",
+            "env -i --chdir dir task check",
+        ];
+        assert_eq!(allowed(&cmds), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn refuses_a_build_in_a_shell_flag_cluster_or_eval() {
+        let cmds = [
+            "bash -euc 'task check'",
+            "sh -xc 'task check'",
+            "bash -o pipefail -euc 'cd x && task check'",
+            "eval 'task check'",
+            "eval task check",
+        ];
+        assert_eq!(allowed(&cmds), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn advice_is_a_command_that_can_be_pasted() {
+        let cases = [
+            (
+                "pytest -k \"a and b\" tests",
+                "slot pytest -k \"a and b\" tests",
+            ),
+            (
+                "pytest -k 'a and b' tests",
+                "slot pytest -k 'a and b' tests",
+            ),
+            (
+                "pytest -k a\\ b \"$DIR\"/*.py",
+                "slot pytest -k a\\ b \"$DIR\"/*.py",
+            ),
+            ("bash -c 'pytest -k \"a b\"'", "slot pytest -k \"a b\""),
+            ("eval pytest -k '\"a b\"'", "slot pytest -k \"a b\""),
+            ("make -j 8", "slot make -j 8"),
+            ("make -j 8 2>&1 | tail -3", "slot make -j 8"),
+            (
+                "npx playwright test --workers 2",
+                "slot npx playwright test --workers 2",
+            ),
+            ("task test -- --retries 3", "slot task test -- --retries 3"),
+            ("task check 2>/dev/null", "slot task check"),
+            ("cargo test -p y 2>&1", "slot cargo test -p y"),
+        ];
+        let got: Vec<String> = cases.iter().map(|(cmd, _)| advised(cmd)).collect();
+        assert_eq!(got, cases.map(|(_, want)| want));
+    }
+
+    #[test]
+    fn a_descriptor_digit_is_not_a_word_and_a_trailing_number_is() {
+        let cases = [
+            ("cargo test 2>&1", "cargo test"),
+            ("task check 2>/dev/null", "task check"),
+            ("sort 0<in 1>>out", "sort"),
+            ("make -j 8", "make -j 8"),
+            ("make -j 8 2>&1", "make -j 8"),
+            ("echo 2 >out", "echo 2"),
+            ("sleep 5", "sleep 5"),
+        ];
+        let words = |src: &str| simple_commands(src).concat().join(" ");
+        let got: Vec<String> = cases.iter().map(|(src, _)| words(src)).collect();
+        assert_eq!(got, cases.map(|(_, want)| want));
+    }
+
+    #[test]
+    fn allows_compound_commands_without_a_build() {
+        let cmds = [
+            "for f in *.rs; do echo $f; done",
+            "if true; then ls; fi",
+            "timeout 60 ls",
+            "timeout -k 5 60 ls",
+            "env -u FOO ls",
+            "eval \"$(ssh-agent -s)\"",
+            "bash -c 'ls'",
+            "! grep -q x file",
+            "slot task check",
+            "for p in a b; do slot task check; done",
+            "timeout -k 5 60 slot task check",
+            "for task in check build; do echo $task; done",
+            "bash -euc 'ls'",
+            "eval",
+        ];
+        assert_eq!(allowed(&cmds), cmds);
     }
 }

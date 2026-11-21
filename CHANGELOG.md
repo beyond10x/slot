@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The Claude Code hook refuses a build or test command behind shell syntax that hid it before:
+  behind `if`, `then`, `elif`, `else`, `while`, `until`, `do`, `!` or `{`
+  (`for p in a b; do task check; done`), behind `timeout -k 5`, `-s KILL` or `--signal KILL`
+  and `env -u FOO` or `-C dir`, inside a shell flag cluster that ends in `c` (`bash -euc '…'`,
+  `sh -xc '…'`) and inside `eval '…'`. The `slot` command in its advice has the words as they
+  were written: quotes stay (`slot pytest -k "a and b" tests`) and a trailing number is no
+  longer dropped (`slot make -j 8`, `--workers 2`); a file-descriptor digit before `>` or `<`
+  (`2>&1`) is still left out.
+
 ## 0.19.0 — 2026-11-19
 
 - Eviction of local target directories deletes by default: `--evict-dry-run` defaults to false.

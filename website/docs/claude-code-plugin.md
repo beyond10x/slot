@@ -31,7 +31,10 @@ The plugin loads in sessions started after the install.
 
 Claude Code runs `slot hook claude-pre-tool-use` before every Bash command. The command reads the
 event on stdin, splits the command line into simple commands (on `&&`, `||`, `;`, `|`, `&`,
-newlines and parentheses; inside `bash -c '…'` too) and checks each:
+newlines and parentheses; inside `bash -c '…'`, `sh -euc '…'` and `eval '…'` too), skips the
+shell keywords `if`, `then`, `elif`, `else`, `while`, `until`, `do`, `!` and `{` and the wrappers
+`env`, `time`, `nice`, `ionice`, `nohup`, `command`, `exec` and `timeout` with their options
+(`env -u FOO`, `timeout -k 5 60`) in front of a command, and checks each:
 
 - `cargo` build, check, test, clippy, doc, bench, nextest, install, rustc, llvm-cov, miri;
 - `go build`, `test`, `vet`, `install`;
@@ -61,6 +64,9 @@ A command that watches, serves or only prints passes (`--watch`, `serve`, `--hel
 ```text
 slot: `npx vitest run` compiles or runs tests outside the shared build pool. Run `slot npx vitest run --maxWorkers=4` instead (the job holds one slot per worker, so name the worker count).
 ```
+
+The `slot` command in that line has the words as they were written, with their quotes and numbers
+(`slot pytest -k "a and b" tests`, `slot make -j 8`), and without the redirections.
 
 These pass:
 
