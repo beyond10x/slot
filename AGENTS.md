@@ -356,6 +356,14 @@ Open, one line each, with where the design lives. A session starts with (e).
   `host_cores`). A watch that switches the limit off on the queue wait must count the ages of
   the queued jobs: the waits of started jobs alone read 46 s while 39 queued jobs had a median
   age of 200 s.
+- (ab) Between `--evict-below` and `--min-free-disk` the daemon holds every build for disk space
+  and deletes nothing. Measured 2026-11-22 with `--min-free-disk 50` and the default
+  `--evict-below 40`: free space fell from 77 GB to 44 GB in under 3 hours, and for about
+  12 minutes up to 38 jobs stood queued for disk while 2 ran; eviction did not start, and the
+  queue emptied when the sessions deleted their own build output (about 31 GB within minutes).
+  Both values are options of `slot serve`, so a change needs a full restart (g). Not built: a
+  refusal or a warning at start when `--min-free-disk` is above `--evict-below`, eviction that
+  starts at the hold's mark, or both values in `limits.json`.
 
 ## Never
 
