@@ -7,6 +7,7 @@ import { jobs, select, store } from './store.ts';
 import HeaderBar from './components/HeaderBar.vue';
 import HostPanel from './components/HostPanel.vue';
 import TimelineChart from './components/TimelineChart.vue';
+import TrendCharts from './components/TrendCharts.vue';
 import CoresChart from './components/CoresChart.vue';
 import QueueTable from './components/QueueTable.vue';
 import ActiveTable from './components/ActiveTable.vue';
@@ -55,7 +56,13 @@ watchEffect(() => {
   <p v-if="!store.ready" class="muted waiting">loading jobs and history from the daemon…</p>
   <main v-else :class="{ nopane: store.selected === null }">
     <div>
+      <TrendCharts />
       <section class="tables">
+        <SectionHead text="Running" />
+        <p class="sum">
+          <b>{{ running.n }}</b> {{ running.n === 1 ? 'job uses' : 'jobs use' }} <b>{{ store.jobCores.toFixed(1) }}</b> cores
+        </p>
+        <ActiveTable />
         <SectionHead :text="queueTitle" />
         <p v-if="waits.n" class="sum">
           slot wait of <b>{{ waits.n }}</b> {{ waits.n === 1 ? 'job' : 'jobs' }} finished in the last 60 min: median <b>{{ waits.median }}</b>, 9 of 10 within
@@ -63,11 +70,6 @@ watchEffect(() => {
         </p>
         <p v-else class="sum">no job finished in the last 60 min</p>
         <QueueTable />
-        <SectionHead text="Running" />
-        <p class="sum">
-          <b>{{ running.n }}</b> {{ running.n === 1 ? 'job uses' : 'jobs use' }} <b>{{ store.jobCores.toFixed(1) }}</b> cores
-        </p>
-        <ActiveTable />
         <SectionHead text="Finished" />
         <DoneTable />
       </section>
