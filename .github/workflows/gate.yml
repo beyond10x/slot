@@ -20,19 +20,40 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+          fetch-depth: 2
+      - name: Decide which checks this change needs
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: sh .github/scripts/pr-scope.sh "$EVENT" >> "$GITHUB_OUTPUT"
+      - name: Read the rustc pinned in rust-toolchain.toml
+        id: rustc
+        if: steps.scope.outputs.scope == 'code'
+        run: sed -n 's/^channel = "\(.*\)"$/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
+        if: steps.scope.outputs.scope == 'code'
         with:
+          toolchain: ${{ steps.rustc.outputs.channel }}
           components: rustfmt, clippy
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        if: steps.scope.outputs.scope != 'none'
         with:
           package_json_file: ui/package.json
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: steps.scope.outputs.scope != 'none'
         with:
           node-version: "22"
       - uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3
+        if: steps.scope.outputs.scope != 'none'
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install the browser for the UX gates
+        if: steps.scope.outputs.scope != 'none'
         working-directory: ui
         run: pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps --only-shell chromium && sudo apt-get install -y fonts-dejavu-core
-      - run: task check
+      - name: Run the repository gate
+        if: steps.scope.outputs.scope == 'code'
+        run: task check
+      - name: Run the docs checks, without the code's build and tests
+        if: steps.scope.outputs.scope == 'docs'
+        run: task site && task site-ux
