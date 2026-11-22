@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-22T20:49:00Z",
+  "actor": "human:timo",
+  "artifact": "story:cpu-hold-counts-the-pools-cpus",
+  "kind": "story",
+  "revision": 19,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate of pull request 61 (task check)",
+    "reference": "https://github.com/beyond10x/slot/actions/runs/45068177662"
+  }
+}

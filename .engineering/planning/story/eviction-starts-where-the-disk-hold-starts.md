@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:eviction-starts-where-the-disk-hold-starts
 kind: story
-status: active
+status: implemented
 title: Eviction runs whenever the disk hold stops builds from starting
 relations:
 - serves: vision:O2
@@ -33,10 +33,11 @@ scope:
   path: website/docs/how-it-works.md
 - confidence: cited
   path: website/docs/reference/cli.md
-revision: 16
+revision: 17
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:27Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

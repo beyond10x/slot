@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:planning-only-pull-requests-skip-the-gate
 kind: story
-status: active
+status: implemented
 title: A pull request of planning or prose files passes its checks without building the code
 relations:
 - serves: vision:O6
@@ -19,10 +19,11 @@ scope:
   path: Taskfile.yml
 - confidence: inferred
   path: crates/slot-docs/tests
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:26Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 
