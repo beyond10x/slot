@@ -19,6 +19,10 @@ test('a queued job has a place in the served order, and its reason reads as a li
     'waits for memory: available memory is below what the job needs',
   );
   assert.equal(
+    waitReasonText(job({ wait_reason: 'host busy: 18.4 of 20 CPUs, mark 17.0' })),
+    "waits for the host's CPUs: host busy: 18.4 of 20 CPUs, mark 17.0",
+  );
+  assert.equal(
     waitReasonText(job({ wait_reason: 'target directory in use by job 12' })),
     'waits for its target directory: in use by job 12',
   );
@@ -150,6 +154,8 @@ test('no failed job in the window: nothing to count and nothing to open', () => 
 test('the queue heading names what the listed jobs wait for, slots last', () => {
   const disk = job({ id: 1, wait_reason: 'free space on the build filesystem is below 25 GB' });
   const memory = job({ id: 2, wait_reason: 'available memory is below what the job needs' });
+  const cpu = job({ id: 4, wait_reason: 'host busy: 18.4 of 20 CPUs, mark 17.0' });
+  assert.equal(queueHeading([cpu, memory]), "Queue: waiting for memory and the host's CPUs, by level, oldest first");
   assert.equal(queueHeading([]), 'Queue: waiting for slots, by level, oldest first');
   assert.equal(queueHeading([job({ id: 3 })]), 'Queue: waiting for slots, by level, oldest first');
   assert.equal(queueHeading([memory, disk]), 'Queue: waiting for disk space and memory, by level, oldest first');

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.24.0 — 2026-11-22
+
+- A CPU limit for starts: `slot cpu-limit <CPUs>` holds the start of a queued job while the whole
+  host is that many CPUs busy or more and at least `--floor` jobs run (4 until one is named).
+  `off` is the default and changes nothing. Why: on a host of 20 CPUs with a pool of 50 slots the
+  host was 16.7 to 18.5 CPUs busy for three hours with an empty queue and 35 slots free, so slots
+  no longer bounded what started, and about half of the compiler CPU ran in the compile cache
+  server, outside the pool's CPU quota. The figure is the CPU time of every process on the host
+  as the daemon already samples it once a second, as a mean over 10 seconds; a job that started in
+  the last 30 seconds counts with the CPUs its earlier runs used (1 without history) until the
+  figure shows it, so a dip under the mark starts only as many jobs as fit, in the queue's order.
+  A held job holds no slot and says why (`host busy: 18.4 of 20 CPUs, mark 17.0`) in its client
+  and in `slot status`; after 10 minutes it starts whatever the figure says. A mark above the
+  host's CPU count never holds, and a mark under 1 is refused. What it costs: with the limit on a
+  queue forms while the host is saturated, also when slots are free. The setting reaches
+  queued jobs within 2 seconds, is kept in `limits.json` beside the headroom and holds across reloads;
+  `GET` and `PUT /api/cpu-limit` read and change it (`{"cpu_busy_max": 17, "cpu_busy_floor": 4}`,
+  `null` for off); `slot status` shows `starts held while the host is busier than 17.0 CPUs and 4
+  jobs run` while it is on, `/api/state` has `cpu_busy_max` and `cpu_busy_floor`, and the census
+  log gets a `cpu_hold` line at a job's first hold and a `cpu_hold_bound` line when the 10 minutes
+  ran out.
+
 ## 0.23.0 — 2026-11-22
 
 - A limit on build processes per job: `slot job-parallel <N>` makes the daemon start every job

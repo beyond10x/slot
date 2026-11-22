@@ -72,6 +72,10 @@ fn config(root: &Path, tokens: usize) -> Config {
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
         token_watch: TOKEN_WATCH,
+        resource_poll: RESOURCE_POLL,
+        cpu_busy: None,
+        host_cpus: None,
+        cpu_hold_max: cpu_limit::HOLD_MAX,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -608,6 +612,10 @@ fn history_survives_restart() {
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
         token_watch: TOKEN_WATCH,
+        resource_poll: RESOURCE_POLL,
+        cpu_busy: None,
+        host_cpus: None,
+        cpu_hold_max: cpu_limit::HOLD_MAX,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -2464,4 +2472,430 @@ fn the_state_counts_slots_no_job_and_no_live_process_holds_and_since_when() {
         "{}",
         f.server.metrics_text()
     );
+}
+
+/// Declares, inside one test, the figure its daemon reads as the host's busy
+/// CPUs, in tenths of a CPU (negative: no figure), and the function that
+/// reads it. [`Config::cpu_busy`] is a plain function and the tests of this
+/// file run side by side in one process, so each test has a figure of its
+/// own.
+macro_rules! host_busy {
+    ($cell:ident, $read:ident, $tenths:expr) => {
+        static $cell: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($tenths);
+        fn $read() -> Option<f64> {
+            let v = $cell.load(std::sync::atomic::Ordering::SeqCst);
+            (v >= 0).then(|| v as f64 / 10.0)
+        }
+    };
+}
+
+/// A daemon on a host of 20 CPUs whose CPU limit reads `busy` and whose
+/// held jobs look again every 20 ms.
+fn start_busy(
+    tokens: usize,
+    busy: fn() -> Option<f64>,
+    change: impl FnOnce(&mut Config),
+) -> Fixture {
+    start_cfg(tokens, |c| {
+        c.cpu_busy = Some(busy);
+        c.host_cpus = Some(20);
+        c.resource_poll = Duration::from_millis(20);
+        change(c);
+    })
+}
+
+fn set_cpu_limit(f: &Fixture, mark: Option<f64>, floor: Option<usize>) -> cpu_limit::View {
+    f.server
+        .set_cpu_limit(&cpu_limit::Request {
+            cpu_busy_max: Some(mark),
+            cpu_busy_floor: floor,
+        })
+        .unwrap()
+}
+
+/// Submits a job that uses no CPU and runs until its client goes away.
+fn quiet(f: &Fixture) -> (UnixStream, i64) {
+    submit(f, sh(&f.root, "sleep 60"))
+}
+
+/// The ids of the running jobs, oldest first.
+fn running(f: &Fixture) -> Vec<i64> {
+    let mut ids: Vec<i64> = f
+        .server
+        .state()
+        .active
+        .iter()
+        .filter(|j| j.state == JobState::Running)
+        .map(|j| j.id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Closes the clients and waits until the daemon has ended their jobs.
+fn end_all(f: &Fixture, clients: Vec<UnixStream>) {
+    drop(clients);
+    wait_for_jobs(f, "every job to end with its client", || {
+        f.server.state().active.is_empty()
+    });
+}
+
+/// With `slot cpu-limit 17 --floor 1` on a host that is 18.4 CPUs busy the
+/// first job starts, because the floor always runs, and the next one is
+/// held without a slot: its wait reason says why, its client is told, the
+/// census log has the event and the view counts it. When the figure falls
+/// under the mark the job starts.
+#[test]
+fn a_start_is_held_while_the_host_is_busier_than_the_mark_and_let_go_when_it_falls() {
+    use std::sync::atomic::Ordering::SeqCst;
+    host_busy!(BUSY, busy, 184);
+    let f = start_busy(4, busy, |_| {});
+    let view = set_cpu_limit(&f, Some(17.0), Some(1));
+    assert_eq!(
+        (
+            view.cpu_busy_max,
+            view.cpu_busy_floor,
+            view.cpus,
+            view.busy,
+            view.held
+        ),
+        (Some(17.0), Some(1), 20, Some(18.4), 0)
+    );
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run: it is the floor", || {
+        state_of(&f, a) == JobState::Running
+    });
+    let (second, b) = submit(&f, sh(&f.root, "echo second"));
+    let held = "host busy: 18.4 of 20 CPUs + 1.0 for jobs that just started, mark 17.0";
+    wait_for_jobs(&f, "the second job to be held", || reason_of(&f, b) == held);
+    assert_eq!(state_of(&f, b), JobState::Queued);
+    let told = read_info_until(&second, "waiting");
+    assert!(
+        told.contains(&format!("slot: job {b} waiting: {held}")),
+        "{told}"
+    );
+    let events = census_events(&f, "cpu_hold");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        (events[0]["job"].as_i64(), events[0]["reason"].as_str()),
+        (Some(b), Some(held))
+    );
+    assert_eq!(f.server.cpu_limit_view().held, 1);
+    let st = f.server.state();
+    assert_eq!((st.cpu_busy_max, st.cpu_busy_floor), (Some(17.0), Some(1)));
+    assert_eq!(f.server.pool().free(), 3, "a held job holds no slot");
+
+    BUSY.store(100, SeqCst);
+    let res = collect(second);
+    assert_eq!((res.code, res.out.as_str()), (0, "second\n"), "{res:?}");
+    assert_eq!(f.server.cpu_limit_view().held, 0);
+    assert_eq!(census_events(&f, "cpu_hold_bound").len(), 0);
+    end_all(&f, vec![first]);
+}
+
+/// Under the floor a job starts on a saturated host, and under the mark
+/// jobs start however many run.
+#[test]
+fn nothing_is_held_under_the_floor_or_under_the_mark() {
+    use std::sync::atomic::Ordering::SeqCst;
+    host_busy!(BUSY, busy, 200);
+    let f = start_busy(8, busy, |_| {});
+    set_cpu_limit(&f, Some(17.0), Some(2));
+    let (c1, j1) = quiet(&f);
+    let (c2, j2) = quiet(&f);
+    wait_for_jobs(&f, "two jobs to run on a saturated host: the floor", || {
+        running(&f) == [j1, j2]
+    });
+    let (c3, j3) = quiet(&f);
+    wait_for_jobs(&f, "the third to be held: the floor runs", || {
+        reason_of(&f, j3).starts_with("host busy: 20.0 of 20 CPUs")
+    });
+    assert_eq!(running(&f), [j1, j2]);
+
+    // 14.0 busy and 1.0 for each of the two that just started: 16.0.
+    BUSY.store(140, SeqCst);
+    wait_for_jobs(&f, "the third to run under the mark", || {
+        running(&f) == [j1, j2, j3]
+    });
+    BUSY.store(20, SeqCst);
+    let (c4, j4) = quiet(&f);
+    let (c5, j5) = quiet(&f);
+    wait_for_jobs(&f, "five jobs to run on an idle host", || {
+        running(&f) == [j1, j2, j3, j4, j5]
+    });
+    assert_eq!(
+        census_events(&f, "cpu_hold").len(),
+        1,
+        "only the third was ever held"
+    );
+    end_all(&f, vec![c1, c2, c3, c4, c5]);
+}
+
+/// Ten jobs are held on a busy host. When the figure dips under the mark
+/// they do not all start: each job that starts counts with the CPUs it is
+/// expected to use until the figure shows it, so only as many start as fit
+/// under the mark, the oldest first, and the others stay held.
+#[test]
+fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first() {
+    use std::sync::atomic::Ordering::SeqCst;
+    host_busy!(BUSY, busy, 184);
+    let f = start_busy(16, busy, |_| {});
+    set_cpu_limit(&f, Some(17.0), Some(1));
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run", || running(&f) == [a]);
+    let mut clients = vec![first];
+    let mut ids = Vec::new();
+    for _ in 0..10 {
+        let (c, id) = quiet(&f);
+        clients.push(c);
+        ids.push(id);
+    }
+    wait_for_jobs(&f, "ten jobs to be held", || {
+        ids.iter()
+            .all(|id| reason_of(&f, *id).starts_with("host busy: 18.4 of 20 CPUs"))
+    });
+    assert_eq!(running(&f), [a]);
+    assert_eq!(f.server.cpu_limit_view().held, 10);
+
+    // A dip to 14.5. The job that runs counts 1.0, so two more fit under
+    // 17 (15.5, then 16.5); a third would make 17.5. Every job that stays
+    // held has looked at the new figure, with the three counted.
+    BUSY.store(145, SeqCst);
+    let held_at =
+        |ids: &[i64], text: &str| ids.iter().all(|id| reason_of(&f, *id).starts_with(text));
+    wait_for_jobs(&f, "the two oldest to start and eight to stay held", || {
+        running(&f) == [a, ids[0], ids[1]]
+            && held_at(
+                &ids[2..],
+                "host busy: 14.5 of 20 CPUs + 3.0 for jobs that just started",
+            )
+    });
+    assert_eq!(f.server.cpu_limit_view().held, 8);
+    assert_eq!(f.server.pool().free(), 13, "held jobs hold no slots");
+
+    // Two CPUs less: two more.
+    BUSY.store(125, SeqCst);
+    wait_for_jobs(&f, "the next two to start and six to stay held", || {
+        running(&f) == [a, ids[0], ids[1], ids[2], ids[3]]
+            && held_at(
+                &ids[4..],
+                "host busy: 12.5 of 20 CPUs + 5.0 for jobs that just started",
+            )
+    });
+    assert_eq!(f.server.cpu_limit_view().held, 6);
+    end_all(&f, clients);
+}
+
+/// A job is not held for the host's CPUs for ever: after the bound (10
+/// minutes outside tests, 300 ms here) it starts although the figure never
+/// fell, its client is told and the census log has the event.
+#[test]
+fn a_job_held_for_the_bound_starts_on_a_host_that_stays_busy() {
+    use std::sync::atomic::Ordering::SeqCst;
+    host_busy!(BUSY, busy, 184);
+    let f = start_busy(4, busy, |c| c.cpu_hold_max = Duration::from_millis(300));
+    set_cpu_limit(&f, Some(17.0), Some(1));
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run", || running(&f) == [a]);
+    let t0 = Instant::now();
+    let (second, b) = submit(&f, sh(&f.root, "echo second"));
+    let r = collect(second);
+    assert_eq!((r.code, r.out.as_str()), (0, "second\n"), "{r:?}");
+    assert!(
+        t0.elapsed() >= Duration::from_millis(300),
+        "started after {:?}",
+        t0.elapsed()
+    );
+    assert!(
+        r.info.contains(&format!(
+            "slot: job {b} waiting: host busy: 18.4 of 20 CPUs"
+        )),
+        "{}",
+        r.info
+    );
+    assert!(
+        r.info.contains(&format!("slot: job {b} was held"))
+            && r.info
+                .contains("for the host's CPUs, as long as a job is: it starts"),
+        "{}",
+        r.info
+    );
+    let bound = census_events(&f, "cpu_hold_bound");
+    assert_eq!(bound.len(), 1, "{bound:?}");
+    assert_eq!(bound[0]["job"].as_i64(), Some(b));
+    assert!(bound[0]["held_ms"].as_i64() >= Some(300), "{bound:?}");
+    assert_eq!(BUSY.load(SeqCst), 184, "the figure never fell");
+    end_all(&f, vec![first]);
+}
+
+/// Without a mark a saturated host holds nothing and `limits.json` is what
+/// a daemon without the setting writes. A mark set while jobs are queued
+/// holds the next one; switched off, the held job starts and the file is
+/// byte for byte what it was.
+#[test]
+fn without_a_mark_a_saturated_host_holds_nothing_and_the_file_is_unchanged() {
+    host_busy!(BUSY, busy, 200);
+    let f = start_busy(8, busy, |_| {});
+    let saved = || std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(Arc::clone(&f.server).set_headroom(25));
+    let before = saved();
+    assert_eq!(before, r#"{"headroom_percent":25,"base":"pool"}"#);
+    let (c1, j1) = quiet(&f);
+    let (c2, j2) = quiet(&f);
+    let (c3, j3) = quiet(&f);
+    wait_for_jobs(&f, "three jobs to run on a saturated host", || {
+        running(&f) == [j1, j2, j3]
+    });
+    assert_eq!(census_events(&f, "cpu_hold").len(), 0);
+    assert_eq!(f.server.state().cpu_busy_max, None);
+
+    let view = set_cpu_limit(&f, Some(17.0), None);
+    assert_eq!(
+        (view.cpu_busy_max, view.cpu_busy_floor),
+        (Some(17.0), Some(4))
+    );
+    assert_eq!(
+        saved(),
+        r#"{"headroom_percent":25,"base":"pool","cpu_busy_max":17.0}"#
+    );
+    let (c4, j4) = quiet(&f);
+    wait_for_jobs(&f, "the fourth to run: the floor of 4", || {
+        running(&f) == [j1, j2, j3, j4]
+    });
+    let (c5, j5) = quiet(&f);
+    wait_for_jobs(&f, "the fifth to be held", || {
+        reason_of(&f, j5).starts_with("host busy: 20.0 of 20 CPUs")
+    });
+    let view = set_cpu_limit(&f, None, None);
+    assert_eq!((view.cpu_busy_max, view.cpu_busy_floor), (None, None));
+    wait_for_jobs(&f, "the held job to start once the limit is off", || {
+        running(&f) == [j1, j2, j3, j4, j5]
+    });
+    assert_eq!(saved(), before, "off: the file as before the setting");
+    assert_eq!(BUSY.load(std::sync::atomic::Ordering::SeqCst), 200);
+    end_all(&f, vec![c1, c2, c3, c4, c5]);
+}
+
+/// Status and text of the answer to `PUT /api/cpu-limit` with `body`.
+fn put_cpu_limit(f: &Fixture, content_type: &str, body: &str) -> (u16, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    let state = axum::extract::State(Arc::clone(&f.server));
+    let body = axum::body::Bytes::from(body.to_owned());
+    answer(http::cpu_limit_put(state, headers, body))
+}
+
+/// Status and text of the answer to `GET /api/cpu-limit`.
+fn get_cpu_limit(f: &Fixture) -> (u16, String) {
+    use axum::response::IntoResponse;
+    let state = axum::extract::State(Arc::clone(&f.server));
+    answer(async move { http::cpu_limit_get(state).await.into_response() })
+}
+
+/// The mark and the floor set through `PUT /api/cpu-limit`, the call `slot
+/// cpu-limit` makes, are saved beside the headroom, read back by `GET`,
+/// shown in the state `slot status` reads and in force in the daemon that
+/// starts next. A mark under 1, a floor of 0 and a floor without a mark are
+/// refused; a mark above the host's CPUs is taken; `null` switches it off.
+#[test]
+fn the_cpu_limit_is_set_saved_and_read_back() {
+    let f = start_cfg(2, |c| c.host_cpus = Some(20));
+    let json = "application/json";
+    let view = |(status, text): (u16, String)| {
+        assert_eq!(status, 200, "{text}");
+        let v: cpu_limit::View = serde_json::from_str(&text).unwrap();
+        (v.cpu_busy_max, v.cpu_busy_floor, v.cpus)
+    };
+    let in_force = || {
+        let v = f.server.cpu_limit_view();
+        (v.cpu_busy_max, v.cpu_busy_floor)
+    };
+    let saved = || std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    let restarted = |socket: &str| {
+        let next = Server::new(Config {
+            socket: f.root.join(socket),
+            host_cpus: Some(20),
+            ..config(&f.root, 2)
+        })
+        .unwrap();
+        let v = next.cpu_limit_view();
+        (
+            v.cpu_busy_max,
+            v.cpu_busy_floor,
+            next.limits().headroom_percent,
+        )
+    };
+    assert_eq!(view(get_cpu_limit(&f)), (None, None, 20));
+    let st = f.server.state();
+    assert_eq!((st.cpu_busy_max, st.cpu_busy_floor), (None, None));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(Arc::clone(&f.server).set_headroom(50));
+    assert!(!saved().contains("cpu_busy"), "{}", saved());
+
+    assert_eq!(
+        view(put_cpu_limit(&f, json, r#"{"cpu_busy_max":17}"#)),
+        (Some(17.0), Some(4), 20),
+        "the floor nobody named is 4"
+    );
+    assert_eq!(view(get_cpu_limit(&f)), (Some(17.0), Some(4), 20));
+    assert!(saved().ends_with(r#","cpu_busy_max":17.0}"#), "{}", saved());
+    assert!(saved().contains(r#""headroom_percent":50"#), "{}", saved());
+    let st = f.server.state();
+    assert_eq!((st.cpu_busy_max, st.cpu_busy_floor), (Some(17.0), Some(4)));
+    assert_eq!(
+        view(put_cpu_limit(&f, json, r#"{"cpu_busy_floor":6}"#)),
+        (Some(17.0), Some(6), 20),
+        "the floor alone keeps the mark"
+    );
+    assert!(
+        saved().ends_with(r#","cpu_busy_max":17.0,"cpu_busy_floor":6}"#),
+        "{}",
+        saved()
+    );
+    rt.block_on(Arc::clone(&f.server).set_headroom(25));
+    assert!(
+        saved().contains(r#""cpu_busy_max":17.0,"cpu_busy_floor":6"#),
+        "a headroom change keeps the limit: {}",
+        saved()
+    );
+    assert_eq!(restarted("s2"), (Some(17.0), Some(6), 25));
+
+    for bad in [
+        "{}",
+        r#"{"cpu_busy_max":0}"#,
+        r#"{"cpu_busy_max":0.5}"#,
+        r#"{"cpu_busy_max":-2}"#,
+        r#"{"cpu_busy_max":"17"}"#,
+        r#"{"cpu_busy_max":17,"cpu_busy_floor":0}"#,
+        r#"{"cpu_busy_floor":-1}"#,
+        r#"{"cpu_busy_max":null,"cpu_busy_floor":2}"#,
+        "not json",
+        "",
+    ] {
+        let (status, text) = put_cpu_limit(&f, json, bad);
+        assert_eq!(status, 400, "{bad}: {text}");
+        assert!(text.starts_with("slot: "), "{bad}: {text}");
+        assert_eq!(in_force(), (Some(17.0), Some(6)), "{bad} changed nothing");
+    }
+    let (status, _) = put_cpu_limit(&f, "text/plain", r#"{"cpu_busy_max":2}"#);
+    assert_eq!(status, 415, "a body a page can post without a preflight");
+    assert_eq!(in_force(), (Some(17.0), Some(6)));
+
+    assert_eq!(
+        view(put_cpu_limit(&f, json, r#"{"cpu_busy_max":25}"#)),
+        (Some(25.0), Some(6), 20),
+        "a mark above the host's 20 CPUs is taken: it never holds"
+    );
+    assert_eq!(
+        view(put_cpu_limit(&f, json, r#"{"cpu_busy_max":null}"#)),
+        (None, None, 20),
+        "null switches it off and forgets the floor"
+    );
+    assert!(!saved().contains("cpu_busy"), "{}", saved());
+    assert_eq!(f.server.state().cpu_busy_max, None);
+    assert_eq!(restarted("s3"), (None, None, 25));
 }

@@ -44,6 +44,14 @@ fn main() -> ExitCode {
             print!("{}", slot::status::render_job_parallel(&v));
             0
         }),
+        Cmd::CpuLimit(args) => args
+            .request()
+            .map_err(anyhow::Error::msg)
+            .and_then(|change| slot::status::cpu_limit(&args.http, change.as_ref()))
+            .map(|v| {
+                print!("{}", slot::status::render_cpu_limit(&v));
+                0
+            }),
         Cmd::Cancel(args) => Ok(client::cancel(args.id, &Settings::from_env())),
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);

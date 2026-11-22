@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-22",
-  "source": "CHANGELOG.md 0.1.0 to 0.23.0 and docs/design.md sections 10 to 23",
+  "source": "CHANGELOG.md 0.1.0 to 0.24.0 and docs/design.md sections 10 to 24",
   "items": [
     {
       "area": "Pool",
@@ -44,6 +44,13 @@
       "status": "shipped",
       "detail": "A job queues while its filesystem has under 25 GB free or available memory is below its expected peak (0.5.0).",
       "href": "/docs/how-it-works#waiting-for-disk-and-memory"
+    },
+    {
+      "area": "Pool",
+      "label": "Waits for the host's CPUs",
+      "status": "shipped",
+      "detail": "slot cpu-limit 17 holds the start of a queued job while the whole host, with everything outside the pool, is 17 or more CPUs busy and 4 jobs run; a held job starts after 10 minutes at the latest. Off until it is set. (0.24.0)",
+      "href": "/docs/how-it-works#waiting-for-the-hosts-cpus"
     },
     {
       "area": "Pool",

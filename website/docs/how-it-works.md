@@ -358,6 +358,73 @@ print `Blocking waiting for file lock on build directory` there. Its reason read
 `target directory in use by job 12`; it goes on when that job has compiled (cargo runs tests
 without the lock) or ended, and the jobs behind it in the queue start meanwhile.
 
+## Waiting for the host's CPUs
+
+Slots bound what the pool starts, not what the host runs: a compile cache server compiles in a
+process group of its own, and editors, browsers and builds outside the pool use CPUs too. `slot
+cpu-limit` adds a third check after disk and memory. It is off on a fresh install, and off is
+exactly the behaviour without it.
+
+```sh
+slot cpu-limit              # print the values in force and the host's busy CPUs
+slot cpu-limit 17           # hold starts while the host is 17 or more CPUs busy
+slot cpu-limit 17 --floor 2 # and let 2 jobs run whatever the host does
+slot cpu-limit off          # no limit
+```
+
+With a mark set, a queued job that could start is held while both are true:
+
+- **The floor runs.** At least `--floor` jobs are running. The floor is 4 until one is named, so
+  a host that is busy with other work still builds.
+- **The host is at the mark.** The busy CPUs of the whole host, plus what the jobs that just
+  started are expected to add, are at or above the mark.
+
+What is counted:
+
+- **The whole host.** The figure is the CPU time of every process in `/proc`, whoever started
+  it: the jobs of the pool, the compilers of a compile cache server, and everything outside the
+  pool. The daemon samples it once a second for the web view and the census log; the limit reads
+  the mean of the last 10 samples and scans nothing itself. A process that starts and ends between
+  two samples is not in it.
+- **Jobs that just started.** A job that started in the last 30 seconds counts with the CPUs it
+  is expected to use, less what the figure already shows of it. Without this every held job would
+  start in the second the figure dips under the mark. The expectation is the median of CPU seconds
+  per second of run time of the same command in the same repository (at least 3 runs of a second
+  or longer among its last 20), else 1 CPU.
+- **Held jobs ahead.** A held job counts the held jobs that are served before it, so they start
+  in the queue's order, by level and then by arrival.
+
+A held job holds no slot. Its client prints the reason once, and `slot status` shows it under
+the job:
+
+```text
+slot: job 12 waiting: host busy: 18.4 of 20 CPUs, mark 17.0
+slot: job 13 waiting: host busy: 14.5 of 20 CPUs + 3.0 for jobs that just started, mark 17.0
+```
+
+While the limit is on, `slot status` has the line `starts held while the host is busier than 17.0
+CPUs and 4 jobs run`. The check runs every 2 seconds and once more when the job has its slots, so
+a change of the mark reaches the queued jobs within 2 seconds, without a reload.
+
+No job waits for ever on this check: a job that has been held for the host's CPUs for 10 minutes
+starts, whatever the figure says. Its client prints `slot: job 12 was held 10m for the host's
+CPUs, as long as a job is: it starts`, and the census log gets a `cpu_hold_bound` line beside the
+`cpu_hold` line of the job's first hold. The 10 minutes start again when the daemon reloads.
+
+A mark above the host's CPU count never holds a start, and `slot cpu-limit` says so. A mark under
+1 is refused. For the first 5 seconds after its start the daemon has no figure yet and holds
+every start past the floor, so a reload does not start every held job at once. After that, a
+daemon whose last sample is older than 5 seconds holds nothing.
+
+What it costs: with the limit on, a queue forms while the host is saturated, also when slots are
+free, and a job can wait up to 10 minutes for work that is not the pool's.
+
+The mark and the floor are kept in `limits.json` beside the headroom and hold across reloads and
+restarts. `GET` and `PUT /api/cpu-limit` read and change them (`{"cpu_busy_max": 17,
+"cpu_busy_floor": 4}`, either field alone; `"cpu_busy_max": null` switches the limit off; a mark
+under 1, a floor under 1, a floor without a mark and a body with neither field are refused with
+400). `/api/state` has `cpu_busy_max` and `cpu_busy_floor` while the limit is on.
+
 ## Freeing disk space
 
 The daemon also frees disk. Every minute it looks at the filesystems of the Cargo target

@@ -1254,3 +1254,79 @@ slot a toolchain holds up front (go, node-test, ignite).
 holds a pool slot" and still bound a job, and one job's `cargo` and `make` processes would share
 one bound. It needs a FIFO and a feeder per job, the daemon cannot see how many tokens a job
 wants, and each FIFO has to cross a handover. Open if S × N turns out too wide.
+
+## 24. A hold on the host's busy CPUs (0.24.0)
+
+**The problem.** Slots bound what the pool starts. They do not bound what the host runs.
+Measured on one host of 20 CPUs with a pool of 50 slots: the host was 16.7 to 18.5 CPUs busy for
+three hours, with 46 runnable threads at one sample, while the queue was empty and 35 slots were
+free. Over 473 runs of 31 repeated commands the same command took 0.55 times its median run time
+at a CPU pressure under 50 % and 1.19 times over 80 %. About half of the compiler CPU ran in the
+compile cache server's own cgroup, outside the `CPUQuota` of the headroom (§ 13), so the quota
+does not see it. The host-wide figure does.
+
+**The setting** (`cpu_limit.rs`). `limits.json`: optional `cpu_busy_max` (the mark, in CPUs;
+absent: off, and the file is then byte for byte what a daemon without the setting writes) and
+`cpu_busy_floor` (jobs that may always run; absent: 4). `GET` and `PUT /api/cpu-limit`, `slot
+cpu-limit [<CPUs>|off] [--floor <N>]`, `State.cpu_busy_max` and `State.cpu_busy_floor`, one header
+line in `slot status`. A mark under 1 or not finite, a floor under 1 and a floor without a mark
+are refused. A mark above the host's CPU count is taken and holds nothing. Released switched off.
+
+**The hold** (`cpu_limit::verdict`, `Server::cpu_verdict`). The third check of
+`Server::short_of`, after disk and memory, of kind `cpu`. A queued job that could start is held
+while both are true:
+
+1. at least `floor` jobs run (a job counts from the claim of its slots);
+2. busy + starting + ahead ≥ mark.
+
+- **busy.** `Sample::host_cores` of the census sampler (§ 11): the CPU ticks of every process in
+  `/proc` over one interval, so the compilers of a compile cache server and everything outside
+  the pool count. The sampler runs once a second; the hold reads the mean of its last 10 samples
+  (`cpu_limit::Recent`, the span of one census log line) and scans nothing itself. One sample
+  swings with every process that starts or ends; the mean of 10 moves at most a tenth of that a
+  second. The sampler's first sample has no earlier reading and is left out. A mean whose last
+  sample is older than 5 s is no figure. A process that starts and ends inside one interval is in
+  no sample; the share of `/proc/stat` that the daemon also reads (`sys_cpu`) counts it.
+- **starting.** The memory hold's device (§ 14): a job that claimed its slots, or started under
+  30 s ago, counts with `expected − shown`, at least 0. `expected` is the median of `cpu_s ÷ run
+  time` over the last 20 runs of the same repository and argv that ended on their own and ran a
+  second or longer (`admission::History::expected_cores`, at least 3 runs), else 1.0, at most the
+  host's CPUs. `shown` is the sum of the job's own one-second samples over the window of the
+  mean, which is the job's part of `busy`. Without this term every held job would pass in the
+  tick where the mean dips under the mark.
+- **ahead.** The expected CPUs of the jobs that are held for CPU, or were let through and have
+  not claimed their slots yet, and that the queue serves before this one (level, then id). Held
+  jobs so start in the queue's order, and the queue's order itself is unchanged.
+
+The verdict is computed under the server lock, in `short_of` and again in the block that claims
+the slots, so of the jobs that pass at the same moment each one counts the claims before it. A
+held job holds no slot.
+
+**The bound.** A job that has been held for CPU for 10 minutes (`cpu_limit::HOLD_MAX`, counted
+from its first CPU hold) starts: one `info` frame, one line in the daemon's log, and a
+`cpu_hold_bound` event in the census log. A job's first CPU hold writes a `cpu_hold` event. The
+time is not part of the handover: after a reload a held job's 10 minutes start again.
+
+**No figure.** A daemon younger than 5 s has no mean yet and holds every start past the floor
+(`Figure::Pending`); otherwise a reload would start every held job in its first second. After
+that, no fresh sample (`Figure::Unknown`) holds nothing.
+
+**Handover.** Nothing travels: the new image reads `limits.json` at its start. The handover
+format and its `VERSION` are unchanged.
+
+**Versions.** A daemon without the setting reads a `limits.json` that has the fields and ignores
+them; when it saves the headroom it writes the file without them, so a downgrade loses the limit.
+
+**The cost.** With the limit on a queue forms while the host is saturated, also when slots are
+free, and a job can wait up to 10 minutes for load that is not the pool's. The expected CPUs of a
+job do not include what its compilers use inside a compile cache server (`compile_server_cpu_s`
+is not attributed at the start), so `starting` is low for such a job until the mean shows it.
+
+**Not chosen.**
+
+- *`sys_cpu` × CPUs from `/proc/stat` as the figure.* It also counts processes that live under a
+  second, but it has no part per job: `shown` is taken from the same per-process ticks as
+  `host_cores`, so the two subtract cleanly.
+- *One sample as the figure.* One second under the mark would start a job.
+- *A second scan of `/proc` per admission check.* The sampler's scan is the one walk a second;
+  a queue of held jobs that each look every 2 s would multiply it.

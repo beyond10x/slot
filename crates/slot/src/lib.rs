@@ -11,6 +11,7 @@ pub mod cargo_lock;
 pub mod census;
 pub mod cli;
 pub mod client;
+pub mod cpu_limit;
 pub mod evict;
 pub mod gate;
 pub mod hook;
