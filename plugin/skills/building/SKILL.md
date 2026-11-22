@@ -32,6 +32,11 @@ a `task check` whose recipe calls `slot cargo …`. A `slot` call inside a job t
 through slot (`SLOT_JOB` is set) runs its command directly on the outer job's slots and queues
 nothing, so a script or Taskfile that prefixes its own builds is safe to run through slot too.
 
+A script that measures, profiles, probes, watches or waits gets no prefix: it would hold a slot
+for its whole run while it compiles and tests nothing, and the builds behind it wait. The same
+holds for a script that mixes builds with sleeping or waiting: start it without the prefix and
+prefix the build and test commands inside it, so a slot is held only while one of them runs.
+
 | command | how it shares the pool |
 |---|---|
 | `slot cargo test -p foo`, `slot cargo build`, `slot cargo clippy` | cargo and rustc draw their parallelism from the pool |

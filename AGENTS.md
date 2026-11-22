@@ -124,6 +124,9 @@ Change this repository in a managed worktree (`worktree create --repo ../slot --
 Run `git fetch origin` first and pass `--base origin/main`: the default base is the local
 `HEAD`, and a local `main` that was not pulled gives a tree many releases old (a UX round
 and a review were once started on 0.10.0 while `origin/main` was 0.19.0).
+Pass `--seed-target` (`worktree` 0.21.0 and later; `WORKTREE_SEED_TARGET=1` does the same): it
+copies the dependency artifacts of the repository's newest built checkout into the new tree's
+`target/`, so the first `cargo` call there does not compile every dependency again.
 Build with `CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0`, and finish the tree
 with `worktree finish --discard-cache --archive` when the change is merged.
 
@@ -326,8 +329,14 @@ Open, one line each, with where the design lives. A session starts with (e).
   slot-hours in jobs under 0.25 CPUs per slot, and the compilers run in the compile cache server,
   outside the job. With 17 running slots 15.2 CPUs were busy and 59 jobs queued; with 50 running
   slots (`--tokens 59`, headroom 15 %, the same CPU quota) 20.0 were busy and the longest wait
-  fell from 31 minutes to under 5. Admission should follow the CPU the jobs use, not a count
-  equal to the CPUs.
+  fell from 31 minutes to under 5; in 15 minutes 12.3 jobs a minute ended against 7.7, the 90th
+  percentile of the queue wait was 97 s against 1,467 s, and single jobs ran longer (4 commands
+  seen in both windows, `pnpm build` 8 s then 120 s).
+  Design, the operator's, not built: no fixed count. The daemon reads the CPUs of the host and
+  what the pool uses, and admits the head of the queue while a share of CPU is free for it (about
+  0.4 CPUs per job); below that it admits nothing. A lower and an upper bound on the number of
+  running jobs hold both ends. `policy::Controller` already computes a pool size from the census
+  every tick and only shows it (`recommended_tokens`); (i) and (v) are cases of the same change.
 
 ## Never
 
