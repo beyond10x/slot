@@ -260,6 +260,11 @@ Open, one line each, with where the design lives. A session starts with (e).
   in `server/mod.rs`), so a changed `ExecStart` option such as `--min-free-disk` takes effect only
   at a full restart. Options that should change on reload belong in `limits.json`, like the
   headroom, or in `priority.json`, like the promotion delay (`slot priority promote-after`).
+- (h) A reload under load can lose lines of a job's output: at a load of 98 to 123 on 20 CPUs,
+  `reloads_keep_running_and_queued_jobs_their_output_and_slots` failed in 1 of 6 runs on 0.21.1
+  and in 2 of 6 with the run-time limit, each time with a run of 14 to 40 lines missing in the
+  middle of one client's output. Not verified: on a handover `client_writer` answers the request
+  for unsent bytes with `pending` only, and frames still in its channel are dropped.
 - (i) Jobs that use no CPU hold 29 % of the slot-hours while requests wait:
   `story:idle-slots-are-lent-to-the-queue`.
 - (j) Jobs that run under 5 s carry half of the queue wait:
