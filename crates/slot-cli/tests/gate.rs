@@ -2,6 +2,8 @@
 //! through FIFOs, holds its slots through `slot hold`, and runs its command
 //! itself (`docs/design.md` § 19).
 
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -12,14 +14,18 @@ struct Setup {
     daemon: Child,
     gate: Child,
     dir: tempfile::TempDir,
+    http: SocketAddr,
 }
 
 impl Setup {
     fn start(tokens: usize) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let bind = TcpListener::bind("127.0.0.1:0").unwrap();
+        let http = bind.local_addr().unwrap();
+        drop(bind);
         let log = std::fs::File::create(dir.path().join("daemon.log")).unwrap();
         let daemon = Command::new(SLOT)
-            .args(["serve", "--http", "off", "--cpu-quota", "false"])
+            .args(["serve", "--http", &http.to_string(), "--cpu-quota", "false"])
             .args(["--tokens", &tokens.to_string()])
             .args(["--call-headroom", "0", "--sccache-watch", "false"])
             .args(["--min-free-disk", "0", "--min-free-memory", "0"])
@@ -46,10 +52,36 @@ impl Setup {
             .stderr(log)
             .spawn()
             .unwrap();
-        wait_for(&dir.path().join("gate").join("requests.fifo"));
-        // The FIFO exists before the gate opens it; give it a moment.
-        std::thread::sleep(Duration::from_millis(200));
-        Self { daemon, gate, dir }
+        let s = Self {
+            daemon,
+            gate,
+            dir,
+            http,
+        };
+        // The FIFO exists before the gate opens it: wait for the open.
+        let fifo = s.gate_dir().join("requests.fifo");
+        until(&format!("the gate to open {}", fifo.display()), || {
+            opened_by(s.gate.id(), &fifo)
+        });
+        s
+    }
+
+    /// Jobs of the daemon in `state`, read from its web API.
+    fn jobs_in(&self, state: &str) -> usize {
+        let Ok(mut c) = TcpStream::connect_timeout(&self.http, Duration::from_secs(1)) else {
+            return 0;
+        };
+        let _ = c.set_read_timeout(Some(Duration::from_secs(2)));
+        let req = format!(
+            "GET /api/state HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            self.http
+        );
+        if c.write_all(req.as_bytes()).is_err() {
+            return 0;
+        }
+        let mut body = String::new();
+        let _ = c.read_to_string(&mut body);
+        body.matches(&format!(r#""state":"{state}""#)).count()
     }
 
     fn gate_dir(&self) -> PathBuf {
@@ -92,12 +124,30 @@ impl Drop for Setup {
     }
 }
 
-fn wait_for(p: &Path) {
+/// Polls `ok` until it holds, at most 10 s.
+fn until(what: &str, ok: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !p.exists() {
-        assert!(Instant::now() < deadline, "{} did not appear", p.display());
+    while !ok() {
+        assert!(Instant::now() < deadline, "{what} within 10 s");
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn wait_for(p: &Path) {
+    until(&format!("{} to appear", p.display()), || p.exists());
+}
+
+/// Whether process `pid` has `path` open. The kernel names an open file by
+/// its canonical path, so `path` is compared in that form.
+fn opened_by(pid: u32, path: &Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|d| {
+        d.flatten()
+            .any(|f| std::fs::read_link(f.path()).is_ok_and(|l| l == path))
+    })
 }
 
 fn finish(c: Child) -> Output {
@@ -130,6 +180,7 @@ fn a_gated_job_runs_in_the_client_with_the_pool_jobserver() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !s.jobs().contains("\"exit\":3") {
         assert!(Instant::now() < deadline, "{}\n{}", s.jobs(), s.logs());
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(50));
     }
     let jobs = s.jobs();
@@ -147,14 +198,26 @@ fn a_gated_job_runs_in_the_client_with_the_pool_jobserver() {
 #[test]
 fn a_gated_job_holds_its_slot_until_the_client_ends() {
     let s = Setup::start(1);
+    let started = s.dir.path().join("first-started");
+    let go = s.dir.path().join("go");
     let marker = s.dir.path().join("first-done");
-    let first = s.client(&format!("sleep 1; touch {}", marker.display()));
-    std::thread::sleep(Duration::from_millis(300));
+    // The first job polls for the file `go` the test writes.
+    let first = s.client(&format!(
+        ": > {}; while [ ! -e {} ]; do sleep 0.02; done; : > {}",
+        started.display(),
+        go.display(),
+        marker.display()
+    ));
+    wait_for(&started);
     // The pool has one slot: the second job starts only after the first.
     let second = s.client(&format!(
         "test -e {} && echo after || echo overlap",
         marker.display()
     ));
+    until("the second job to queue behind the first", || {
+        s.jobs_in("queued") == 1
+    });
+    std::fs::write(&go, "").unwrap();
     let a = finish(first);
     let b = finish(second);
     assert_eq!(a.status.code(), Some(0), "{}", s.logs());
@@ -165,8 +228,10 @@ fn a_gated_job_holds_its_slot_until_the_client_ends() {
 #[test]
 fn a_killed_client_frees_its_slot() {
     let s = Setup::start(1);
-    let mut first = s.client("sleep 5");
-    std::thread::sleep(Duration::from_millis(500));
+    let started = s.dir.path().join("first-started");
+    // `sleep 5` is the job's run; the test kills its client.
+    let mut first = s.client(&format!(": > {}; sleep 5", started.display()));
+    wait_for(&started);
     first.kill().unwrap();
     let _ = first.wait();
     let t = Instant::now();
@@ -190,5 +255,28 @@ fn without_a_gate_the_client_runs_outside_the_pool_and_says_so() {
         String::from_utf8_lossy(&out.stderr).contains("ran outside the pool"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// adversary u3
+
+/// `Setup::start` waits until the gate has its request FIFO open by
+/// comparing each link in `/proc/<pid>/fd` with the FIFO's path as the test
+/// built it. The kernel names the canonical path, so with a temporary
+/// directory reached through a symlink (`TMPDIR` on a symlinked directory)
+/// the wait never ends and every test of this file fails after 10 s.
+#[test]
+fn opened_by_sees_a_file_opened_through_a_symlinked_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let path = link.join("requests.fifo");
+    let _open = std::fs::File::create(&path).unwrap();
+    assert!(
+        opened_by(std::process::id(), &path),
+        "{} is open in this process",
+        path.display()
     );
 }

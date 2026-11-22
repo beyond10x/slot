@@ -1218,14 +1218,22 @@ impl Server {
         }
         let n_running = state.running.len();
         let snap = Snapshot::scan();
+        // Every running job goes into the table before any supervisor starts
+        // and before the first client is accepted. A job that ended during
+        // the handover is finished as soon as its supervisor runs; with a
+        // job still missing from the table, that finish would find no job
+        // holding slots and the idle reconcile would fill the FIFO beside
+        // the slots the missing jobs hold.
+        let mut adopted = Vec::with_capacity(n_running);
         for r in state.running {
             let conn = r.conn.and_then(|i| conns.get_mut(i).and_then(Option::take));
             let out = h.take(r.stdout);
             let err = h.take(r.stderr);
             let (id, pid) = (r.job.id, r.pid);
-            // Into the table before the first client is accepted, so an idle
-            // reconcile never takes the tokens these jobs hold.
             let (tx, gone, keep) = self.adopt_running(r, out, err, conn.as_ref(), &snap);
+            adopted.push((id, pid, tx, gone, keep, conn));
+        }
+        for (id, pid, tx, gone, keep, conn) in adopted {
             let s = Arc::clone(self);
             tokio::spawn(async move {
                 let _keep = keep;
@@ -3953,15 +3961,24 @@ fn pump(
 }
 
 /// Writes frames to one client. Bytes are queued in `pending` and written as
-/// the socket takes them; a request on `ctl` gets every unsent byte, and the
-/// writer then writes nothing more, for a handover to pass on. Ends after
-/// the exit frame, or when every sender is gone, once `pending` is written.
+/// the socket takes them; a request on `ctl` gets every unsent byte, the
+/// frames still in `rx` included, and the writer then writes nothing more,
+/// for a handover to pass on. Ends after the exit frame, or when every
+/// sender is gone, once `pending` is written.
 async fn client_writer(
     mut wr: OwnedWriteHalf,
     mut rx: mpsc::UnboundedReceiver<Frame>,
     mut ctl: mpsc::UnboundedReceiver<oneshot::Sender<Vec<u8>>>,
     mut pending: Vec<u8>,
 ) {
+    /// Appends `f` to `pending`; whether it was the exit frame.
+    fn queue(pending: &mut Vec<u8>, f: &Frame) -> bool {
+        if let Ok(b) = serde_json::to_vec(f) {
+            pending.extend_from_slice(&b);
+            pending.push(b'\n');
+        }
+        matches!(f, Frame::Exit { .. })
+    }
     let mut rx_open = true;
     let mut ctl_open = true;
     let mut closing = false;
@@ -3974,19 +3991,21 @@ async fn client_writer(
             biased;
             c = ctl.recv(), if ctl_open => match c {
                 Some(reply) => {
+                    // The handover stopped the pumps before it asked: what
+                    // they sent is in the channel now, and unsent too.
+                    while rx_open && !closing {
+                        match rx.try_recv() {
+                            Ok(f) => closing = queue(&mut pending, &f),
+                            Err(_) => break,
+                        }
+                    }
                     let _ = reply.send(std::mem::take(&mut pending));
                     std::future::pending::<()>().await;
                 }
                 None => ctl_open = false,
             },
             f = rx.recv(), if rx_open && !closing => match f {
-                Some(f) => {
-                    if let Ok(b) = serde_json::to_vec(&f) {
-                        pending.extend_from_slice(&b);
-                        pending.push(b'\n');
-                    }
-                    closing = matches!(f, Frame::Exit { .. });
-                }
+                Some(f) => closing = queue(&mut pending, &f),
                 None => rx_open = false,
             },
             r = wr.writable(), if !pending.is_empty() => {

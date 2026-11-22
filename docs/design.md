@@ -672,12 +672,16 @@ with these differences:
   handler is lost, never fatal.
 
 Measured by `crates/slot-cli/tests/handover.rs`: 20 running and 20 queued jobs, each printing a
-counter every 10 ms, through two reloads, the second right after the first handover finished:
-every client got all 300 lines once and its exit code, 40 jobs logged once each, and 20 of 20
-tokens in the FIFO at the end. A second test sends 6 reloads 30 ms apart to 4 running and 4
-queued jobs: the daemon keeps its pid and every client gets its output and exit code. The first
-version waited 1 s between the reloads and failed 1 of 5 runs on a loaded machine with one
-handover logged instead of two.
+numbered line every 10 ms until the test lets it end, through two reloads, the second right
+after the first handover finished: every client got an unbroken run of numbered lines, none
+lost or doubled, and its exit code, 40 jobs logged once each, and 20 of 20 tokens in the FIFO at
+the end. A second test sends 6 reloads 30 ms apart to 4 running and 4 queued jobs: the daemon
+keeps its pid and every client gets its output and exit code. The first version waited 1 s
+between the reloads and failed 1 of 5 runs on a loaded machine with one handover logged instead
+of two. Up to 0.24.0 a handover dropped the frames still in a client writer's channel when it
+asked the writer for its unsent bytes: a run of 14 to 40 lines went missing in the middle of one
+client's output in 1 of 6 runs at a load of about 100 on 20 CPUs. The writer now hands those
+frames on with its unsent bytes.
 
 The design as written before it was built:
 

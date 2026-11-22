@@ -37,6 +37,7 @@ fn start_cfg(tokens: usize, change: impl FnOnce(&mut Config)) -> Fixture {
         if cfg.socket.exists() {
             break;
         }
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
     Fixture {
@@ -326,25 +327,51 @@ fn the_bound_per_job_is_set_saved_and_read_back() {
     assert_eq!(restarted("s3").job_parallel_view().job_parallel, None);
 }
 
+/// A job that runs until the file `go` exists in the fixture's root, then
+/// makes the file `first-done`; returned once it runs.
+fn first_until_go(f: &Fixture) -> UnixStream {
+    // The job polls for the file `go` the test writes.
+    let (c, id) = submit(
+        f,
+        sh(
+            &f.root,
+            "while [ ! -e go ]; do sleep 0.02; done; : > first-done",
+        ),
+    );
+    wait_for("the first job to run", || {
+        state_of(f, id) == JobState::Running
+    });
+    c
+}
+
+/// A job that prints `after` when the file `first-done` exists as it runs,
+/// else `beside`.
+fn second_after_first(f: &Fixture) -> Request {
+    sh(&f.root, "test -e first-done && echo after || echo beside")
+}
+
 #[test]
 fn a_pending_upgrade_holds_admission() {
     let f = start(1);
-    let running = send(&f.socket, sh(&f.root, "sleep 1"));
-    std::thread::sleep(Duration::from_millis(150));
-    let queued_before = send(&f.socket, sh(&f.root, "echo before"));
-    std::thread::sleep(Duration::from_millis(100));
+    let running = first_until_go(&f);
+    let (queued_before, _) = submit(&f, sh(&f.root, "echo before"));
+    wait_for("the job to wait for the slot", || {
+        f.server.pool().waiting() == 1
+    });
     f.server.hold_admission();
-    let queued_after = send(&f.socket, sh(&f.root, "echo after"));
+    let (queued_after, _) = submit(&f, sh(&f.root, "echo after"));
+    std::fs::write(f.root.join("go"), "").unwrap();
     let r = collect(running);
     assert_eq!((r.code, r.started), (0, true), "the running job finishes");
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(f.server.nothing_running(), "the moment to re-execute");
+    wait_for("the moment to re-execute", || f.server.nothing_running());
     let states: Vec<JobState> = {
         let g = f.server.inner.lock().unwrap();
         g.active.values().map(|l| l.job.state).collect()
     };
     assert_eq!(states, [JobState::Queued, JobState::Queued]);
-    assert_eq!(f.server.pool().free(), 1, "the slot went back to the pool");
+    wait_for("the slot to go back to the pool", || {
+        f.server.pool().free() == 1
+    });
     for c in [queued_before, queued_after] {
         c.set_read_timeout(Some(Duration::from_millis(300)))
             .unwrap();
@@ -357,12 +384,11 @@ fn a_pending_upgrade_holds_admission() {
 #[test]
 fn a_hold_that_runs_out_admits_the_queued_jobs() {
     let f = start(1);
-    let running = send(&f.socket, sh(&f.root, "sleep 0.5"));
-    std::thread::sleep(Duration::from_millis(150));
+    let running = first_until_go(&f);
     f.server.hold_admission();
-    let queued = send(&f.socket, sh(&f.root, "echo after"));
-    std::thread::sleep(Duration::from_millis(100));
+    let (queued, _) = submit(&f, sh(&f.root, "echo after"));
     assert!(!f.server.upgrade_step(upgrade::Step::Release));
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(running).code, 0);
     let r = collect(queued);
     assert_eq!((r.code, r.started, r.out.as_str()), (0, true, "after\n"));
@@ -371,23 +397,23 @@ fn a_hold_that_runs_out_admits_the_queued_jobs() {
 #[test]
 fn second_job_waits_for_the_slot() {
     let f = start(1);
-    let first = send(&f.socket, sh(&f.root, "sleep 1"));
-    std::thread::sleep(Duration::from_millis(150));
-    let t0 = Instant::now();
-    let r = run(&f, sh(&f.root, "true"));
-    assert_eq!(r.code, 0);
-    assert!(
-        t0.elapsed() >= Duration::from_millis(700),
-        "{:?}",
-        t0.elapsed()
-    );
+    let first = first_until_go(&f);
+    let (second, id) = submit(&f, second_after_first(&f));
+    wait_for("the second job to wait for the slot", || {
+        f.server.pool().waiting() == 1
+    });
+    assert_eq!(state_of(&f, id), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+    let r = collect(second);
+    assert_eq!((r.code, r.out.as_str()), (0, "after\n"), "{r:?}");
 }
 
 #[test]
 fn client_disconnect_kills_job_and_returns_token() {
     let f = start(1);
     let marker = f.root.join("pid");
+    // `sleep 30` is the job's run; the client leaving ends it.
     let c = send(
         &f.socket,
         sh(
@@ -395,29 +421,23 @@ fn client_disconnect_kills_job_and_returns_token() {
             &format!("echo $$ > {}; sleep 30", marker.display()),
         ),
     );
-    let mut pid = 0;
-    for _ in 0..200 {
-        if let Ok(s) = std::fs::read_to_string(&marker)
-            && let Ok(p) = s.trim().parse::<i32>()
-        {
-            pid = p;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(pid > 0, "job did not start");
+    let pid = pid_in(&marker);
     drop(c);
-    let mut gone = false;
-    for _ in 0..200 {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
-            gone = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(gone, "job still running after client disconnect");
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(f.server.pool().free(), 1);
+    wait_for("the job to end after its client left", || {
+        !Path::new(&format!("/proc/{pid}")).exists()
+    });
+    wait_for("the slot to come back", || f.server.pool().free() == 1);
+}
+
+/// The process id a job wrote to `marker`, polled for up to [`WAIT`].
+fn pid_in(marker: &Path) -> i32 {
+    let read = || {
+        std::fs::read_to_string(marker)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+    };
+    wait_for("the job to start", || read().is_some());
+    read().unwrap()
 }
 
 fn cancel(f: &Fixture, id: i64) -> Res {
@@ -434,6 +454,7 @@ fn cancel(f: &Fixture, id: i64) -> Res {
 fn slot_cancel_stops_a_queued_and_a_running_job() {
     let f = start(1);
     let marker = f.root.join("pid");
+    // `sleep 30` is the job's run; the test cancels it.
     let running = send(
         &f.socket,
         sh(
@@ -441,19 +462,9 @@ fn slot_cancel_stops_a_queued_and_a_running_job() {
             &format!("echo $$ > {}; sleep 30", marker.display()),
         ),
     );
-    let mut pid = 0;
-    for _ in 0..200 {
-        if let Ok(s) = std::fs::read_to_string(&marker)
-            && let Ok(p) = s.trim().parse::<i32>()
-        {
-            pid = p;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(pid > 0, "job did not start");
-    let queued = send(&f.socket, sh(&f.root, "true"));
-    std::thread::sleep(Duration::from_millis(300));
+    let pid = pid_in(&marker);
+    let (queued, id) = submit(&f, sh(&f.root, "true"));
+    assert_eq!(id, 2);
 
     let r = cancel(&f, 2);
     assert_eq!(r.code, 0, "{r:?}");
@@ -466,8 +477,7 @@ fn slot_cancel_stops_a_queued_and_a_running_job() {
     assert_eq!(r.code, 0, "{r:?}");
     assert_eq!(collect(running).code, 130);
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(f.server.pool().free(), 1);
+    wait_for("the slot to come back", || f.server.pool().free() == 1);
 
     let r = cancel(&f, 99);
     assert_eq!(r.code, 1);
@@ -554,8 +564,7 @@ fn go_job_holds_at_most_the_pool() {
         return; // go not installed
     }
     assert!(r.out.contains("-p=2"), "{r:?}");
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(f.server.pool().free(), 2);
+    wait_for("every slot back", || f.server.pool().free() == 2);
 }
 
 #[test]
@@ -566,8 +575,7 @@ fn requested_tokens_replace_the_toolchains() {
     let r = run(&f, req);
     assert_eq!(r.code, 0, "{r:?}");
     assert_eq!(f.server.state().done[0].tokens, 3);
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(f.server.pool().free(), 4, "all slots back");
+    wait_for("all slots back", || f.server.pool().free() == 4);
 }
 
 #[test]
@@ -646,17 +654,20 @@ fn headroom_lowers_the_limit_and_is_saved() {
     assert_eq!(v.headroom_percent, 50);
     assert_eq!(v.cpu_quota_percent, None, "cpu quota is off in tests");
     assert_eq!(f.server.state().limit, 1);
-    let first = send(&f.socket, sh(&f.root, "sleep 1"));
-    std::thread::sleep(Duration::from_millis(150));
-    let t0 = Instant::now();
-    let r = run(&f, sh(&f.root, "true"));
-    assert_eq!(r.code, 0);
-    assert!(
-        t0.elapsed() >= Duration::from_millis(700),
-        "second job ran beside the first with 1 of 2 tokens circulating: {:?}",
-        t0.elapsed()
-    );
+    let first = first_until_go(&f);
+    let (second, id) = submit(&f, second_after_first(&f));
+    wait_for("the second job to wait for the slot", || {
+        f.server.pool().waiting() == 1
+    });
+    assert_eq!(state_of(&f, id), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+    let r = collect(second);
+    assert_eq!(
+        (r.code, r.out.as_str()),
+        (0, "after\n"),
+        "second job ran beside the first with 1 of 2 tokens circulating"
+    );
     assert_eq!(limits::load(&f.root.join("state")).headroom_percent, 50);
     let v = rt.block_on(Arc::clone(&f.server).set_headroom(0));
     assert_eq!(v.effective_tokens, 2);
@@ -694,14 +705,10 @@ fn a_job_waits_while_the_disk_is_short_and_can_be_cancelled() {
     assert_eq!(st.active[0].state, JobState::Queued);
     assert!(st.active[0].wait_reason.contains("builds need"), "{st:?}");
     drop(c);
-    for _ in 0..100 {
-        if f.server.state().active.is_empty() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for("the job to leave the table", || {
+        f.server.state().active.is_empty()
+    });
     let st = f.server.state();
-    assert!(st.active.is_empty(), "{st:?}");
     assert_eq!(st.done.last().unwrap().state, JobState::Cancelled);
 }
 
@@ -720,18 +727,21 @@ fn memory_short_holds_a_job_only_while_another_runs() {
         (0, "alone\n"),
         "alone: runs"
     );
-    let first = send(&f.socket, sh(&f.root, "sleep 1.5"));
-    std::thread::sleep(Duration::from_millis(300));
-    let t0 = Instant::now();
-    let second = run(&f, sh(&f.root, "echo second"));
-    assert_eq!(second.code, 0);
-    assert!(second.info.contains("memory available"), "{}", second.info);
-    assert!(
-        t0.elapsed() >= Duration::from_millis(900),
-        "ran beside the first: {:?}",
-        t0.elapsed()
-    );
+    let first = first_until_go(&f);
+    let (second, b) = submit(&f, second_after_first(&f));
+    wait_for("the second job to wait for memory", || {
+        reason_of(&f, b).contains("memory available")
+    });
+    assert_eq!(state_of(&f, b), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+    let second = collect(second);
+    assert_eq!(
+        (second.code, second.out.as_str()),
+        (0, "after\n"),
+        "ran beside the first"
+    );
+    assert!(second.info.contains("memory available"), "{}", second.info);
 }
 
 #[test]
@@ -913,9 +923,14 @@ fn a_job_logs_the_project_of_its_directory() {
                 .success()
         );
     }
-    // git runs off the request path; a job that lasts a second has its project.
-    let r = run(&f, sh(&repo, "sleep 1"));
-    assert_eq!(r.code, 0);
+    // git runs off the request path: the job polls for the file `go`, which
+    // the test writes once the job has its project.
+    let (c, id) = submit(&f, sh(&repo, "while [ ! -e go ]; do sleep 0.02; done"));
+    wait_for("the job's project", || {
+        active_job(&f, id).is_some_and(|j| j.project == "team-a")
+    });
+    std::fs::write(repo.join("go"), "").unwrap();
+    assert_eq!(collect(c).code, 0);
     let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
     assert!(log.contains("\"project\":\"team-a\""), "{log}");
     let u = crate::usage::aggregate(
@@ -929,19 +944,22 @@ fn a_job_logs_the_project_of_its_directory() {
     assert_eq!(u.rows[0].key, "team-a");
 }
 
-/// Polls `cond` for up to 5 s.
+/// The bound of [`wait_for`] and [`wait_for_jobs`].
+const WAIT: Duration = Duration::from_secs(10);
+
+/// Polls `cond` for up to [`WAIT`].
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    for _ in 0..500 {
-        if cond() {
-            return;
-        }
+    let deadline = Instant::now() + WAIT;
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for {what}");
 }
 
 /// A job that holds its slot until the file `go` exists in `cwd`.
 fn holder(f: &Fixture) -> UnixStream {
+    // The job polls for the file `go` the test writes.
     let c = send(
         &f.socket,
         sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done"),
@@ -1527,6 +1545,7 @@ fn fake_build(dir: &Path, target: &Path, script: &str) -> Request {
 
 /// A build into `target` that runs until the file `go` exists.
 fn building(f: &Fixture, target: &Path, go: &str) -> (UnixStream, i64) {
+    // The job polls for the file `go` the test writes.
     let script = format!("while [ ! -e {go} ]; do sleep 0.02; done");
     let (c, id) = submit(f, fake_build(&f.root, target, &script));
     wait_for("the build to run", || state_of(f, id) == JobState::Running);
@@ -1573,14 +1592,16 @@ fn in_use_by(id: i64) -> String {
     format!("target directory in use by job {id}")
 }
 
-/// Polls `cond` for up to 5 s like [`wait_for`]; a timeout names every
+/// Polls `cond` for up to [`WAIT`] like [`wait_for`]; a timeout names every
 /// active job with its state and reason, and the pool's free slots and
 /// queue.
 fn wait_for_jobs(f: &Fixture, what: &str, cond: impl Fn() -> bool) {
-    for _ in 0..500 {
+    let deadline = Instant::now() + WAIT;
+    while Instant::now() < deadline {
         if cond() {
             return;
         }
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
     let jobs: Vec<String> = {
@@ -1630,8 +1651,16 @@ fn a_cargo_build_waits_while_another_job_compiles_in_its_target_directory() {
     let (second, b) = submit(&f, fake_build(&f.root, &target, "echo built"));
     let info = read_info_until(&second, "waiting:");
     assert_eq!(info, format!("slot: job {b} waiting: {}", in_use_by(a)));
-    // Past the settle time of the first job only the lock holds it back.
-    std::thread::sleep(Duration::from_millis(400));
+    // Past the settle time of the first job, and two polls of the target
+    // directories after it, only the lock holds it back.
+    let started = active_job(&f, a).unwrap().started_ms;
+    let past = {
+        let c = &f.server.cfg;
+        i64::try_from((c.target_settle + 2 * c.target_poll).as_millis()).unwrap()
+    };
+    wait_for("the settle time of the first job to pass", || {
+        now_ms() > started + past
+    });
     let queued = active_job(&f, b).unwrap();
     assert_eq!(
         (queued.state, queued.wait_reason, queued.started_ms),
@@ -1705,6 +1734,8 @@ fn builds_that_wait_for_one_target_directory_start_by_level_then_age() {
     let _lock = compile_lock(&target);
     let (first, a) = building(&f, &target, "go");
     let wait = |name: &str, level: Option<Priority>| {
+        // `sleep 0.2` widens each run, so two that overlapped would show in
+        // `order`; nothing waits on it.
         let script = format!("echo {name}-starts >> order; sleep 0.2; echo {name}-ends >> order");
         let mut req = fake_build(&f.root, &target, &script);
         req.priority = level;
@@ -1742,6 +1773,7 @@ fn a_build_that_waited_for_its_target_directory_keeps_its_place_in_the_queue() {
     let target = f.root.join("target");
     let lock = compile_lock(&target);
     let (first, a) = building(&f, &target, "go");
+    // The job polls for the file `go-other` the test writes.
     let other = send(
         &f.socket,
         sh(&f.root, "while [ ! -e go-other ]; do sleep 0.02; done"),
@@ -1774,6 +1806,7 @@ fn a_queued_build_makes_way_for_one_of_its_target_directory_that_is_served_first
     let f = start(2);
     let target = f.root.join("target");
     let _lock = compile_lock(&target);
+    // The job polls for the file `go` the test writes.
     let mut all = sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done");
     all.tokens = Some(2);
     let holder = send(&f.socket, all);
@@ -1783,6 +1816,7 @@ fn a_queued_build_makes_way_for_one_of_its_target_directory_that_is_served_first
         f.server.pool().waiting() == 1
     });
     assert_eq!(reason_of(&f, n), "");
+    // The job polls for the file `go-high` the test writes.
     let mut req = fake_build(
         &f.root,
         &target,
@@ -1913,6 +1947,7 @@ fn a_job_past_the_run_time_limit_is_ended_with_124_and_logged_as_timed_out() {
     assert_eq!(set_run_limit(&f, Some(1), None).run_limit_s, Some(1));
     let marker = f.root.join("pid");
     let t0 = Instant::now();
+    // `sleep 30` runs past the limit of 1 s; the daemon ends it.
     let r = run_bounded(
         &f,
         sh(
@@ -1972,6 +2007,7 @@ fn a_job_past_the_run_time_limit_is_ended_with_124_and_logged_as_timed_out() {
 fn a_job_that_names_a_longer_time_is_not_ended_at_the_daemons_limit() {
     let f = start(1);
     set_run_limit(&f, Some(1), None);
+    // `sleep 2.5` runs past the daemon's limit of 1 s: that is the case tested.
     let mut own = sh(&f.root, "sleep 2.5; echo own");
     own.timeout_s = Some(60);
     let r = run_bounded(&f, own);
@@ -1981,6 +2017,7 @@ fn a_job_that_names_a_longer_time_is_not_ended_at_the_daemons_limit() {
     assert_eq!((job.timed_out, job.limit_s), (false, Some(60)), "{job:?}");
     assert!(job.ended_ms - job.started_ms >= 2000, "{job:?}");
     set_run_limit(&f, Some(30), None);
+    // `sleep 30` runs past the job's own 1 s; the daemon ends it.
     let mut short = sh(&f.root, "sleep 30");
     short.timeout_s = Some(1);
     let r = run_bounded(&f, short);
@@ -2053,6 +2090,7 @@ fn a_wrapped_timeout_does_not_extend_a_job_and_its_client_is_told_once() {
 
     set_run_limit(&f, Some(1), None);
     let t0 = Instant::now();
+    // `sleep 30` runs past the limit of 1 s; the daemon ends it.
     let r = run_bounded(&f, wrapped(sh(&f.root, "sleep 30"), "1800"));
     let ran = t0.elapsed();
     assert_eq!((r.code, told(&r)), (124, 1), "{r:?}");
@@ -2213,7 +2251,10 @@ fn a_limit_set_while_a_job_runs_applies_to_the_jobs_that_start_after_it() {
     let f = start(2);
     let h = holder(&f);
     set_run_limit(&f, Some(1), None);
-    std::thread::sleep(Duration::from_millis(2200));
+    let set = now_ms();
+    // The check is that nothing happens: let the new limit of 1 s pass
+    // twice over, then look.
+    wait_for("2.2 s after the limit was set", || now_ms() > set + 2200);
     let st = f.server.state();
     assert_eq!(st.active.len(), 1, "the job from before runs on");
     assert_eq!(
@@ -2260,6 +2301,7 @@ impl Client {
         Self::start(
             f,
             name,
+            // The children's `sleep 600` keeps them alive; `kill` ends them.
             &format!(
                 "exec 3<>\"$FIFO\"; i=0; \
                  while [ $i -lt {children} ]; do sleep 600 3>&- & i=$((i+1)); done; \
@@ -2273,6 +2315,7 @@ impl Client {
         Self::start(
             f,
             name,
+            // `sleep 600` keeps the client alive; `kill` ends it.
             &format!(
                 "exec 3<>\"$FIFO\"; dd bs=1 count={tokens} <&3 >/dev/null 2>&1; \
                  : > {name}.ready; exec sleep 600"
@@ -2295,6 +2338,7 @@ impl Drop for Client {
 
 /// A job that holds `tokens` slots until its connection closes, once it runs.
 fn holding_job(f: &Fixture, tokens: u32) -> (UnixStream, i64) {
+    // The job polls for the file `go` the test writes.
     let mut req = sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done");
     req.tokens = Some(tokens);
     let (c, id) = submit(f, req);
@@ -2305,6 +2349,7 @@ fn holding_job(f: &Fixture, tokens: u32) -> (UnixStream, i64) {
 /// A job that waits in the queue for one slot.
 fn waiting_job(f: &Fixture) -> (UnixStream, i64) {
     let before = f.server.pool().waiting();
+    // The job polls for the file `go` the test writes.
     let (c, id) = submit(f, sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done"));
     wait_for_jobs(f, "the job to wait for a slot", || {
         f.server.pool().waiting() == before + 1
@@ -2329,6 +2374,7 @@ fn wait_for_watch(f: &Fixture, what: &str, cond: impl Fn() -> bool) {
         if cond() {
             return;
         }
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!(
@@ -2524,6 +2570,7 @@ fn set_cpu_limit(f: &Fixture, mark: Option<f64>, floor: Option<usize>) -> cpu_li
 
 /// Submits a job that uses no CPU and runs until its client goes away.
 fn quiet(f: &Fixture) -> (UnixStream, i64) {
+    // `sleep 60` is the job's run; the test ends it.
     submit(f, sh(&f.root, "sleep 60"))
 }
 
@@ -3537,4 +3584,69 @@ fn a_job_runs_with_the_open_file_limit_of_its_client() {
             "{r:?}"
         );
     }
+}
+
+// wave w1 u3
+
+/// A handover asks each client writer for its unsent bytes after the output
+/// pumps stopped. Frames a pump put into the writer's channel just before
+/// that are unsent too: the bytes the client read plus the bytes handed on
+/// hold every frame once, in order.
+#[test]
+fn a_handover_passes_on_the_frames_still_in_a_writers_channel() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (read, handed_on) = rt.block_on(async {
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let (_rd, wr) = ours.into_split();
+        let (frames, rx) = mpsc::unbounded_channel();
+        let (ctl, ctl_rx) = mpsc::unbounded_channel();
+        let mut unsent = serde_json::to_vec(&Frame::Out {
+            b: "unsent-before\n".into(),
+        })
+        .unwrap();
+        unsent.push(b'\n');
+        for i in 0..100 {
+            frames
+                .send(Frame::Out {
+                    b: format!("line{i}\n"),
+                })
+                .unwrap();
+        }
+        let (reply, answer) = oneshot::channel();
+        ctl.send(reply).unwrap();
+        let writer = tokio::spawn(client_writer(wr, rx, ctl_rx, unsent));
+        let handed_on = tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .expect("the writer answers within 10 s")
+            .expect("the writer answers");
+        writer.abort();
+        let mut read = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match theirs.try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => read.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("read: {e}"),
+            }
+        }
+        (read, handed_on)
+    });
+    let mut out = String::new();
+    for line in [read, handed_on].concat().split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<Frame>(line).unwrap() {
+            Frame::Out { b } => out += &b,
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    let want: String = std::iter::once("unsent-before\n".to_string())
+        .chain((0..100).map(|i| format!("line{i}\n")))
+        .collect();
+    assert_eq!(out, want, "a frame was lost or doubled");
 }
