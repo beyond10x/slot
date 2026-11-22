@@ -3180,3 +3180,39 @@ fn with_passing_off_a_short_job_waits_its_turn() {
     let s = done_job(&f, short_id);
     assert_eq!((s.ahead, s.predicted_ms.is_some()), (false, true), "{s:?}");
 }
+
+// adversary u5
+
+/// Design § 25: once a job has waited `--pass-for`, "from then on it
+/// starts before every job that came after it". The daemon's clock steps
+/// back an hour (an NTP step, a manual `date`) after the 2-slot job became
+/// unpassable: the wait reads as 0 again, the job is passable again, and a
+/// 1-slot job that queues after it starts ahead of it.
+#[test]
+fn adversary_u5_a_job_that_waited_the_bound_stays_unpassable_when_the_clock_steps_back() {
+    static SKEW_MS: AtomicI64 = AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(2, |c| c.clock = clock);
+    let (h, _) = holding_job(&f, 1);
+    let (big, big_id) = queued_job(&f, named(&f, LONG_CMD, "big", "big", Some(2)));
+    wait_for_jobs(&f, "the 2-slot job to collect 1", || {
+        collected(&f, big_id) == 1
+    });
+    SKEW_MS.store(301_000, Ordering::SeqCst);
+    f.server.rerank();
+    SKEW_MS.store(-3_600_000, Ordering::SeqCst);
+    f.server.rerank();
+    let (s2, s2_id) = submit(&f, named(&f, LONG_CMD, "small", "s2", None));
+    let passed = has_slots_within(&f, s2_id, Duration::from_millis(500));
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    assert_eq!(collect(big).code, 0);
+    assert_eq!(collect(s2).code, 0);
+    assert!(
+        !passed,
+        "started ahead of a job that had waited the bound; order {:?}",
+        order(&f)
+    );
+}

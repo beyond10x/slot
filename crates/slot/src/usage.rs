@@ -350,6 +350,7 @@ mod tests {
             predicted_ms: None,
             collected: 0,
             ahead: false,
+            queue_class: None,
         };
         serde_json::to_string(&j).unwrap()
     }

@@ -154,6 +154,15 @@ pub struct Job {
     /// that fits in slots a larger request collected and cannot use yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ahead: bool,
+    /// Where a queued job stands inside its level in the pool's queue: 0
+    /// may no longer be passed (it waited `--pass-for`), 1 predicted short,
+    /// 2 the others. The pool serves by level, then this, then arrival; a
+    /// view lists the queue in that order. Absent once the job runs, while
+    /// it has not been in the pool's queue, and from a daemon that does
+    /// not say: a view then takes `ahead` as 1 and anything else as 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub queue_class: Option<u8>,
 }
 
 // serde hands `skip_serializing_if` a reference.

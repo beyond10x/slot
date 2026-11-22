@@ -201,12 +201,12 @@ pub struct ServeArgs {
     /// default` removes it.
     #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
     pub promote_after: u64,
-    /// A queued job may be passed by later jobs of its level or below only
-    /// until it has waited this long: by a job predicted to run 5 s or less,
-    /// and by a job that fits in the slots a larger request collected and
-    /// cannot use yet. From then on it starts before every job that came
-    /// after it. 0: nobody passes; the queue is served by level, then
-    /// arrival.
+    /// A queued job may be passed by later jobs of its own level only until
+    /// it has waited this long: by a job predicted to run 5 s or less, and by
+    /// a job that fits in the slots a larger request collected and cannot use
+    /// yet. From then on it starts before every job that came after it. A
+    /// job of a lower level never passes it. 0: nobody passes; the queue is
+    /// served by level, then arrival.
     #[arg(long, default_value_t = 300, value_name = "SECONDS")]
     pub pass_for: u64,
     /// For remote clients: GB the target directories of synced workspaces

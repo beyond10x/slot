@@ -14,14 +14,24 @@ export function levelText(j: Job): string {
 }
 
 /**
- * Queued jobs in the order the pool serves them: urgent, high, normal, then low,
- * oldest request first inside a level, id breaks ties.
+ * Where a queued job stands inside its level: the daemon's `queue_class` (0 may no longer be passed,
+ * 1 predicted short, 2 the others). From a daemon that does not send it, 1 for a job moved ahead and 2
+ * for any other, which keeps the order of level, then arrival.
+ */
+export function servedClass(j: Job): number {
+  return j.queue_class ?? (j.ahead ? 1 : 2);
+}
+
+/**
+ * Queued jobs in the order the pool serves them: urgent, high, normal, then low; inside a level by
+ * {@link servedClass}, then oldest request first; id breaks ties.
  */
 export function servedQueue(list: Iterable<Job>): Job[] {
   const q: Job[] = [];
   for (const j of list) if (j.state === 'queued') q.push(j);
   return q.sort(
-    (a, b) => RANK[level(a)] - RANK[level(b)] || times(a).queued - times(b).queued || jobId(a) - jobId(b),
+    (a, b) =>
+      RANK[level(a)] - RANK[level(b)] || servedClass(a) - servedClass(b) || times(a).queued - times(b).queued || jobId(a) - jobId(b),
   );
 }
 

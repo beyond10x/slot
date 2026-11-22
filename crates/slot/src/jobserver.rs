@@ -11,15 +11,16 @@
 //! no longer be passed ([`Place::passable`] false) no request behind it
 //! takes one: a request for many tokens is then not overtaken by a stream of
 //! small ones of its own level or below. While it may still be passed, a
-//! later request that fits in the tokens at hand starts ahead of it, so a
-//! request for the whole pool does not keep freed tokens idle while others
-//! wait; and inside a level a short request ([`Place::short`]) stands ahead
-//! of passable ones that are not short. The daemon makes every request
+//! later request of its own level that fits in the tokens at hand starts
+//! ahead of it, so a request for the whole pool does not keep freed tokens
+//! idle while others of its level wait. Passing never crosses levels. Inside
+//! a level a short request ([`Place::short`]) stands ahead of passable ones
+//! that are not short. The daemon makes every request
 //! unpassable once it has waited its bound (`--pass-for`), and all of them
 //! with a bound of zero, which is the order of level, then arrival. What
 //! is gathered stays with one request, so two requests never each hold part
 //! of what one of them needs. An `urgent` head with no token free borrows
-//! the tokens the headroom holds back.
+//! the tokens the headroom holds back; no other request starts on them.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -202,8 +203,8 @@ pub struct Place {
     /// Predicted to run a few seconds: it stands ahead of the requests of
     /// its level that are passable and not short.
     pub short: bool,
-    /// Later requests may start ahead of it: a short one, or one that fits
-    /// in the tokens at hand while this one cannot start. False once it has
+    /// Later requests of its level may start ahead of it: a short one, or
+    /// one that fits in the tokens at hand while this one cannot start. False once it has
     /// waited the bound: from then on no later request of its level or below
     /// starts before it.
     pub passable: bool,
@@ -233,6 +234,13 @@ impl WaiterHandle {
     pub fn ahead(&self) -> bool {
         self.0.lock().expect("waiter lock").ahead
     }
+
+    /// Where the request stands inside its level: 0 may no longer be
+    /// passed, 1 short, 2 the other passable ones. The queue serves level,
+    /// then this, then arrival.
+    pub fn class(&self) -> u8 {
+        self.0.lock().expect("waiter lock").rank().1
+    }
 }
 
 struct WaiterState {
@@ -247,6 +255,10 @@ struct WaiterState {
     /// Moved ahead of a request that level, then arrival serves first:
     /// it stood or started before it. Kept once set.
     ahead: bool,
+    /// Of `got`, the tokens [`Pool::lend`] gave it out of the held-back
+    /// set. They stay with this request while it is `urgent` and go back to
+    /// the held-back set when it is not: never to another request.
+    lent: usize,
 }
 
 impl WaiterState {
@@ -525,6 +537,7 @@ impl Pool {
             seq,
             place,
             ahead: false,
+            lent: 0,
         }));
         inner.queue.push_back(Arc::clone(&state));
         self.distribute(&mut inner, 0);
@@ -547,11 +560,18 @@ impl Pool {
 
     /// Changes the level and the [`Place`] of a queued request, and serves
     /// the queue in its new order. A request already granted, or one whose
-    /// level and place are unchanged, is left alone.
+    /// level and place are unchanged, is left alone. A request that may no
+    /// longer be passed stays so, whatever `place` says: a clock that steps
+    /// back does not make it passable again.
     pub fn set_place(&self, w: &WaiterHandle, level: Priority, place: Place) {
         let mut inner = self.inner.lock().expect("jobserver lock");
         {
             let mut st = w.0.lock().expect("waiter lock");
+            let place = if st.place.passable {
+                place
+            } else {
+                Place::default()
+            };
             if (st.level == level && st.place == place) || st.granted {
                 return;
             }
@@ -577,15 +597,20 @@ impl Pool {
     }
 
     /// Serves the queue from the tokens at hand: every token the queued
-    /// requests gathered, and `incoming` that the reader just took.
+    /// requests gathered, and `incoming` that the reader just took. Tokens
+    /// lent out of the held-back set are not at hand: they stay with their
+    /// `urgent` request, or go back to the held-back set once it is not
+    /// `urgent`, so no other work runs beyond the limit on them.
     ///
     /// The queue is put in order ([`WaiterState::rank`]) and walked from
     /// the front. A request that the tokens at hand cover is granted. One
     /// they do not cover stops the walk when it may no longer be passed:
     /// nobody behind it takes a token before it. While it may be passed,
-    /// the walk goes on, and a later request that fits in what is at hand
-    /// starts ahead of it. What is left stays booked with one request (the
-    /// one that stopped the walk, else the first not covered), so no two
+    /// the walk goes on through its own level, and a later request of that
+    /// level that fits in what is at hand starts ahead of it; the walk
+    /// stops at the first request of a lower level, so passing never
+    /// crosses levels. What is left stays booked with one request (the one
+    /// that stopped the walk, else the first not covered), so no two
     /// requests each hold part of what one of them needs; with nobody
     /// waiting it goes back to the FIFO.
     fn distribute(&self, inner: &mut Inner, incoming: usize) {
@@ -598,17 +623,40 @@ impl Pool {
             .sort_by_cached_key(|w| w.lock().expect("waiter lock").rank());
         let mut hand = incoming;
         for w in &inner.queue {
-            hand += std::mem::take(&mut w.lock().expect("waiter lock").got);
+            let mut st = w.lock().expect("waiter lock");
+            // Not urgent any more, or asking for fewer since a lower limit:
+            // what it no longer may keep goes back to the held-back set.
+            let keep = if st.level == Priority::Urgent {
+                st.lent.min(st.n)
+            } else {
+                0
+            };
+            inner.held_back += st.lent - keep;
+            st.got = st.got.saturating_sub(st.lent - keep);
+            st.lent = keep;
+            hand += st.got.saturating_sub(st.lent);
+            st.got = st.lent;
+        }
+        if inner.held_back > inner.reserve {
+            let back = inner.held_back - inner.reserve;
+            inner.held_back = inner.reserve;
+            self.write(back);
         }
         let mut keeper: Option<usize> = None;
+        let mut uncovered: Option<Priority> = None;
         let mut granted: Vec<usize> = Vec::new();
         for (i, w) in inner.queue.iter().enumerate() {
             let st = w.lock().expect("waiter lock");
-            if hand >= st.n {
-                hand -= st.n;
+            if uncovered.is_some_and(|l| st.level != l) {
+                break;
+            }
+            let need = st.n.saturating_sub(st.lent);
+            if hand >= need {
+                hand -= need;
                 granted.push(i);
                 continue;
             }
+            uncovered.get_or_insert(st.level);
             if keeper.is_none() || !st.place.passable {
                 keeper = Some(i);
             }
@@ -640,7 +688,7 @@ impl Pool {
             }
         }
         match keeper {
-            Some(k) => inner.queue[k].lock().expect("waiter lock").got = hand,
+            Some(k) => inner.queue[k].lock().expect("waiter lock").got += hand,
             None => self.write(hand),
         }
         let mut i = 0;
@@ -674,6 +722,7 @@ impl Pool {
             }
             let give = inner.held_back.min(st.n.saturating_sub(st.got));
             st.got += give;
+            st.lent += give;
             inner.held_back -= give;
             if st.got < st.n {
                 break;
@@ -1637,5 +1686,88 @@ mod tests {
         let mut ws = [("short", &mut short), ("long", &mut long)];
         assert_eq!(next_ready(&p, &mut ws).await, "long");
         assert_eq!(next_ready(&p, &mut ws).await, "short");
+    }
+
+    // adversary u5
+
+    /// Held-back tokens are lent only to urgent work ("at most `size -
+    /// limit` are in use beyond the limit", `Pool::lend`). An urgent
+    /// request the headroom covers only in part is passable in its first
+    /// `--pass-for`, so the walk in `distribute` hands what it was lent to
+    /// a later normal request that fits: a normal job then runs beyond the
+    /// limit on headroom tokens.
+    #[tokio::test]
+    async fn adversary_u5_tokens_lent_to_an_urgent_request_do_not_start_a_normal_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 5).unwrap();
+        p.set_limit(3);
+        assert!(held_back_reaches(&p, 2).await);
+        let mut a = p.acquire(3);
+        assert!(ready_within(&mut a, 1000).await);
+        assert_eq!(p.free(), 0);
+        let urgent = p.acquire_placed(3, Priority::Urgent, 10, PASS);
+        assert!(reaches(|| urgent.held() == 2).await, "lent the 2 held back");
+        let mut normal = p.acquire_placed(2, Priority::Normal, 11, PASS);
+        let started = ready_within(&mut normal, 200).await;
+        assert!(
+            !started,
+            "a normal request started on held-back tokens: {} slots in use with a limit of 3, \
+             the urgent request holds {}",
+            3 + normal.held(),
+            urgent.held()
+        );
+    }
+
+    /// Story acceptance: "a short request of a lower level does not pass a
+    /// request of a higher level". With 2 slots, one taken, a passable
+    /// `high` request for 2 gathers the free one; a short `normal` request
+    /// for 1 then takes that token and starts ahead of it.
+    #[tokio::test]
+    async fn adversary_u5_a_short_lower_request_does_not_take_what_a_higher_one_gathered() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 2).unwrap();
+        let mut a = p.acquire(1);
+        assert!(ready_within(&mut a, 1000).await);
+        let high = p.acquire_placed(2, Priority::High, 10, PASS);
+        assert!(reaches(|| high.held() == 1).await, "gathers the free token");
+        let mut short = p.acquire_placed(1, Priority::Normal, 11, SHORT);
+        let started = ready_within(&mut short, 200).await;
+        assert!(
+            !started,
+            "a short normal request started ahead of a high one; high holds {}",
+            high.held()
+        );
+    }
+
+    /// Tokens lent to an `urgent` request go back to the held-back set when
+    /// it is lowered to `normal` (here as a request that may no longer be
+    /// passed, so it is served next); no request starts on them, and the
+    /// limit holds.
+    #[tokio::test]
+    async fn lent_tokens_go_back_to_the_held_back_set_when_a_request_is_no_longer_urgent() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 5).unwrap();
+        p.set_limit(3);
+        assert!(held_back_reaches(&p, 2).await);
+        let mut a = p.acquire(3);
+        assert!(ready_within(&mut a, 1000).await);
+        let mut was_urgent = p.acquire_placed(3, Priority::Urgent, 10, PASS);
+        assert!(
+            reaches(|| was_urgent.held() == 2).await,
+            "lent the 2 held back"
+        );
+        p.set_place(&was_urgent.handle(), Priority::Normal, FIXED);
+        assert_eq!((was_urgent.held(), p.held_back()), (0, 2));
+        let mut normal = p.acquire_placed(1, Priority::Normal, 11, PASS);
+        assert!(
+            !ready_within(&mut normal, 200).await,
+            "started beyond the limit"
+        );
+        p.release(a.take_held());
+        assert!(ready_within(&mut was_urgent, 1000).await);
+        assert!(!ready_within(&mut normal, 200).await);
+        p.release(was_urgent.take_held());
+        assert!(ready_within(&mut normal, 1000).await);
+        assert_eq!(p.held_back(), 2);
     }
 }

@@ -1681,6 +1681,7 @@ impl Server {
                 predicted_ms,
                 collected: 0,
                 ahead: false,
+                queue_class: None,
             };
             g.active.insert(
                 id,
@@ -1777,15 +1778,12 @@ impl Server {
             // comes from its predicted run time and its wait.
             let mut waiter = {
                 let mut g = self.inner.lock().expect("server lock");
-                let (level, place) = g.active.get(&id).map_or(
-                    (Priority::Normal, jobserver::Place::default()),
-                    |l| {
-                        (
-                            l.job.priority,
-                            self.place_of(l.job.predicted_ms, l.job.enqueued_ms),
-                        )
-                    },
-                );
+                let (level, place) = g
+                    .active
+                    .get(&id)
+                    .map_or((Priority::Normal, jobserver::Place::default()), |l| {
+                        (l.job.priority, self.place_of(&l.job))
+                    });
                 let w =
                     self.pool
                         .acquire_placed(tokens, level, u64::try_from(id).unwrap_or(0), place);
@@ -1862,6 +1860,7 @@ impl Server {
                         l.cpu_wait = false;
                         l.job.collected = 0;
                         l.job.ahead |= ahead;
+                        l.job.queue_class = None;
                         (n, cpu == cpu_limit::Verdict::Overdue)
                     })
                 }
@@ -2841,14 +2840,19 @@ impl Server {
         priority::level(&table.rules, repo, own, waited, promote_after)
     }
 
-    /// The place inside its level of a queued job predicted to run
-    /// `predicted_ms` that queued at `enqueued_ms`: whether later jobs may
-    /// still pass it (it has waited less than `--pass-for`), and whether it
-    /// is short.
-    fn place_of(&self, predicted_ms: Option<u64>, enqueued_ms: i64) -> jobserver::Place {
+    /// The place inside its level of queued job `job`: whether later jobs
+    /// of its level may still pass it (it has waited less than
+    /// `--pass-for` since `enqueued_ms`), and whether it is short
+    /// (`predicted_ms`). A job the pool already serves as one that may no
+    /// longer be passed (`queue_class` 0) stays so: the wait is read on a
+    /// wall clock, which can step back.
+    fn place_of(&self, job: &Job) -> jobserver::Place {
+        if job.queue_class == Some(0) {
+            return jobserver::Place::default();
+        }
         let now = (self.cfg.clock)();
-        let waited = Duration::from_millis(u64::try_from(now - enqueued_ms).unwrap_or(0));
-        priority::place(predicted_ms, waited, self.cfg.pass_for)
+        let waited = Duration::from_millis(u64::try_from(now - job.enqueued_ms).unwrap_or(0));
+        priority::place(job.predicted_ms, waited, self.cfg.pass_for)
     }
 
     /// The level job `id` is queued at.
@@ -2887,17 +2891,23 @@ impl Server {
                     continue;
                 };
                 if let Some(w) = &l.waiter {
-                    let place = self.place_of(l.job.predicted_ms, enqueued_ms);
+                    let place = self.place_of(&l.job);
                     self.pool.set_place(w, level, place);
                 }
-                let (collected, ahead) = Self::queue_marks(l);
-                if (l.job.priority, l.job.promoted, l.job.collected, l.job.ahead)
-                    != (level, promoted, collected, ahead)
+                let (collected, ahead, class) = Self::queue_marks(l);
+                if (
+                    l.job.priority,
+                    l.job.promoted,
+                    l.job.collected,
+                    l.job.ahead,
+                    l.job.queue_class,
+                ) != (level, promoted, collected, ahead, class)
                 {
                     l.job.priority = level;
                     l.job.promoted = promoted;
                     l.job.collected = collected;
                     l.job.ahead = ahead;
+                    l.job.queue_class = class;
                     changed.push(id);
                 }
             }
@@ -2908,16 +2918,18 @@ impl Server {
         }
     }
 
-    /// The slots a queued job has collected in the pool's queue, and
-    /// whether it was moved ahead there. A job that waits outside the queue
-    /// (for memory, disk or its target directory) collects none.
-    fn queue_marks(l: &Live) -> (u32, bool) {
+    /// The slots a queued job has collected in the pool's queue, whether it
+    /// was moved ahead there, and its class there. A job that waits outside
+    /// the queue (for memory, disk or its target directory) collects none
+    /// and keeps the class it had.
+    fn queue_marks(l: &Live) -> (u32, bool, Option<u8>) {
         match &l.waiter {
             Some(w) => (
                 u32::try_from(w.held()).unwrap_or(u32::MAX),
                 l.job.ahead || w.ahead(),
+                Some(w.class()),
             ),
-            None => (0, l.job.ahead),
+            None => (0, l.job.ahead, l.job.queue_class),
         }
     }
 
@@ -3742,7 +3754,7 @@ impl Server {
                 .map(|l| {
                     let mut j = l.job.clone();
                     if j.state == JobState::Queued {
-                        (j.collected, j.ahead) = Self::queue_marks(l);
+                        (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
                     }
                     j
                 })

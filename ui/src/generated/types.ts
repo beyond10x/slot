@@ -150,7 +150,16 @@ collected?: number,
  * serves first: as a job predicted to run a few seconds, or as one
  * that fits in slots a larger request collected and cannot use yet.
  */
-ahead?: boolean, };
+ahead?: boolean, 
+/**
+ * Where a queued job stands inside its level in the pool's queue: 0
+ * may no longer be passed (it waited `--pass-for`), 1 predicted short,
+ * 2 the others. The pool serves by level, then this, then arrival; a
+ * view lists the queue in that order. Absent once the job runs, while
+ * it has not been in the pool's queue, and from a daemon that does
+ * not say: a view then takes `ahead` as 1 and anything else as 2.
+ */
+queue_class?: number, };
 
 export type Unit = { 
 /**

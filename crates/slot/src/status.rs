@@ -574,15 +574,23 @@ fn evict_line(r: &crate::evict::Report) -> Option<String> {
     ))
 }
 
+/// Where a queued job stands inside its level: the pool's `queue_class`;
+/// from a daemon that does not send it, 1 for a job moved ahead and 2 for
+/// any other, which keeps the order of level, then arrival.
+fn served_class(j: &Job) -> u8 {
+    j.queue_class.unwrap_or(if j.ahead { 1 } else { 2 })
+}
+
 /// The pool line, then one line per queued or running job, queued first,
-/// in the order they get slots: by level, then by arrival.
+/// in the order they get slots: by level, then the job's place in its
+/// level, then arrival.
 pub fn render(s: &State) -> String {
     let mut queued: Vec<&Job> = s
         .active
         .iter()
         .filter(|j| j.state == JobState::Queued)
         .collect();
-    queued.sort_by_key(|j| (j.priority, j.id));
+    queued.sort_by_key(|j| (j.priority, served_class(j), j.id));
     let running: Vec<&Job> = s
         .active
         .iter()
@@ -682,6 +690,7 @@ mod tests {
             predicted_ms: None,
             collected: 0,
             ahead: false,
+            queue_class: None,
         }
     }
 
@@ -1425,13 +1434,13 @@ mod tests {
             "{out}"
         );
         assert!(
-            lines[1].starts_with("#30036 queued")
-                && lines[1].ends_with("cargo test  normal, holds 11 of 17"),
+            lines[2].starts_with("#30036 queued")
+                && lines[2].ends_with("cargo test  normal, holds 11 of 17"),
             "{out}"
         );
         assert!(
-            lines[2].starts_with("#30040 queued")
-                && lines[2].ends_with("cargo test  normal, moved ahead"),
+            lines[1].starts_with("#30040 queued")
+                && lines[1].ends_with("cargo test  normal, moved ahead"),
             "{out}"
         );
         let mut none = s.clone();
@@ -1440,5 +1449,56 @@ mod tests {
             render(&none).lines().next(),
             Some("17 of 20 slots (15% headroom), 0 free, 1 running, 0 queued")
         );
+    }
+
+    // adversary u5
+
+    /// `render` lists queued jobs "in the order they get slots". A short
+    /// job moved ahead of an earlier job of its level gets the next slot
+    /// first, so it is listed first; it is listed second, under the job it
+    /// passes.
+    #[test]
+    fn adversary_u5_a_job_moved_ahead_is_listed_before_the_job_it_passes() {
+        let long = job(4, JobState::Queued, 1);
+        let mut short = job(9, JobState::Queued, 1);
+        short.ahead = true;
+        short.predicted_ms = Some(800);
+        let s = State {
+            tokens: 1,
+            limit: 1,
+            active: vec![job(2, JobState::Running, 1), long, short],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out.lines().skip(1).collect();
+        assert!(lines[0].starts_with("#9 "), "{out}");
+    }
+
+    /// The class the daemon sends wins over `ahead`: a job that waited the
+    /// bound (class 0) is listed before a short one that passed it earlier.
+    #[test]
+    fn a_job_that_waited_the_bound_is_listed_before_a_short_one() {
+        let mut fixed = job(4, JobState::Queued, 1);
+        fixed.queue_class = Some(0);
+        let mut short = job(9, JobState::Queued, 1);
+        short.ahead = true;
+        short.queue_class = Some(1);
+        let mut plain = job(6, JobState::Queued, 1);
+        plain.queue_class = Some(2);
+        let s = State {
+            tokens: 1,
+            limit: 1,
+            active: vec![plain, short, fixed],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let ids: Vec<&str> = out
+            .lines()
+            .skip(1)
+            .map(|l| l.split_whitespace().next().unwrap_or(""))
+            .collect();
+        assert_eq!(ids, ["#4", "#9", "#6"], "{out}");
     }
 }
