@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Jobs show their Git repository and linked worktree name. Directories outside
+  Git show **No repository**. Historical jobs keep their recorded names marked
+  **Unverified**, or show **Repository unknown** when the name is empty.
+
+- Daemon handovers preserve recent chart samples and job output when the sending daemon supports it.
+
+- The CPU and queue chart uses the saved ten-second census for up to six hours of history after a reload.
+
 - The Claude Code hook refuses a build or test command behind shell syntax that hid it before:
   behind `if`, `then`, `elif`, `else`, `while`, `until`, `do`, `!` or `{`
   (`for p in a b; do task check; done`), behind `timeout -k 5`, `-s KILL` or `--signal KILL`

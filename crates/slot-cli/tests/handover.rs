@@ -4,7 +4,8 @@
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -21,11 +22,16 @@ struct Daemon {
 
 impl Daemon {
     fn start(tokens: usize, env: &[(&str, &str)]) -> Self {
+        Self::start_with_http(tokens, env, "off")
+    }
+
+    fn start_with_http(tokens: usize, env: &[(&str, &str)], addr: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("daemon.log")).unwrap();
         let mut cmd = Command::new(SLOT);
-        cmd.args(["serve", "--http", "off", "--cpu-quota", "false"])
+        cmd.args(["serve", "--http", addr, "--cpu-quota", "false"])
             .args(["--tokens", &tokens.to_string()])
+            .args(["--cpu-weight", "0", "--evict-below", "0"])
             .args(["--call-headroom", "0", "--sccache-watch", "false"])
             .args(["--min-free-disk", "0", "--min-free-memory", "0"])
             .arg("--socket")
@@ -204,6 +210,145 @@ fn wait_all(clients: Vec<(String, Child)>, within: Duration) -> Vec<(String, i32
         ));
     }
     out
+}
+
+fn http_get(addr: SocketAddr, path: &str) -> Option<BufReader<TcpStream>> {
+    let timeout = Duration::from_millis(500);
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).ok()?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    if !line.starts_with("HTTP/1.1 200 ") {
+        return None;
+    }
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if line == "\r\n" {
+            return Some(reader);
+        }
+    }
+}
+
+fn dashboard_ticks(addr: SocketAddr) -> Option<Vec<serde_json::Value>> {
+    serde_json::from_reader(http_get(addr, "/api/history")?).ok()
+}
+
+fn dashboard_output_contains(addr: SocketAddr, id: i64, marker: &str) -> bool {
+    http_get(addr, &format!("/api/jobs/{id}/output")).is_some_and(|reader| {
+        reader
+            .lines()
+            .map_while(Result::ok)
+            .any(|l| l.contains(marker))
+    })
+}
+
+#[test]
+fn chart_history_reads_persisted_cpu_and_queue_windows() {
+    let bind = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = bind.local_addr().unwrap();
+    drop(bind);
+    let d = Daemon::start_with_http(2, &[], &addr.to_string());
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let first = serde_json::json!({"t":now-60_000,"host_cores":12.25,"waiting":4.2,"n":10});
+    let second = serde_json::json!({"t":now-20_000,"host_cores":9.75,"waiting":1.5,"n":10});
+    {
+        let mut log = std::fs::File::create(d.state().join("census.jsonl")).unwrap();
+        let too_old =
+            serde_json::json!({"t":now-6*3_600_000-60_000,"host_cores":4.0,"waiting":1.0,"n":10});
+        writeln!(log, "{too_old}\n{second}").unwrap();
+        // An invalid line wider than the initial tail forces another read;
+        // the complete in-range row before it must still be found.
+        log.write_all(&vec![b'x'; 1 << 20]).unwrap();
+        writeln!(log, "\n{{\"t\":{now},\"event\":\"tokens_restored\"}}").unwrap();
+        writeln!(log, "{first}").unwrap();
+        let unfinished = serde_json::json!({"t":now,"host_cores":8.0,"waiting":2.0,"n":10});
+        write!(log, "{unfinished}").unwrap();
+    }
+    d.wait_until("chart history API", Duration::from_secs(2), |_| {
+        http_get(addr, "/api/chart-history").is_some()
+    });
+    let samples: serde_json::Value =
+        serde_json::from_reader(http_get(addr, "/api/chart-history").unwrap()).unwrap();
+    assert_eq!(samples, serde_json::json!([first, second]));
+}
+
+#[test]
+fn reload_keeps_dashboard_history_and_output() {
+    let bind = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = bind.local_addr().unwrap();
+    drop(bind);
+    let d = Daemon::start_with_http(2, &[], &addr.to_string());
+    let completed = d.client("echo finished-before-reload");
+    let done = wait_all(vec![("finished".into(), completed)], Duration::from_secs(5));
+    assert_eq!(done[0].1, 0);
+    let finished_id = d.logged("echo finished-before-reload")[0].0;
+    let running = d.client(
+        "echo running-before-reload; echo stderr-before-reload >&2; \
+         i=0; while [ ! -e release ] && [ $i -lt 250 ]; do sleep 0.1; i=$((i+1)); done; \
+         test -e release && echo running-after-reload",
+    );
+    let running_id = finished_id + 1;
+    d.wait_until("original dashboard output", Duration::from_secs(6), |_| {
+        dashboard_ticks(addr).is_some_and(|ticks| !ticks.is_empty())
+            && dashboard_output_contains(addr, running_id, "running-before-reload")
+            && dashboard_output_contains(addr, running_id, "stderr-before-reload")
+    });
+    let before = dashboard_ticks(addr).unwrap();
+    assert_eq!(
+        before.first().and_then(|t| t["type"].as_str()),
+        Some("tick")
+    );
+
+    d.reload();
+    d.wait_until("running job handed over", Duration::from_secs(6), |d| {
+        d.log().contains("took over 1 running")
+            && dashboard_ticks(addr).is_some_and(|after| after.starts_with(&before))
+    });
+    assert!(dashboard_output_contains(
+        addr,
+        finished_id,
+        "finished-before-reload"
+    ));
+    assert!(dashboard_output_contains(
+        addr,
+        running_id,
+        "running-before-reload"
+    ));
+    assert!(dashboard_output_contains(
+        addr,
+        running_id,
+        "stderr-before-reload"
+    ));
+
+    std::fs::write(d.dir.path().join("release"), []).unwrap();
+    let done = wait_all(vec![("running".into(), running)], Duration::from_secs(6));
+    assert_eq!(done[0].1, 0);
+    assert!(dashboard_output_contains(
+        addr,
+        running_id,
+        "running-before-reload"
+    ));
+    assert!(dashboard_output_contains(
+        addr,
+        running_id,
+        "running-after-reload"
+    ));
 }
 
 #[test]

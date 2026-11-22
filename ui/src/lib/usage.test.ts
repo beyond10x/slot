@@ -7,6 +7,7 @@ const row = (key: string, slot_share: number, extra: Partial<UsageRow> = {}): Us
   key,
   title: '',
   jobs: 10,
+  unverified_repo_jobs: 0,
   slot_s: slot_share * 36000,
   cpu_s: slot_share * 18000,
   wait_s: 100,
@@ -60,4 +61,24 @@ test('a session row is labelled by its title, else by the start of its id', () =
 
 test('an empty window has no rows', () => {
   assert.deepEqual(usageRows(usage([]), 5), []);
+});
+
+test('repository and project rows qualify historic keys without changing the aggregation key', () => {
+  const u = usage([
+    row('bench', 0.5, { unverified_repo_jobs: 10 }),
+    row('parser', 0.25, { unverified_repo_jobs: 3 }),
+    row('', 0.2, { unverified_repo_jobs: 0 }),
+  ]);
+  for (const by of ['repo', 'project'] as const) {
+    const rows = usageRows({ ...u, by }, 5);
+    assert.deepEqual(rows.map((r) => r.key), ['bench', 'parser', '']);
+    assert.deepEqual(rows.map((r) => r.label), ['Unverified · bench', '3 of 10 unverified · parser', by === 'repo' ? 'No repository' : '(none)']);
+  }
+  assert.equal(usageRows({ ...u, by: 'session' }, 5)[0].label, 'bench');
+});
+
+test('an older daemon cannot verify repository or project keys', () => {
+  const u = usage([row('old-path', 1, { unverified_repo_jobs: undefined }), row('', 0, { unverified_repo_jobs: undefined })]);
+  assert.deepEqual(usageRows({ ...u, by: 'repo' }, 5).map((r) => r.label), ['Unverified · old-path', 'Repository unknown']);
+  assert.equal(usageRows(u, 5)[0].label, 'Unverified · old-path');
 });

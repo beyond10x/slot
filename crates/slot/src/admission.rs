@@ -50,7 +50,8 @@ fn p90(v: &VecDeque<u64>) -> u64 {
 impl History {
     /// Adds a finished job; jobs that never ran or have no sample are skipped.
     pub fn record(&mut self, j: &Job) {
-        if j.started_ms > 0
+        if !j.repo.is_empty()
+            && j.started_ms > 0
             && j.ended_ms >= j.started_ms
             && matches!(
                 j.state,
@@ -69,13 +70,15 @@ impl History {
         if j.peak_rss == 0 || j.started_ms == 0 {
             return;
         }
-        let c = self
-            .by_command
-            .entry((j.repo.clone(), j.argv.clone()))
-            .or_default();
-        c.push_back(j.peak_rss);
-        if c.len() > KEEP_PER_COMMAND {
-            c.pop_front();
+        if !j.repo.is_empty() {
+            let c = self
+                .by_command
+                .entry((j.repo.clone(), j.argv.clone()))
+                .or_default();
+            c.push_back(j.peak_rss);
+            if c.len() > KEEP_PER_COMMAND {
+                c.pop_front();
+            }
         }
         let t = self.by_toolchain.entry(j.toolchain.clone()).or_default();
         t.push_back(j.peak_rss);
@@ -85,7 +88,8 @@ impl History {
     }
 
     /// Expected run time of a command, ms: the 90th percentile of its last
-    /// 20 runs that ended on their own, with at least 3; `None` otherwise.
+    /// 20 runs in this repository that ended on their own, with at least 3.
+    /// A command without a repository has no runtime estimate.
     pub fn expected_runtime(&self, repo: &str, argv: &[String]) -> Option<u64> {
         self.runtime
             .get(&(repo.to_string(), argv.to_vec()))
@@ -203,6 +207,7 @@ mod tests {
             argv: cmd.split(' ').map(String::from).collect(),
             cwd: "/w".into(),
             repo: repo.into(),
+            checkout: None,
             project: String::new(),
             session: String::new(),
             client: String::new(),
@@ -275,6 +280,21 @@ mod tests {
             10 * GB,
             "no sample, not kept"
         );
+    }
+
+    #[test]
+    fn jobs_without_a_repository_share_only_toolchain_history() {
+        let mut h = History::default();
+        let j = job("", "cargo test", "rust", 5 * GB);
+        for _ in 0..3 {
+            h.record(&j);
+        }
+        assert_eq!(h.expected_runtime("", &j.argv), None);
+        assert_eq!(h.expected("", &j.argv, "rust"), DEFAULT_EXPECTED);
+        for _ in 0..2 {
+            h.record(&j);
+        }
+        assert_eq!(h.expected("", &j.argv, "rust"), 5 * GB);
     }
 
     #[test]

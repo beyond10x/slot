@@ -1,5 +1,5 @@
 // Usage of the pool per project, repository or session (`GET api/usage`).
-import type { By, Usage } from '../generated/types.ts';
+import type { By, Usage, UsageRow } from '../generated/types.ts';
 
 export type UsageWindow = 'today' | '24h' | '7d';
 
@@ -30,12 +30,23 @@ export function usageUrl(w: UsageWindow, by: By, now: Date): string {
 
 const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
 
+function groupLabel(r: UsageRow, by: By): string {
+  if (by === 'session') return r.title || r.key.slice(0, 8) || '(none)';
+  const name = r.key || (by === 'repo' ? 'No repository' : '(none)');
+  const unverified = r.unverified_repo_jobs;
+  if (unverified === 0) return name;
+  if (unverified === undefined || unverified === r.jobs) {
+    return !r.key && by === 'repo' ? 'Repository unknown' : `Unverified · ${name}`;
+  }
+  return `${unverified} of ${r.jobs} unverified · ${name}`;
+}
+
 export function usageRows(u: Usage, top: number): UsageLine[] {
   const rows = u.rows.slice(0, top);
   const max = rows.reduce((m, r) => Math.max(m, r.slot_share), 0);
   return rows.map((r) => ({
     key: r.key,
-    label: r.title || (u.by === 'session' ? r.key.slice(0, 8) : r.key) || '(none)',
+    label: groupLabel(r, u.by),
     width: max > 0 ? (r.slot_share / max) * 100 : 0,
     share: pct(r.slot_share),
     cpuShare: pct(r.cpu_share),

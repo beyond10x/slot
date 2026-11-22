@@ -273,6 +273,7 @@ mod tests {
             argv: vec![],
             cwd: String::new(),
             repo: String::new(),
+            checkout: None,
             project: String::new(),
             session: String::new(),
             client: String::new(),

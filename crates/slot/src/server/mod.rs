@@ -462,8 +462,19 @@ impl Server {
             .ok()
             .and_then(|h| h.into_string().ok())
             .unwrap_or_default();
-        if let Some(h) = &inherited {
+        let mut history = VecDeque::new();
+        if let Some(h) = &mut inherited {
             next_id = next_id.max(h.state.next_id);
+            history = std::mem::take(&mut h.state.history);
+            history.drain(..history.len().saturating_sub(HISTORY_TICKS));
+            for d in done.iter_mut().rev().take(DONE_OUTPUT_KEEP) {
+                if let Some(tail) = h.state.done_output.remove(&d.job.id) {
+                    let ring = Arc::new(Ring::from_tail(OUTPUT_KEEP, tail));
+                    ring.close();
+                    d.out = Some(ring);
+                }
+            }
+            h.state.done_output.clear();
         }
         let cores = procstat::host_cpus() as u32;
         let pool_size = cfg.tokens;
@@ -501,7 +512,7 @@ impl Server {
                 machine_shown: machine::Shown::default(),
             }),
             events,
-            history: Mutex::new(VecDeque::new()),
+            history: Mutex::new(history),
             host,
             cores,
             headroom: Mutex::new(Headroom {
@@ -849,6 +860,7 @@ impl Server {
             queued,
             pumps,
             next_id,
+            done_output,
         } = taken;
         let ends = tokio::task::spawn_blocking(move || {
             pumps
@@ -863,7 +875,8 @@ impl Server {
         .await
         .map_err(|e| Abort::Fatal(anyhow!("join output pumps: {e}")))?;
         let mut keep: Vec<OwnedFd> = Vec::new();
-        for ((r, _), ends) in running.iter_mut().zip(ends) {
+        for ((r, _, ring), ends) in running.iter_mut().zip(ends) {
+            r.output = ring.snapshot();
             for (t, fd) in ends {
                 let n = fd.as_ref().map(handover::raw);
                 if t == "out" {
@@ -890,6 +903,10 @@ impl Server {
             fifo: handover::raw(self.pool.file()),
             pool: self.pool.state(),
             next_id,
+            done_output: done_output
+                .into_iter()
+                .map(|(id, ring)| (id, ring.snapshot()))
+                .collect(),
             ..handover::State::default()
         };
         let mut index: HashMap<u64, usize> = HashMap::new();
@@ -909,10 +926,10 @@ impl Server {
             });
             keep.push(fd);
         }
-        for (r, conn) in &mut running {
+        for (r, conn, _) in &mut running {
             r.conn = conn.and_then(|c| index.get(&c).copied());
         }
-        state.running = running.into_iter().map(|(r, _)| r).collect();
+        state.running = running.into_iter().map(|(r, _, _)| r).collect();
         state.queued = queued
             .into_iter()
             .map(|(mut q, conn)| {
@@ -928,6 +945,8 @@ impl Server {
         }
         handover::ignore_hup().map_err(fatal)?;
         state.reload = handover::take_hup();
+        let mut history = self.history.lock().expect("history lock");
+        state.history = std::mem::take(&mut *history);
         let path = handover::write(&self.cfg.state_dir, &state).map_err(fatal)?;
         eprintln!(
             "slot: handing {} running and {} queued job(s) and {} connection(s) to {} after {} ms",
@@ -942,6 +961,7 @@ impl Server {
             .args(&args)
             .env(handover::ENV, &path)
             .exec();
+        drop(history);
         Err(Abort::Fatal(anyhow!("re-exec {}: {err}", exe.display())))
     }
 
@@ -951,6 +971,13 @@ impl Server {
     fn take_table(&self, g: &mut Inner) -> Table {
         let mut t = Table {
             next_id: g.next_id,
+            done_output: g
+                .done
+                .iter()
+                .rev()
+                .take(DONE_OUTPUT_KEEP)
+                .filter_map(|d| Some((d.job.id, Arc::clone(d.out.as_ref()?))))
+                .collect(),
             ..Table::default()
         };
         for (id, l) in &mut g.active {
@@ -964,10 +991,12 @@ impl Server {
                         stdout: None,
                         stderr: None,
                         rewrite: l.rewrite.clone(),
+                        output: Vec::new(),
                         exited: l.exited,
                         conn: None,
                     },
                     l.conn,
+                    Arc::clone(&l.out),
                 ));
             } else {
                 if let Some(w) = l.waiter.take() {
@@ -1065,7 +1094,7 @@ impl Server {
             let (g, rx) = watch::channel(false);
             (tx, rx, None, Some(g))
         };
-        let ring = Arc::new(Ring::new(OUTPUT_KEEP));
+        let ring = Arc::new(Ring::from_tail(OUTPUT_KEEP, r.output));
         let pumps = self.start_pumps([out, err], &tx, &ring, &r.rewrite);
         {
             let mut g = self.inner.lock().expect("server lock");
@@ -1421,6 +1450,7 @@ impl Server {
                 argv: shown.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 repo: req.repo.clone(),
+                checkout: req.checkout.clone(),
                 project: project.clone(),
                 session: req.session.clone(),
                 client: req.client.clone(),
@@ -2585,8 +2615,12 @@ impl Server {
             };
             let (seen, busy_repos, busy_dirs) = {
                 let g = self.inner.lock().expect("server lock");
-                let repos: HashSet<String> =
-                    g.active.values().map(|l| l.job.repo.clone()).collect();
+                let repos: HashSet<String> = g
+                    .active
+                    .values()
+                    .filter(|l| !l.job.repo.is_empty())
+                    .map(|l| l.job.repo.clone())
+                    .collect();
                 let dirs: HashSet<PathBuf> = g
                     .active
                     .values()
@@ -2659,10 +2693,10 @@ impl Server {
     async fn evict_one(&self, c: &crate::evict::Candidate) -> String {
         {
             let g = self.inner.lock().expect("server lock");
-            let busy = g
-                .active
-                .values()
-                .any(|l| l.job.repo == c.repo || Path::new(&l.job.target_dir) == c.path.as_path());
+            let busy = g.active.values().any(|l| {
+                (!c.repo.is_empty() && l.job.repo == c.repo)
+                    || Path::new(&l.job.target_dir) == c.path.as_path()
+            });
             if busy {
                 return "kept: a job started".into();
             }
@@ -3052,10 +3086,11 @@ enum Abort {
 /// The job table a handover takes, with each job's connection id.
 #[derive(Default)]
 struct Table {
-    running: Vec<(handover::Running, Option<u64>)>,
+    running: Vec<(handover::Running, Option<u64>, Arc<Ring>)>,
     queued: Vec<(handover::Queued, Option<u64>)>,
     pumps: Vec<Vec<std::thread::JoinHandle<PumpEnd>>>,
     next_id: i64,
+    done_output: Vec<(i64, Arc<Ring>)>,
 }
 
 /// How a job ends: what is logged and what the client is told.
