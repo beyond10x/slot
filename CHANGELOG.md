@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.22.0 — 2026-11-22
 
 - A run-time limit for jobs: `slot run-limit <duration>` makes the daemon end a job that has run
   longer (`10m`, `90s`, `1h` or plain seconds; `off` for no limit, which stays the default). The
