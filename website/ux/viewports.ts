@@ -27,3 +27,14 @@ export const DESKTOP_MIN_WIDTH = 997;
 export const vpName = (v: Viewport): string => `${v.width}x${v.height}`;
 
 export const viewportsInRun = (): Viewport[] => (process.env.UX_ALL ? VIEWPORTS : VIEWPORTS.filter((v) => v.gating));
+
+/**
+ * The sizes each page load of a gate test measures, in order. The gating sizes share one load: the
+ * ratchet size first, so its layout shift is that of the load, then the window is resized (both are
+ * desktop layouts). A size only a round measures has a load of its own.
+ */
+export const pageLoads = (all = Boolean(process.env.UX_ALL)): Viewport[][] => {
+  const first = (v: Viewport): number => (vpName(v) === RATCHET_VIEWPORT ? 0 : 1);
+  const gating = VIEWPORTS.filter((v) => v.gating).sort((a, b) => first(a) - first(b));
+  return [gating, ...(all ? VIEWPORTS.filter((v) => !v.gating).map((v) => [v]) : [])];
+};

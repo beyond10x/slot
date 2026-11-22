@@ -1,6 +1,7 @@
 import { defineConfig } from '@playwright/test';
+import { gatePort } from '../ui/ux/port.ts';
 
-const PORT = 4318;
+const PORT = gatePort();
 /** The built site to measure; a round measures the site before its changes from another directory. */
 const BUILD = process.env.UX_BUILD ?? 'build';
 
@@ -16,7 +17,7 @@ export default defineConfig({
     launchOptions: process.env.UX_CHROME ? { executablePath: process.env.UX_CHROME } : {},
   },
   webServer: {
-    command: `npx docusaurus serve --dir ${BUILD} --host 127.0.0.1 --port ${PORT} --no-open`,
+    command: `node --disable-warning=ExperimentalWarning ../ui/ux/serve.ts ${BUILD} ${PORT} --base /slot/ --docs`,
     url: `http://127.0.0.1:${PORT}/slot/`,
     reuseExistingServer: false,
   },
