@@ -2,7 +2,9 @@
 //!
 //! cargo, rustc and make read and write the FIFO directly. The daemon takes
 //! tokens for jobs through one reader thread, for one request at a time: the
-//! head of the queue, which is ordered by [`Priority`], then by arrival. The
+//! head of the queue, which is ordered by [`Priority`], then by arrival (a
+//! request that left the queue and comes back keeps its arrival number:
+//! [`Pool::acquire_arrived`]). The
 //! head gathers tokens until it has all it asked for; no request behind it
 //! takes one meanwhile, so a request for many tokens is not overtaken by a
 //! stream of small ones of its own level or below. Only the head ever holds
@@ -363,11 +365,25 @@ impl Pool {
     /// `level`: behind every request of its level or a higher one, ahead of
     /// every request of a lower one.
     pub fn acquire_at(&self, n: usize, level: Priority) -> Waiter {
+        self.queue(n, level, None)
+    }
+
+    /// Queues a request for `n` tokens (capped at the limit) at queue level
+    /// `level` with the arrival number `arrival`: inside its level it stands
+    /// ahead of every request with a higher number, also one queued before
+    /// it. A job passes its id, so one that waited outside the queue (for
+    /// memory, for its target directory, through an upgrade) comes back to
+    /// the place its age gives it, not to the end.
+    pub fn acquire_arrived(&self, n: usize, level: Priority, arrival: u64) -> Waiter {
+        self.queue(n, level, Some(arrival))
+    }
+
+    fn queue(&self, n: usize, level: Priority, arrival: Option<u64>) -> Waiter {
         let n = n.clamp(1, self.limit());
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().expect("jobserver lock");
-        let seq = inner.next_seq;
-        inner.next_seq += 1;
+        let seq = arrival.unwrap_or(inner.next_seq);
+        inner.next_seq = inner.next_seq.max(seq + 1);
         let state = Arc::new(Mutex::new(WaiterState {
             n,
             got: 0,
@@ -380,7 +396,7 @@ impl Pool {
         let at = inner
             .queue
             .iter()
-            .position(|w| w.lock().expect("waiter lock").level > level)
+            .position(|w| w.lock().expect("waiter lock").rank() > (level, seq))
             .unwrap_or(inner.queue.len());
         inner.queue.insert(at, Arc::clone(&state));
         self.regather(&mut inner);
@@ -896,6 +912,35 @@ mod tests {
             order.push(next_ready(&p, &mut ws).await);
         }
         assert_eq!(order, ["h1", "h2", "n1", "n2", "l1"]);
+    }
+
+    /// A request that comes back with its arrival number stands where its
+    /// age puts it: ahead of later arrivals of its level that queued while
+    /// it was away, behind every higher level.
+    #[tokio::test]
+    async fn a_returning_request_keeps_the_place_of_its_arrival() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 1).unwrap();
+        let mut a = p.acquire(1);
+        assert!(ready_within(&mut a, 1000).await);
+        a.take_held();
+        let mut n7 = p.acquire_arrived(1, Priority::Normal, 7);
+        let mut n9 = p.acquire_arrived(1, Priority::Normal, 9);
+        let mut h8 = p.acquire_arrived(1, Priority::High, 8);
+        let mut n3 = p.acquire_arrived(1, Priority::Normal, 3);
+        let mut later = p.acquire_at(1, Priority::Normal);
+        let mut ws = [
+            ("n7", &mut n7),
+            ("n9", &mut n9),
+            ("h8", &mut h8),
+            ("n3", &mut n3),
+            ("later", &mut later),
+        ];
+        let mut order = Vec::new();
+        for _ in 0..5 {
+            order.push(next_ready(&p, &mut ws).await);
+        }
+        assert_eq!(order, ["h8", "n3", "n7", "n9", "later"]);
     }
 
     #[tokio::test]

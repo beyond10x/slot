@@ -110,6 +110,12 @@ pub struct Config {
     /// The clock a queued job's wait is measured by for that, ms since the
     /// epoch: [`now_ms`] outside tests.
     pub clock: fn() -> i64,
+    /// How often a job that waits for its target directory looks at it
+    /// again: [`TARGET_POLL`] outside tests.
+    pub target_poll: Duration,
+    /// How long after its start a job counts as about to take cargo's lock
+    /// on its target directory: [`TARGET_SETTLE`] outside tests.
+    pub target_settle: Duration,
     /// Bytes the target directories of synced workspaces may take together
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
@@ -127,6 +133,15 @@ pub const JOB_SLICE: &str = "slot.slice";
 
 /// How often a job that waits for disk or memory looks again.
 const RESOURCE_POLL: Duration = Duration::from_secs(2);
+
+/// How often a job that waits for its cargo target directory looks at the
+/// directory's lock again, at the gate and in the queue for slots.
+pub const TARGET_POLL: Duration = Duration::from_secs(1);
+
+/// A cargo job that started this recently counts as about to compile: cargo
+/// reads its configuration and resolves the workspace before it takes the
+/// lock on the build directory, so the lock is not held yet.
+pub const TARGET_SETTLE: Duration = Duration::from_secs(3);
 
 /// Jobs that started this recently count as still growing towards their
 /// expected peak memory.
@@ -217,6 +232,66 @@ struct Live {
     exited: Option<handover::Exited>,
     /// The client connection.
     conn: Option<u64>,
+    /// Queued and at the gate of its cargo target directory
+    /// ([`Server::target_ready`]): from its first look until it stands in
+    /// the queue for slots.
+    target_wait: bool,
+}
+
+/// What stands between a queued cargo job and its target directory: the
+/// other jobs that compile into the same one.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TargetUse {
+    /// The target directory.
+    dir: PathBuf,
+    /// A job that holds slots and has no process yet, or started less than
+    /// the settle time ago: about to take cargo's lock.
+    starting: Option<i64>,
+    /// A job that has run for longer: it holds the lock while it compiles.
+    running: Option<i64>,
+    /// A queued job that is served first (higher level, else older) and
+    /// waits for the directory too or stands in the queue for slots.
+    ahead: Option<i64>,
+}
+
+/// Whether `l` is a local cargo job that compiles, and the target directory
+/// it compiles into.
+fn build_dir(l: &Live) -> Option<&str> {
+    (!l.job.target_dir.is_empty() && crate::cargo_lock::compiles(&l.job.argv))
+        .then_some(l.job.target_dir.as_str())
+}
+
+/// The jobs in `active` that compile into the target directory of job `id`;
+/// `None` when `id` is not a local cargo job that compiles. Of several jobs
+/// of one kind it names the one with the lowest id (`ahead`: the one served
+/// first).
+fn target_use(active: &BTreeMap<i64, Live>, id: i64, now: i64, settle: i64) -> Option<TargetUse> {
+    let me = active.get(&id)?;
+    let dir = build_dir(me)?;
+    let mut u = TargetUse {
+        dir: PathBuf::from(dir),
+        ..TargetUse::default()
+    };
+    let mut ahead = (me.job.priority, id);
+    for (other, l) in active {
+        if *other == id || build_dir(l) != Some(dir) {
+            continue;
+        }
+        if l.pid.is_some() {
+            let slot = if now - l.job.started_ms < settle {
+                &mut u.starting
+            } else {
+                &mut u.running
+            };
+            slot.get_or_insert(*other);
+        } else if l.held > 0 {
+            u.starting.get_or_insert(*other);
+        } else if (l.target_wait || l.waiter.is_some()) && (l.job.priority, *other) < ahead {
+            ahead = (l.job.priority, *other);
+            u.ahead = Some(*other);
+        }
+    }
+    Some(u)
 }
 
 /// A pump thread's end: its stream, and the pipe when it stopped for a
@@ -1127,6 +1202,7 @@ impl Server {
                     rewrite: r.rewrite,
                     exited: r.exited,
                     conn: conn.map(|a| a.id),
+                    target_wait: false,
                 },
             );
         }
@@ -1507,6 +1583,7 @@ impl Server {
                     rewrite: (from.clone(), to.clone()),
                     exited: None,
                     conn,
+                    target_wait: false,
                 },
             );
             id
@@ -1553,6 +1630,10 @@ impl Server {
         {
             return self.finish(id, &tx, cancelled).ok();
         }
+        // Whether the job compiles into a cargo target directory, which
+        // another job may be compiling into.
+        let shares_target = target_dir.is_some() && crate::cargo_lock::compiles(&shown);
+        let mut told_target = false;
         let held = loop {
             if !self.admission_open(gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
@@ -1560,41 +1641,82 @@ impl Server {
             if !self.resources_ready(id, &disks, &tx, gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
             }
+            if shares_target
+                && !self
+                    .target_ready(id, &tx, gone.clone(), &mut told_target)
+                    .await
+            {
+                return self.finish(id, &tx, cancelled).ok();
+            }
             // Queued under the server lock, so a re-rank sees the waiter.
+            // The job's id is its arrival: after a wait outside the queue
+            // it stands where its age puts it.
             let mut waiter = {
                 let mut g = self.inner.lock().expect("server lock");
                 let level = g
                     .active
                     .get(&id)
                     .map_or(Priority::Normal, |l| l.job.priority);
-                let w = self.pool.acquire_at(tokens, level);
+                let w = self
+                    .pool
+                    .acquire_arrived(tokens, level, u64::try_from(id).unwrap_or(0));
                 if let Some(l) = g.active.get_mut(&id) {
                     l.waiter = Some(w.handle());
+                    l.target_wait = false;
                 }
                 w
             };
-            tokio::select! {
-                () = waiter.ready() => {}
-                () = client_gone(gone.clone()) => {
-                    if self.pool.cancel(&waiter) {
-                        self.pool.release(waiter.take_held());
+            // While it waits for slots it keeps looking at its target
+            // directory: once another job compiles there, or one that is
+            // served before it queues for the directory, it leaves the
+            // queue, so it gathers no slot it could not use.
+            let in_use = loop {
+                tokio::select! {
+                    () = waiter.ready() => break false,
+                    () = client_gone(gone.clone()) => {
+                        if self.pool.cancel(&waiter) {
+                            self.pool.release(waiter.take_held());
+                        }
+                        return self.finish(id, &tx, cancelled).ok();
                     }
-                    return self.finish(id, &tx, cancelled).ok();
+                    () = tokio::time::sleep(self.cfg.target_poll), if shares_target => {
+                        if self.target_wait(id, false).is_some() {
+                            break true;
+                        }
+                    }
                 }
+            };
+            if in_use {
+                if self.pool.cancel(&waiter) {
+                    self.pool.release(waiter.take_held());
+                }
+                self.left_queue(id);
+                continue;
             }
             // Memory may have gone while the job waited for slots: give
-            // them back and wait for memory first.
-            if self.short_of(id, &disks).is_some() {
+            // them back and wait for memory first. The same for its target
+            // directory.
+            if self.short_of(id, &disks).is_some() || self.target_wait(id, false).is_some() {
                 self.pool.release(waiter.take_held());
+                self.left_queue(id);
                 continue;
             }
             // Claim the slots under the server lock: an upgrade requested
             // meanwhile (hold or handover) sends them back and the job waits
             // with the others; a handover sees the claim and waits for the
-            // process.
+            // process. Under the same lock a job sees the claim of another
+            // job of its target directory, and one served before it that
+            // has its slots and no claim yet: of two that got slots at the
+            // same moment the first in the queue starts and the other waits.
             let claimed = {
                 let mut g = self.inner.lock().expect("server lock");
-                if *self.upgrading.borrow() || g.handing_over {
+                let settle = self.cfg.target_settle.as_millis() as i64;
+                let taken = target_use(&g.active, id, now_ms(), settle)
+                    .is_some_and(|u| u.starting.is_some() || u.ahead.is_some());
+                if *self.upgrading.borrow() || g.handing_over || taken {
+                    if let Some(l) = g.active.get_mut(&id) {
+                        l.waiter = None;
+                    }
                     None
                 } else {
                     let n = waiter.take_held();
@@ -1971,6 +2093,88 @@ impl Server {
             }
             tokio::select! {
                 () = tokio::time::sleep(RESOURCE_POLL) => {}
+                () = client_gone(gone.clone()) => return false,
+            }
+        }
+    }
+
+    /// Why job `id` may not start now as far as its cargo target directory
+    /// goes: another job of the pool compiles into it, so cargo would only
+    /// block on the build directory's lock and the job would hold its slots
+    /// idle. That is a job about to compile ([`TargetUse::starting`]) or a
+    /// running one while the lock is held ([`crate::cargo_lock::held`]):
+    /// cargo gives the lock back before it runs tests, and from then on the
+    /// directory is free. A queued job of the same directory that is served
+    /// before it goes first too ([`TargetUse::ahead`]), so the builds of one
+    /// directory start by level, then age, and only the first of them
+    /// stands in the queue for slots. `at_gate` marks the job as at the
+    /// gate. `None` for a job that is not a local cargo build, or with
+    /// nothing in its way.
+    fn target_wait(&self, id: i64, at_gate: bool) -> Option<String> {
+        let settle = self.cfg.target_settle.as_millis() as i64;
+        let u = {
+            let mut g = self.inner.lock().expect("server lock");
+            if at_gate && let Some(l) = g.active.get_mut(&id) {
+                l.target_wait = true;
+            }
+            target_use(&g.active, id, now_ms(), settle)?
+        };
+        // The lock is read outside the server lock: it is file I/O.
+        let user = u
+            .starting
+            .or_else(|| u.running.filter(|_| crate::cargo_lock::held(&u.dir)));
+        if let Some(job) = user {
+            return Some(format!("target directory in use by job {job}"));
+        }
+        u.ahead
+            .map(|job| format!("target directory goes to job {job} first"))
+    }
+
+    /// Job `id` left the queue for slots without starting.
+    fn left_queue(&self, id: i64) {
+        let mut g = self.inner.lock().expect("server lock");
+        if let Some(l) = g.active.get_mut(&id) {
+            l.waiter = None;
+        }
+    }
+
+    /// Waits until no other job compiles into the cargo target directory of
+    /// job `id` ([`Server::target_wait`]), outside the queue for slots, so
+    /// the jobs behind it start meanwhile. Tells the client once why it
+    /// waits (`told`); false when the client went away first.
+    async fn target_ready(
+        &self,
+        id: i64,
+        tx: &mpsc::UnboundedSender<Frame>,
+        gone: watch::Receiver<bool>,
+        told: &mut bool,
+    ) -> bool {
+        loop {
+            let wait = self.target_wait(id, true);
+            let reason = wait.clone().unwrap_or_default();
+            let changed = {
+                let mut g = self.inner.lock().expect("server lock");
+                g.active.get_mut(&id).is_some_and(|l| {
+                    let c = l.job.wait_reason != reason;
+                    l.job.wait_reason.clone_from(&reason);
+                    c
+                })
+            };
+            if changed {
+                self.publish(id);
+            }
+            let Some(text) = wait else {
+                return true;
+            };
+            if !*told {
+                let _ = tx.send(Frame::Info {
+                    msg: format!("slot: job {id} waiting: {text}"),
+                });
+                eprintln!("slot: job {id} waiting: {text}");
+                *told = true;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(self.cfg.target_poll) => {}
                 () = client_gone(gone.clone()) => return false,
             }
         }

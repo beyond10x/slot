@@ -296,9 +296,13 @@ Open, one line each, with where the design lives. A session starts with (e).
 - (r) `cpu_s` of a cancelled job is read too low: of 22 cancelled jobs that ran over 5 minutes, 14
   show under 0.05 CPUs per second of run time (2026-11-22; 4 of 207 among jobs not cancelled). A
   cancelled run that computed looks like one that waited.
-- (s) Two running cargo jobs on one target directory: the second holds its slot while cargo waits
-  for the build-directory lock (2 of 17 slots at one reading on 2026-11-22). Admission should
-  keep it queued until the first stops compiling.
+- (s) Two tests of the daemon wait fixed times and failed once each in repeated runs on a
+  workstation at load 59: `memory_short_holds_a_job_only_while_another_runs` (expects a process
+  300 ms after the submit) and `client_disconnect_kills_job_and_returns_token` (expects the slot
+  back 300 ms after the process is gone), both in `crates/slot/src/server/tests.rs`. They should
+  wait on the condition. A build that waits for its target directory holds back only cargo jobs:
+  a script job (`task check`) records no target directory, so its inner cargo still blocks on
+  the lock of a running build.
 - (t) The web view has no dark theme.
 
 ## Never

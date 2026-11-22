@@ -97,7 +97,8 @@ pub struct Job {
     /// Highest sampled resident memory, bytes.
     #[ts(type = "number")]
     pub peak_rss: u64,
-    /// Why a queued job waits besides slots (disk space, memory); empty otherwise.
+    /// Why a queued job waits besides slots (disk space, memory, a build in
+    /// its target directory); empty otherwise.
     #[serde(default)]
     pub wait_reason: String,
     /// Cargo target directory a local Rust job builds into; empty otherwise.

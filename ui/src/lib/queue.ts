@@ -25,15 +25,24 @@ export function servedQueue(list: Iterable<Job>): Job[] {
   );
 }
 
+/** How the daemon starts the reason of a cargo build that waits for another job of its target directory. */
+const TARGET = 'target directory ';
+
 /** What a queued job waits for: a slot, or what the daemon's admission names in `wait_reason`. */
-export function waitsFor(j: Job): 'disk space' | 'memory' | 'slots' {
+export function waitsFor(j: Job): 'disk space' | 'memory' | 'a target directory' | 'slots' {
   if (!j.wait_reason) return 'slots';
+  if (j.wait_reason.startsWith(TARGET)) return 'a target directory';
   return j.wait_reason.includes('filesystem') ? 'disk space' : 'memory';
 }
 
-/** The daemon's reason as a line of text: "waits for disk space: free space … is below 25 GB"; empty for a job that waits for a slot. */
+/**
+ * The daemon's reason as a line of text: "waits for disk space: free space … is below 25 GB",
+ * "waits for its target directory: in use by job 12"; empty for a job that waits for a slot.
+ */
 export function waitReasonText(j: Job): string {
-  return j.wait_reason ? `waits for ${waitsFor(j)}: ${j.wait_reason}` : '';
+  if (!j.wait_reason) return '';
+  if (j.wait_reason.startsWith(TARGET)) return `waits for its target directory: ${j.wait_reason.slice(TARGET.length)}`;
+  return `waits for ${waitsFor(j)}: ${j.wait_reason}`;
 }
 
 /** A queued job's place in the order the pool serves, 1 first, and the queue's length; null when it is not queued. */
@@ -44,10 +53,10 @@ export function queuePlace(queue: readonly Job[], id: number): { pos: number; of
 
 /**
  * The Queue's heading. It names what the listed jobs wait for, slots last, so it says
- * "waiting for slots" only when no listed job waits for disk space or memory.
+ * "waiting for slots" only when no listed job waits for disk space, memory or a target directory.
  */
 export function queueHeading(queue: readonly Job[]): string {
-  const kinds = (['disk space', 'memory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
+  const kinds = (['disk space', 'memory', 'a target directory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
   const what = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : (kinds[0] ?? 'slots');
   return `Queue: waiting for ${what}, by level, oldest first`;
 }

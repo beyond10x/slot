@@ -7,6 +7,7 @@
 
 pub mod admission;
 pub mod call;
+pub mod cargo_lock;
 pub mod census;
 pub mod cli;
 pub mod client;

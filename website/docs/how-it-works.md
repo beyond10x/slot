@@ -183,6 +183,12 @@ slot: job 12 waiting: 18.0 GB free on the filesystem of /srv/build/repo, builds 
 `memory`. The check runs again every 2 seconds, and once more after the slots are granted: a job
 that finds memory gone by then gives its slots back and waits again.
 
+A cargo build (`cargo build`, `check`, `clippy`, `test` and the like) also waits, without a
+slot, while another job of the pool compiles in the same target directory: cargo would only
+print `Blocking waiting for file lock on build directory` there. Its reason reads
+`target directory in use by job 12`; it goes on when that job has compiled (cargo runs tests
+without the lock) or ended, and the jobs behind it in the queue start meanwhile.
+
 ## Freeing disk space
 
 The daemon also frees disk. Every minute it looks at the filesystems of the Cargo target

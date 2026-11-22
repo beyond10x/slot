@@ -568,6 +568,44 @@ The check repeats every 2 s and once more after the slots are granted: a job tha
 gone gives its slots back and waits again. The client gets one `slot: job N waiting: …` line per
 kind of reason; the job carries `wait_reason` for `slot status` and the UI.
 
+### 14.1 Admission by target directory
+
+Need: two cargo builds into one target directory do not run side by side. The second prints
+"Blocking waiting for file lock on build directory" and sleeps until the first has compiled. With
+a slot it holds that slot idle while other jobs wait.
+
+A local cargo job that compiles (`cargo_lock::compiles`: `build`, `check`, `clippy`, `test`,
+`nextest` and the like, not `fmt` or `metadata`) passes a third gate after disk and memory,
+`Server::target_ready`, before it queues for slots. It waits there while another such job with
+the same `target_dir`
+
+- holds slots and has no process yet, or started less than 3 s ago (`TARGET_SETTLE`): cargo
+  takes the lock only after it has read its configuration and resolved the workspace;
+- runs, and the lock of a profile directory of the target directory is held
+  (`cargo_lock::held`);
+- is queued, is served before it (level, then id) and waits at the gate or in the queue for
+  slots. So the builds of one directory start in queue order, and only the first of them
+  stands in the queue.
+
+The signal for "is compiling" is cargo's own lock, not the job's processes. `cargo_lock::held`
+opens `.cargo-build-lock` and `.cargo-lock` (older cargo) in `<target>/<profile>` and
+`<target>/<triple>/<profile>` and asks for a shared `flock` without waiting
+(`File::try_lock_shared`, no `unsafe`), which fails exactly while a process holds the file
+exclusively; what it gets it gives back at once. The process sample (`LiveJob.units`, 1 Hz) was
+not used: it has gaps while cargo holds the lock with no compiler running (fingerprints, waiting
+for a jobserver token), it counts a test that starts a compiler, and it does not see a build in
+a sandbox (`slot gate`), whose processes are not in the job's tree. The profile directory a
+queued command will use is not known from its command line, so a held lock in any of them
+counts.
+
+The gate looks again every second (`TARGET_POLL`). A job in the queue for slots looks too and
+leaves the queue when its directory is taken, so it gathers no slot it cannot use; at the claim
+of its slots, under the server lock, it sees the claim of another job of the directory. A job
+enters the queue with its id as arrival number (`Pool::acquire_arrived`), so after any wait
+outside the queue it stands where its age puts it. Nothing is persisted: the state is derived
+from the job table and the lock. A lock held by a process outside the pool, or by a script job
+(no `target_dir`), holds nobody back; such a build starts and blocks in cargo as before.
+
 ## 15. Upgrading while jobs run
 
 ### 15.1 Bounded hold (0.5.1)

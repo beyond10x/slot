@@ -89,7 +89,8 @@ compile_server_cpu_s: number,
  */
 peak_rss: number, 
 /**
- * Why a queued job waits besides slots (disk space, memory); empty otherwise.
+ * Why a queued job waits besides slots (disk space, memory, a build in
+ * its target directory); empty otherwise.
  */
 wait_reason: string, 
 /**

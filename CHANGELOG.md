@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- A cargo build no longer takes a slot while another job of the pool compiles in its target
+  directory, where cargo would only print "Blocking waiting for file lock on build directory"
+  and hold the slot idle. It stays queued with the reason `target directory in use by job N`
+  (`slot status`, the web view, one line from the client) and the jobs behind it start. It
+  goes on when that job has compiled or ended; several builds of one directory start by
+  level, then age. A job that waited outside the queue for slots (for its target directory,
+  for memory or disk) comes back to the place its age gives it, not to the end.
+
 ## 0.20.0 — 2026-11-22
 
 - Web view: one row of three line charts stands directly under the header (cores used on the
