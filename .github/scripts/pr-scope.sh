@@ -4,6 +4,7 @@
 #   none  only planning or prose files: everything under .engineering/, and *.md
 #         outside website/ and ui/ (ui/ux/findings/*.md are read by the UI tests)
 #   docs  those and files under website/: the docs checks, not the code's build and tests
+#         (website/docs/getting-started.md is code: cargo test reads its install snippet)
 #   code  anything else, or no paths at all: every check
 #
 # This case block is the one path list of the repository.
@@ -18,6 +19,7 @@ set -eu
 kind() {
   case $1 in
     .engineering/*) echo none ;;
+    website/docs/getting-started.md) echo code ;;
     website/*) echo docs ;;
     ui/*) echo code ;;
     *.md) echo none ;;

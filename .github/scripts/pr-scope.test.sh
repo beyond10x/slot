@@ -44,13 +44,17 @@ expect code 'a UX finding under ui/, read by the UI tests' \
 expect code 'a path that only starts like the planning directory' \
   .engineering-notes/a.rs
 expect docs 'only website/' \
-  website/docs/getting-started.md website/src/css/custom.css
+  website/docs/how-it-works.md website/src/css/custom.css
+expect code 'the getting-started page, read by cargo test' \
+  website/docs/getting-started.md
 expect docs 'website/ and planning files' \
   website/docs/toolchains.md .engineering/planning/story/a.md README.md
 expect code 'website/ plus one source file' \
   website/docs/toolchains.md crates/slot-cli/src/main.rs
 expect code 'no paths at all' \
   ''
+expect code 'one source file listed before a website/ file' \
+  crates/slot-cli/src/main.rs website/docs/toolchains.md
 
 # Events other than a pull request always build.
 cases=$((cases + 1))
