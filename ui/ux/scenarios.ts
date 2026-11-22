@@ -273,12 +273,13 @@ function callMode(): Scenario {
   const waiting = [
     { ...queued(134, -60), wait_reason: 'free space on the build filesystem is below 25 GB' },
     { ...queued(135, -20), wait_reason: 'available memory is below what the job needs' },
+    { ...queued(136, -10), wait_reason: 'target directory in use by job 131' },
   ];
   const finished = Array.from({ length: 6 }, (_, i) => done(120 + i, -300 + i * 30));
   const st = state([...running, ...waiting], finished, 20, 40, apps);
   return {
     name: 'call-mode', anchor: false,
-    card: 'A call holds the headroom at 40 %; two builds wait for disk space and memory, not for slots. Read what the first one waits for.',
+    card: 'A call holds the headroom at 40 %; three builds wait for disk space, memory and a target directory, not for slots. Read what the first one waits for.',
     state: st, history: history(running, 20, 12, 40, 2, apps),
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 12, 40, 2, 1, apps)] }],
     output: {}, task: { kind: 'see', expect: 'free space on the build filesystem is below 25 GB' },

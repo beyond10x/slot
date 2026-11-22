@@ -373,7 +373,7 @@ const CARGO_BUILD: &[&str] = &[
 ];
 
 /// cargo's subcommand: the first word that is not a global flag or its value.
-fn cargo_sub(args: &[String]) -> Option<&str> {
+pub(crate) fn cargo_sub(args: &[String]) -> Option<&str> {
     let mut skip = false;
     for a in args {
         if skip {

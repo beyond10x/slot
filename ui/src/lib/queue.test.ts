@@ -18,6 +18,14 @@ test('a queued job has a place in the served order, and its reason reads as a li
     waitReasonText(job({ wait_reason: 'available memory is below what the job needs' })),
     'waits for memory: available memory is below what the job needs',
   );
+  assert.equal(
+    waitReasonText(job({ wait_reason: 'target directory in use by job 12' })),
+    'waits for its target directory: in use by job 12',
+  );
+  assert.equal(
+    waitReasonText(job({ wait_reason: 'target directory goes to job 12 first' })),
+    'waits for its target directory: goes to job 12 first',
+  );
 });
 
 function job(over: Partial<Job>): Job {
@@ -147,4 +155,7 @@ test('the queue heading names what the listed jobs wait for, slots last', () => 
   assert.equal(queueHeading([memory, disk]), 'Queue: waiting for disk space and memory, by level, oldest first');
   assert.equal(queueHeading([job({ id: 3 }), disk]), 'Queue: waiting for disk space and slots, by level, oldest first');
   assert.equal(queueHeading([job({ id: 3 }), memory, disk]), 'Queue: waiting for disk space, memory and slots, by level, oldest first');
+  const target = job({ id: 4, wait_reason: 'target directory in use by job 12' });
+  assert.equal(queueHeading([target]), 'Queue: waiting for a target directory, by level, oldest first');
+  assert.equal(queueHeading([job({ id: 3 }), target, memory]), 'Queue: waiting for memory, a target directory and slots, by level, oldest first');
 });

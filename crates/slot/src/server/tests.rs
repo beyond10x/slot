@@ -69,6 +69,8 @@ fn config(root: &Path, tokens: usize) -> Config {
         upgrade_hold: Duration::from_secs(60),
         promote_after: Duration::from_secs(1800),
         clock: now_ms,
+        target_poll: Duration::from_millis(40),
+        target_settle: Duration::from_millis(250),
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -448,6 +450,8 @@ fn history_survives_restart() {
         upgrade_hold: Duration::from_secs(60),
         promote_after: Duration::from_secs(1800),
         clock: now_ms,
+        target_poll: Duration::from_millis(40),
+        target_settle: Duration::from_millis(250),
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -1117,4 +1121,386 @@ fn a_rust_job_with_the_usual_setup_and_a_job_of_another_toolchain_get_no_warning
         !line.contains("cache_env") && !line.contains("warnings"),
         "{line}"
     );
+}
+
+/// A cargo command that compiles, as far as its name says (`cargo-test`, a
+/// link to the shell, runs `script`), with `target` as its target directory.
+fn fake_build(dir: &Path, target: &Path, script: &str) -> Request {
+    let cargo = dir.join("cargo-test");
+    if !cargo.exists() {
+        std::os::unix::fs::symlink("/bin/sh", &cargo).unwrap();
+    }
+    Request {
+        argv: vec![
+            cargo.to_string_lossy().into_owned(),
+            "-c".into(),
+            script.into(),
+        ],
+        cwd: dir.to_string_lossy().into_owned(),
+        env: vec![
+            "PATH=/usr/bin:/bin".into(),
+            format!("CARGO_TARGET_DIR={}", target.display()),
+        ],
+        ..Request::default()
+    }
+}
+
+/// A build into `target` that runs until the file `go` exists.
+fn building(f: &Fixture, target: &Path, go: &str) -> (UnixStream, i64) {
+    let script = format!("while [ ! -e {go} ]; do sleep 0.02; done");
+    let (c, id) = submit(f, fake_build(&f.root, target, &script));
+    wait_for("the build to run", || state_of(f, id) == JobState::Running);
+    (c, id)
+}
+
+/// Holds cargo's lock on the profile directory `debug` of `target`, as a
+/// cargo that compiles there does, until the file is dropped.
+fn compile_lock(target: &Path) -> std::fs::File {
+    let dir = target.join("debug");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = std::fs::File::create(dir.join(".cargo-build-lock")).unwrap();
+    f.lock().unwrap();
+    f
+}
+
+/// Sends `req` and returns its connection and the id of its job.
+fn submit(f: &Fixture, req: Request) -> (UnixStream, i64) {
+    let next = || f.server.inner.lock().unwrap().next_id;
+    let before = next();
+    let c = send(&f.socket, req);
+    wait_for("the job to be listed", || next() > before);
+    (c, before + 1)
+}
+
+fn active_job(f: &Fixture, id: i64) -> Option<Job> {
+    f.server.state().active.into_iter().find(|j| j.id == id)
+}
+
+fn state_of(f: &Fixture, id: i64) -> JobState {
+    active_job(f, id).map_or(JobState::Queued, |j| j.state)
+}
+
+fn reason_of(f: &Fixture, id: i64) -> String {
+    active_job(f, id).map_or_else(String::new, |j| j.wait_reason)
+}
+
+fn done_job(f: &Fixture, id: i64) -> Job {
+    let st = f.server.state();
+    st.done.into_iter().find(|j| j.id == id).expect("not done")
+}
+
+fn in_use_by(id: i64) -> String {
+    format!("target directory in use by job {id}")
+}
+
+/// Polls `cond` for up to 5 s like [`wait_for`]; a timeout names every
+/// active job with its state and reason, and the pool's free slots and
+/// queue.
+fn wait_for_jobs(f: &Fixture, what: &str, cond: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let jobs: Vec<String> = {
+        let g = f.server.inner.lock().unwrap();
+        g.active
+            .values()
+            .map(|l| {
+                format!(
+                    "{} {:?} {:?} pid={:?} held={} queued={} gate={}",
+                    l.job.id,
+                    l.job.state,
+                    l.job.wait_reason,
+                    l.pid,
+                    l.held,
+                    l.waiter.is_some(),
+                    l.target_wait
+                )
+            })
+            .collect()
+    };
+    panic!(
+        "timed out waiting for {what}: {jobs:#?}, {} slot(s) free, {} in the queue",
+        f.server.pool().free(),
+        f.server.pool().waiting()
+    );
+}
+
+/// The lines of the file `order`, which jobs append their names to.
+fn order(f: &Fixture) -> Vec<String> {
+    std::fs::read_to_string(f.root.join("order"))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// While a job compiles in a target directory, a second cargo build of the
+/// same directory stays queued outside the queue for slots, holds none and
+/// names the job it waits for. It starts when the lock is given back, while
+/// the first job runs on (cargo runs tests without the lock).
+#[test]
+fn a_cargo_build_waits_while_another_job_compiles_in_its_target_directory() {
+    let f = start(2);
+    let target = f.root.join("target");
+    let lock = compile_lock(&target);
+    let (first, a) = building(&f, &target, "go");
+    let (second, b) = submit(&f, fake_build(&f.root, &target, "echo built"));
+    let info = read_info_until(&second, "waiting:");
+    assert_eq!(info, format!("slot: job {b} waiting: {}", in_use_by(a)));
+    // Past the settle time of the first job only the lock holds it back.
+    std::thread::sleep(Duration::from_millis(400));
+    let queued = active_job(&f, b).unwrap();
+    assert_eq!(
+        (queued.state, queued.wait_reason, queued.started_ms),
+        (JobState::Queued, in_use_by(a), 0)
+    );
+    assert_eq!(f.server.pool().free(), 1, "the waiting job holds no slot");
+    assert_eq!(f.server.pool().waiting(), 0, "nor a place in the queue");
+    {
+        let table = f.server.inner.lock().unwrap();
+        let live = &table.active[&b];
+        assert!(live.held == 0 && live.waiter.is_none() && live.target_wait);
+    }
+    let shown = crate::status::render(&f.server.state());
+    assert!(
+        shown.contains(&format!("waiting: {}", in_use_by(a))),
+        "{shown}"
+    );
+    drop(lock);
+    let built = collect(second);
+    assert_eq!(
+        (built.code, built.out.as_str(), built.started),
+        (0, "built\n", true)
+    );
+    assert_eq!(state_of(&f, a), JobState::Running, "the first job runs on");
+    assert_eq!(done_job(&f, b).wait_reason, "");
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(first).code, 0);
+}
+
+/// A build that waits for its target directory is not in the queue for
+/// slots: the jobs behind it start, and one that asked for the whole pool
+/// gathers no slot meanwhile. It starts when the other job has ended.
+#[test]
+fn jobs_behind_a_build_that_waits_for_its_target_directory_start() {
+    let f = start(2);
+    let target = f.root.join("target");
+    let _lock = compile_lock(&target);
+    let (first, a) = building(&f, &target, "go");
+    let mut whole_pool = fake_build(&f.root, &target, "echo built");
+    whole_pool.tokens = Some(2);
+    let (second, b) = submit(&f, whole_pool);
+    wait_for("the build to wait for its directory", || {
+        reason_of(&f, b) == in_use_by(a)
+    });
+    for _ in 0..3 {
+        let r = run(&f, sh(&f.root, "echo behind"));
+        assert_eq!((r.code, r.out.as_str()), (0, "behind\n"));
+        assert_eq!(r.info, "", "it found a free slot and nobody ahead");
+    }
+    assert_eq!(
+        (state_of(&f, b), reason_of(&f, b)),
+        (JobState::Queued, in_use_by(a))
+    );
+    assert_eq!(f.server.pool().free(), 1, "no slot gathered");
+    assert_eq!(f.server.pool().waiting(), 0);
+    // The first job ends. No job of the pool compiles in the directory any
+    // more, so the build starts as it did before, whoever holds the lock.
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(first).code, 0);
+    let r = collect(second);
+    assert_eq!((r.code, r.out.as_str()), (0, "built\n"));
+    assert_eq!(done_job(&f, b).tokens, 2);
+}
+
+/// Several builds that wait for one target directory start by level, then
+/// age, one at a time: each next one waits for the one before it.
+#[test]
+fn builds_that_wait_for_one_target_directory_start_by_level_then_age() {
+    let f = start(4);
+    let target = f.root.join("target");
+    let _lock = compile_lock(&target);
+    let (first, a) = building(&f, &target, "go");
+    let wait = |name: &str, level: Option<Priority>| {
+        let script = format!("echo {name}-starts >> order; sleep 0.2; echo {name}-ends >> order");
+        let mut req = fake_build(&f.root, &target, &script);
+        req.priority = level;
+        let (c, id) = submit(&f, req);
+        wait_for("the build to wait for its directory", || {
+            reason_of(&f, id) == in_use_by(a)
+        });
+        c
+    };
+    let waiting = [
+        wait("n1", None),
+        wait("n2", None),
+        wait("low", Some(Priority::Low)),
+        wait("high", Some(Priority::High)),
+    ];
+    assert_eq!(f.server.pool().free(), 3);
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(first).code, 0);
+    for c in waiting {
+        assert_eq!(collect(c).code, 0);
+    }
+    let want: Vec<String> = ["high", "n1", "n2", "low"]
+        .iter()
+        .flat_map(|n| [format!("{n}-starts"), format!("{n}-ends")])
+        .collect();
+    assert_eq!(order(&f), want, "three slots were free the whole time");
+}
+
+/// A build that waited for its target directory comes to the queue for
+/// slots at the place its age gives it: ahead of a job that queued while it
+/// waited.
+#[test]
+fn a_build_that_waited_for_its_target_directory_keeps_its_place_in_the_queue() {
+    let f = start(2);
+    let target = f.root.join("target");
+    let lock = compile_lock(&target);
+    let (first, a) = building(&f, &target, "go");
+    let other = send(
+        &f.socket,
+        sh(&f.root, "while [ ! -e go-other ]; do sleep 0.02; done"),
+    );
+    wait_for("both slots to be taken", || f.server.pool().free() == 0);
+    let (second, b) = submit(&f, fake_build(&f.root, &target, "echo build >> order"));
+    wait_for("the build to wait for its directory", || {
+        reason_of(&f, b) == in_use_by(a)
+    });
+    let later = queue(&f, "later", "repo-a", None);
+    drop(lock);
+    wait_for("the build to queue for a slot", || {
+        f.server.pool().waiting() == 2
+    });
+    assert_eq!(reason_of(&f, b), "");
+    std::fs::write(f.root.join("go-other"), "").unwrap();
+    assert_eq!(collect(other).code, 0);
+    assert_eq!(collect(second).code, 0);
+    assert_eq!(collect(later).code, 0);
+    assert_eq!(order(&f), ["build", "later"]);
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(first).code, 0);
+}
+
+/// A build in the queue for slots makes way when a build of its target
+/// directory queues that is served first: it leaves the queue, the other
+/// starts first, and it waits for that one to compile.
+#[test]
+fn a_queued_build_makes_way_for_one_of_its_target_directory_that_is_served_first() {
+    let f = start(2);
+    let target = f.root.join("target");
+    let _lock = compile_lock(&target);
+    let mut all = sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done");
+    all.tokens = Some(2);
+    let holder = send(&f.socket, all);
+    wait_for("both slots to be taken", || f.server.pool().free() == 0);
+    let (normal, n) = submit(&f, fake_build(&f.root, &target, "echo normal >> order"));
+    wait_for("the first build to queue for a slot", || {
+        f.server.pool().waiting() == 1
+    });
+    assert_eq!(reason_of(&f, n), "");
+    let mut req = fake_build(
+        &f.root,
+        &target,
+        "echo high >> order; while [ ! -e go-high ]; do sleep 0.02; done",
+    );
+    req.priority = Some(Priority::High);
+    let (high, h) = submit(&f, req);
+    let goes_first = format!("target directory goes to job {h} first");
+    wait_for("the first build to make way", || {
+        reason_of(&f, n) == goes_first
+    });
+    wait_for("only the second build to stand in the queue", || {
+        f.server.pool().waiting() == 1
+    });
+    assert_eq!(reason_of(&f, h), "");
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(holder).code, 0);
+    wait_for_jobs(&f, "the first build to wait for the second", || {
+        reason_of(&f, n) == in_use_by(h)
+    });
+    wait_for("the second build to run", || {
+        state_of(&f, h) == JobState::Running
+    });
+    assert_eq!(reason_of(&f, n), in_use_by(h));
+    assert_eq!(
+        f.server.pool().free(),
+        1,
+        "the build that waits holds no slot"
+    );
+    std::fs::write(f.root.join("go-high"), "").unwrap();
+    assert_eq!(collect(high).code, 0);
+    let r = collect(normal);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.info
+            .contains(&format!("slot: job {n} waiting: {goes_first}")),
+        "{}",
+        r.info
+    );
+    assert_eq!(order(&f), ["high", "normal"]);
+    let (high, normal) = (done_job(&f, h), done_job(&f, n));
+    assert!(
+        normal.started_ms >= high.ended_ms,
+        "the lock was held throughout, so one ran after the other: {normal:?} {high:?}"
+    );
+}
+
+/// Only cargo builds of the same target directory wait: a script, a build
+/// into another directory (also one whose lock a process outside the pool
+/// holds), a cargo command that does not compile and a build on a synced
+/// workspace start beside the job that compiles.
+#[test]
+fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
+    let f = start(2);
+    let target = f.root.join("target");
+    let _lock = compile_lock(&target);
+    let (first, a) = building(&f, &target, "go");
+    let elsewhere = f.root.join("elsewhere/target");
+    let _outside = compile_lock(&elsewhere);
+    let mut no_build = fake_cargo(&f.root, "echo ran", &[]);
+    no_build
+        .env
+        .push(format!("CARGO_TARGET_DIR={}", target.display()));
+    std::fs::create_dir_all(f.root.join("ws/w1")).unwrap();
+    let synced = Request {
+        cwd: String::new(),
+        env: Vec::new(),
+        workspace: Some(Workspace {
+            id: "w1".into(),
+            rel_cwd: ".".into(),
+            client_root: "/c".into(),
+        }),
+        ..fake_build(&f.root, &target, "echo ran")
+    };
+    for (what, req) in [
+        ("a script", sh(&f.root, "echo ran")),
+        (
+            "a build into another target directory",
+            fake_build(&f.root, &elsewhere, "echo ran"),
+        ),
+        ("a cargo command that does not compile", no_build),
+        ("a build on a synced workspace", synced),
+    ] {
+        let r = run(&f, req);
+        assert_eq!((r.code, r.out.as_str()), (0, "ran\n"), "{what}: {r:?}");
+        assert!(!r.info.contains("target directory"), "{what}: {}", r.info);
+    }
+    assert_eq!(state_of(&f, a), JobState::Running);
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let dirs: Vec<String> = log
+        .lines()
+        .map(|l| serde_json::from_str::<Job>(l).unwrap().target_dir)
+        .collect();
+    let (here, there) = (
+        target.display().to_string(),
+        elsewhere.display().to_string(),
+    );
+    assert_eq!(dirs, ["", there.as_str(), here.as_str(), ""]);
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(first).code, 0);
 }

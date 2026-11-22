@@ -145,7 +145,7 @@ test('UXF-029 busy-failed: a result is a word, and a build outside the pool is "
 test('UXF-029 call-mode: the Queue heading names disk space and memory, not slots, when the listed jobs wait for those', async ({ page, baseURL }) => {
   await start(page, baseURL, 'call-mode');
   const heading = page.getByRole('heading', { name: /^Queue/ });
-  await expect(heading).toHaveText('Queue: waiting for disk space and memory, by level, oldest first');
+  await expect(heading).toHaveText('Queue: waiting for disk space, memory and a target directory, by level, oldest first');
   await expect(heading).not.toContainText('waiting for slots');
 });
 
@@ -373,6 +373,8 @@ test('UXF-033 call-mode: the reason of a wait is said once per job, as the line 
   const queue = tableOf(page, 'Queue');
   await expect(queue.getByText('waits for disk space: free space on the build filesystem is below 25 GB')).toBeVisible();
   expect(((await queue.innerText()).match(/disk space/g) ?? []).length, 'times the Queue table says "disk space"').toBe(1);
+  // A cargo build that waits for another job of its target directory says which job.
+  await expect(queue.getByText('waits for its target directory: in use by job 131')).toBeVisible();
 });
 
 test('UXF-034 busy-failed: every row of the Sessions table shows its id, and a session without a title says so', async ({ page, baseURL }) => {

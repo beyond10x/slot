@@ -462,6 +462,8 @@ impl ServeArgs {
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             promote_after: std::time::Duration::from_secs(self.promote_after),
             clock: crate::server::now_ms,
+            target_poll: crate::server::TARGET_POLL,
+            target_settle: crate::server::TARGET_SETTLE,
             cache_budget: gb_bytes(self.cache_budget),
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
