@@ -248,6 +248,10 @@ Open, one line each, with where the design lives. A session starts with (e).
 - (m) No `rust-toolchain.toml`: the local gate and CI each use the rustc they find.
 - (n) A pull request of planning files runs the full gate (307 s):
   `story:planning-only-pull-requests-skip-the-gate`.
+- (o) Which Rust units are compiled again, and how often, is recorded nowhere: on 2026-11-22
+  sccache answered 26 % of rustc calls from the cache and refused 57 %, and 35 % of the units on
+  disk repeat one built in another target directory:
+  `story:jobs-record-what-the-compile-cache-did`.
 
 ## Never
 
