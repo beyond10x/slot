@@ -20,12 +20,14 @@ tasks:
       - pnpm check
 
   ui-ux:
-    desc: Run the UX gates and the ratchet against the built UI (ui/ux).
+    desc: Run the UX gates and the ratchet against the built UI (ui/ux); stopped and failed after 120 s.
     dir: ui
     cmds:
-      - pnpm exec playwright test
-      - node ux/ratchet.ts
-      - node --test --disable-warning=ExperimentalWarning ux/concurrent.e2e.ts
+      - |
+        node ux/deadline.ts 120 sh -exc '
+          pnpm exec playwright test
+          node ux/ratchet.ts
+          node --test --disable-warning=ExperimentalWarning ux/concurrent.e2e.ts'
 
   ux-round:
     desc: 'Measure a UX round at every size and write its report: task ux-round -- R-nn'
@@ -88,13 +90,15 @@ tasks:
       - npm run build
 
   site-ux:
-    desc: Run the docs UX gates and the docs ratchet against the built site (website/ux).
+    desc: Run the docs UX gates and the docs ratchet against the built site (website/ux); stopped and failed after 120 s.
     dir: website
     cmds:
-      - node --test --disable-warning=ExperimentalWarning "ux/*.test.ts"
-      - npx tsc --noEmit -p ux/tsconfig.json
-      - npx playwright test
-      - node ux/ratchet.ts
+      - |
+        node ../ui/ux/deadline.ts 120 sh -exc '
+          node --test --disable-warning=ExperimentalWarning "ux/*.test.ts"
+          npx tsc --noEmit -p ux/tsconfig.json
+          npx playwright test
+          node ux/ratchet.ts'
 
   site-ux-round:
     desc: 'Measure a docs UX round at every size and write its report: task site-ux-round -- D-nn'

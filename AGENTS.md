@@ -66,7 +66,21 @@ sets one), so worktrees run the gates at the same time; `ui/ux/concurrent.e2e.ts
 Playwright's Chromium headless shell must be installed
 (`pnpm exec playwright install --only-shell chromium` in `ui/`), and the DejaVu Sans font: the
 harness renders every page in it, so the gates measure the same layout on every host.
-Playwright stops a test at 60 s, and every run ends with its ten slowest tests (`ui/ux/slowest.ts`).
+Playwright stops a test at 60 s, in `ui/` and in `website/`, and every run ends with its ten
+slowest tests (`ui/ux/slowest.ts`). `task ui-ux` and `task site-ux` each run their commands in one
+shell under `node ui/ux/deadline.ts 120`. A Playwright run that reaches 119 s prints the slowest
+tests and the tests it is in (the script sets `STEP_DEADLINE_AT`). At 120 s of run time the step
+gets SIGINT, 3 s later everything it started is killed, the web server in its own session
+included; the script exits 124 and the task fails. Pass or fail, the script's last line is the
+time the step took. The commands are not a nested `task`: Task copies the output of what it runs
+and drops what is printed after it left. Two things keep a test short, and a new test keeps both:
+
+- A scenario step waits for the page, not for a fixed time: `run.step()` moves the page's timers
+  1.1 s ahead (`page.clock.fastForward`), then waits until no request of the page is in flight and
+  a frame changed nothing (`ui/ux/harness.ts`).
+- axe-core is loaded into a page once and run in it at every state (`axeSerious` in
+  `ui/ux/probes.ts` and `website/ux/probes.ts`), not loaded again per state and merged in a
+  second page.
 
 - A change that improves a metric runs `node ux/ratchet.ts --update` and commits the new baseline
   in the same change. A baseline made worse names a decision id in that entry (`decision`).
@@ -92,6 +106,15 @@ tasks in `tasks.ts` done from the landing page by pointer and by keyboard in at 
 `planned` item in `website/data/status.json` points at a "Not built yet" section that still
 lists it). A round: `task site-ux-round -- D-nn`; findings are `website/ux/findings/DXF-nnn.md`.
 A page or a feature that a reader should find gets a task in `website/ux/tasks.ts`.
+
+A docs test waits for the page, not for a fixed time (`website/ux/settle.ts`; `budget.test.ts`
+fails on a new `waitForTimeout`): `openPage` until the page is hydrated and at rest (no script or
+request in flight, no scroll or transition running, a frame that changed nothing), the reader
+after a scroll until `scrollend`, after a link until the other page is drawn. The reader's search
+and menu paths keep their three fixed waits: no task takes them, so a wait on a condition there
+was never run. The reader sends its Tab presses 25 at a time; the page counts them and drops those
+after the target. It waits on the search box until the index is loaded, because the box takes the
+focus back then (DXF-010); with that its Tab counts were the same in two runs.
 
 Tests use `tempfile` directories, never a fixed path under `/tmp`.
 
@@ -244,9 +267,16 @@ Open, one line each, with where the design lives. A session starts with (e).
   is first in the queue, and every job behind it waits; `slot status` then reads "0 free" with
   few jobs running, which is not the lost-token case of (h):
   `story:a-whole-pool-request-does-not-stall-the-queue`.
-- (l) `task ui-ux` ran 148 s, 124 s and 107 s against a budget of 120 s with 59 to 64 tests, and
-  nothing stops it there. With 87 tests it ran 5.9 min in Playwright on a loaded host, its
-  slowest test 52.0 s: `story:ux-gate-step-ends-within-its-budget`.
+- (l) `task ui-ux` and `task site-ux` stop themselves at 120 s. `ui-ux` (87 tests) went from
+  240 s and 251 s to 75 s and 102 s on a workstation at load 30 to 36; the forge took 145 s before
+  that change and has not run it since. `site-ux` (86 tests, 84 s on the forge before the
+  change) is still over 120 s on a workstation at load 32 and above: stopped at 123 s with 33
+  tests done while the load rose from 32 to 43. Its tests no longer wait fixed times and the
+  reader's Tab presses go out in batches; what is left is the work of the pages. One gates test
+  took 7.1 s at load 56 (page load 1.8 s, hydration 0.9 s, loading axe-core 1.0 s, its run 2.6 s)
+  and there are 48. Left: three forge runs of `ui-ux` under 100 s; `site-ux` under 120 s on a
+  loaded workstation, which needs fewer page loads or axe-core runs for the same checks, not
+  shorter waits: `story:ux-gate-step-ends-within-its-budget`.
 - (m) No `rust-toolchain.toml`: the local gate and CI each use the rustc they find.
 - (n) A pull request of planning files runs the full gate (307 s):
   `story:planning-only-pull-requests-skip-the-gate`.

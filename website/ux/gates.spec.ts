@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDocPage, sitemapPages, slug } from './pages.ts';
 import { axeSerious, layout, layoutShift, openPage } from './probes.ts';
+import { settle } from './settle.ts';
 import { RATCHET_VIEWPORT, THEMES, viewportsInRun, vpName } from './viewports.ts';
 
 const out = join(dirname(fileURLToPath(import.meta.url)), 'out', 'gates');
@@ -43,7 +44,7 @@ for (const route of sitemapPages()) {
           const bottom = (end?.getBoundingClientRect().bottom ?? 0) + window.scrollY;
           window.scrollTo(0, Math.max(0, bottom - window.innerHeight));
         });
-        await page.waitForTimeout(150);
+        await settle(page);
         const bottom = await layout(page, isDocPage(route));
         const hidden = [...new Set([...top.hidden_always_visible.map((h) => `top: ${h}`), ...bottom.hidden_always_visible.map((h) => `bottom: ${h}`)])];
         const problems = [
