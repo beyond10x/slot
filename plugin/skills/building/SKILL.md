@@ -94,10 +94,11 @@ named like a build (`pnpm build`, `yarn typecheck`, `npm run test:unit`, not `de
 `node --test` and `node <script> gate|test|check|…`; `zig build|test` (also `scripts/zig.sh`);
 `pytest` and `python -m pytest`; `mvn`/`gradle` goals that compile or test; `ignite
 build|test|conformance` unless the PATH shim covers it.
-It looks into `bash -c '…'` and every part of `a && b; c | d`, and ignores quoted text, comments
-and heredoc bodies. `slot …`, `SLOT_SHIM_OFF=1 …` and every command inside a slot job (`SLOT_JOB`
-set) pass. The user sets `SLOT_HOOK=warn` (advice as context, nothing refused) or `SLOT_HOOK=off`;
-a session never sets it to get around a refusal.
+It looks into `bash -c '…'`, `sh -euc '…'`, `eval '…'` and every part of `a && b; c | d`, behind
+`if`, `while`, `until`, `for … do`, `!` and `{`, and behind `env -u FOO` and `timeout -k 5 60`,
+and ignores quoted text, comments and heredoc bodies. `slot …`, `SLOT_SHIM_OFF=1 …` and every
+command inside a slot job (`SLOT_JOB` set) pass. The user sets `SLOT_HOOK=warn` (advice as
+context, nothing refused) or `SLOT_HOOK=off`; a session never sets it to get around a refusal.
 
 ## The warden
 

@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-19",
-  "source": "CHANGELOG.md 0.1.0 to 0.19.0 and docs/design.md sections 10 to 19",
+  "asOf": "2026-11-22",
+  "source": "CHANGELOG.md 0.1.0 to 0.19.1 and docs/design.md sections 10 to 19",
   "items": [
     {
       "area": "Pool",
@@ -112,7 +112,7 @@
       "area": "Observation",
       "label": "Web UI",
       "status": "shipped",
-      "detail": "Timeline, slot usage, cores per toolchain, active and finished jobs, live output on 127.0.0.1:7411.",
+      "detail": "Timeline, slot usage, cores per toolchain, active and finished jobs, live output on 127.0.0.1:7411. Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
       "href": "/docs/how-it-works#web-ui"
     },
     {
@@ -168,7 +168,7 @@
       "area": "Agents",
       "label": "Claude Code plugin",
       "status": "shipped",
-      "detail": "A PreToolUse hook refuses builds outside the pool; the slot-warden agent lists sessions that bypass it (0.4.0).",
+      "detail": "A PreToolUse hook refuses builds outside the pool, also behind shell keywords, timeout and env options and eval (0.19.1); the slot-warden agent lists sessions that bypass it (0.4.0).",
       "href": "/docs/claude-code-plugin"
     },
     {
