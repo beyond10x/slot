@@ -10,6 +10,53 @@
   limit for starts held jobs on them. Every CPU figure of a sample (host, classes, sessions, jobs,
   machine quota) now divides by the time between the two scans, and a failed scan no longer
   shortens the next sample's interval.
+- Queue order within a level: `slot serve --pass-for <seconds>` (300 by default). A queued job
+  may be passed by later jobs of its own level only until it has waited this long; a job of a
+  lower level never passes it, and 0 serves the queue by level, then arrival, as before. Inside
+  that bound a job predicted to run 5 s or less (the 90th percentile of its last runs) starts
+  ahead of longer jobs of its level, and a job that asks for more slots than are free no longer
+  keeps the slots it collected from later jobs of its level that fit. Slots lent to an urgent job
+  out of the headroom stay with urgent jobs. The job record has `predicted_ms`, `collected`,
+  `ahead` and `queue_class`; `slot status` ends a queued line with `holds N of M` and `moved
+  ahead` and its pool line with `N collected by queued jobs`, and both it and the web queue list
+  the queue in the order the pool serves it. Why: jobs under 5 s carried half of the queue wait,
+  and a job that asked for every slot stalled every job behind it.
+- Eviction starts where the disk hold starts: its mark is the larger of `--evict-below` and
+  `--min-free-disk` (`--evict-below 0` still turns it off), and a job that starts to wait for disk
+  makes the daemon look at once instead of at the next minute. `slot status` prints the mark in
+  force and says when the disk hold raised it. Why: with `--min-free-disk 50` and `--evict-below
+  40`, up to 38 jobs stood queued for disk for 12 minutes and nothing was deleted.
+- The CPU limit for starts (`slot cpu-limit`) counts the CPU of the pool's jobs and of the compile
+  cache servers (an `sccache` whose parent is the service manager, and its compilers), not work
+  outside both. A held job's reason names the parts (`host busy: pool 12.0 + compile cache 6.0 of
+  20 CPUs, mark 17.0`), `slot cpu-limit` prints them and the CPUs outside both, `GET
+  /api/cpu-limit` answers `pool`, `compile_cache` and `outside`, and `slot status` reads `starts
+  held while the pool and the compile cache use more than N CPUs and M jobs run`. Why: work
+  outside the pool held 278 jobs in the first hour the limit was on.
+- A job runs with the open-file limit of the process that called `slot`, capped at the daemon's
+  hard limit with one `slot: warning:` line. When it differs from the daemon's, the daemon starts
+  the job through its own binary (`slot __exec`, hidden), which sets the limit and then executes
+  the job's command in its place; the daemon's own limit never changes. Remote jobs keep the build
+  server's limit; the stack size and other limits are not passed. Before, a daemon under systemd
+  gave every job 1,024.
+- A reload no longer drops output lines still queued for a client: the writer hands them on with
+  its unsent bytes (a run of 14 to 40 lines went missing in 1 of 6 reloads at a load of about
+  100). After a reload the new image puts every running job back in its table before it watches
+  any, so a job that ended during the handover no longer makes the daemon add the slots the other
+  jobs hold to the pool (+1, +6 and +18 seen).
+- The daemon tests wait on the state they assert, not fixed times; the slowest handover test went
+  from 44.5 s to 29.4 s at a load of 105 to 134.
+- `rust-toolchain.toml` pins rustc 1.99.1 with rustfmt and clippy; the local gate and the gate,
+  release and documentation workflows compile with it, and `task check` prints `rustc --version`
+  first.
+- A pull request whose changed files are all planning or prose files (`.engineering/`, `*.md`
+  outside `website/` and `ui/`) passes `gate` and `Build documentation` without building; one that
+  changes only `website/` runs the docs checks without the code's build and tests.
+  `.github/scripts/pr-scope.sh` decides and prints the paths it saw.
+- UX gates: the docs gates load each page once per theme and measure both gating sizes in that
+  load (24 loads in place of 48, a third less CPU); both suites serve the built files with
+  `ui/ux/serve.ts` in place of `vite preview` and `docusaurus serve`, and the docs gates take a
+  free port, so two worktrees run them at once.
 
 ## 0.24.0 — 2026-11-22
 

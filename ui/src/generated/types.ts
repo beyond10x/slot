@@ -264,9 +264,14 @@ action: string, };
 
 export type Report = { 
 /**
- * Free bytes below which eviction starts; 0 = off.
+ * Free bytes below which eviction starts (the mark); 0 = off.
  */
 floor: number, 
+/**
+ * `--evict-below`, bytes, when `--min-free-disk` is larger and so
+ * raised the mark to the disk hold's value; 0 when it did not.
+ */
+raised_from: number, 
 /**
  * Only reporting, not deleting.
  */
