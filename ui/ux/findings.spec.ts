@@ -395,8 +395,11 @@ for (const size of GATING) {
       if (!box) throw new Error(`no heading ${String(name)}`);
       return Math.round(box.y);
     };
-    const charts = [await top(/^Cores: used/), await top(/^Pressure/), await top(/^Pool size/)];
-    expect(new Set(charts).size, 'the three charts stand in one row').toBe(1);
+    const charts = [await top(/^Cores: used/), await top(/^Pressure/), await top(/^Pool size/), await top(/^Compile cache/)];
+    expect(new Set(charts).size, 'the four charts stand in one row').toBe(1);
+    const heads = await page.locator('section.trend h2').evaluateAll((all) => all.map((h) => Math.round(h.getBoundingClientRect().height)));
+    expect(heads.length, 'four chart headings').toBe(4);
+    expect(Math.max(...heads), 'no chart heading takes a second line').toBeLessThan(30);
     const down = [charts[0], await top(/^Running/), await top(/^Queue/), await top(/^Finished/)];
     expect(new Set(down).size, 'four different heights').toBe(4);
     expect(down, 'order down the page').toEqual([...down].sort((a, b) => a - b));

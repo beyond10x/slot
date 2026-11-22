@@ -1,5 +1,6 @@
 import { computed, reactive, shallowReactive, shallowRef, triggerRef } from 'vue';
-import type { Event, HostCensus, Job, LiveJob, State } from './generated/types.ts';
+import type { CacheMinute, Event, HostCensus, Job, LiveJob, State } from './generated/types.ts';
+import { MINUTE_MS, cachePoint, cacheWindow, latestMinute, parseCacheHistory } from './lib/cache.ts';
 import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './lib/history.ts';
 import type { RecordedBucket, Sample, Tick } from './lib/history.ts';
 import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
@@ -96,6 +97,17 @@ export const chartWindow = computed(() => {
   }
   for (const p of samples) maxWaiting = Math.max(maxWaiting, p.waiting);
   return { samples, host, buckets, maxHost, maxWaiting };
+});
+
+/** Compiler calls per minute as `api/cache-history` answered last; empty from a daemon that has no such path. */
+export const cacheMinutes = shallowRef<CacheMinute[]>([]);
+
+/** The compile cache chart: the minutes in the window as shares, the newest minute while it is fresh, and how many minutes are held. */
+export const cacheChart = computed(() => {
+  const to = store.clock;
+  const all = cacheMinutes.value;
+  const points = cacheWindow(all, to - store.windowS * 1000, to).map(cachePoint);
+  return { points, latest: latestMinute(all, to), recorded: all.length };
 });
 
 /** Server time estimate, ms. */
@@ -216,8 +228,15 @@ async function loadRecordedHistory(): Promise<void> {
   recorded.value = mergeByT(recorded.value, buckets).filter((b) => b.t + b.n * 1000 > from);
 }
 
+/** A daemon without the path answers 404 and the minutes held stand: the chart then says that it has no data. */
+async function loadCacheHistory(): Promise<void> {
+  const res = await fetch('api/cache-history');
+  if (!res.ok) return;
+  cacheMinutes.value = parseCacheHistory(await res.json());
+}
+
 async function loadHistory(): Promise<void> {
-  await Promise.allSettled([loadExactHistory(), loadRecordedHistory()]);
+  await Promise.allSettled([loadExactHistory(), loadRecordedHistory(), loadCacheHistory()]);
   store.historyLoaded = true;
 }
 
@@ -267,6 +286,8 @@ export async function start(): Promise<void> {
   connect();
   await loadHistory().catch(() => undefined);
   store.ready = true;
+  // The daemon adds a minute of compiler calls each minute, and no event says so.
+  setInterval(() => void loadCacheHistory().catch(() => undefined), MINUTE_MS);
 }
 
 /**

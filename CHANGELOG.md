@@ -9,6 +9,9 @@
   goes on when that job has compiled or ended; several builds of one directory start by
   level, then age. A job that waited outside the queue for slots (for its target directory,
   for memory or disk) comes back to the place its age gives it, not to the end.
+- Web view: a fourth line chart, **Compile cache**, shows per minute the share of compiler calls
+  sccache answered from its cache, of all calls and of the cacheable ones; the daemon serves the
+  calls per minute of the last six hours as `GET /api/cache-history`.
 
 ## 0.20.0 — 2026-11-22
 

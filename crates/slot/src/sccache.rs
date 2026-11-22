@@ -17,7 +17,8 @@
 //!
 //! The module also holds what the daemon records about the compile cache:
 //! the counters of each running server, once a minute ([`StatsLog`], one
-//! [`Counters`] line each in `cache.jsonl`), and per rust job the variables
+//! [`Counters`] line each in `cache.jsonl`; [`cache_minutes`] turns them into
+//! the calls per minute the web view charts), and per rust job the variables
 //! that decide what the cache can do ([`cache_env`]) with the warnings they
 //! give ([`cache_warnings`]).
 
@@ -30,6 +31,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::procstat::{self, Snapshot};
 
@@ -490,6 +492,64 @@ pub fn went_down(prev: &Counters, now: &Counters) -> bool {
             .any(|(reason, n)| now.not_cached.get(reason).copied().unwrap_or(0) < *n)
 }
 
+/// One element of `/api/cache-history`: the compiler calls of every sccache
+/// server between two readings of its counters, the later one at `t`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct CacheMinute {
+    /// When the later reading was made, Unix milliseconds.
+    #[ts(type = "number")]
+    pub t: i64,
+    /// Calls answered from the cache.
+    #[ts(type = "number")]
+    pub hits: u64,
+    /// Calls compiled after a miss.
+    #[ts(type = "number")]
+    pub misses: u64,
+    /// Calls the servers refused to cache: the sum of `reasons`.
+    #[ts(type = "number")]
+    pub not_cached: u64,
+    /// The refused calls by the server's reason; a reason with no call is
+    /// left out.
+    #[ts(type = "Record<string, number>")]
+    pub reasons: BTreeMap<String, u64>,
+}
+
+/// What the servers did between the readings in `records` (in the order of
+/// their `t`): one element for each `t` at which a server has a reading
+/// before it, the servers of one `t` summed.
+///
+/// A server is read once a minute and only after it worked ([`due`]), so a
+/// difference is the work of the minute before `t`. A reading with no
+/// earlier one of the same port, and one whose counters fell (the server
+/// started again), is where counting starts again: it gives no difference.
+pub fn cache_minutes(records: &[Counters]) -> Vec<CacheMinute> {
+    let mut prev: HashMap<u16, &Counters> = HashMap::new();
+    let mut out: BTreeMap<i64, CacheMinute> = BTreeMap::new();
+    for now in records {
+        let Some(before) = prev.insert(now.port, now) else {
+            continue;
+        };
+        if now.restarted || went_down(before, now) {
+            continue;
+        }
+        let m = out.entry(now.t).or_insert_with(|| CacheMinute {
+            t: now.t,
+            ..CacheMinute::default()
+        });
+        m.hits += (now.rust_hits - before.rust_hits) + (now.c_hits - before.c_hits);
+        m.misses += (now.rust_misses - before.rust_misses) + (now.c_misses - before.c_misses);
+        for (reason, n) in &now.not_cached {
+            let more = n - before.not_cached.get(reason).copied().unwrap_or(0);
+            if more > 0 {
+                *m.reasons.entry(reason.clone()).or_default() += more;
+                m.not_cached += more;
+            }
+        }
+    }
+    out.into_values().collect()
+}
+
 /// How long one `sccache --show-stats` may take.
 pub const STATS_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -944,6 +1004,90 @@ mod tests {
             ..Counters::default()
         };
         assert!(next.record(4, 4226, lower).restarted);
+    }
+
+    #[test]
+    fn calls_per_minute_are_the_differences_of_each_port_summed_at_one_time() {
+        const MIN: i64 = 60_000;
+        let mut log = StatsLog::default();
+        let mut read = |min: i64, port: u16, c: [u64; 4], refused: &[(&str, u64)]| {
+            let stats = Counters {
+                rust_hits: c[0],
+                rust_misses: c[1],
+                c_hits: c[2],
+                c_misses: c[3],
+                not_cached: reasons(refused),
+                ..Counters::default()
+            };
+            log.record(min * MIN, port, stats)
+        };
+        let mut records = vec![
+            // The first reading of a port is where counting starts.
+            read(1, 4226, [100, 50, 10, 5], &[("crate-type", 20), ("-", 5)]),
+            read(
+                2,
+                4226,
+                [130, 60, 10, 6],
+                &[("crate-type", 25), ("-", 5), ("incremental", 2)],
+            ),
+            read(2, 4303, [7, 0, 0, 0], &[]),
+            // Port 4226 did not work in minute 3: it has no reading there.
+            read(3, 4303, [9, 1, 0, 0], &[]),
+            // Ten minutes without work, then both ports at one time.
+            read(
+                13,
+                4226,
+                [140, 60, 12, 6],
+                &[("crate-type", 26), ("-", 5), ("incremental", 2)],
+            ),
+            read(13, 4303, [12, 1, 0, 0], &[("crate-type", 1)]),
+            // The server on 4226 started again: its counters fell.
+            read(14, 4226, [4, 0, 0, 0], &[]),
+            read(14, 4303, [13, 1, 0, 0], &[("crate-type", 1)]),
+            read(15, 4226, [9, 2, 0, 0], &[]),
+        ];
+        assert!(records[6].restarted, "the log marks the restart");
+        // A reading whose counters fell without the mark starts again too.
+        records.push(Counters {
+            t: 16 * MIN,
+            port: 4303,
+            rust_hits: 1,
+            ..Counters::default()
+        });
+        records.push(Counters {
+            t: 17 * MIN,
+            port: 4303,
+            rust_hits: 5,
+            ..Counters::default()
+        });
+        let minute = |min: i64, hits, misses, refused: &[(&str, u64)]| CacheMinute {
+            t: min * MIN,
+            hits,
+            misses,
+            not_cached: refused.iter().map(|(_, n)| n).sum(),
+            reasons: reasons(refused),
+        };
+        assert_eq!(
+            cache_minutes(&records),
+            [
+                minute(2, 30, 11, &[("crate-type", 5), ("incremental", 2)]),
+                minute(3, 2, 1, &[]),
+                minute(13, 15, 0, &[("crate-type", 2)]),
+                minute(14, 1, 0, &[]),
+                minute(15, 5, 2, &[]),
+                minute(17, 4, 0, &[]),
+            ]
+        );
+        assert_eq!(cache_minutes(&records[..1]), Vec::new());
+        let line = serde_json::to_string(&minute(2, 30, 11, &[("crate-type", 5)])).unwrap();
+        assert_eq!(
+            line,
+            r#"{"t":120000,"hits":30,"misses":11,"not_cached":5,"reasons":{"crate-type":5}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CacheMinute>(r#"{"t":120000,"later_field":1}"#).unwrap(),
+            minute(2, 0, 0, &[])
+        );
     }
 
     #[test]

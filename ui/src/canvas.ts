@@ -37,6 +37,28 @@ export function drawExact<T extends { t: number }>(ctx: CanvasRenderingContext2D
   ctx.stroke();
 }
 
+/**
+ * One level stroke per point over the `span` ms that end at its `t`; a point that follows within one and a half spans
+ * is joined to it by a step. A point without a value (`y` not finite) and a time without a point stay blank.
+ */
+export function drawSpans<T extends { t: number }>(ctx: CanvasRenderingContext2D, points: readonly T[],
+  X: (t: number) => number, y: (p: T) => number, span: number): void {
+  ctx.beginPath();
+  let prev: T | undefined;
+  for (const p of points) {
+    const v = y(p);
+    if (!Number.isFinite(v)) {
+      prev = undefined;
+      continue;
+    }
+    if (prev && p.t - prev.t <= span * 1.5) ctx.lineTo(X(prev.t), v);
+    else ctx.moveTo(X(p.t - span), v);
+    ctx.lineTo(X(p.t), v);
+    prev = p;
+  }
+  ctx.stroke();
+}
+
 /** Sizes the backing store to CSS width x `h` at device pixel ratio; returns the CSS width. */
 export function sizeCanvas(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, h: number): number {
   const dpr = window.devicePixelRatio || 1;
