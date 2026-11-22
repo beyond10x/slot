@@ -45,36 +45,45 @@ watch([win, by], () => void load());
       <legend class="sr">group by</legend>
       <label v-for="[v, l] in groups" :key="v"><input v-model="by" type="radio" name="usage-by" :value="v" /> {{ l }}</label>
     </fieldset>
-    <span class="muted">{{ failed || total }}</span>
+    <span class="total" :class="{ bad: !!failed }">{{ failed || total }}</span>
   </div>
   <table>
     <thead>
       <tr>
-        <th>{{ by }}</th><th>share of slot time</th><th class="num">slot-h</th><th class="num">CPU share</th>
-        <th class="num">jobs</th><th class="num opt">median wait</th>
+        <th class="c-label">{{ by }}</th><th>share of slot time</th><th class="c-n num">slot-h</th><th class="c-w num">CPU share</th>
+        <th class="c-n num">jobs</th><th class="c-w num opt">median wait</th>
       </tr>
     </thead>
     <tbody>
       <tr v-for="r in rows" :key="r.key" class="static">
-        <td class="label" :title="by === 'session' && r.key ? `${r.label}\n${r.key}` : r.label">{{ r.label }}</td>
-        <td class="bar"><span class="track"><span class="fill" :style="{ width: `${r.width}%` }"></span></span> {{ r.share }}</td>
+        <td class="label" :title="by === 'session' && r.key ? `${r.label}\nsession ${r.key}` : r.label">{{ r.label }}</td>
+        <td><span class="bar"><span class="track"><span class="fill" :style="{ width: `${r.width}%` }"></span></span><span class="share">{{ r.share }}</span></span></td>
         <td class="num">{{ r.slotHours }}</td>
         <td class="num">{{ r.cpuShare }}</td>
         <td class="num">{{ r.jobs }}</td>
         <td class="num opt">{{ r.wait }}</td>
       </tr>
-      <tr v-if="!rows.length && !failed" class="empty"><td colspan="6" class="muted">no finished jobs in this window</td></tr>
+      <tr v-if="!rows.length && !failed" class="empty"><td colspan="6">no finished jobs in this window</td></tr>
     </tbody>
   </table>
 </template>
 
 <style scoped>
-.controls { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; margin: 4px 0 6px; }
-fieldset { border: 0; margin: 0; padding: 0; display: flex; gap: 10px; }
-.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-tr.static { cursor: default; }
-td.label { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
-td.bar { white-space: nowrap; }
-.track { display: inline-block; width: 140px; height: 10px; background: #f6f6f6; vertical-align: middle; margin-right: 6px; }
-.fill { display: block; height: 100%; background: #0072B2; }
+.controls { display: flex; flex-wrap: wrap; gap: 4px 20px; align-items: center; margin: 2px 0 6px; font-size: 13px; }
+fieldset { border: 0; margin: 0; padding: 0; display: flex; gap: 12px; }
+fieldset label { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; cursor: pointer; }
+.total { margin-left: auto; color: var(--mute); font-variant-numeric: tabular-nums; }
+.total.bad { color: var(--bad); }
+/* The name and the numbers keep their widths; the bar takes the room that is left, with its share right-aligned after it. */
+table { table-layout: fixed; }
+.c-label { width: 30%; }
+.c-n { width: 76px; }
+.c-w { width: 100px; }
+.bar { display: flex; align-items: center; gap: 8px; }
+.track { flex: 1 1 auto; min-width: 40px; height: 10px; border-radius: 2px; background: #ececec; }
+.fill { display: block; height: 100%; border-radius: 2px; background: #0072b2; }
+.share { flex: none; width: 60px; text-align: right; }
+@container (max-width: 899px) {
+  .opt { display: none; }
+}
 </style>

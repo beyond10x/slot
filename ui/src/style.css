@@ -1,37 +1,119 @@
 :root {
   --fg: #1a1a1a;
-  --mute: #666;
-  --line: #ddd;
+  --mute: #5c5c5c;
+  --line: #d4d4d4;
+  --rule: #e9e9e9;
   --bg: #fff;
   --panel: #f6f6f6;
-  --hdr: 46px;
+  --hover: #f2f4f7;
+  --sel: #e2ecfa;
+  --ink: #3d3d3d;
+  --accent: #1f5fbf;
+  --bad: #b00000;
+  --warn: #a94300;
+  --ctl: #8a8a8a;
+  --mono: ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+  /* Height of the sticky header: two rows of fixed height (HeaderBar.vue). The observer there corrects it where a narrow window wraps the first row. */
+  --hdr: 80px;
 }
 * { box-sizing: border-box; }
-[hidden] { display: none !important; }
-body { margin: 0; font: 13px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
-h2 { font-size: 13px; margin: 10px 0 6px; color: var(--mute); font-weight: 600; }
+body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+/* A section heading: its name in the text colour, what the section shows after it in the quiet one. */
+h2 { font-size: 13px; line-height: 20px; margin: 14px 0 4px; color: var(--mute); font-weight: 400; }
+h2 .name { font-size: 14px; font-weight: 700; color: var(--fg); }
+/* The current numbers of a section, beside its heading. */
+.sum { margin: 14px 0 4px; font-size: 13px; line-height: 20px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.sum b { color: var(--fg); font-weight: 600; }
 canvas { display: block; width: 100%; }
-select, button { font: inherit; }
-.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: 0; }
-.bad { color: #b00; font-weight: 600; }
+select, button, input { font: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+.btn { min-width: 24px; min-height: 24px; padding: 0 7px; border: 1px solid var(--ctl); border-radius: 4px; background: #fff; color: var(--fg);
+  cursor: pointer; font-size: 13px; line-height: 20px; white-space: nowrap; }
+.btn:hover { background: var(--hover); }
+.btn[aria-pressed='true'], .btn[aria-pressed='true']:hover, .btn.on, .btn.on:hover { background: var(--ink); border-color: var(--ink); color: #fff; }
+select { min-height: 24px; padding: 0 2px; border: 1px solid var(--ctl); border-radius: 4px; background: #fff; color: var(--fg); font-size: 13px; }
+input[type='checkbox'], input[type='radio'], input[type='range'] { accent-color: var(--accent); margin: 0; }
+.dot { display: inline-block; flex: none; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+.bad { color: var(--bad); font-weight: 600; }
 .muted { color: var(--mute); }
-table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid #eee; white-space: nowrap; }
-th { color: var(--mute); font-weight: 600; position: sticky; top: var(--hdr); background: var(--bg); }
-td.cmd { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, monospace; font-size: 12px; }
-td.repo { max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
-button.jobid { min-width: 24px; min-height: 24px; padding: 0 2px; border: 0; background: none; color: inherit; font: inherit;
-  font-variant-numeric: tabular-nums; text-align: left; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; margin-top: 5px; font-size: 13px; color: var(--mute);
+  font-variant-numeric: tabular-nums; }
+.legend b { color: var(--fg); font-weight: 600; }
+table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+/* A table's rows reach 6 px into the page margin on both sides, so its first and last text stand in line with the headings and the charts. */
+table { margin: 0 -6px; width: calc(100% + 12px); }
+th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--rule); white-space: nowrap; height: 31px; }
+/* The rule under a column heading is drawn inside the cell: a collapsed border stays behind when the heading sticks below the header. */
+th { color: var(--mute); font-size: 12px; font-weight: 400; height: 26px; vertical-align: bottom; border-bottom: 0; box-shadow: inset 0 -1px 0 var(--line);
+  position: sticky; top: var(--hdr); background: var(--bg); z-index: 1; }
 td.num, th.num { text-align: right; }
+td.cmd { overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 13px; }
+td.repo, td.session, td.label { overflow: hidden; text-overflow: ellipsis; }
+td.repo .wt, td.session, td.id { color: var(--mute); }
+button.jobid { min-width: 24px; min-height: 22px; padding: 0 2px; margin-left: -2px; border: 0; background: none; color: inherit; font: inherit;
+  font-variant-numeric: tabular-nums; text-align: left; text-decoration: underline; text-decoration-color: var(--ctl); text-underline-offset: 3px;
+  cursor: pointer; }
+button.jobid:hover { text-decoration-color: var(--fg); text-decoration-thickness: 2px; }
+/* The ring stays clear of the queue position left of it. */
+button.jobid:focus-visible { outline-offset: 0; }
 tbody tr { cursor: pointer; }
-tbody tr:hover td { background: #f3f3f3; }
-tbody tr.sel td { background: #e8f0fb; }
-tbody tr.empty { cursor: default; }
-/* Below this width the job tables drop the columns that only add detail: sparkline, memory, session id. */
-@container (max-width: 1150px) {
-  .opt { display: none; }
+tbody tr:hover td { background: var(--hover); }
+tbody tr.sel td { background: var(--sel); }
+tbody tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+/* A line below a job (its wait reason, its units) belongs to the job: it takes the job's hover and selection. */
+tbody tr:hover + tr.detail td { background: var(--hover); }
+tbody tr.sel + tr.detail td { background: var(--sel); }
+tbody tr.sel + tr.detail td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+tbody tr.empty, tbody tr.static, tbody tr.detail { cursor: default; }
+tbody tr.empty:hover td, tbody tr.static:hover td, tbody tr.detail:hover td { background: transparent; }
+tbody tr.static.flag td, tbody tr.static.flag:hover td { background: #fdf0e6; }
+tr.empty td { color: var(--mute); }
+/*
+ * The job tables: one column order and one set of widths for Queue, Running and Finished. Running and Finished share every
+ * column line; the Queue ends with wait below 1800 px (QueueTable.vue). The command takes what is left. The widths hold the widest value in the harness's wide font, a job number of 6 digits included.
+ */
+table.jobs { table-layout: fixed; --c-tool: 94px; --c-repo: 160px; --c-session: 112px; --c-state: 106px; }
+.jobs .c-lead { width: 38px; }
+.jobs .c-job { width: 60px; }
+.jobs .c-tool { width: var(--c-tool); overflow: hidden; }
+.jobs .c-repo { width: var(--c-repo); }
+.jobs .c-session { width: var(--c-session); }
+.jobs .c-out { width: 72px; }
+.jobs .c-state { width: var(--c-state); overflow: hidden; }
+.jobs .c-slots { width: 42px; }
+.jobs .c-wait { width: 50px; }
+.jobs .c-run { width: 66px; }
+.jobs .c-cores { width: 70px; }
+.jobs .c-extra { width: 86px; }
+.jobs .c-mem { width: 70px; }
+.jobs td.c-lead { color: var(--mute); padding-right: 0; }
+.jobs td.c-out { color: var(--mute); font-size: 13px; }
+.jobs td.c-extra { padding-top: 0; padding-bottom: 0; }
+.jobs tr.detail td { height: auto; padding: 0 6px 6px; white-space: normal; font-size: 13px; color: var(--mute); }
+/*
+ * Every column shows from a main column of 1240 px on: a window of 1280 px and wider with the output pane closed.
+ * From 1500 px, and again from 1800 px, the repository and the session get more room; below 1320 px the tool is its colour mark, since the command names it.
+ * Below 1240 px (the pane is open, or the window is narrow) the 60 s curve, the CPU seconds and the memory go;
+ * below 1110 px the session; below 900 px the "live" button and the end time. The output pane names every value of its job.
+ */
+@container (min-width: 1500px) {
+  table.jobs { --c-repo: 250px; --c-session: 230px; }
 }
-/* Below this width the Running table drops its live-output button too: the job number opens the output. */
-@container (max-width: 900px) {
-  .opt2 { display: none; }
+@container (min-width: 1800px) {
+  table.jobs { --c-repo: 320px; --c-session: 290px; }
+}
+@container (max-width: 1319px) {
+  table.jobs { --c-tool: 28px; }
+  .jobs .c-tool .tn, .jobs th.c-tool span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+}
+@container (max-width: 1239px) {
+  .jobs .h-a { display: none; }
+}
+@container (max-width: 1109px) {
+  .jobs .h-b { display: none; }
+  table.jobs { --c-repo: 140px; --c-state: 104px; }
+}
+@container (max-width: 899px) {
+  .jobs .h-c { display: none; }
 }

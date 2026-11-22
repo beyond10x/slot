@@ -2,7 +2,23 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job } from '../generated/types.ts';
 import { jobId } from './job.ts';
-import { failedStats, levelText, percentile, queueHeading, queueSummary, servedQueue, waitStats } from './queue.ts';
+import { failedStats, levelText, percentile, queueHeading, queuePlace, queueSummary, servedQueue, waitReasonText, waitStats } from './queue.ts';
+
+test('a queued job has a place in the served order, and its reason reads as a line', () => {
+  const q = servedQueue([job({ id: 5, enqueued_ms: 3000 }), job({ id: 6, enqueued_ms: 1000 }), job({ id: 7, state: 'running', started_ms: 9 })]);
+  assert.deepEqual(queuePlace(q, 5), { pos: 2, of: 2 });
+  assert.deepEqual(queuePlace(q, 6), { pos: 1, of: 2 });
+  assert.equal(queuePlace(q, 7), null);
+  assert.equal(waitReasonText(job({})), '');
+  assert.equal(
+    waitReasonText(job({ wait_reason: 'free space on the build filesystem is below 25 GB' })),
+    'waits for disk space: free space on the build filesystem is below 25 GB',
+  );
+  assert.equal(
+    waitReasonText(job({ wait_reason: 'available memory is below what the job needs' })),
+    'waits for memory: available memory is below what the job needs',
+  );
+});
 
 function job(over: Partial<Job>): Job {
   return {

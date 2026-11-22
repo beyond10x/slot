@@ -5,5 +5,5 @@ defineProps<{ name: string }>();
 </script>
 
 <template>
-  <span><span class="dot" :style="{ background: tcColor(name) }"></span>{{ name }}</span>
+  <span class="tool"><span class="dot" :style="{ background: tcColor(name) }"></span><span class="tn">{{ name }}</span></span>
 </template>

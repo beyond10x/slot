@@ -3,7 +3,9 @@ import type { RecordedBucket } from './lib/history.ts';
 
 /** Height of the time axis strip at the bottom of a chart, px. */
 export const AXIS = 20;
-export const FONT = '11px system-ui, sans-serif';
+export const FONT = '12px system-ui, sans-serif';
+/** Colour of the labels drawn in a chart: the page's quiet text colour. */
+export const INK = '#5c5c5c';
 export const RECORDED_CPU = '#436789';
 export const RECORDED_QUEUE = '#78639a';
 
@@ -48,17 +50,26 @@ export function sizeCanvas(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, 
   return w;
 }
 
-/** Vertical grid lines and clock labels for [t0, t1]. */
+/**
+ * Vertical grid lines and clock labels for [t0, t1]. A label stands right of its line; the last one moves left
+ * to end inside the chart, and is left out where that would touch the label before it, so no label is cut.
+ */
 export function drawAxis(ctx: CanvasRenderingContext2D, w: number, h: number, t0: number, t1: number): void {
   const step = axisStepMs((t1 - t0) / 1000);
   ctx.font = FONT;
   ctx.textBaseline = 'top';
+  let lastEnd = -Infinity;
   for (const t of axisTicks(t0, t1, step)) {
     const x = ((t - t0) / (t1 - t0)) * w;
-    ctx.fillStyle = '#eee';
+    ctx.fillStyle = '#ececec';
     ctx.fillRect(x, 0, 1, h - AXIS + 4);
-    ctx.fillStyle = '#666';
-    ctx.fillText(fmtClock(t, step < 60_000), x + 2, h - AXIS + 6);
+    const label = fmtClock(t, step < 60_000);
+    const tw = ctx.measureText(label).width;
+    const lx = Math.min(x + 3, w - tw - 2);
+    if (lx < lastEnd + 8) continue;
+    ctx.fillStyle = INK;
+    ctx.fillText(label, lx, h - AXIS + 5);
+    lastEnd = lx + tw;
   }
 }
 

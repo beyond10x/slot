@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, reactive, useTemplateRef } from 'vue';
 import type { Job } from '../generated/types.ts';
 import { AXIS, FONT, animate, drawAxis, sizeCanvas } from '../canvas.ts';
 import { tcColor } from '../lib/colors.ts';
+import { fitLabel } from '../lib/fit.ts';
 import { barLabel, jobId, times, tooltipText } from '../lib/job.ts';
 import { assignLanes } from '../lib/lanes.ts';
 import { jobs, live, now, select, store } from '../store.ts';
@@ -10,6 +11,22 @@ import { jobs, live, now, select, store } from '../store.ts';
 const BAR = 16;
 const GAP = 3;
 const MIN_H = 80;
+/** Room left and right of a bar's label, px; the right one clears the edge mark of a running or failed bar. */
+const PAD_L = 4;
+const PAD_R = 6;
+
+/** Fitted labels by text and room: a frame measures only the bars whose width changed. */
+const fitted = new Map<string, string>();
+function label(ctx: CanvasRenderingContext2D, text: string, room: number): string {
+  const key = `${Math.floor(room)}\n${text}`;
+  let got = fitted.get(key);
+  if (got === undefined) {
+    if (fitted.size > 2000) fitted.clear();
+    got = fitLabel(text, Math.floor(room), (s) => ctx.measureText(s).width);
+    fitted.set(key, got);
+  }
+  return got;
+}
 
 interface Bar {
   job: Job;
@@ -36,7 +53,6 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   ctx.clearRect(0, 0, w, h);
   drawAxis(ctx, w, h, t0, t1);
   const X = (t: number) => Math.max(0, ((t - t0) / win) * w);
-  const blink = Math.floor(t1 / 500) % 2 === 1;
   const next: Bar[] = [];
   ctx.textBaseline = 'middle';
   ctx.font = FONT;
@@ -60,21 +76,18 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
         const frac = l ? Math.min(1, l.cores / Math.max(1, store.tokens)) : 0;
         ctx.fillStyle = 'rgba(255,255,255,0.35)';
         ctx.fillRect(x0, y + BAR - 3, bw * frac, 3);
-        ctx.fillStyle = blink ? '#000' : col;
-        ctx.fillRect(x1 - 2, y, 2, BAR);
+        // A steady dark edge left of the "now" line marks a bar that still grows: nothing on the page blinks.
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(x1 - 3, y, 2, BAR);
       }
       if (j.state === 'failed') {
-        ctx.fillStyle = '#b00';
+        ctx.fillStyle = '#b00000';
         ctx.fillRect(x1 - 3, y, 3, BAR);
       }
-      if (x1 - x0 > 60) {
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x0, y, x1 - x0, BAR);
-        ctx.clip();
+      const text = label(ctx, barLabel(j), x1 - x0 - PAD_L - PAD_R);
+      if (text) {
         ctx.fillStyle = '#fff';
-        ctx.fillText(barLabel(j), x0 + 4, y + BAR / 2);
-        ctx.restore();
+        ctx.fillText(text, x0 + PAD_L, y + BAR / 2);
       }
     }
     next.push({ job: j, x0: X(queued), x1: Math.max(X(queued) + 3, X(end)), y });
@@ -127,5 +140,5 @@ onUnmounted(() => stop());
 
 <style scoped>
 .tip { position: fixed; pointer-events: none; background: #111; color: #fff; padding: 6px 8px; border-radius: 4px;
-  font: 12px/1.35 ui-monospace, monospace; max-width: 560px; white-space: pre-wrap; z-index: 5; }
+  font: 12px/1.4 var(--mono); max-width: 560px; white-space: pre-wrap; z-index: 5; }
 </style>

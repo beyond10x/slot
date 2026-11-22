@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, useTemplateRef } from 'vue';
-import { AXIS, FONT, RECORDED_CPU, RECORDED_QUEUE, animate, drawAxis, drawExact, drawRecorded, sizeCanvas } from '../canvas.ts';
+import { AXIS, FONT, INK, RECORDED_CPU, RECORDED_QUEUE, animate, drawAxis, drawExact, drawRecorded, sizeCanvas } from '../canvas.ts';
 import { QUEUE_COLOR, stackOrder, tcColor } from '../lib/colors.ts';
 import { chartWindow, now, store } from '../store.ts';
 
-const H = 150;
+const H = 156;
 /** Height of the queue-length strip between the cores area and the time axis. */
-const QH = 30;
+const QH = 36;
 const CORES_BOTTOM = H - AXIS - QH - 6;
 const QUEUE_TOP = CORES_BOTTOM + 6;
 const QUEUE_BOTTOM = H - AXIS;
@@ -32,7 +32,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   const Y = (v: number) => CORES_BOTTOM - (v / top) * (CORES_BOTTOM - 6);
   const bw = Math.max(1, w / store.windowS);
 
-  ctx.fillStyle = '#ddd';
+  ctx.fillStyle = '#d4d4d4';
   ctx.fillRect(0, CORES_BOTTOM, w, 1);
   ctx.fillRect(0, QUEUE_BOTTOM, w, 1);
 
@@ -53,7 +53,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   drawExact(ctx, pts, X, (p) => Y(p.sys));
 
   const qmax = Math.max(1, Math.ceil(maxWaiting));
-  const QY = (v: number) => QUEUE_BOTTOM - (v / qmax) * (QH - 12);
+  const QY = (v: number) => QUEUE_BOTTOM - (v / qmax) * (QH - 17);
   drawRecorded(ctx, buckets, 'waiting', X, QY);
   ctx.fillStyle = QUEUE_COLOR;
   for (const p of pts) {
@@ -64,20 +64,21 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
 
   ctx.font = FONT;
   ctx.textBaseline = 'top';
-  ctx.fillStyle = '#666';
-  ctx.fillText(top + ' cores', 4, 2);
-  ctx.fillText('line: host CPU in use', 70, 2);
+  ctx.fillStyle = INK;
+  const scale = `${top} cores · line: host CPU in use`;
+  ctx.fillText(scale, 4, 2);
   if (buckets.length) {
     ctx.fillStyle = RECORDED_CPU;
-    ctx.fillText('10 s recorded averages · host process CPU', 4, 16);
+    ctx.fillText('10 s recorded averages · host process CPU', 4, 18);
   } else if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
   ctx.fillStyle = QUEUE_COLOR;
-  ctx.fillRect(4, QUEUE_TOP + 2, 9, 9);
-  ctx.fillStyle = '#666';
-  ctx.fillText(`queue length (max ${qmax})`, 18, QUEUE_TOP + 1);
+  ctx.fillRect(4, QUEUE_TOP + 3, 9, 9);
+  ctx.fillStyle = INK;
+  const queued = `queue length (max ${qmax})`;
+  ctx.fillText(queued, 18, QUEUE_TOP + 1);
   if (buckets.length) {
     ctx.fillStyle = RECORDED_QUEUE;
-    ctx.fillText('10 s recorded averages · queue', 145, QUEUE_TOP + 1);
+    ctx.fillText('10 s recorded averages · queue', 18 + ctx.measureText(queued).width + 14, QUEUE_TOP + 1);
   }
 }
 
@@ -91,5 +92,5 @@ onUnmounted(() => stop());
 </script>
 
 <template>
-  <canvas ref="cv" role="img" :aria-label="label" style="height: 150px"></canvas>
+  <canvas ref="cv" role="img" :aria-label="label" style="height: 156px"></canvas>
 </template>

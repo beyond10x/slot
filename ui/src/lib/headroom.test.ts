@@ -1,6 +1,31 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { POOL_BASE, buildCores, effectiveTokens, headroomCaption, machineLine, machineNumbers, notJsonError } from './headroom.ts';
+import {
+  POOL_BASE, buildCores, effectiveTokens, headroomCaption, machineDetail, machineLine, machineNumbers, machineSentence, notJsonError,
+} from './headroom.ts';
+
+test('the machine sentence leads with what holds builds back, and the detail keeps every number', () => {
+  const m = {
+    headroom_base: 'machine' as const, busy_cores: 18.24, target_cores: 11, outside_cores: 9.1, quota_floor: true, over_target: true,
+    outside: [{ name: 'session-3.scope', cores: 5.9 }, { name: 'docker 3f2a1b2c3d4e', cores: 3.2 }],
+  };
+  assert.equal(machineSentence(m, 20, 200), 'machine over target: 18.2 of 20 CPUs busy, other programs use 9.1; builds are held to 2.0 CPUs');
+  const calm = { ...m, quota_floor: false, over_target: false, outside: [] };
+  assert.equal(machineSentence(calm, 20, 430), 'machine: 18.2 of 20 CPUs busy, other programs use 9.1; builds may use 4.3 CPUs');
+  assert.equal(machineSentence(calm, 20, null), 'machine: 18.2 of 20 CPUs busy, other programs use 9.1; builds have no CPU limit');
+  assert.equal(machineSentence({ ...m, headroom_base: 'pool' }, 20, 200), null);
+  assert.equal(machineSentence({ ...m, target_cores: 0 }, 20, null), null);
+  assert.equal(
+    machineDetail(m, 20, 200),
+    'The machine may use 11.0 of 20 CPUs and is over that target: 18.2 are busy, 9.1 of them by programs outside the pool ' +
+      '(session-3.scope 5.9, docker 3f2a1b2c3d4e 3.2). Builds are held to 2.0 CPUs, the lowest limit slot sets.',
+  );
+  assert.equal(
+    machineDetail(calm, 20, 430),
+    'The machine may use 11.0 of 20 CPUs: 18.2 are busy, 9.1 of them by programs outside the pool. Builds may use 4.3 CPUs.',
+  );
+  assert.equal(machineDetail({ ...m, headroom_base: 'pool' }, 20, 200), null);
+});
 
 test('effective tokens match the daemon', () => {
   assert.equal(effectiveTokens(20, 0), 20);

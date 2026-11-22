@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue';
 import { fmtBytes, fmtDur } from '../lib/format.ts';
+import { sessionName } from '../lib/host.ts';
 import { checkoutLabel, cmdText, jobId, runS, waitS } from '../lib/job.ts';
 import { phase } from '../lib/units.ts';
-import { jobs, live, select, sparks, store } from '../store.ts';
+import { jobs, live, select, sessionTitles, sparks, store } from '../store.ts';
 import CoresSpark from './CoresSpark.vue';
+import RepoName from './RepoName.vue';
 import ToolDot from './ToolDot.vue';
 import UnitChips from './UnitChips.vue';
 
@@ -21,7 +23,8 @@ const rows = computed(() => {
     return {
       id,
       job: j,
-      checkout: checkoutLabel(j, '\n'),
+      checkout: checkoutLabel(j, ' '),
+      session: sessionName(j.session, sessionTitles),
       live: l,
       open: opened.has(id),
       cmd: cmdText(j),
@@ -42,57 +45,63 @@ function toggle(id: number, open: boolean): void {
 </script>
 
 <template>
-  <table>
+  <table class="jobs">
     <thead>
       <tr>
-        <th></th><th>#</th><th>tool</th><th>repo</th><th>command</th><th class="opt2">output</th><th>phase</th><th class="num">slots</th>
-        <th class="num">wait</th><th class="num">elapsed</th><th class="num">cores</th><th class="opt">last 60 s</th>
-        <th class="num opt">RSS</th><th class="opt">session</th>
+        <th class="c-lead"><span class="sr">units</span></th><th class="c-job">job</th><th class="c-tool"><span>tool</span></th><th class="c-repo">repo</th>
+        <th class="c-session h-b">session</th><th>command</th><th class="c-out h-c">output</th>
+        <th class="c-state">phase</th><th class="c-slots num">slots</th><th class="c-wait num">wait</th><th class="c-run num">elapsed</th>
+        <th class="c-cores num">cores</th><th class="c-extra h-a">last 60 s</th><th class="c-mem num h-a">RSS</th>
       </tr>
     </thead>
     <tbody>
       <template v-for="r in rows" :key="r.id">
-        <tr :class="{ sel: store.selected === r.id }" @click="select(r.id)">
-          <td class="tg">
-            <button type="button" :aria-expanded="r.open" :title="r.open ? 'hide units' : 'show units'"
-              :aria-label="`${r.open ? 'hide' : 'show'} units of job ${r.id}`"
-              @click.stop="toggle(r.id, r.open)">{{ r.open ? '▾' : '▸' }}</button>
+        <tr :class="{ sel: store.selected === r.id, lead: r.open }" @click="select(r.id)">
+          <td class="c-lead">
+            <button type="button" class="tg" :aria-expanded="r.open" :title="r.open ? 'hide units' : 'show units'"
+              :aria-label="`${r.open ? 'hide' : 'show'} units of job ${r.id}`" @click.stop="toggle(r.id, r.open)">
+              <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true" :class="{ open: r.open }"><path d="M3 1.5 7 5 3 8.5" /></svg>
+            </button>
           </td>
           <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
-          <td><ToolDot :name="r.job.toolchain" /></td>
-          <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`">{{ r.checkout }}</td>
+          <td class="c-tool" :title="r.job.toolchain"><ToolDot :name="r.job.toolchain" /></td>
+          <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
+          <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
-          <td class="opt2">
-            <button type="button" class="live" :class="{ on: store.selected === r.id }" title="watch this job's output live"
-              @click.stop="select(r.id, $event)">● live</button>
+          <td class="c-out h-c">
+            <button type="button" class="btn live" :class="{ on: store.selected === r.id }" tabindex="-1" title="watch this job's output as it is written"
+              @click.stop="select(r.id, $event)"><i></i>live</button>
           </td>
-          <td><span class="phase" :class="r.phase">{{ r.phase }}</span></td>
+          <td class="c-state"><span class="phase" :class="r.phase">{{ r.phase }}</span></td>
           <td class="num">{{ r.job.tokens }}</td>
           <td class="num">{{ r.wait }}</td>
           <td class="num">{{ r.elapsed }}</td>
           <td class="num">{{ r.cores }}</td>
-          <td class="opt"><CoresSpark :points="r.spark" :t1="store.clock" :span="sparks.spanMs" /></td>
-          <td class="num opt">{{ r.rss }}</td>
-          <td class="muted opt">{{ r.job.session.slice(0, 8) }}</td>
+          <td class="c-extra h-a"><CoresSpark :points="r.spark" :t1="store.clock" :span="sparks.spanMs" /></td>
+          <td class="num h-a">{{ r.rss }}</td>
         </tr>
         <tr v-if="r.open" class="detail">
-          <td colspan="14"><UnitChips :live="r.live" /></td>
+          <td></td><td colspan="9"><UnitChips :live="r.live" /></td><td class="h-b"></td><td class="h-c"></td><td class="h-a"></td><td class="h-a"></td>
         </tr>
       </template>
-      <tr v-if="!rows.length" class="empty"><td colspan="14" class="muted">nothing running</td></tr>
+      <tr v-if="!rows.length" class="empty"><td colspan="10">nothing running</td><td class="h-b"></td><td class="h-c"></td><td class="h-a"></td><td class="h-a"></td></tr>
     </tbody>
   </table>
 </template>
 
 <style scoped>
-td.tg { width: 22px; padding-right: 0; }
-td.tg button { min-width: 24px; min-height: 24px; border: 0; background: none; padding: 0 4px; cursor: pointer; color: var(--mute); }
-button.live { font-size: 12px; min-height: 24px; padding: 0 6px; border: 1px solid #e5a5a2; border-radius: 3px; background: #fff; color: #c4302b;
-  cursor: pointer; }
-button.live:hover, button.live.on { background: #c4302b; border-color: #c4302b; color: #fff; }
-tr.detail { cursor: default; }
-tr.detail td { background: transparent; border-bottom: 1px solid #eee; padding-top: 0; }
-.phase { font-size: 12px; padding: 0 5px; border-radius: 3px; background: #eee; }
+.tg { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px;
+  background: none; color: var(--ink); cursor: pointer; }
+.tg:hover { background: #e3e6ea; }
+.tg svg { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tg svg.open { transform: rotate(90deg); }
+/* "live" marks a stream that carries output: the mark is the calm ink, red stays the colour of a failure. */
+.live { padding: 0 7px 0 6px; }
+.live i { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; background: #1e8e3e; }
+.live.on i { background: #8fe0a6; }
+/* No rule between a job and the line below it. A transparent rule would show the page through the hover colour. */
+tr.lead td { border-bottom-width: 0; }
+.phase { display: inline-block; padding: 0 7px; border-radius: 10px; background: #ececec; font-size: 13px; line-height: 20px; }
 .phase.compiling { background: #dbeaf5; }
 .phase.testing { background: #d6efe6; }
 .phase.linking { background: #e4e4e4; }

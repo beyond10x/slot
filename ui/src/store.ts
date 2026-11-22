@@ -28,6 +28,14 @@ export const sparks = new SparkBuffer<number>(60_000);
 export const sessionSparks = new SparkBuffer<string>(60_000);
 /** Host census of the newest tick. */
 export const census = shallowRef<HostCensus | null>(null);
+/** Title of every session a census named, by id: the job tables name a job's session by it, also after the session went quiet. */
+export const sessionTitles = shallowReactive(new Map<string, string>());
+
+function noteTitles(ticks: readonly Tick[]): void {
+  for (const t of ticks) {
+    for (const s of t.census.sessions) if (s.session && s.title && sessionTitles.get(s.session) !== s.title) sessionTitles.set(s.session, s.title);
+  }
+}
 
 export const store = reactive({
   host: '',
@@ -164,6 +172,7 @@ function applyTick(m: Tick): void {
   hostSeries.push(hostSample(m));
   if (hostSeries.length > MAX_SAMPLES) hostSeries.splice(0, hostSeries.length - MAX_SAMPLES);
   noteFamilies([m]);
+  noteTitles([m]);
   triggerRef(exact);
 }
 
@@ -193,6 +202,7 @@ async function loadExactHistory(): Promise<void> {
     }
   }
   noteFamilies(ticks);
+  noteTitles(ticks);
   for (const [id, pts] of jobPts) if (live.has(id)) sparks.seed(id, pts);
   const current = new Set((census.value?.sessions ?? []).map((s) => s.session));
   for (const [key, pts] of sessionPts) if (current.has(key)) sessionSparks.seed(key, pts);

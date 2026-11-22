@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CensusSession } from '../generated/types.ts';
-import { familyColor, familyOrder, hostSample, notOnSlot, orderSessions, sessionLabel, stack } from './host.ts';
+import { familyColor, familyOrder, hostSample, notOnSlot, orderSessions, sessionCells, sessionLabel, stack } from './host.ts';
 import { tick } from './fixtures.ts';
 
 const session = (over: Partial<CensusSession>): CensusSession => ({
@@ -74,6 +74,12 @@ test('session label falls back to a short id, then a placeholder', () => {
   assert.equal(sessionLabel(session({ session: '0123456789abcdef', title: 'fix the parser' })), 'fix the parser');
   assert.equal(sessionLabel(session({ session: '0123456789abcdef' })), '01234567');
   assert.equal(sessionLabel(session({})), '(no session)');
+});
+
+test('the Sessions table names the id in every row, and says when a session has no title', () => {
+  assert.deepEqual(sessionCells(session({ session: '0123456789abcdef', title: 'fix the parser' })), { name: 'fix the parser', untitled: false, id: '01234567' });
+  assert.deepEqual(sessionCells(session({ session: '0123456789abcdef' })), { name: 'no title', untitled: true, id: '01234567' });
+  assert.deepEqual(sessionCells(session({})), { name: '(no session)', untitled: true, id: '' });
 });
 
 test('a session is not on slot above one unmanaged core', () => {

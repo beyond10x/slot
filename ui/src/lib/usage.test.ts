@@ -44,7 +44,7 @@ test('rows show shares, hours and the median wait, biggest first, at most top', 
   assert.equal(rows.length, 2);
   assert.deepEqual(
     { label: rows[0].label, share: rows[0].share, cpu: rows[0].cpuShare, hours: rows[0].slotHours, wait: rows[0].wait },
-    { label: 'team-a', share: '36.6%', cpu: '18.3%', hours: '3.7', wait: '42s' },
+    { label: 'team-a', share: '36.6 %', cpu: '18.3 %', hours: '3.7', wait: '42s' },
   );
   assert.equal(rows[0].width, 100, 'the largest row fills the bar track');
   assert.ok(Math.abs(rows[1].width - (0.092 / 0.366) * 100) < 1e-9);
