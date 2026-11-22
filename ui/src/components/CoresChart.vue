@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, useTemplateRef } from 'vue';
-import { AXIS, FONT, animate, drawAxis, sizeCanvas } from '../canvas.ts';
+import { computed, onMounted, onUnmounted, useTemplateRef } from 'vue';
+import { AXIS, FONT, RECORDED_CPU, RECORDED_QUEUE, animate, drawAxis, drawExact, drawRecorded, sizeCanvas } from '../canvas.ts';
 import { QUEUE_COLOR, stackOrder, tcColor } from '../lib/colors.ts';
-import { now, series, store } from '../store.ts';
+import { chartWindow, now, store } from '../store.ts';
 
 const H = 150;
 /** Height of the queue-length strip between the cores area and the time axis. */
@@ -12,6 +12,12 @@ const QUEUE_TOP = CORES_BOTTOM + 6;
 const QUEUE_BOTTOM = H - AXIS;
 
 const cv = useTemplateRef<HTMLCanvasElement>('cv');
+const label = computed(() => {
+  const { samples, buckets } = chartWindow.value;
+  return `Host CPU and queue, 1 s samples: ${samples.length}` +
+    (buckets.length ? `, 10 s recorded averages: ${buckets.length}` : '');
+});
+const tools = computed(() => stackOrder(chartWindow.value.samples.flatMap((p) => Object.keys(p.by))));
 
 function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   const win = store.windowS * 1000;
@@ -21,10 +27,9 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   ctx.clearRect(0, 0, w, H);
   drawAxis(ctx, w, H, t0, t1);
   const X = (t: number) => Math.max(0, ((t - t0) / win) * w);
-  const top = Math.max(store.cores || store.tokens || 1, 1);
+  const { samples: pts, buckets, maxHost, maxWaiting } = chartWindow.value;
+  const top = Math.ceil(Math.max(store.cores || store.tokens || 1, maxHost, 1));
   const Y = (v: number) => CORES_BOTTOM - (v / top) * (CORES_BOTTOM - 6);
-  const pts = series.filter((p) => p.t >= t0 - 2000);
-  const tools = stackOrder(pts.flatMap((p) => Object.keys(p.by)));
   const bw = Math.max(1, w / store.windowS);
 
   ctx.fillStyle = '#ddd';
@@ -34,7 +39,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   for (const p of pts) {
     let acc = 0;
     const x = X(p.t);
-    for (const k of tools) {
+    for (const k of tools.value) {
       const v = p.by[k] ?? 0;
       if (!v) continue;
       ctx.fillStyle = tcColor(k);
@@ -44,15 +49,12 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   }
   ctx.strokeStyle = '#222';
   ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  pts.forEach((p, i) => {
-    if (i) ctx.lineTo(X(p.t), Y(p.sys));
-    else ctx.moveTo(X(p.t), Y(p.sys));
-  });
-  ctx.stroke();
+  drawRecorded(ctx, buckets, 'host_cores', X, Y);
+  drawExact(ctx, pts, X, (p) => Y(p.sys));
 
-  const qmax = Math.max(1, ...pts.map((p) => p.waiting));
+  const qmax = Math.max(1, Math.ceil(maxWaiting));
   const QY = (v: number) => QUEUE_BOTTOM - (v / qmax) * (QH - 12);
+  drawRecorded(ctx, buckets, 'waiting', X, QY);
   ctx.fillStyle = QUEUE_COLOR;
   for (const p of pts) {
     if (!p.waiting) continue;
@@ -65,11 +67,18 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   ctx.fillStyle = '#666';
   ctx.fillText(top + ' cores', 4, 2);
   ctx.fillText('line: host CPU in use', 70, 2);
-  if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
+  if (buckets.length) {
+    ctx.fillStyle = RECORDED_CPU;
+    ctx.fillText('10 s recorded averages · host process CPU', 4, 16);
+  } else if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
   ctx.fillStyle = QUEUE_COLOR;
   ctx.fillRect(4, QUEUE_TOP + 2, 9, 9);
   ctx.fillStyle = '#666';
   ctx.fillText(`queue length (max ${qmax})`, 18, QUEUE_TOP + 1);
+  if (buckets.length) {
+    ctx.fillStyle = RECORDED_QUEUE;
+    ctx.fillText('10 s recorded averages · queue', 145, QUEUE_TOP + 1);
+  }
 }
 
 let stop = (): void => undefined;
@@ -82,5 +91,5 @@ onUnmounted(() => stop());
 </script>
 
 <template>
-  <canvas ref="cv" style="height: 150px"></canvas>
+  <canvas ref="cv" role="img" :aria-label="label" style="height: 150px"></canvas>
 </template>

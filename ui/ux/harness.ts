@@ -54,6 +54,9 @@ function fakeEventSource(outputs: Outputs): void {
     push(suffix: string, data: string): void {
       for (const src of sources) if (src.url.endsWith(suffix)) src.emit('message', data);
     },
+    reconnect(): void {
+      for (const src of sources) if (src.url.endsWith('api/events')) src.onopen?.(new Event('open'));
+    },
   };
 }
 
@@ -78,6 +81,8 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
   const limitPuts: unknown[] = [];
   await page.route('**/api/state', (r) => r.fulfill({ json: sc.state }));
   await page.route('**/api/history', (r) => r.fulfill({ json: sc.history }));
+  await page.route('**/api/chart-history', (r) => sc.chartHistory
+    ? r.fulfill({ json: sc.chartHistory }) : r.fulfill({ status: 404, body: '' }));
   await page.route('**/api/usage**', (r) => r.fulfill({ json: sc.usage ?? EMPTY_USAGE }));
   await page.route('**/api/limits', async (r) => {
     const body = r.request().postDataJSON() as { headroom_percent: number };

@@ -28,6 +28,21 @@ impl JobState {
     }
 }
 
+/// Git checkout containing the submitting client's working directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Checkout {
+    /// The repository's main working tree.
+    Repository,
+    /// A linked working tree of the repository.
+    Worktree {
+        /// Name of the linked working directory.
+        name: String,
+    },
+    /// The working directory is outside a Git checkout.
+    Directory,
+}
+
 /// One job, as logged and as shown.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Job {
@@ -40,6 +55,10 @@ pub struct Job {
     pub cwd: String,
     /// Repository name.
     pub repo: String,
+    /// How the client identified its checkout. Absent for unverified jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub checkout: Option<Checkout>,
     /// Project: the namespace of the repository's remote, or `.slot.toml`'s
     /// `project`; empty when unknown (`crate::project`).
     #[serde(default, skip_serializing_if = "String::is_empty")]

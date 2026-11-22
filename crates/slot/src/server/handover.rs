@@ -11,7 +11,7 @@
 //! listed jobs' process groups, so no client waits on a connection nobody
 //! serves and no job runs outside the pool.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::jobserver::PoolState;
 use crate::proto::Request;
-use crate::types::Job;
+use crate::types::{Chunk, Job};
 
 /// Format version this release writes and reads.
 pub const VERSION: u32 = 1;
@@ -57,6 +57,12 @@ pub struct State {
     pub running: Vec<Running>,
     /// Jobs waiting for admission or slots, oldest first.
     pub queued: Vec<Queued>,
+    /// Buffered chart ticks, as serialized events in chronological order.
+    #[serde(default, skip_serializing_if = "VecDeque::is_empty")]
+    pub history: VecDeque<String>,
+    /// Output tails of recent finished jobs, by job id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub done_output: HashMap<i64, Vec<Chunk>>,
     /// A reload was asked for while this handover ran: the new process
     /// hands over again once it serves.
     #[serde(default)]
@@ -94,6 +100,9 @@ pub struct Running {
     /// Path rewrite of remote jobs: from, to.
     #[serde(default)]
     pub rewrite: (String, String),
+    /// Output already read from the job's pipes, kept for the dashboard.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output: Vec<Chunk>,
     /// Set when the old process reaped the job already.
     #[serde(default)]
     pub exited: Option<Exited>,

@@ -662,6 +662,8 @@ Sequence in the old process, on SIGHUP:
      ends, fd of its client connection, the client's uid, the tracker's last sample, path
      rewrite pair;
    - per queued job: the `Request` and its client fd (so queued clients no longer resubmit);
+   - up to 900 one-second chart samples and the buffered output of running jobs and the last 50 completions.
+     Older senders omit these optional fields.
    - headroom, call-mode tracker and upgrade counters.
 5. Clear `FD_CLOEXEC` on exactly those fds (`fcntl(F_SETFD, 0)`), then `exec` with
    `SLOT_HANDOVER=<path>` in the environment.

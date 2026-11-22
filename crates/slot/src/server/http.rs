@@ -1,7 +1,10 @@
 //! Web UI and its JSON/SSE API.
 
 use std::convert::Infallible;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::net::SocketAddr;
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -14,11 +17,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::stream::{self, Stream, StreamExt};
 use include_dir::{Dir, include_dir};
+use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
 
 use super::Server;
 
 static UI: Dir<'_> = include_dir!("$OUT_DIR/ui");
+
+const CHART_WINDOW_MS: i64 = 6 * 60 * 60 * 1_000;
+const CHART_TAIL_START: u64 = 1 << 20;
+const CHART_TAIL_LIMIT: u64 = 32 << 20;
 
 pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
     let app = Router::new()
@@ -27,6 +35,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/jobs/{id}/output", get(output))
         .route("/metrics", get(metrics))
         .route("/api/history", get(history))
+        .route("/api/chart-history", get(chart_history))
         .route("/api/limits", get(limits_get).put(limits_put))
         .route("/api/usage", get(usage))
         .route("/api/priority", get(priority_get).put(priority_put))
@@ -163,6 +172,73 @@ async fn history(State(s): State<Arc<Server>>) -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/json")],
         s.history_json(),
     )
+}
+
+#[derive(Deserialize, Serialize)]
+struct ChartSample {
+    t: i64,
+    host_cores: f64,
+    waiting: f64,
+    n: u32,
+}
+
+async fn chart_history(
+    State(s): State<Arc<Server>>,
+) -> Result<axum::Json<Vec<ChartSample>>, StatusCode> {
+    let path = s.cfg.state_dir.join("census.jsonl");
+    let samples = tokio::task::spawn_blocking(move || read_chart_history(&path, super::now_ms()))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(axum::Json(samples))
+}
+
+fn read_chart_history(path: &FsPath, now: i64) -> io::Result<Vec<ChartSample>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    let first = now.saturating_sub(CHART_WINDOW_MS);
+    let mut amount = CHART_TAIL_START.min(len);
+    loop {
+        // Most of the log is outside the chart. Expand the tail only when
+        // it has no complete sample older than the requested window.
+        let offset = len - amount;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut tail = Vec::new();
+        (&mut file).take(amount).read_to_end(&mut tail)?;
+        let start = if offset == 0 {
+            0
+        } else {
+            tail.iter()
+                .position(|&b| b == b'\n')
+                .map_or(tail.len(), |p| p + 1)
+        };
+        let mut earlier = false;
+        let mut samples: Vec<_> = tail[start..]
+            .split_inclusive(|&b| b == b'\n')
+            .filter_map(|line| {
+                // The writer appends a newline with each completed window.
+                if line.last() != Some(&b'\n') {
+                    return None;
+                }
+                let sample: ChartSample = serde_json::from_slice(line).ok()?;
+                if sample.n == 0 || sample.t <= 0 || sample.host_cores < 0.0 || sample.waiting < 0.0
+                {
+                    return None;
+                }
+                earlier |= sample.t < first;
+                (first..=now).contains(&sample.t).then_some(sample)
+            })
+            .collect();
+        if earlier || offset == 0 || amount == CHART_TAIL_LIMIT {
+            samples.sort_by_key(|s| s.t);
+            return Ok(samples);
+        }
+        amount = (amount * 2).min(len).min(CHART_TAIL_LIMIT);
+    }
 }
 
 async fn events(

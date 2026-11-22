@@ -34,6 +34,24 @@ impl Ring {
         }
     }
 
+    pub(super) fn from_tail(limit: usize, chunks: Vec<Chunk>) -> Self {
+        let ring = Self::new(limit);
+        for chunk in chunks {
+            ring.write(&chunk.t, chunk.b);
+        }
+        ring
+    }
+
+    pub(super) fn snapshot(&self) -> Vec<Chunk> {
+        self.inner
+            .lock()
+            .expect("ring lock")
+            .chunks
+            .iter()
+            .cloned()
+            .collect()
+    }
+
     /// Appends a chunk and forwards it to followers.
     pub fn write(&self, t: &str, b: String) {
         let mut g = self.inner.lock().expect("ring lock");

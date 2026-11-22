@@ -1,7 +1,7 @@
-import { reactive, shallowReactive, shallowRef } from 'vue';
+import { computed, reactive, shallowReactive, shallowRef, triggerRef } from 'vue';
 import type { Event, HostCensus, Job, LiveJob, State } from './generated/types.ts';
-import { coresSample, mergeByT, parseHistory } from './lib/history.ts';
-import type { Sample, Tick } from './lib/history.ts';
+import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './lib/history.ts';
+import type { RecordedBucket, Sample, Tick } from './lib/history.ts';
 import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
 import type { MachineNumbers } from './lib/headroom.ts';
 import { familyOrder, hostSample } from './lib/host.ts';
@@ -20,6 +20,8 @@ export const live = shallowReactive(new Map<number, LiveJob>());
 export const series: Sample[] = [];
 /** Not reactive: host census per second, read by the host panel's canvas loops. */
 export const hostSeries: HostSample[] = [];
+const exact = shallowRef(series);
+const recorded = shallowRef<RecordedBucket[]>([]);
 /** Not reactive: per-job cores over the last 60 s; readers re-run on `live` changes. */
 export const sparks = new SparkBuffer<number>(60_000);
 /** Not reactive: per-session cores over the last 60 s; readers re-run on `census` changes. */
@@ -69,6 +71,24 @@ export const store = reactive({
 
 let skew = 0;
 let lastTick = -Infinity;
+
+/** Recompute once per tick, history load or zoom; both canvases reuse these samples between frames. */
+export const chartWindow = computed(() => {
+  const to = store.clock;
+  const from = to - store.windowS * 1000;
+  const inWindow = (p: { t: number }) => p.t >= from && p.t <= to;
+  const samples = exact.value.filter(inWindow);
+  const host = hostSeries.filter(inWindow);
+  const buckets = recordedWindow(recorded.value, exact.value, from, to);
+  let maxHost = 0;
+  let maxWaiting = 0;
+  for (const b of buckets) {
+    maxHost = Math.max(maxHost, b.host_cores);
+    maxWaiting = Math.max(maxWaiting, b.waiting);
+  }
+  for (const p of samples) maxWaiting = Math.max(maxWaiting, p.waiting);
+  return { samples, host, buckets, maxHost, maxWaiting };
+});
 
 /** Server time estimate, ms. */
 export const now = (): number => Date.now() + skew;
@@ -144,15 +164,19 @@ function applyTick(m: Tick): void {
   hostSeries.push(hostSample(m));
   if (hostSeries.length > MAX_SAMPLES) hostSeries.splice(0, hostSeries.length - MAX_SAMPLES);
   noteFamilies([m]);
+  triggerRef(exact);
 }
 
 /** Seeds every chart buffer from `api/history`; samples already held win, none is added twice. */
-async function loadHistory(): Promise<void> {
+async function loadExactHistory(): Promise<void> {
   const res = await fetch('api/history');
   if (!res.ok) return;
   const ticks = parseHistory(await res.json());
+  const newest = ticks[ticks.length - 1];
+  if (newest) applyTick(newest);
   replace(series, mergeByT(ticks.map((t) => coresSample(t, toolchainOf, store.cores)), series, MAX_SAMPLES));
   replace(hostSeries, mergeByT(ticks.map(hostSample), hostSeries, MAX_SAMPLES));
+  triggerRef(exact);
   const jobPts = new Map<number, Point[]>();
   const sessionPts = new Map<string, Point[]>();
   for (const t of ticks) {
@@ -169,12 +193,21 @@ async function loadHistory(): Promise<void> {
     }
   }
   noteFamilies(ticks);
-  const newest = ticks[ticks.length - 1];
-  // Without a live tick yet, the newest history tick is the current state.
-  if (newest && newest.t > lastTick) applyTick(newest);
   for (const [id, pts] of jobPts) if (live.has(id)) sparks.seed(id, pts);
   const current = new Set((census.value?.sessions ?? []).map((s) => s.session));
   for (const [key, pts] of sessionPts) if (current.has(key)) sessionSparks.seed(key, pts);
+}
+
+async function loadRecordedHistory(): Promise<void> {
+  const res = await fetch('api/chart-history');
+  if (!res.ok) return;
+  const buckets = parseRecordedHistory(await res.json());
+  const from = now() - MAX_SAMPLES * 1000;
+  recorded.value = mergeByT(recorded.value, buckets).filter((b) => b.t + b.n * 1000 > from);
+}
+
+async function loadHistory(): Promise<void> {
+  await Promise.allSettled([loadExactHistory(), loadRecordedHistory()]);
   store.historyLoaded = true;
 }
 

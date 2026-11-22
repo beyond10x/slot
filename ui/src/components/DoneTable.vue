@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { fmtBytes, fmtClock, fmtDur } from '../lib/format.ts';
-import { cmdText, jobId, resultText, runS, splitJobs, times, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobId, resultText, runS, splitJobs, times, waitS } from '../lib/job.ts';
 import { jobs, select, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
@@ -12,6 +12,7 @@ const rows = computed(() =>
     return {
       id: jobId(j),
       job: j,
+      checkout: checkoutLabel(j, '\n'),
       cmd: cmdText(j),
       result: resultText(j),
       bad: j.exit !== 0,
@@ -39,7 +40,7 @@ const rows = computed(() =>
       <tr v-for="r in rows" :key="r.id" :class="{ sel: store.selected === r.id }" @click="select(r.id)">
         <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
         <td><ToolDot :name="r.job.toolchain" /></td>
-        <td class="repo" :title="r.job.repo">{{ r.job.repo }}</td>
+        <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`">{{ r.checkout }}</td>
         <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
         <td :class="{ bad: r.bad }">{{ r.result }}</td>
         <td class="num">{{ r.wait }}</td>

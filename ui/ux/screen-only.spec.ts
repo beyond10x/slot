@@ -12,6 +12,28 @@ import { VIEWPORTS, vpName } from './viewports.ts';
 const OUT = join(dirname(fileURLToPath(import.meta.url)), 'out', 'bot');
 const MAX_ACTIONS_PER_FIX = 2;
 
+test('job tables distinguish repository, worktree, directory and historical jobs', async ({ page, baseURL }) => {
+  const run = await open(page, baseURL ?? '/', SCENARIOS.find((s) => s.name === 'busy-failed')!);
+  while (await run.step()) { /* wait for the failed job */ }
+  const row = (id: number) => page.getByRole('row').filter({ has: page.getByRole('button', { name: `output of job ${id}`, exact: true }) });
+  await expect(row(40).getByRole('cell', { name: 'No repository', exact: true })).toHaveAttribute('title', /\/jobs\/build-cache/);
+  await expect(row(41).getByRole('cell', { name: 'checkout', exact: true })).toBeVisible();
+  await expect(row(47).getByRole('cell', { name: 'ledger worktree invoices', exact: true })).toBeVisible();
+  await expect(row(36).getByRole('cell', { name: 'Repository unknown', exact: true })).toBeVisible();
+  await expect(row(37).getByRole('cell', { name: 'Unverified · impl-gate', exact: true })).toHaveAttribute('title', /\/jobs\/impl-gate/);
+  await expect(row(38).getByRole('cell', { name: 'Unverified · checkout', exact: true })).toBeVisible();
+  await expect(row(42).getByRole('cell', { name: 'ledger worktree tax-rounding', exact: true })).toBeVisible();
+  await row(37).getByRole('button').click();
+  await expect(page.getByRole('complementary').getByText(/^#37 Unverified · impl-gate:/)).toBeVisible();
+});
+
+test('pool share labels identify wholly and partly unverified groups', async ({ page, baseURL }) => {
+  await open(page, baseURL ?? '/', SCENARIOS.find((s) => s.name === 'pool-share')!);
+  const usage = page.getByRole('table').filter({ has: page.getByRole('columnheader', { name: 'share of slot time' }) });
+  await expect(usage.getByRole('cell', { name: 'Unverified · checkout', exact: true })).toBeVisible();
+  await expect(usage.getByRole('cell', { name: '4 of 327 unverified · docs-site', exact: true })).toBeVisible();
+});
+
 for (const sc of SCENARIOS) {
   const task = sc.task;
   if (!task) continue;

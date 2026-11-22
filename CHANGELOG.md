@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Jobs show their Git repository and linked worktree name. Directories outside
+  Git show **No repository**. Historical jobs keep their recorded names marked
+  **Unverified**, or show **Repository unknown** when the name is empty.
+
+- Daemon handovers preserve recent chart samples and job output when the sending daemon supports it.
+
+- The CPU and queue chart uses the saved ten-second census for up to six hours of history after a reload.
+
 ## 0.19.0 — 2026-11-19
 
 - Eviction of local target directories deletes by default: `--evict-dry-run` defaults to false.
