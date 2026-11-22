@@ -3,8 +3,9 @@
 //!
 //! A job's level is the rule for its repository, else the level it asked
 //! for itself (`--priority`, `SLOT_PRIORITY`), else `normal`. A job that
-//! has waited longer than `--promote-after` is ordered as `high`, so no
-//! level waits forever.
+//! has waited longer than the promotion delay is ordered as `high`, so no
+//! level waits forever. The delay is the daemon's `--promote-after` until
+//! `slot priority promote-after` sets one at run time, kept in [`FILE`] too.
 
 use std::path::Path;
 use std::time::Duration;
@@ -25,29 +26,51 @@ pub struct Rule {
     pub level: Priority,
 }
 
-/// What is saved in [`FILE`].
+/// What is saved in [`FILE`] and what the daemon orders the queue by: the
+/// rules and the promotion delay set at run time. A field the reader does
+/// not know is ignored, so an older daemon reads a newer file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct Saved {
+pub struct Table {
+    /// The rules, in the order they were set.
     #[serde(default)]
-    rules: Vec<Rule>,
+    pub rules: Vec<Rule>,
+    /// Seconds after which a queued job is ordered as `high`, set with
+    /// `slot priority promote-after`; 0 never promotes. `None`, and absent
+    /// from the file: the daemon's `--promote-after` applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_after_s: Option<u64>,
 }
 
-/// Reads the saved rules; none when the file is missing or unreadable.
-pub fn load(dir: &Path) -> Vec<Rule> {
+impl Table {
+    /// The promotion delay in force: the one set at run time, else
+    /// `option`, the daemon's `--promote-after`.
+    pub fn promote_after(&self, option: Duration) -> Duration {
+        self.promote_after_s.map_or(option, Duration::from_secs)
+    }
+
+    /// Sets the delay, or returns to the daemon's option. Returns whether
+    /// the table changed.
+    pub fn set_promote_after(&mut self, to: PromoteAfter) -> bool {
+        let to = match to {
+            PromoteAfter::Seconds(s) => Some(s),
+            PromoteAfter::Default => None,
+        };
+        std::mem::replace(&mut self.promote_after_s, to) != to
+    }
+}
+
+/// Reads the saved table; empty when the file is missing or unreadable.
+pub fn load(dir: &Path) -> Table {
     std::fs::read_to_string(dir.join(FILE))
         .ok()
-        .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
-        .map(|s| s.rules)
+        .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
 }
 
-/// Writes the rules.
-pub fn save(dir: &Path, rules: &[Rule]) -> std::io::Result<()> {
+/// Writes the table.
+pub fn save(dir: &Path, table: &Table) -> std::io::Result<()> {
     let tmp = dir.join(format!("{FILE}.tmp"));
-    let saved = Saved {
-        rules: rules.to_vec(),
-    };
-    std::fs::write(&tmp, serde_json::to_vec(&saved)?)?;
+    std::fs::write(&tmp, serde_json::to_vec(table)?)?;
     std::fs::rename(tmp, dir.join(FILE))
 }
 
@@ -133,15 +156,80 @@ pub fn level(
     (set, false)
 }
 
-/// Body of `PUT /api/priority`: the rule for `pattern` gets `level`; a
-/// missing or null `level` removes it.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The value of `slot priority promote-after` and of `promote_after_s` in
+/// the body of `PUT /api/priority`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromoteAfter {
+    /// A queued job is ordered as `high` after this many seconds; 0 never
+    /// promotes. In JSON a number.
+    Seconds(u64),
+    /// The daemon's `--promote-after` applies again. In JSON `null`.
+    Default,
+}
+
+impl std::str::FromStr for PromoteAfter {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "default" {
+            return Ok(Self::Default);
+        }
+        s.parse()
+            .map(Self::Seconds)
+            .map_err(|_| format!("{s:?} is neither a number of seconds nor `default`"))
+    }
+}
+
+impl Serialize for PromoteAfter {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Seconds(n) => s.serialize_u64(*n),
+            Self::Default => s.serialize_none(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PromoteAfter {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Option::<u64>::deserialize(d).map(|s| s.map_or(Self::Default, Self::Seconds))
+    }
+}
+
+/// A field that is present, `null` included: `None` is left to the field's
+/// default, a field left out.
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<PromoteAfter>, D::Error> {
+    PromoteAfter::deserialize(d).map(Some)
+}
+
+/// Body of `PUT /api/priority`. With `pattern`: the rule for it gets
+/// `level`; a missing or null `level` removes it. With `promote_after_s`:
+/// the promotion delay is set, or with `null` the daemon's
+/// `--promote-after` applies again. A body names one of the two or both.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Request {
     /// Repository name or glob.
-    pub pattern: String,
+    #[serde(default)]
+    pub pattern: Option<String>,
     /// The level; `None` removes the rule.
     #[serde(default)]
     pub level: Option<Priority>,
+    /// The promotion delay; `None`, a field left out, does not change it.
+    #[serde(default, deserialize_with = "present")]
+    pub promote_after_s: Option<PromoteAfter>,
+}
+
+impl Request {
+    /// Why the daemon refuses this body, if it does.
+    pub fn refused(&self) -> Option<&'static str> {
+        match self.pattern.as_deref().map(str::trim) {
+            Some("") => Some("slot: the pattern is empty"),
+            None if self.level.is_some() => Some("slot: a level needs a pattern"),
+            None if self.promote_after_s.is_none() => {
+                Some("slot: the body names neither pattern nor promote_after_s")
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Answer of `GET` and `PUT /api/priority`.
@@ -150,7 +238,9 @@ pub struct View {
     /// The rules, in the order they were set.
     #[serde(default)]
     pub rules: Vec<Rule>,
-    /// Seconds after which a queued job is ordered as `high`; 0 = never.
+    /// Seconds after which a queued job is ordered as `high`, as in force
+    /// now (the delay set at run time, else the daemon's
+    /// `--promote-after`); 0 = never.
     #[serde(default)]
     pub promote_after_s: u64,
 }
@@ -207,12 +297,164 @@ mod tests {
     #[test]
     fn rules_survive_a_restart() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(load(dir.path()), Vec::<Rule>::new());
-        let rules = vec![rule("repo-a", Priority::High), rule("web-*", Priority::Low)];
-        save(dir.path(), &rules).unwrap();
-        assert_eq!(load(dir.path()), rules);
+        assert_eq!(load(dir.path()), Table::default());
+        let table = Table {
+            rules: vec![rule("repo-a", Priority::High), rule("web-*", Priority::Low)],
+            promote_after_s: None,
+        };
+        save(dir.path(), &table).unwrap();
+        assert_eq!(load(dir.path()), table);
         std::fs::write(dir.path().join(FILE), "not json").unwrap();
-        assert_eq!(load(dir.path()), Vec::<Rule>::new());
+        assert_eq!(load(dir.path()), Table::default());
+    }
+
+    #[test]
+    fn the_delay_is_saved_beside_the_rules_and_absent_until_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let text = || std::fs::read_to_string(&file).unwrap();
+        let option = Duration::from_secs(1800);
+        let mut table = Table {
+            rules: vec![rule("repo-a", Priority::High)],
+            promote_after_s: None,
+        };
+        save(dir.path(), &table).unwrap();
+        assert_eq!(
+            text(),
+            r#"{"rules":[{"pattern":"repo-a","level":"high"}]}"#,
+            "no delay set: the file is what a daemon without the setting writes"
+        );
+        assert_eq!(load(dir.path()).promote_after(option), option);
+
+        assert!(table.set_promote_after(PromoteAfter::Seconds(300)));
+        assert!(!table.set_promote_after(PromoteAfter::Seconds(300)));
+        save(dir.path(), &table).unwrap();
+        assert_eq!(
+            text(),
+            r#"{"rules":[{"pattern":"repo-a","level":"high"}],"promote_after_s":300}"#
+        );
+        let back = load(dir.path());
+        assert_eq!(back, table);
+        assert_eq!(back.promote_after(option), Duration::from_secs(300));
+
+        assert!(table.set_promote_after(PromoteAfter::Seconds(0)));
+        save(dir.path(), &table).unwrap();
+        assert_eq!(
+            load(dir.path()).promote_after(option),
+            Duration::ZERO,
+            "0 is a delay of its own, not the option"
+        );
+
+        assert!(table.set_promote_after(PromoteAfter::Default));
+        assert!(!table.set_promote_after(PromoteAfter::Default));
+        save(dir.path(), &table).unwrap();
+        assert!(!text().contains("promote_after_s"), "{}", text());
+        assert_eq!(load(dir.path()).rules, table.rules);
+    }
+
+    #[test]
+    fn an_old_file_and_a_file_with_fields_of_a_newer_daemon_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let rules = vec![rule("web-*", Priority::Low)];
+        std::fs::write(&file, r#"{"rules":[{"pattern":"web-*","level":"low"}]}"#).unwrap();
+        assert_eq!(
+            load(dir.path()),
+            Table {
+                rules: rules.clone(),
+                promote_after_s: None
+            },
+            "a file of a daemon without the setting"
+        );
+        std::fs::write(
+            &file,
+            r#"{"rules":[{"pattern":"web-*","level":"low"}],"promote_after_s":300,"later":{"x":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load(dir.path()),
+            Table {
+                rules,
+                promote_after_s: Some(300)
+            },
+            "a field this daemon does not know is ignored"
+        );
+        std::fs::write(&file, r#"{"promote_after_s":60}"#).unwrap();
+        assert_eq!(
+            load(dir.path()),
+            Table {
+                rules: Vec::new(),
+                promote_after_s: Some(60)
+            }
+        );
+    }
+
+    #[test]
+    fn the_request_body_names_a_rule_a_delay_or_both() {
+        let parse = |s: &str| serde_json::from_str::<Request>(s);
+        let rule = parse(r#"{"pattern":"repo-a","level":"high"}"#).unwrap();
+        assert_eq!(
+            rule,
+            Request {
+                pattern: Some("repo-a".into()),
+                level: Some(Priority::High),
+                promote_after_s: None,
+            }
+        );
+        assert_eq!(rule.refused(), None);
+        let unset = parse(r#"{"pattern":"repo-a","level":null}"#).unwrap();
+        assert_eq!((unset.level, unset.promote_after_s), (None, None));
+        assert_eq!(parse(r#"{"pattern":"repo-a"}"#).unwrap(), unset);
+        assert_eq!(unset.refused(), None);
+
+        let delay = parse(r#"{"promote_after_s":300}"#).unwrap();
+        assert_eq!(delay.promote_after_s, Some(PromoteAfter::Seconds(300)));
+        assert_eq!((delay.pattern.as_deref(), delay.refused()), (None, None));
+        let never = parse(r#"{"promote_after_s":0}"#).unwrap();
+        assert_eq!(never.promote_after_s, Some(PromoteAfter::Seconds(0)));
+        let default = parse(r#"{"promote_after_s":null}"#).unwrap();
+        assert_eq!(default.promote_after_s, Some(PromoteAfter::Default));
+        assert_eq!(default.refused(), None);
+        let both = parse(r#"{"pattern":"web-*","level":"low","promote_after_s":60}"#).unwrap();
+        assert_eq!(both.refused(), None);
+
+        assert!(parse("{}").unwrap().refused().is_some());
+        assert!(parse(r#"{"level":"high"}"#).unwrap().refused().is_some());
+        assert!(
+            parse(r#"{"level":"high","promote_after_s":60}"#)
+                .unwrap()
+                .refused()
+                .is_some(),
+            "a level without a pattern"
+        );
+        assert!(parse(r#"{"pattern":" "}"#).unwrap().refused().is_some());
+        assert!(
+            parse(r#"{"pattern":"","promote_after_s":60}"#)
+                .unwrap()
+                .refused()
+                .is_some()
+        );
+        for bad in [
+            r#"{"promote_after_s":-1}"#,
+            r#"{"promote_after_s":"300"}"#,
+            r#"{"promote_after_s":1.5}"#,
+            r#"{"pattern":"repo-a","level":"asap"}"#,
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_delay_parses_from_seconds_or_default_and_writes_as_json() {
+        assert_eq!("300".parse(), Ok(PromoteAfter::Seconds(300)));
+        assert_eq!("0".parse(), Ok(PromoteAfter::Seconds(0)));
+        assert_eq!("default".parse(), Ok(PromoteAfter::Default));
+        for bad in ["", "-1", "5m", "Default", "1.5"] {
+            assert!(bad.parse::<PromoteAfter>().is_err(), "{bad}");
+        }
+        let json = |v: PromoteAfter| serde_json::to_string(&v).unwrap();
+        assert_eq!(json(PromoteAfter::Seconds(300)), "300");
+        assert_eq!(json(PromoteAfter::Default), "null");
     }
 
     #[test]
@@ -271,5 +513,20 @@ mod tests {
             (Priority::Low, false),
             "zero never promotes"
         );
+    }
+
+    #[test]
+    fn a_delay_set_at_run_time_wins_over_the_option() {
+        let option = Duration::from_secs(1800);
+        let waited = Duration::from_secs(400);
+        let mut table = Table::default();
+        let at = |t: &Table| level(&t.rules, "web-b", None, waited, t.promote_after(option));
+        assert_eq!(at(&table), (Priority::Normal, false), "400 s of 1800 s");
+        table.set_promote_after(PromoteAfter::Seconds(300));
+        assert_eq!(at(&table), (Priority::High, true), "400 s of 300 s");
+        table.set_promote_after(PromoteAfter::Seconds(0));
+        assert_eq!(at(&table), (Priority::Normal, false), "0 never promotes");
+        table.set_promote_after(PromoteAfter::Default);
+        assert_eq!(at(&table), (Priority::Normal, false), "the option again");
     }
 }

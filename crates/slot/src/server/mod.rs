@@ -105,7 +105,7 @@ pub struct Config {
     /// Longest time an upgrade stops admission while jobs run; zero never stops it.
     pub upgrade_hold: Duration,
     /// A queued job that waited longer than this is ordered as `high`;
-    /// zero never promotes.
+    /// zero never promotes. A delay saved through `PUT /api/priority` wins.
     pub promote_after: Duration,
     /// The clock a queued job's wait is measured by for that, ms since the
     /// epoch: [`now_ms`] outside tests.
@@ -401,8 +401,9 @@ pub struct Server {
     uid: u32,
     /// Held while a `CPUQuota` is set, so two settings never cross.
     quota_lock: tokio::sync::Mutex<()>,
-    /// The priority rules, as saved in `priority.json`.
-    rules: Mutex<Vec<priority::Rule>>,
+    /// The priority rules and the promotion delay set at run time, as
+    /// saved in `priority.json`.
+    priority: Mutex<priority::Table>,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -480,7 +481,7 @@ impl Server {
         std::fs::set_permissions(&cfg.state_dir, std::fs::Permissions::from_mode(0o700))?;
         let fifo = cfg.state_dir.join("jobserver.fifo");
         let saved = limits::load(&cfg.state_dir);
-        let rules = priority::load(&cfg.state_dir);
+        let priority_table = priority::load(&cfg.state_dir);
         let adopted = inherited.as_mut().and_then(|h| {
             if h.state.pool.size != cfg.tokens {
                 eprintln!(
@@ -627,7 +628,7 @@ impl Server {
                 .and_then(|s| machine::own_cgroup(&s)),
             uid: nix::unistd::getuid().as_raw(),
             quota_lock: tokio::sync::Mutex::new(()),
-            rules: Mutex::new(rules),
+            priority: Mutex::new(priority_table),
         }))
     }
 
@@ -2592,8 +2593,9 @@ impl Server {
     fn level_of(&self, repo: &str, own: Option<Priority>, enqueued_ms: i64) -> (Priority, bool) {
         let now = (self.cfg.clock)();
         let waited = Duration::from_millis(u64::try_from(now - enqueued_ms).unwrap_or(0));
-        let rules = self.rules.lock().expect("rules lock");
-        priority::level(&rules, repo, own, waited, self.cfg.promote_after)
+        let table = self.priority.lock().expect("priority lock");
+        let promote_after = table.promote_after(self.cfg.promote_after);
+        priority::level(&table.rules, repo, own, waited, promote_after)
     }
 
     /// The level job `id` is queued at.
@@ -2644,7 +2646,8 @@ impl Server {
         }
     }
 
-    /// Every second: promotes queued jobs that waited past `--promote-after`.
+    /// Every second: promotes queued jobs that waited past the promotion
+    /// delay.
     async fn priority_watch(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2654,27 +2657,36 @@ impl Server {
         }
     }
 
-    /// The priority rules, as `GET /api/priority` answers.
+    /// The priority rules and the promotion delay in force, as
+    /// `GET /api/priority` answers.
     pub fn priority_view(&self) -> priority::View {
+        let table = self.priority.lock().expect("priority lock");
         priority::View {
-            rules: self.rules.lock().expect("rules lock").clone(),
-            promote_after_s: self.cfg.promote_after.as_secs(),
+            rules: table.rules.clone(),
+            promote_after_s: table.promote_after(self.cfg.promote_after).as_secs(),
         }
     }
 
-    /// Sets or removes a priority rule (`slot priority set|unset`), saves the
-    /// rules and re-ranks the queued jobs.
+    /// Sets or removes a priority rule (`slot priority set|unset`), sets the
+    /// promotion delay (`slot priority promote-after`), saves both and
+    /// re-ranks the queued jobs.
     pub fn set_priority(&self, req: &priority::Request) -> Result<priority::View, String> {
-        let pattern = req.pattern.trim();
-        if pattern.is_empty() {
-            return Err("slot: the pattern is empty".into());
+        if let Some(why) = req.refused() {
+            return Err(why.into());
         }
         let saved = {
-            let mut rules = self.rules.lock().expect("rules lock");
-            priority::set(&mut rules, pattern, req.level).then(|| rules.clone())
+            let mut table = self.priority.lock().expect("priority lock");
+            let mut changed = false;
+            if let Some(pattern) = &req.pattern {
+                changed |= priority::set(&mut table.rules, pattern.trim(), req.level);
+            }
+            if let Some(to) = req.promote_after_s {
+                changed |= table.set_promote_after(to);
+            }
+            changed.then(|| table.clone())
         };
-        if let Some(rules) = saved {
-            if let Err(e) = priority::save(&self.cfg.state_dir, &rules) {
+        if let Some(table) = saved {
+            if let Err(e) = priority::save(&self.cfg.state_dir, &table) {
                 eprintln!("slot: save {}: {e}", priority::FILE);
             }
             self.rerank();

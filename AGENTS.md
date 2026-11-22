@@ -256,7 +256,7 @@ Open, one line each, with where the design lives. A session starts with (e).
 - (g) A reload re-execs the new binary with the old process's own arguments (`std::env::args()`
   in `server/mod.rs`), so a changed `ExecStart` option such as `--min-free-disk` takes effect only
   at a full restart. Options that should change on reload belong in `limits.json`, like the
-  headroom.
+  headroom, or in `priority.json`, like the promotion delay (`slot priority promote-after`).
 - (h) Lost jobserver tokens stay lost while any process has the FIFO open (one period of
   172 minutes with 8 tokens gone): `story:lost-tokens-return-on-a-busy-pool`.
 - (i) Jobs that use no CPU hold 29 % of the slot-hours while requests wait:

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The delay after which a waiting `normal` or `low` job counts as `high` changes while the daemon
+  runs: `slot priority promote-after <seconds>` (0 never raises a job, `default` returns to
+  `slot serve --promote-after`). It applies to the jobs already queued, is kept in
+  `priority.json` beside the rules and wins over the option after a reload or a restart.
+  `PUT /api/priority` takes `{"promote_after_s": 300}` (`null` for the option's value) beside the
+  rule form; `GET /api/priority` and `slot priority list` show the delay in force.
+  The option alone took effect only at a full restart, because a reload keeps the daemon's
+  arguments.
 - A cargo build no longer takes a slot while another job of the pool compiles in its target
   directory, where cargo would only print "Blocking waiting for file lock on build directory"
   and hold the slot idle. It stays queued with the reason `target directory in use by job N`

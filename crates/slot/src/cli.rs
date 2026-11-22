@@ -176,6 +176,9 @@ pub struct ServeArgs {
     pub upgrade_hold: u64,
     /// A queued `normal` or `low` job that has waited longer than this is
     /// ordered as `high`, so no level waits forever; 0 never promotes.
+    /// `slot priority promote-after` changes it at run time; a value set
+    /// that way wins over this option until `slot priority promote-after
+    /// default` removes it.
     #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
     pub promote_after: u64,
     /// For remote clients: GB the target directories of synced workspaces
@@ -315,6 +318,9 @@ pub enum PriorityCmd {
     Unset(PriorityUnsetArgs),
     /// List the rules.
     List(PriorityListArgs),
+    /// Set how long a queued `normal` or `low` job waits before it is
+    /// ordered as `high`, while the daemon runs.
+    PromoteAfter(PriorityPromoteAfterArgs),
 }
 
 /// `slot priority set` arguments.
@@ -335,6 +341,21 @@ pub struct PrioritySetArgs {
 pub struct PriorityUnsetArgs {
     /// The pattern of the rule, as `slot priority list` shows it.
     pub pattern: String,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+/// `slot priority promote-after` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct PriorityPromoteAfterArgs {
+    /// Seconds; 0 never promotes a job; `default` goes back to the daemon's
+    /// `--promote-after`. The value applies to the jobs already queued, is
+    /// kept in `priority.json` in the state directory and wins over
+    /// `--promote-after` across reloads and restarts, until `default`
+    /// removes it.
+    #[arg(value_name = "SECONDS")]
+    pub seconds: crate::server::priority::PromoteAfter,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -537,6 +558,28 @@ mod tests {
             panic!("not priority set")
         };
         assert_eq!((a.pattern.as_str(), a.level), ("web-*", Priority::Low));
+    }
+
+    #[test]
+    fn priority_promote_after_takes_seconds_or_default() {
+        use crate::server::priority::PromoteAfter;
+        let seconds = |args: &[&str]| {
+            let mut argv = vec!["priority", "promote-after"];
+            argv.extend(args);
+            parse(&argv).map(|cli| {
+                let Cmd::Priority(PriorityCmd::PromoteAfter(a)) = cli.command else {
+                    panic!("not priority promote-after")
+                };
+                a.seconds
+            })
+        };
+        assert_eq!(seconds(&["300"]).unwrap(), PromoteAfter::Seconds(300));
+        assert_eq!(seconds(&["0"]).unwrap(), PromoteAfter::Seconds(0));
+        assert_eq!(seconds(&["default"]).unwrap(), PromoteAfter::Default);
+        assert!(seconds(&[]).is_err(), "the value is required");
+        assert!(seconds(&["soon"]).is_err());
+        assert!(seconds(&["-1"]).is_err());
+        assert!(seconds(&["5m"]).is_err());
     }
 
     #[test]
