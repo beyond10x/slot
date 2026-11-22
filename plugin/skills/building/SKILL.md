@@ -80,6 +80,13 @@ Each job in `active` has `state` (`queued` or `running`), `argv`, `repo`, `token
 `started_ms` 0. Finished jobs in `done` also carry `exit`, `cpu_s` and `peak_rss`. Report a long
 wait with the jobs ahead of it; do not work around it.
 
+A pool may end a job that runs longer than a limit (`slot status` shows `run-time limit` in its
+header when one is set; the wait in the queue does not count). The job's client then prints one
+line and exits 124. A job that needs longer names its time itself: `slot --timeout 30m cargo
+test`, or `SLOT_TIMEOUT=30m` in front of a command the shim wraps, up to the most the pool allows.
+A `timeout` wrapped around the command extends nothing. Do not start a job that was ended at its
+limit again unchanged: make it shorter, split it, or name its time.
+
 ## A refused command
 
 In Claude Code the plugin's `PreToolUse` hook refuses a Bash command that compiles or runs tests

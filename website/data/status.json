@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-22",
-  "source": "CHANGELOG.md 0.1.0 to 0.21.1 and docs/design.md sections 10 to 21",
+  "source": "CHANGELOG.md 0.1.0 to 0.22.0 and docs/design.md sections 10 to 22",
   "items": [
     {
       "area": "Pool",
@@ -28,7 +28,7 @@
       "area": "Pool",
       "label": "Run-time limit",
       "status": "shipped",
-      "detail": "slot run-limit 10m ends a job that runs longer, with exit 124; a job names its own time with slot --timeout or SLOT_TIMEOUT, up to 1 hour unless slot run-limit --max changes it. No limit until one is set.",
+      "detail": "slot run-limit 10m ends a job that runs longer, with exit 124; a job names its own time with slot --timeout or SLOT_TIMEOUT, up to 1 hour unless slot run-limit --max changes it. No limit until one is set. (0.22.0)",
       "href": "/docs/how-it-works#run-time-limit"
     },
     {

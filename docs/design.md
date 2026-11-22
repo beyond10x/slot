@@ -1091,7 +1091,7 @@ thread keeps (`debt`). Before, only the idle reconcile removed a surplus.
   once the holders give their tokens back.
 - A handover (§ 15.2) does not pass on the tokens still to take out; the new image counts again.
 
-## 22. The run-time limit (unreleased)
+## 22. The run-time limit (0.22.0)
 
 A job that hangs holds its slots until its client goes away. The run-time limit ends a job that
 has run longer than a set time, counted from `started_ms`; the queue wait is not part of it
