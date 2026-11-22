@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The host's busy CPUs no longer read more than the host has. The daemon divided the CPU time
+  between two `/proc` scans by the time between two ticks of its 1-second clock; under load the
+  scan starts late on a blocking thread, so a sample covered up to twice the time it was divided
+  by. On a host of 20 CPUs, 35 of 2,160 records of 10 samples read over 20, the highest 37.0, all
+  at a load of 108 or more; the web view scaled its CPU chart to them ("37 cores") and the CPU
+  limit for starts held jobs on them. Every CPU figure of a sample (host, classes, sessions, jobs,
+  machine quota) now divides by the time between the two scans, and a failed scan no longer
+  shortens the next sample's interval.
+
 ## 0.24.0 — 2026-11-22
 
 - A CPU limit for starts: `slot cpu-limit <CPUs>` holds the start of a queued job while the whole
