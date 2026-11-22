@@ -949,7 +949,7 @@ process is idle); the sandbox's own cgroup limits apply. The gate does not authe
 whoever can write to the directory can queue jobs, which is the sandbox the directory is shared
 with.
 
-## 20. The promotion delay as a run-time setting (unreleased)
+## 20. The promotion delay as a run-time setting (0.21.0)
 
 A queued `normal` or `low` job that has waited longer than the promotion delay is ordered as
 `high` (`server/priority.rs`, `level`), so no level waits forever. The delay was only the option
@@ -974,7 +974,7 @@ job.
   setting reads a file that has it and orders by its own option. When that older daemon saves a
   rule it writes the file without the field: a downgrade loses the delay, not the rules.
 
-## 21. Lost and surplus tokens while the pool is busy (unreleased)
+## 21. Lost and surplus tokens while the pool is busy (0.21.1)
 
 A process killed while it holds jobserver tokens (a cancel, a `timeout`, a watcher that kills by
 run time) takes them with it. Two repairs existed. The idle reconcile sets the FIFO back when no

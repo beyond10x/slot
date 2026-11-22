@@ -236,7 +236,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.21.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.21.1 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 admission by disk and memory, headroom and call mode, headroom of the machine, slots named by the
 job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, the gate for builds in a sandbox, handover on reload, lost-token
 recovery, and eviction of local target directories (deletes by default, `evict.json` sets a dry run).
@@ -260,15 +260,13 @@ Open, one line each, with where the design lives. A session starts with (e).
   in `server/mod.rs`), so a changed `ExecStart` option such as `--min-free-disk` takes effect only
   at a full restart. Options that should change on reload belong in `limits.json`, like the
   headroom, or in `priority.json`, like the promotion delay (`slot priority promote-after`).
-- (h) Lost jobserver tokens stay lost while any process has the FIFO open (one period of
-  172 minutes with 8 tokens gone): `story:lost-tokens-return-on-a-busy-pool`.
 - (i) Jobs that use no CPU hold 29 % of the slot-hours while requests wait:
   `story:idle-slots-are-lent-to-the-queue`.
 - (j) Jobs that run under 5 s carry half of the queue wait:
   `story:short-jobs-start-ahead-of-long-ones`.
 - (k) A job that asks for every slot (`--tokens` at the limit) collects each freed slot while it
   is first in the queue, and every job behind it waits; `slot status` then reads "0 free" with
-  few jobs running, which is not the lost-token case of (h):
+  few jobs running, which is not the lost-token case:
   `story:a-whole-pool-request-does-not-stall-the-queue`.
 - (l) `task ui-ux` and `task site-ux` stop themselves at 120 s. `ui-ux` (87 tests) went from
   240 s and 251 s to 75 s and 102 s on a workstation at load 30 to 36; the forge took 145 s before
