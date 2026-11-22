@@ -95,9 +95,9 @@ None.
 |---|---|---|---|---|
 | busy-failed | actions_per_fix.max | 1 | 1 | 2 |
 | busy-failed | gates.problems | 0 | 0 | 0 |
-| busy-failed | layout_shift.total | 0.046 | 0.035 | 0.035 |
-| busy-failed | reading_load.max | 384 | 202 | 202 |
-| busy-failed | reading_load.median | 378 | 202 | 202 |
+| busy-failed | layout_shift.total | 0.049 | 0.049 | 0.035 |
+| busy-failed | reading_load.max | 386 | 386 | 202 |
+| busy-failed | reading_load.median | 380.5 | 380.5 | 202 |
 | busy-failed | screen_only.actions | 1 | 1 | 2 |
 | busy-failed | screen_only.failed | 0 | 0 | 0 |
 | busy-failed | screen_only.keyboard_failed | 0 | 0 | 0 |
@@ -107,21 +107,21 @@ None.
 | busy-failed | screen_only.time_to_act_steps.max | 0 | 0 | 1 |
 | call-mode | gates.problems | 0 | 0 | 0 |
 | call-mode | layout_shift.total | 0.028 | 0.028 | 0.028 |
-| call-mode | reading_load.max | 353 | 205 | 205 |
-| call-mode | reading_load.median | 353 | 205 | 205 |
+| call-mode | reading_load.max | 353 | 353 | 205 |
+| call-mode | reading_load.median | 353 | 353 | 205 |
 | crowded | gates.problems | 0 | 0 | 0 |
-| crowded | layout_shift.total | 0.089 | 0.044 | 0.044 |
-| crowded | reading_load.max | 472 | 548 | 548 |
-| crowded | reading_load.median | 472 | 548 | 548 |
+| crowded | layout_shift.total | 0.089 | 0.089 | 0.044 |
+| crowded | reading_load.max | 472 | 472 | 548 |
+| crowded | reading_load.median | 472 | 472 | 548 |
 | idle | gates.problems | 0 | 0 | 0 |
 | idle | layout_shift.total | 0.035 | 0.035 | 0.035 |
 | idle | reading_load.max | 208 | 202 | 202 |
 | idle | reading_load.median | 208 | 202 | 202 |
 | machine-headroom | actions_per_fix.max | 0 | 0 | – |
 | machine-headroom | gates.problems | 0 | 0 | – |
-| machine-headroom | layout_shift.total | 0.106 | – | – |
-| machine-headroom | reading_load.max | 342 | – | – |
-| machine-headroom | reading_load.median | 342 | – | – |
+| machine-headroom | layout_shift.total | 0.106 | 0.106 | – |
+| machine-headroom | reading_load.max | 342 | 342 | – |
+| machine-headroom | reading_load.median | 342 | 342 | – |
 | machine-headroom | screen_only.actions | 0 | 0 | – |
 | machine-headroom | screen_only.failed | 0 | 0 | – |
 | machine-headroom | screen_only.keyboard_failed | 0 | 0 | – |
@@ -130,14 +130,14 @@ None.
 | machine-headroom | screen_only.steers | 0 | 0 | – |
 | machine-headroom | screen_only.time_to_act_steps.max | 0 | 0 | – |
 | pool-share | gates.problems | 0 | 0 | – |
-| pool-share | layout_shift.total | 0.046 | – | – |
-| pool-share | reading_load.max | 384 | – | – |
-| pool-share | reading_load.median | 378 | – | – |
+| pool-share | layout_shift.total | 0.049 | 0.049 | – |
+| pool-share | reading_load.max | 386 | 386 | – |
+| pool-share | reading_load.median | 380.5 | 380.5 | – |
 | queue-levels | actions_per_fix.max | 0 | 0 | – |
 | queue-levels | gates.problems | 0 | 0 | – |
-| queue-levels | layout_shift.total | 0.035 | – | – |
-| queue-levels | reading_load.max | 370 | – | – |
-| queue-levels | reading_load.median | 370 | – | – |
+| queue-levels | layout_shift.total | 0.035 | 0.035 | – |
+| queue-levels | reading_load.max | 370 | 370 | – |
+| queue-levels | reading_load.median | 370 | 370 | – |
 | queue-levels | screen_only.actions | 0 | 0 | – |
 | queue-levels | screen_only.failed | 0 | 0 | – |
 | queue-levels | screen_only.keyboard_failed | 0 | 0 | – |
@@ -148,8 +148,8 @@ None.
 | queue-position | actions_per_fix.max | 0 | 0 | 1 |
 | queue-position | gates.problems | 0 | 0 | 0 |
 | queue-position | layout_shift.total | 0.035 | 0.035 | 0.035 |
-| queue-position | reading_load.max | 365 | 202 | 202 |
-| queue-position | reading_load.median | 365 | 202 | 202 |
+| queue-position | reading_load.max | 365 | 365 | 202 |
+| queue-position | reading_load.median | 365 | 365 | 202 |
 | queue-position | screen_only.actions | 0 | 0 | 1 |
 | queue-position | screen_only.failed | 0 | 0 | 0 |
 | queue-position | screen_only.keyboard_failed | 0 | 0 | 0 |
@@ -159,9 +159,9 @@ None.
 | queue-position | screen_only.time_to_act_steps.max | 0 | 0 | 1 |
 | upgrade-pending | actions_per_fix.max | 0 | 0 | 0 |
 | upgrade-pending | gates.problems | 0 | 0 | 0 |
-| upgrade-pending | layout_shift.total | 0.088 | 0.005 | 0.005 |
-| upgrade-pending | reading_load.max | 333 | 214 | 214 |
-| upgrade-pending | reading_load.median | 333 | 214 | 214 |
+| upgrade-pending | layout_shift.total | 0.088 | 0.088 | 0.005 |
+| upgrade-pending | reading_load.max | 333 | 333 | 214 |
+| upgrade-pending | reading_load.median | 333 | 333 | 214 |
 | upgrade-pending | screen_only.actions | 0 | 0 | 0 |
 | upgrade-pending | screen_only.failed | 0 | 0 | 0 |
 | upgrade-pending | screen_only.keyboard_failed | 0 | 0 | 0 |
@@ -172,8 +172,8 @@ None.
 | video-call | actions_per_fix.max | 1 | 1 | 1 |
 | video-call | gates.problems | 0 | 0 | 0 |
 | video-call | layout_shift.total | 0.035 | 0.035 | 0.035 |
-| video-call | reading_load.max | 372 | 202 | 202 |
-| video-call | reading_load.median | 372 | 202 | 202 |
+| video-call | reading_load.max | 372 | 372 | 202 |
+| video-call | reading_load.median | 372 | 372 | 202 |
 | video-call | screen_only.actions | 1 | 1 | 1 |
 | video-call | screen_only.failed | 0 | 0 | 0 |
 | video-call | screen_only.keyboard_failed | 0 | 0 | 0 |
@@ -184,8 +184,8 @@ None.
 | video-call-old-daemon | actions_per_fix.max | 1 | 1 | 1 |
 | video-call-old-daemon | gates.problems | 0 | 0 | 0 |
 | video-call-old-daemon | layout_shift.total | 0.035 | 0.035 | 0.035 |
-| video-call-old-daemon | reading_load.max | 372 | 202 | 202 |
-| video-call-old-daemon | reading_load.median | 372 | 202 | 202 |
+| video-call-old-daemon | reading_load.max | 372 | 372 | 202 |
+| video-call-old-daemon | reading_load.median | 372 | 372 | 202 |
 | video-call-old-daemon | screen_only.actions | 1 | 1 | 1 |
 | video-call-old-daemon | screen_only.failed | 0 | 0 | 0 |
 | video-call-old-daemon | screen_only.keyboard_failed | 0 | 0 | 0 |
@@ -198,32 +198,7 @@ None.
 
 `node ux/ratchet.ts --round`, the last command of the round task, fails on each line below.
 
-- busy-failed reading_load.max: 384 is worse than the baseline 202 (tolerance 21)
-- busy-failed reading_load.median: 378 is worse than the baseline 202 (tolerance 21)
-- busy-failed layout_shift.total: 0.046 is worse than the baseline 0.035 (tolerance 0.01)
-- call-mode reading_load.max: 353 is worse than the baseline 205 (tolerance 21)
-- call-mode reading_load.median: 353 is worse than the baseline 205 (tolerance 21)
-- crowded reading_load.max: 472 improves on the baseline 548; take it in (ratchet --update)
-- crowded reading_load.median: 472 improves on the baseline 548; take it in (ratchet --update)
-- crowded layout_shift.total: 0.089 is worse than the baseline 0.044 (tolerance 0.01)
-- queue-position reading_load.max: 365 is worse than the baseline 202 (tolerance 21)
-- queue-position reading_load.median: 365 is worse than the baseline 202 (tolerance 21)
-- video-call-old-daemon reading_load.max: 372 is worse than the baseline 202 (tolerance 21)
-- video-call-old-daemon reading_load.median: 372 is worse than the baseline 202 (tolerance 21)
-- video-call reading_load.max: 372 is worse than the baseline 202 (tolerance 21)
-- video-call reading_load.median: 372 is worse than the baseline 202 (tolerance 21)
-- upgrade-pending reading_load.max: 333 is worse than the baseline 214 (tolerance 22)
-- upgrade-pending reading_load.median: 333 is worse than the baseline 214 (tolerance 22)
-- upgrade-pending layout_shift.total: 0.088 is worse than the baseline 0.005 (tolerance 0.01)
-- machine-headroom reading_load.max: measured but not in the baseline
-- machine-headroom reading_load.median: measured but not in the baseline
-- machine-headroom layout_shift.total: measured but not in the baseline
-- pool-share reading_load.max: measured but not in the baseline
-- pool-share reading_load.median: measured but not in the baseline
-- pool-share layout_shift.total: measured but not in the baseline
-- queue-levels reading_load.max: measured but not in the baseline
-- queue-levels reading_load.median: measured but not in the baseline
-- queue-levels layout_shift.total: measured but not in the baseline
+At or better than the baseline.
 
 ## Not measured this round
 

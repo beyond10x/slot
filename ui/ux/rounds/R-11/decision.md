@@ -33,3 +33,8 @@ answers no scenario task but machine-headroom, whose answer is in the header lin
 ## Answer
 
 Yes, 2026-11-22. Built in this round as part of the R-11 change set.
+
+After, at 1366x768: `screen_only.looks` 1 for busy-failed and 2 for queue-position and
+queue-levels (was 3); `screen_only.actions` of queue-position 0 (was 1). The cost, as named under
+"Options": the reading load of the first screen went up in 6 scenarios and the layout shift in 2
+(UXF-032). Those entries of `ux/baseline.json` name this decision as `R-11-job-tables-first`.

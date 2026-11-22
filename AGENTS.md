@@ -106,6 +106,11 @@ with `worktree finish --discard-cache --archive` when the change is merged.
 
 ## Upgrading a running daemon
 
+Before the install, read `slot --version` of the installed binary and `git worktree list`: a
+version with a `+` suffix is a local build of another session. The release that replaces it must
+contain its changes, and both must write the same handover `VERSION` (`server/handover.rs`).
+After the reload, compare the job ids of `/api/state` before and after.
+
 Install the new binary over the old path, then `systemctl --user reload slot`. Reload sends
 SIGHUP. From 0.11.0 the daemon re-executes at once and hands running and queued jobs, their
 slots, output pipes and client sockets to the new image (`server/handover.rs`, design.md
@@ -234,6 +239,15 @@ Open, one line each, with where the design lives. A session starts with (e).
   `story:idle-slots-are-lent-to-the-queue`.
 - (j) Jobs that run under 5 s carry half of the queue wait:
   `story:short-jobs-start-ahead-of-long-ones`.
+- (k) A job that asks for every slot (`--tokens` at the limit) collects each freed slot while it
+  is first in the queue, and every job behind it waits; `slot status` then reads "0 free" with
+  few jobs running, which is not the lost-token case of (h):
+  `story:a-whole-pool-request-does-not-stall-the-queue`.
+- (l) `task ui-ux` ran 148 s, 124 s and 107 s against a budget of 120 s, and nothing stops it
+  there: `story:ux-gate-step-ends-within-its-budget`.
+- (m) No `rust-toolchain.toml`: the local gate and CI each use the rustc they find.
+- (n) A pull request of planning files runs the full gate (307 s):
+  `story:planning-only-pull-requests-skip-the-gate`.
 
 ## Never
 

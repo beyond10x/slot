@@ -3,9 +3,9 @@
   "metrics": {
     "busy-failed": {
       "gates.problems": 0,
-      "reading_load.max": 384,
-      "reading_load.median": 378,
-      "layout_shift.total": 0.046,
+      "reading_load.max": 386,
+      "reading_load.median": 380.5,
+      "layout_shift.total": 0.049,
       "screen_only.keyboard_tabs": 5,
       "screen_only.keyboard_failed": 0,
       "screen_only.actions": 1,
@@ -49,9 +49,9 @@
     },
     "pool-share": {
       "gates.problems": 0,
-      "reading_load.max": 384,
-      "reading_load.median": 378,
-      "layout_shift.total": 0.046
+      "reading_load.max": 386,
+      "reading_load.median": 380.5,
+      "layout_shift.total": 0.049
     },
     "queue-levels": {
       "gates.problems": 0,
@@ -134,34 +134,7 @@
     "screen_only_failures": 0,
     "keyboard_failures": 0
   },
-  "ratchet": [
-    "busy-failed reading_load.max: 384 is worse than the baseline 202 (tolerance 21)",
-    "busy-failed reading_load.median: 378 is worse than the baseline 202 (tolerance 21)",
-    "busy-failed layout_shift.total: 0.046 is worse than the baseline 0.035 (tolerance 0.01)",
-    "call-mode reading_load.max: 353 is worse than the baseline 205 (tolerance 21)",
-    "call-mode reading_load.median: 353 is worse than the baseline 205 (tolerance 21)",
-    "crowded reading_load.max: 472 improves on the baseline 548; take it in (ratchet --update)",
-    "crowded reading_load.median: 472 improves on the baseline 548; take it in (ratchet --update)",
-    "crowded layout_shift.total: 0.089 is worse than the baseline 0.044 (tolerance 0.01)",
-    "queue-position reading_load.max: 365 is worse than the baseline 202 (tolerance 21)",
-    "queue-position reading_load.median: 365 is worse than the baseline 202 (tolerance 21)",
-    "video-call-old-daemon reading_load.max: 372 is worse than the baseline 202 (tolerance 21)",
-    "video-call-old-daemon reading_load.median: 372 is worse than the baseline 202 (tolerance 21)",
-    "video-call reading_load.max: 372 is worse than the baseline 202 (tolerance 21)",
-    "video-call reading_load.median: 372 is worse than the baseline 202 (tolerance 21)",
-    "upgrade-pending reading_load.max: 333 is worse than the baseline 214 (tolerance 22)",
-    "upgrade-pending reading_load.median: 333 is worse than the baseline 214 (tolerance 22)",
-    "upgrade-pending layout_shift.total: 0.088 is worse than the baseline 0.005 (tolerance 0.01)",
-    "machine-headroom reading_load.max: measured but not in the baseline",
-    "machine-headroom reading_load.median: measured but not in the baseline",
-    "machine-headroom layout_shift.total: measured but not in the baseline",
-    "pool-share reading_load.max: measured but not in the baseline",
-    "pool-share reading_load.median: measured but not in the baseline",
-    "pool-share layout_shift.total: measured but not in the baseline",
-    "queue-levels reading_load.max: measured but not in the baseline",
-    "queue-levels reading_load.median: measured but not in the baseline",
-    "queue-levels layout_shift.total: measured but not in the baseline"
-  ],
+  "ratchet": [],
   "bots": [
     {
       "scenario": "busy-failed",

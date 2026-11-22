@@ -21,8 +21,9 @@
   R-10 0.005, R-11 0.088, with the same pixels in the `opened` frame of all three rounds. The
   shift happens in the first 0.6 s of the page load, when the header fills and wraps
   (`review-heuristics.md`). Decision `R-11-upgrade-pending-shift`: the baseline of 0.005 was one
-  low sample; the entry is set from three measurements of this round (see "Tools"), and the
-  header's growth on load stays open as UXF-023.
+  low sample; the entry is set to 0.088, read in three measurements of this round (before the
+  change set, after it, and after `main` was merged in), and the header's growth on load stays
+  open as UXF-023.
 - Nine lines were values of machine-headroom, pool-share and queue-levels that had no baseline:
   the merge-mode `--update` does not write the host-dependent keys.
 
@@ -78,6 +79,16 @@ frames 1 s apart.
 Target metrics: busy-failed `screen_only.actions` 2 to 1 and `screen_only.looks` 3 to 1 (UXF-019);
 "close" at most 2 Tab presses from the opener's Enter (UXF-022); 0 Running rows moved without
 input over three ticks in crowded (UXF-021).
+
+After (1366x768, measured with `main` merged in): busy-failed by pointer 1 action and 1 look, by
+keyboard 5 tabs; queue-position and queue-levels 0 actions and 2 looks (were 1 and 3). The three
+target metrics are asserted in `ux/findings.spec.ts`.
+
+Cost of UXF-020, taken into the baseline under decision `R-11-job-tables-first`: the reading load
+of the first screen went up in 6 scenarios (busy-failed 202 to 386, call-mode 205 to 353,
+queue-position 202 to 365, video-call and video-call-old-daemon 202 to 372, upgrade-pending 214
+to 333) and the layout shift in 2 (crowded 0.044 to 0.089, busy-failed 0.035 to 0.049), filed as
+UXF-032. Reading load of crowded went down, 548 to 472.
 
 ## Tools
 
