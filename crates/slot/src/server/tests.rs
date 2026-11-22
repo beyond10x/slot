@@ -68,6 +68,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
         promote_after: Duration::from_secs(1800),
+        pass_for: Duration::from_secs(300),
         clock: now_ms,
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
@@ -608,6 +609,7 @@ fn history_survives_restart() {
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
         promote_after: Duration::from_secs(1800),
+        pass_for: Duration::from_secs(300),
         clock: now_ms,
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
@@ -2898,4 +2900,283 @@ fn the_cpu_limit_is_set_saved_and_read_back() {
     assert!(!saved().contains("cpu_busy"), "{}", saved());
     assert_eq!(f.server.state().cpu_busy_max, None);
     assert_eq!(restarted("s3"), (None, None, 25));
+}
+
+// wave w1 u5
+
+/// Waits until the job ends, then appends `$NAME` to the file `order`: a
+/// job predicted short once it has history. Jobs of this command share
+/// their history whatever their `NAME`.
+const SHORT_CMD: &str = "while [ ! -e go-$NAME ]; do sleep 0.02; done; echo $NAME >> order";
+
+/// Appends `$NAME` to the file `order`: a command without history.
+const LONG_CMD: &str = "echo $NAME >> order";
+
+/// A job of repository `repo` that runs `cmd` with `NAME=name` in its
+/// environment and asks for `tokens` slots.
+fn named(f: &Fixture, cmd: &str, repo: &str, name: &str, tokens: Option<u32>) -> Request {
+    let mut r = sh(&f.root, cmd);
+    r.repo = repo.into();
+    r.tokens = tokens;
+    r.env = std::env::vars()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain([format!("NAME={name}")])
+        .collect();
+    r
+}
+
+/// Lets the job named `name` of [`SHORT_CMD`] end.
+fn go(f: &Fixture, name: &str) {
+    std::fs::write(f.root.join(format!("go-{name}")), "").unwrap();
+}
+
+/// Sends `req` and waits until it waits for slots.
+fn queued_job(f: &Fixture, req: Request) -> (UnixStream, i64) {
+    let before = f.server.pool().waiting();
+    let (c, id) = submit(f, req);
+    wait_for_jobs(f, "the job to wait for slots", || {
+        f.server.pool().waiting() == before + 1
+    });
+    (c, id)
+}
+
+/// Runs [`SHORT_CMD`] three times in `repo`, so the daemon predicts its run
+/// time, and empties the file `order`.
+fn give_history(f: &Fixture, repo: &str) {
+    go(f, "history");
+    for _ in 0..3 {
+        let r = run(f, named(f, SHORT_CMD, repo, "history", None));
+        assert_eq!(r.code, 0, "{r:?}");
+    }
+    std::fs::remove_file(f.root.join("order")).unwrap();
+}
+
+/// Slots job `id` has collected while it waits, as `slot status` reads it.
+fn collected(f: &Fixture, id: i64) -> u32 {
+    active_job(f, id).map_or(0, |j| j.collected)
+}
+
+/// Whether job `id` has its slots (it claimed them, or it already ended)
+/// within `within`. Measured at the claim, not at the start of its
+/// process: on a loaded host starting `sh` alone took over 500 ms.
+fn has_slots_within(f: &Fixture, id: i64, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        let has = {
+            let g = f.server.inner.lock().unwrap();
+            g.active.get(&id).is_none_or(|l| l.held > 0)
+        };
+        if has {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A job that asks for every slot does not keep freed slots idle: with 4
+/// slots, one job running on 1 and a 4-slot job queued, three 1-slot jobs
+/// that queue behind it each get their slot within 1 s and run, each
+/// logged as moved ahead. The
+/// 4-slot job shows the slots it collected, and the token count books
+/// them: none is missing. Then it starts once the running job ends.
+#[test]
+fn one_slot_jobs_start_while_a_job_that_asks_for_every_slot_waits() {
+    let f = start(4);
+    let (h, _) = holding_job(&f, 1);
+    let (big, big_id) = queued_job(&f, named(&f, LONG_CMD, "big", "big", Some(4)));
+    wait_for_jobs(&f, "the 4-slot job to collect 3", || {
+        collected(&f, big_id) == 3
+    });
+    assert_eq!(
+        f.server.token_count(),
+        (1, 0, 0),
+        "granted, missing, surplus"
+    );
+    let mut small = Vec::new();
+    for i in 0..3 {
+        let (c, id) = submit(&f, named(&f, LONG_CMD, "small", &format!("s{i}"), None));
+        assert!(
+            has_slots_within(&f, id, Duration::from_secs(1)),
+            "1-slot job {i} did not get its slot within 1 s"
+        );
+        small.push((c, id));
+    }
+    let mut ids = Vec::new();
+    for (c, id) in small {
+        let r = collect(c);
+        assert_eq!((r.code, r.started), (0, true), "{r:?}");
+        ids.push(id);
+    }
+    for id in ids {
+        assert!(
+            done_job(&f, id).ahead,
+            "job {id} is not logged as moved ahead"
+        );
+    }
+    wait_for_jobs(&f, "the 4-slot job to collect 3 again", || {
+        collected(&f, big_id) == 3
+    });
+    assert_eq!(f.server.token_count(), (1, 0, 0));
+    assert_eq!(state_of(&f, big_id), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    assert_eq!(collect(big).code, 0);
+    let ran = order(&f);
+    assert_eq!(
+        (ran.len(), ran.last().map(String::as_str)),
+        (4, Some("big"))
+    );
+    assert!(!done_job(&f, big_id).ahead);
+}
+
+/// The bound of passing: a 1-slot job passes a 2-slot job that waits, but
+/// once the 2-slot job has waited `--pass-for` (300 s, on a clock the test
+/// moves) a 1-slot job that queues after it waits, and the 2-slot job
+/// starts first.
+#[test]
+fn once_a_job_that_asks_for_every_slot_has_waited_the_bound_it_starts_first() {
+    static SKEW_MS: AtomicI64 = AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(2, |c| c.clock = clock);
+    let (h, _) = holding_job(&f, 1);
+    let (big, big_id) = queued_job(&f, named(&f, LONG_CMD, "big", "big", Some(2)));
+    wait_for_jobs(&f, "the 2-slot job to collect 1", || {
+        collected(&f, big_id) == 1
+    });
+    let s1 = run(&f, named(&f, LONG_CMD, "small", "s1", None));
+    assert_eq!((s1.code, s1.started), (0, true), "passed it: {s1:?}");
+    SKEW_MS.store(301_000, Ordering::SeqCst);
+    f.server.rerank();
+    let (s2, s2_id) = queued_job(&f, named(&f, LONG_CMD, "small", "s2", None));
+    wait_for_jobs(&f, "the 2-slot job to collect 1 again", || {
+        collected(&f, big_id) == 1
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        state_of(&f, s2_id),
+        JobState::Queued,
+        "started ahead of a job that waited the bound"
+    );
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    assert_eq!(collect(big).code, 0);
+    assert_eq!(collect(s2).code, 0);
+    assert_eq!(order(&f), ["s1", "big", "s2"]);
+}
+
+/// Short jobs first. A pool of 1 slot, one level: a job without history
+/// queues, then one whose last runs predict 5 s or less. When the slot
+/// frees, the short job starts first. Its record carries the prediction
+/// and says it was moved ahead, also in the job log; the other job has
+/// neither.
+#[test]
+fn a_job_predicted_short_starts_ahead_of_a_longer_one_of_its_level() {
+    let f = start(1);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let (long, long_id) = queued_job(&f, named(&f, LONG_CMD, "app", "long", None));
+    go(&f, "short");
+    let (short, short_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "short", None));
+    let waiting = active_job(&f, short_id).unwrap();
+    assert!(
+        waiting
+            .predicted_ms
+            .is_some_and(|ms| ms <= priority::SHORT_MS),
+        "{waiting:?}"
+    );
+    wait_for_jobs(&f, "the short job to show as moved ahead", || {
+        active_job(&f, short_id).is_some_and(|j| j.ahead)
+    });
+    assert_eq!(run_all(&f, h, vec![long, short]), ["short", "long"]);
+    let (short_job, long_job) = (done_job(&f, short_id), done_job(&f, long_id));
+    assert!(
+        short_job.ahead && short_job.predicted_ms.is_some(),
+        "{short_job:?}"
+    );
+    assert_eq!(
+        (long_job.ahead, long_job.predicted_ms),
+        (false, None),
+        "{long_job:?}"
+    );
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let line = |id: i64| {
+        log.lines()
+            .find(|row| row.contains(&format!("\"id\":{id},")))
+            .unwrap()
+            .to_string()
+    };
+    assert!(line(short_id).contains("\"predicted_ms\":"), "{log}");
+    assert!(line(short_id).contains("\"ahead\":true"), "{log}");
+    assert!(!line(long_id).contains("predicted_ms"), "{log}");
+    assert!(!line(long_id).contains("ahead"), "{log}");
+}
+
+/// A stream of short jobs passes a longer one only until it has waited
+/// `--pass-for` (300 s, on a clock the test moves): two short jobs start
+/// ahead of it one after the other, the third, queued after the bound,
+/// starts after it.
+#[test]
+fn a_stream_of_short_jobs_does_not_hold_a_longer_job_past_the_bound() {
+    static SKEW_MS: AtomicI64 = AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(1, |c| c.clock = clock);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let (long, long_id) = queued_job(&f, named(&f, LONG_CMD, "app", "long", None));
+    let (s0, s0_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "s0", None));
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    wait_for_jobs(&f, "s0 to run", || state_of(&f, s0_id) == JobState::Running);
+    let (s1, s1_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "s1", None));
+    go(&f, "s0");
+    wait_for_jobs(&f, "s1 to run", || state_of(&f, s1_id) == JobState::Running);
+    assert_eq!(state_of(&f, long_id), JobState::Queued);
+    SKEW_MS.store(301_000, Ordering::SeqCst);
+    f.server.rerank();
+    go(&f, "s2");
+    let (s2, _) = queued_job(&f, named(&f, SHORT_CMD, "app", "s2", None));
+    go(&f, "s1");
+    for c in [s0, s1, long, s2] {
+        assert_eq!(collect(c).code, 0);
+    }
+    assert_eq!(order(&f), ["s0", "s1", "long", "s2"]);
+}
+
+/// The order between levels is unchanged: a short `normal` job does not
+/// pass a `high` job without history.
+#[test]
+fn a_short_job_does_not_pass_a_job_of_a_higher_level() {
+    let f = start(1);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let mut high = named(&f, LONG_CMD, "app", "high", None);
+    high.priority = Some(Priority::High);
+    let (high, _) = queued_job(&f, high);
+    go(&f, "short");
+    let (short, short_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "short", None));
+    assert_eq!(run_all(&f, h, vec![high, short]), ["high", "short"]);
+    assert!(!done_job(&f, short_id).ahead);
+}
+
+/// With `--pass-for 0` the queue is served by level, then arrival: a job
+/// predicted short waits behind an earlier one without history, and is
+/// not moved ahead. The prediction is still recorded.
+#[test]
+fn with_passing_off_a_short_job_waits_its_turn() {
+    let f = start_cfg(1, |c| c.pass_for = Duration::ZERO);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let (long, _) = queued_job(&f, named(&f, LONG_CMD, "app", "long", None));
+    go(&f, "short");
+    let (short, short_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "short", None));
+    assert_eq!(run_all(&f, h, vec![long, short]), ["long", "short"]);
+    let s = done_job(&f, short_id);
+    assert_eq!((s.ahead, s.predicted_ms.is_some()), (false, true), "{s:?}");
 }

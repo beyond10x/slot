@@ -132,7 +132,25 @@ limit_s?: number,
  * Whether the daemon ended the job at `limit_s`; its exit code is then
  * 124.
  */
-timed_out?: boolean, };
+timed_out?: boolean, 
+/**
+ * The run time the daemon predicted when the job queued, ms: the 90th
+ * percentile of the last runs of the same command in the same
+ * repository (`admission::History::expected_runtime`). Absent without
+ * enough history and from a daemon that does not predict.
+ */
+predicted_ms?: number, 
+/**
+ * Slots a queued job has collected towards its `tokens` while it
+ * waits; 0 once it runs and from a daemon that does not say.
+ */
+collected?: number, 
+/**
+ * Whether the job was moved ahead of a job that priority, then arrival
+ * serves first: as a job predicted to run a few seconds, or as one
+ * that fits in slots a larger request collected and cannot use yet.
+ */
+ahead?: boolean, };
 
 export type Unit = { 
 /**

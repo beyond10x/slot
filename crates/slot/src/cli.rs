@@ -201,6 +201,14 @@ pub struct ServeArgs {
     /// default` removes it.
     #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
     pub promote_after: u64,
+    /// A queued job may be passed by later jobs of its level or below only
+    /// until it has waited this long: by a job predicted to run 5 s or less,
+    /// and by a job that fits in the slots a larger request collected and
+    /// cannot use yet. From then on it starts before every job that came
+    /// after it. 0: nobody passes; the queue is served by level, then
+    /// arrival.
+    #[arg(long, default_value_t = 300, value_name = "SECONDS")]
+    pub pass_for: u64,
     /// For remote clients: GB the target directories of synced workspaces
     /// may take together. Before a remote job starts, the least recently
     /// used target directories and their source copies are deleted while
@@ -591,6 +599,7 @@ impl ServeArgs {
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             promote_after: std::time::Duration::from_secs(self.promote_after),
+            pass_for: std::time::Duration::from_secs(self.pass_for),
             clock: crate::server::now_ms,
             target_poll: crate::server::TARGET_POLL,
             target_settle: crate::server::TARGET_SETTLE,

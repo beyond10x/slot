@@ -182,10 +182,27 @@ the delay in force. `PUT /api/priority` sets it with `{"promote_after_s": 300}`,
 value returns to the daemon's option; the body may name a rule as well, and a body with neither
 a `pattern` nor `promote_after_s` is refused (400).
 
-The first job in that order takes slots as they come free and keeps them until it has all it
-asked for: a job that needs 4 slots is not overtaken by later 1-slot jobs of its level or below,
-even while one of them would fit. A later job of a higher level does overtake it, and takes the
-slots it gathered; after 30 minutes the waiting job is `high` itself.
+A job that needs more slots than are free collects them as they come free. For its first 5
+minutes in the queue (`slot serve --pass-for`, seconds, 300 by default) it does not keep them from
+jobs that queue after it: a later job of its level or below that fits in the slots it collected
+takes them and starts. With 4 slots, one running job on 1 and a job queued for all 4, three 1-slot
+jobs that queue behind it start at once. Once it has waited 5 minutes, no job that came after it
+starts before it: it keeps every slot that comes free until it has all it asked for. A later job of
+a higher level still goes first; after 30 minutes the waiting job is `high` itself.
+
+Inside a level, a job that is predicted to run 5 seconds or less starts ahead of the others. The
+prediction is the 90th percentile of the last 20 runs of the same command in the same repository,
+with at least 3; a command with fewer runs has none. A job passed over this way also starts before
+every later job once it has waited 5 minutes, so a stream of short jobs cannot hold it longer.
+
+With `--pass-for 0` nobody passes: jobs start by level, then in the order they arrived, and a job
+that needs 4 slots is not overtaken by later 1-slot jobs of its level or below.
+
+`slot status` ends a queued line with `, holds 11 of 17` for the slots the job collected and
+`, moved ahead` for a job that passed an earlier one, and its first line counts the collected
+slots (`, 11 collected by queued jobs`). The web UI's queue shows `11/17` in its slots column
+and `ahead` beside the level. The job log records the prediction (`predicted_ms`) and whether the
+job was moved ahead (`ahead`).
 
 When the client goes away (Ctrl-C, a killed agent, a closed ssh connection), the daemon cancels
 the job: it kills the job's process group and returns the job's slots. `slot cancel <id>` does the

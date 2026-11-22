@@ -110,6 +110,11 @@ pub struct Config {
     /// A queued job that waited longer than this is ordered as `high`;
     /// zero never promotes. A delay saved through `PUT /api/priority` wins.
     pub promote_after: Duration,
+    /// A queued job may be passed by later jobs (one predicted to run a few
+    /// seconds, one that fits in slots a larger request collected) only
+    /// until it has waited this long; zero: nobody passes, the queue is
+    /// served by level, then arrival.
+    pub pass_for: Duration,
     /// The clock a queued job's wait is measured by for that, ms since the
     /// epoch: [`now_ms`] outside tests.
     pub clock: fn() -> i64,
@@ -1641,6 +1646,7 @@ impl Server {
             let expect_rss = g.memory.expected(&req.repo, &shown, tc.name());
             let expect_cores = self.expected_cores(&g.memory, &req.repo, &shown);
             let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
+            let predicted_ms = g.memory.expected_runtime(&req.repo, &shown);
             let job = Job {
                 id,
                 argv: shown.clone(),
@@ -1672,6 +1678,9 @@ impl Server {
                 warnings: warnings.clone(),
                 limit_s: None,
                 timed_out: false,
+                predicted_ms,
+                collected: 0,
+                ahead: false,
             };
             g.active.insert(
                 id,
@@ -1764,16 +1773,22 @@ impl Server {
             }
             // Queued under the server lock, so a re-rank sees the waiter.
             // The job's id is its arrival: after a wait outside the queue
-            // it stands where its age puts it.
+            // it stands where its age puts it. Its place inside its level
+            // comes from its predicted run time and its wait.
             let mut waiter = {
                 let mut g = self.inner.lock().expect("server lock");
-                let level = g
-                    .active
-                    .get(&id)
-                    .map_or(Priority::Normal, |l| l.job.priority);
-                let w = self
-                    .pool
-                    .acquire_arrived(tokens, level, u64::try_from(id).unwrap_or(0));
+                let (level, place) = g.active.get(&id).map_or(
+                    (Priority::Normal, jobserver::Place::default()),
+                    |l| {
+                        (
+                            l.job.priority,
+                            self.place_of(l.job.predicted_ms, l.job.enqueued_ms),
+                        )
+                    },
+                );
+                let w =
+                    self.pool
+                        .acquire_placed(tokens, level, u64::try_from(id).unwrap_or(0), place);
                 if let Some(l) = g.active.get_mut(&id) {
                     l.waiter = Some(w.handle());
                     l.target_wait = false;
@@ -1840,10 +1855,13 @@ impl Server {
                     None
                 } else {
                     let n = waiter.take_held();
+                    let ahead = waiter.ahead();
                     g.active.get_mut(&id).map(|l| {
                         l.held = n;
                         l.waiter = None;
                         l.cpu_wait = false;
+                        l.job.collected = 0;
+                        l.job.ahead |= ahead;
                         (n, cpu == cpu_limit::Verdict::Overdue)
                     })
                 }
@@ -2823,6 +2841,16 @@ impl Server {
         priority::level(&table.rules, repo, own, waited, promote_after)
     }
 
+    /// The place inside its level of a queued job predicted to run
+    /// `predicted_ms` that queued at `enqueued_ms`: whether later jobs may
+    /// still pass it (it has waited less than `--pass-for`), and whether it
+    /// is short.
+    fn place_of(&self, predicted_ms: Option<u64>, enqueued_ms: i64) -> jobserver::Place {
+        let now = (self.cfg.clock)();
+        let waited = Duration::from_millis(u64::try_from(now - enqueued_ms).unwrap_or(0));
+        priority::place(predicted_ms, waited, self.cfg.pass_for)
+    }
+
     /// The level job `id` is queued at.
     fn queued_level(&self, id: i64) -> Priority {
         let g = self.inner.lock().expect("server lock");
@@ -2831,8 +2859,11 @@ impl Server {
             .map_or(Priority::Normal, |l| l.job.priority)
     }
 
-    /// Recomputes the level of every queued job from the rules and its wait,
-    /// and reorders the pool's queue to match.
+    /// Recomputes the level and the place of every queued job from the
+    /// rules, its prediction and its wait, and reorders the pool's queue to
+    /// match: the place changes without any event once a job has waited
+    /// `--pass-for`. Then takes the slots each queued job has collected and
+    /// whether it was moved ahead into its record.
     fn rerank(&self) {
         let changed: Vec<i64> = {
             let mut g = self.inner.lock().expect("server lock");
@@ -2856,11 +2887,17 @@ impl Server {
                     continue;
                 };
                 if let Some(w) = &l.waiter {
-                    self.pool.set_level(w, level);
+                    let place = self.place_of(l.job.predicted_ms, enqueued_ms);
+                    self.pool.set_place(w, level, place);
                 }
-                if (l.job.priority, l.job.promoted) != (level, promoted) {
+                let (collected, ahead) = Self::queue_marks(l);
+                if (l.job.priority, l.job.promoted, l.job.collected, l.job.ahead)
+                    != (level, promoted, collected, ahead)
+                {
                     l.job.priority = level;
                     l.job.promoted = promoted;
+                    l.job.collected = collected;
+                    l.job.ahead = ahead;
                     changed.push(id);
                 }
             }
@@ -2871,8 +2908,22 @@ impl Server {
         }
     }
 
+    /// The slots a queued job has collected in the pool's queue, and
+    /// whether it was moved ahead there. A job that waits outside the queue
+    /// (for memory, disk or its target directory) collects none.
+    fn queue_marks(l: &Live) -> (u32, bool) {
+        match &l.waiter {
+            Some(w) => (
+                u32::try_from(w.held()).unwrap_or(u32::MAX),
+                l.job.ahead || w.ahead(),
+            ),
+            None => (0, l.job.ahead),
+        }
+    }
+
     /// Every second: promotes queued jobs that waited past the promotion
-    /// delay.
+    /// delay, makes those that waited `--pass-for` unpassable, and shows
+    /// the slots queued jobs collected.
     async fn priority_watch(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -3685,7 +3736,17 @@ impl Server {
             tokens_unaccounted: self.unaccounted.load(Ordering::Relaxed) as u32,
             tokens_unaccounted_since_ms: self.unaccounted_since.load(Ordering::Relaxed),
             free: self.pool.free() as u32,
-            active: g.active.values().map(|l| l.job.clone()).collect(),
+            active: g
+                .active
+                .values()
+                .map(|l| {
+                    let mut j = l.job.clone();
+                    if j.state == JobState::Queued {
+                        (j.collected, j.ahead) = Self::queue_marks(l);
+                    }
+                    j
+                })
+                .collect(),
             done: g.done.iter().map(|d| d.job.clone()).collect(),
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),

@@ -47,6 +47,8 @@ pub enum Checkout {
 
 /// One job, as logged and as shown.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+// Each flag is a fact of its own that the log and the views read alone.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Job {
     /// Job id, increasing.
     #[ts(type = "number")]
@@ -136,6 +138,28 @@ pub struct Job {
     /// 124.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// The run time the daemon predicted when the job queued, ms: the 90th
+    /// percentile of the last runs of the same command in the same
+    /// repository (`admission::History::expected_runtime`). Absent without
+    /// enough history and from a daemon that does not predict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub predicted_ms: Option<u64>,
+    /// Slots a queued job has collected towards its `tokens` while it
+    /// waits; 0 once it runs and from a daemon that does not say.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub collected: u32,
+    /// Whether the job was moved ahead of a job that priority, then arrival
+    /// serves first: as a job predicted to run a few seconds, or as one
+    /// that fits in slots a larger request collected and cannot use yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ahead: bool,
+}
+
+// serde hands `skip_serializing_if` a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Live numbers of one running job.
