@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-22",
-  "source": "CHANGELOG.md 0.1.0 to 0.19.1 and docs/design.md sections 10 to 19",
+  "source": "CHANGELOG.md 0.1.0 to 0.20.0 and docs/design.md sections 10 to 19",
   "items": [
     {
       "area": "Pool",
@@ -112,7 +112,7 @@
       "area": "Observation",
       "label": "Web UI",
       "status": "shipped",
-      "detail": "Timeline, slot usage, cores per toolchain, active and finished jobs, live output on 127.0.0.1:7411. Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
+      "detail": "Three line charts (cores, pressure, pool size), then running, queued and finished jobs, the host census, sessions and a timeline, with live output, on 127.0.0.1:7411 (0.20.0). Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
       "href": "/docs/how-it-works#web-ui"
     },
     {
@@ -127,6 +127,13 @@
       "label": "sccache watchdog",
       "status": "shipped",
       "detail": "The daemon refills an sccache server jobserver that has leaked its tokens (0.5.0).",
+      "href": "/docs/how-it-works#sccache-watchdog"
+    },
+    {
+      "area": "Observation",
+      "label": "Compile cache record",
+      "status": "shipped",
+      "detail": "Once a minute the daemon records the hits, misses and refused calls of each running sccache server; a rust job records its cache environment and is warned when it switches the cache off (0.20.0).",
       "href": "/docs/how-it-works#sccache-watchdog"
     },
     {

@@ -233,7 +233,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.19.1 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.20.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 admission by disk and memory, headroom and call mode, headroom of the machine, slots named by the
 job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, the gate for builds in a sandbox, handover on reload, lost-token
 recovery, and eviction of local target directories (deletes by default, `evict.json` sets a dry run).
@@ -269,9 +269,12 @@ Open, one line each, with where the design lives. A session starts with (e).
   `story:a-whole-pool-request-does-not-stall-the-queue`.
 - (l) `task ui-ux` and `task site-ux` stop themselves at 120 s. `ui-ux` (87 tests) went from
   240 s and 251 s to 75 s and 102 s on a workstation at load 30 to 36; the forge took 145 s before
-  that change and has not run it since. `site-ux` (86 tests, 84 s on the forge before the
+  that change. `site-ux` (86 tests, 84 s on the forge before the
   change) is still over 120 s on a workstation at load 32 and above: stopped at 123 s with 33
-  tests done while the load rose from 32 to 43. Its tests no longer wait fixed times and the
+  tests done while the load rose from 32 to 43. After the change the forge took 45.5 s and
+  54.5 s for `ui-ux` (87 and 89 tests) and 36.1 s and 46.1 s for `site-ux`; `ui-ux` with 89
+  tests was stopped at 123 s with 52 done on a workstation at load 41. Its tests no longer
+  wait fixed times and the
   reader's Tab presses go out in batches; what is left is the work of the pages. One gates test
   took 7.1 s at load 56 (page load 1.8 s, hydration 0.9 s, loading axe-core 1.0 s, its run 2.6 s)
   and there are 48. Left: three forge runs of `ui-ux` under 100 s; `site-ux` under 120 s on a

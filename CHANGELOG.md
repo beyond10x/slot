@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.20.0 — 2026-11-22
 
 - Web view: one row of three line charts stands directly under the header (cores used on the
   whole machine, pressure, pool size), and the job tables read Running, Queue, Finished.
