@@ -165,3 +165,22 @@ test('the queue heading names what the listed jobs wait for, slots last', () => 
   assert.equal(queueHeading([target]), 'Queue: waiting for a target directory, by level, oldest first');
   assert.equal(queueHeading([job({ id: 3 }), target, memory]), 'Queue: waiting for memory, a target directory and slots, by level, oldest first');
 });
+
+// adversary u5
+
+test('adversary u5: a job moved ahead has the place the pool serves it at', () => {
+  const long = job({ id: 4, enqueued_ms: 1000 });
+  const short = job({ id: 9, enqueued_ms: 3000, ahead: true, predicted_ms: 800 });
+  const q = servedQueue([long, short]);
+  assert.deepEqual(queuePlace(q, 9), { pos: 1, of: 2 }, 'the pool serves the short job first');
+});
+
+test('inside a level the queue is listed by the class the daemon sends: waited the bound, short, the others', () => {
+  const fixed = job({ id: 3, enqueued_ms: 1000, queue_class: 0 });
+  const plain = job({ id: 5, enqueued_ms: 2000, queue_class: 2 });
+  const short = job({ id: 8, enqueued_ms: 3000, queue_class: 1, ahead: true });
+  const high = job({ id: 9, enqueued_ms: 4000, priority: 'high', queue_class: 2 });
+  assert.deepEqual(servedQueue([plain, short, fixed, high]).map(jobId), [9, 3, 8, 5]);
+  const older = [job({ id: 6, enqueued_ms: 3000 }), job({ id: 7, enqueued_ms: 1000 })];
+  assert.deepEqual(servedQueue(older).map(jobId), [7, 6], 'a daemon without classes: by arrival');
+});

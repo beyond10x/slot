@@ -6,6 +6,10 @@
 //! has waited longer than the promotion delay is ordered as `high`, so no
 //! level waits forever. The delay is the daemon's `--promote-after` until
 //! `slot priority promote-after` sets one at run time, kept in [`FILE`] too.
+//!
+//! Inside its level a job's [`place`] decides the rest: later jobs may pass
+//! it until it has waited `--pass-for`, and a job predicted to run at most
+//! [`SHORT_MS`] stands ahead of the passable jobs that are not short.
 
 use std::path::Path;
 use std::time::Duration;
@@ -154,6 +158,27 @@ pub fn level(
         return (Priority::High, true);
     }
     (set, false)
+}
+
+/// A job predicted to run this long or less, ms, is short: inside its level
+/// it starts ahead of the jobs that are not, while they may be passed.
+pub const SHORT_MS: u64 = 5_000;
+
+/// Where a queued job stands inside its level besides its arrival
+/// ([`jobserver::Place`](crate::jobserver::Place)): later jobs may pass it
+/// while it has waited less than `pass_for` (zero: never), and it is short
+/// when its predicted run time `predicted_ms` is at most [`SHORT_MS`] and
+/// passing is on for it.
+pub fn place(
+    predicted_ms: Option<u64>,
+    waited: Duration,
+    pass_for: Duration,
+) -> crate::jobserver::Place {
+    let passable = waited < pass_for;
+    crate::jobserver::Place {
+        short: passable && predicted_ms.is_some_and(|ms| ms <= SHORT_MS),
+        passable,
+    }
 }
 
 /// The value of `slot priority promote-after` and of `promote_after_s` in
@@ -528,5 +553,33 @@ mod tests {
         assert_eq!(at(&table), (Priority::Normal, false), "0 never promotes");
         table.set_promote_after(PromoteAfter::Default);
         assert_eq!(at(&table), (Priority::Normal, false), "the option again");
+    }
+
+    #[test]
+    fn a_job_is_short_and_may_be_passed_only_within_the_bound() {
+        use crate::jobserver::Place;
+        let bound = Duration::from_secs(300);
+        let at = |predicted, waited_s| place(predicted, Duration::from_secs(waited_s), bound);
+        let (short, long) = (
+            Place {
+                short: true,
+                passable: true,
+            },
+            Place {
+                short: false,
+                passable: true,
+            },
+        );
+        assert_eq!(at(Some(5_000), 0), short, "5 s is short");
+        assert_eq!(at(Some(5_001), 0), long, "over 5 s is not");
+        assert_eq!(at(None, 0), long, "no history: not short");
+        assert_eq!(at(Some(800), 299), short);
+        assert_eq!(at(Some(800), 300), Place::default(), "waited the bound");
+        assert_eq!(at(None, 300), Place::default());
+        assert_eq!(
+            place(Some(800), Duration::ZERO, Duration::ZERO),
+            Place::default(),
+            "a bound of zero: nobody passes, nobody is moved ahead"
+        );
     }
 }

@@ -348,7 +348,10 @@ the queue is non-empty) and does not oscillate.
    how large the reserve must be.
 3. Whether queue order should move from FIFO to shortest-predicted-first, using each command's
    history in `jobs.jsonl` (median CPU seconds and run time per repository and argv prefix), so
-   short checks are not stuck behind release builds.
+   short checks are not stuck behind release builds. Answered by § 25: inside a level a job
+   predicted at 5 s or less (90th percentile of its last runs) goes ahead of longer ones, until
+   they have waited `--pass-for`; `predicted_ms` in the job log shows how often such a job then
+   ran over 30 s.
 4. Whether memory, not CPU, is the binding limit for parallel link and test phases.
 
 ## 12. Why dependencies compile again and again (measured 2026-11-12)
@@ -997,8 +1000,10 @@ Every 15 s (`server::TOKEN_WATCH`; `Config::token_watch` in tests) one pass of
 `Server::token_pass` reads:
 
 - **unbooked**: the pool size, less the tokens in the FIFO, the tokens held back for the headroom,
-  the slots granted to running jobs and the tokens the head of the queue has gathered
-  (`Pool::missing`). It is read under the server lock, so a job that ends is counted once, and it
+  the slots granted to running jobs and the tokens queued requests have gathered (`Pool::missing`;
+  one request holds them, the one that stops the walk of § 25, else the first the tokens at hand
+  do not cover; `slot status` names them as collected). It is read under the server lock, so a
+  job that ends is counted once, and it
   is read before and after the walk over `/proc`; the smaller value counts, so a token given back
   during the walk is not missing.
 - **bound**: the sum, over every live process with the FIFO open (`jobserver::holders`, by device
@@ -1330,3 +1335,97 @@ is not attributed at the start), so `starting` is low for such a job until the m
 - *One sample as the figure.* One second under the mark would start a job.
 - *A second scan of `/proc` per admission check.* The sampler's scan is the one walk a second;
   a queue of held jobs that each look every 2 s would multiply it.
+
+## 25. Passing in the queue: whole-pool requests and short jobs (unreleased)
+
+Two measurements on one 20-CPU host, both on 2026-11-22.
+
+- **A request for every slot stalls the queue.** A job submitted with `--tokens 17`, with 17
+  slots in circulation, stood first in the queue for about 13 minutes. It had collected 11 slots;
+  5 running jobs held 6, one of them for over an hour. 54 jobs waited behind it, 53 of them for 1
+  slot. The reader gave every returning token to the head of the queue, and the head kept it.
+  `slot status` read "0 free, 5 running, 54 queued" and named none of the 11. After the job was
+  cancelled, 17 jobs ran within minutes.
+- **Short jobs carry most of the queue wait.** On the busiest day of the log (17,682 started
+  jobs) 72 % of the jobs ran under 5 s and carried 47.4 h of the day's 94.8 h of queue wait. A
+  replay with the daemon's own predictor (`admission::History::expected_runtime`, the 90th
+  percentile of the last 20 runs of the same repository and argv that ended on their own, with at
+  least 3) predicted 44.7 % of the jobs at 5 s or less; they waited 22.6 h and needed 1.8
+  slot-hours, and 0.1 % of them then ran over 30 s.
+
+Both answers let a request start before an earlier one, and each needs a bound for the request
+it passes. One bound serves both.
+
+**The bound** (`slot serve --pass-for <seconds>`, 300 by default; `Config::pass_for`). A queued
+job may be passed by later jobs of its own level only until it has waited this long. From then on
+it starts before every job that came after it. The wait is counted from the job's enqueue time
+on the daemon's clock (`Config::clock`), as the promotion delay is (§ 20), so a job that left the
+queue for memory or its target directory keeps its age. That clock is the wall clock and can step
+back; a job stays unpassable once it was (`Pool::set_place` keeps it so, and `Server::place_of`
+reads the class the job last had in the pool, so a job that leaves the queue and comes back keeps
+it too). `--pass-for 0`: nobody
+passes, and the queue is served by level, then arrival, as before. A reload re-executes with the
+old arguments (§ 15.2), so a changed value takes effect at a full restart.
+
+**The place** (`jobserver::Place`, `server::priority::place`). Every request carries two flags
+beside its level and its arrival:
+
+- `passable`: it has waited less than the bound.
+- `short`: it is passable and its predicted run time is at most 5 s (`priority::SHORT_MS`). A job
+  with fewer than 3 earlier runs has no prediction and is not short.
+
+The queue's order is level first; inside a level the requests that are no longer passable, then
+the short ones, then the other passable ones; arrival last (`WaiterState::rank`). Since waits
+grow with arrival, the unpassable requests of a level are its oldest. The daemon sets the place
+at enqueue and again once a second (`Server::rerank`), so a request becomes unpassable within a
+second of its bound without any other event; the pool sorts its queue on every change.
+
+**Serving the queue** (`Pool::distribute`). The pool serves from the tokens at hand: every
+token the queued requests gathered, plus the one the reader just took. It walks the queue in
+order and grants each request the tokens at hand cover. A request they do not cover stops the
+walk when it is not passable: nobody behind it takes a token, it gathers each token that comes
+back and starts when it has all, which is the old behaviour. While it is passable the walk goes
+on through its own level, and a later request of that level that fits in what is at hand starts
+ahead of it; the walk stops at the first request of a lower level, so passing never crosses
+levels. Tokens the headroom lent an `urgent` request (`Pool::lend`) are not at hand: they stay
+with it, or go back to the held-back set once it is not `urgent`, so no other work runs beyond
+the limit on them. What is left stays
+booked with one request (the one that stopped the walk, else the first not covered), so two
+requests never each hold part of what one of them needs; with nobody waiting it goes back to the
+FIFO. With 4 slots, one running job on 1, a 4-slot request and three 1-slot requests behind it:
+the 4-slot request gathers 3, and each 1-slot request takes one of them as it queues.
+
+**The cost of the bound.** A whole-pool request waits at least `--pass-for`, and after it every
+job that started meanwhile must end before it starts. A long job may be passed by short ones for
+up to `--pass-for`. The levels are unchanged: no request of a lower level starts while a request
+of a higher level waits for slots, also when it would fit in tokens that request cannot use yet.
+A whole-pool request of a higher level therefore keeps freed slots from lower levels until it
+starts; only jobs of its own level use them meanwhile.
+
+**What is shown and logged.** `Job.collected`: the slots a queued job has collected, read from
+the pool in `Server::state` and once a second in `rerank` (which publishes a changed job).
+`Job.ahead`: the job started or stood before a job that level, then arrival serves first; once
+set it stays, and the claim takes it into the record, so the job log shows which jobs were moved
+ahead. `Job.predicted_ms`: the prediction at enqueue, absent without history, so the share of
+jobs predicted short that ran over 30 s can be read from `jobs.jsonl`. `slot status` ends a
+queued line with `, moved ahead` and `, holds 11 of 17`, and the pool line with `, 11 collected
+by queued jobs`; the web UI's queue shows `11/17` in its slots column and `ahead` beside the
+level. `Job.queue_class`: the request's class in the pool (0 unpassable, 1 short, 2 the others),
+read like `collected`; `slot status` (`render`) and the web UI (`servedQueue`) list the queue by
+level, then this class, then arrival, which is the order the pool serves. A job without it (from
+an older daemon) counts as 1 when `ahead` and 2 otherwise, so an older daemon's queue keeps the
+order of level, then arrival. All four fields are `#[serde(default)]` and left out of the JSON
+when empty; the handover carries them in the job and recomputes them.
+
+**Lost tokens.** Collected tokens stay booked: they are a waiting request's `got`, which
+`Pool::placed` counts (§ 21.1), and the lost-token watch writes back nothing for them.
+
+**Not chosen.**
+
+- *A separate bound per rule.* One bound reads the same for both: no job waits more than
+  `--pass-for` because a later one passed it.
+- *A run-time setting.* `--pass-for` is an option of `slot serve`; a setting like `slot priority
+  promote-after` can follow when a host needs to change it without a restart.
+- *Backfill by predicted end (EASY backfilling).* It would let a small job pass a large one only
+  when it ends before the running jobs do. The prediction is missing for 44.5 % of the jobs, and a
+  bound in time needs none.
