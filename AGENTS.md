@@ -220,8 +220,9 @@ Open, one line each, with where the design lives. A session starts with (e).
 - (a) The rest of the conductor contract (job priority is built; labels, version endpoint, OpenAPI,
   strict mode, run report, write token, prompt-prefix hook): the conductor repository,
   `docs/design/slot-integration.md`.
-- (c) Warnings for an empty `RUSTC_WRAPPER` while sccache is configured and for mixed
-  `CARGO_PROFILE_*` in one target directory: `docs/design.md` § 12, ideas 1 and 2, not built.
+- (c) A warning for mixed `CARGO_PROFILE_*` in one target directory: `docs/design.md` § 12,
+  idea 2, not built; a job's `cache_env` in the job log has the values to compare. The warning
+  for an empty `RUSTC_WRAPPER` (idea 1) is built, without asking whether sccache is configured.
 - (d) I/O and disk and cache sizes in the live view: about ½ to 1 day each; `io.stat` needs a
   root `Delegate=` drop-in for the user manager.
 - (e) The live daemon may still run an old binary: compare

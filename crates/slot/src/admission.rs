@@ -226,6 +226,8 @@ mod tests {
             target_dir: String::new(),
             priority: crate::types::Priority::Normal,
             promoted: false,
+            cache_env: None,
+            warnings: Vec::new(),
         }
     }
 

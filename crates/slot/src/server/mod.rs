@@ -97,7 +97,8 @@ pub struct Config {
     pub call_off_after: Duration,
     /// Applications whose capture is not a call (level meters, mixers).
     pub call_ignore: Vec<String>,
-    /// Watch sccache servers and give back jobserver tokens they lost.
+    /// Watch sccache servers: give back jobserver tokens they lost, and
+    /// log their counters once a minute.
     pub sccache_watch: bool,
     /// Free memory and disk a job needs before it may start; 0 turns one off.
     pub admission: admission::Limits,
@@ -133,6 +134,9 @@ const STARTING_MS: i64 = 30_000;
 
 /// Interval between two call probes.
 const CALL_PROBE: Duration = Duration::from_secs(5);
+
+/// Interval between two readings of the sccache counters.
+const CACHE_STATS_EVERY: Duration = Duration::from_secs(60);
 
 /// The systemd user unit this process runs in, from `/proc/self/cgroup`.
 fn own_unit() -> Option<String> {
@@ -683,6 +687,7 @@ impl Server {
         }
         if self.cfg.sccache_watch {
             tokio::spawn(Arc::clone(&self).sccache_watch());
+            tokio::spawn(Arc::clone(&self).cache_stats_watch());
         }
         let h = self.headroom_percent();
         if h > 0 {
@@ -1433,6 +1438,14 @@ impl Server {
         let target_dir = (tc.name() == "rust" && req.workspace.is_none())
             .then(|| crate::evict::target_dir(&shown, &req.env, &cwd))
             .flatten();
+        // What the job's environment says about the compile cache. The
+        // toolchain adds none of these variables, so `base` has them as the
+        // job gets them.
+        let cache_env = (tc.name() == "rust").then(|| crate::sccache::cache_env(&base));
+        let warnings = cache_env
+            .as_ref()
+            .map(crate::sccache::cache_warnings)
+            .unwrap_or_default();
         let project = crate::project::cached(&cwd).unwrap_or_default();
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
         let id = {
@@ -1472,6 +1485,8 @@ impl Server {
                     .unwrap_or_default(),
                 priority,
                 promoted,
+                cache_env,
+                warnings: warnings.clone(),
             };
             g.active.insert(
                 id,
@@ -1663,6 +1678,13 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        // Sent as the job starts, ahead of anything the command prints. An
+        // `info` frame, so a client of any version prints it.
+        for w in &warnings {
+            let _ = tx.send(Frame::Info {
+                msg: format!("slot: warning: {w}"),
+            });
+        }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -2567,6 +2589,53 @@ impl Server {
                     b.push(b'\n');
                     let _ = g.census_log.write_all(&b);
                 }
+            }
+        }
+    }
+
+    /// Once a minute, appends the counters of every running sccache server
+    /// of this user to `cache.jsonl` in the state directory, one line each
+    /// ([`crate::sccache::StatsLog`]). The file only grows, like the census
+    /// log. A server that cannot be read is named once in the journal and
+    /// skipped.
+    async fn cache_stats_watch(self: Arc<Self>) {
+        let path = self.cfg.state_dir.join("cache.jsonl");
+        let mut file = match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!(
+                    "slot: {}: {e}; sccache counters are not recorded",
+                    path.display()
+                );
+                return;
+            }
+        };
+        let log = Arc::new(Mutex::new(crate::sccache::StatsLog::continuing(&path)));
+        let mut tick = tokio::time::interval(CACHE_STATS_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let l = Arc::clone(&log);
+            let Ok(pass) = tokio::task::spawn_blocking(move || {
+                let snap = Snapshot::scan();
+                l.lock().expect("stats lock").pass(&snap, now_ms())
+            })
+            .await
+            else {
+                continue;
+            };
+            for e in &pass.errors {
+                eprintln!("{e}");
+            }
+            let mut lines = Vec::new();
+            for r in &pass.records {
+                if let Ok(b) = serde_json::to_vec(r) {
+                    lines.extend(b);
+                    lines.push(b'\n');
+                }
+            }
+            if !lines.is_empty() {
+                let _ = file.write_all(&lines);
             }
         }
     }

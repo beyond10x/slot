@@ -283,6 +283,10 @@ fn line(j: &Job, now: i64) -> String {
         s.push_str("\n       waiting: ");
         s.push_str(&j.wait_reason);
     }
+    for w in &j.warnings {
+        s.push_str("\n       warning: ");
+        s.push_str(w);
+    }
     s
 }
 
@@ -425,6 +429,8 @@ mod tests {
             target_dir: String::new(),
             priority: crate::types::Priority::Normal,
             promoted: false,
+            cache_env: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -765,6 +771,47 @@ mod tests {
         o.remove("promoted");
         let j: Job = serde_json::from_value(v).unwrap();
         assert_eq!((j.priority, j.promoted), (Priority::Normal, false));
+    }
+
+    #[test]
+    fn a_job_with_warnings_lists_them_under_its_line() {
+        let plain_running = job(7, JobState::Running, 1);
+        let mut running = plain_running.clone();
+        running.warnings = vec![
+            "compile cache off: RUSTC_WRAPPER is empty".into(),
+            "private sccache server (port 4303)".into(),
+        ];
+        let mut plain_queued = job(8, JobState::Queued, 1);
+        plain_queued.wait_reason = "memory: 1.0 GB free".into();
+        let mut queued = plain_queued.clone();
+        queued.warnings = vec!["private sccache directory".into()];
+        let s = State {
+            tokens: 4,
+            limit: 4,
+            active: vec![running.clone(), queued.clone()],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out.lines().skip(1).collect();
+        let first = |j: &Job| line(j, 151_000).lines().next().unwrap().to_string();
+        assert_eq!(
+            lines,
+            [
+                first(&plain_queued).as_str(),
+                "       waiting: memory: 1.0 GB free",
+                "       warning: private sccache directory",
+                first(&plain_running).as_str(),
+                "       warning: compile cache off: RUSTC_WRAPPER is empty",
+                "       warning: private sccache server (port 4303)",
+            ],
+            "{out}"
+        );
+        assert_eq!(
+            line(&plain_running, 151_000).lines().count(),
+            1,
+            "no warning, no extra line"
+        );
     }
 
     #[test]

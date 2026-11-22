@@ -394,7 +394,8 @@ Tested and rejected:
 Ideas, none built yet:
 
 1. Keep sccache on: the rust toolchain could warn in the job output when a job sets
-   `RUSTC_WRAPPER` empty while sccache is configured.
+   `RUSTC_WRAPPER` empty while sccache is configured. The warning is built
+   (`sccache::cache_warnings`, unreleased); it does not ask whether sccache is configured.
 2. One profile per worktree: warn when the same target directory sees jobs with different
    `CARGO_PROFILE_*` values, since each one builds a full dependency tree.
 3. A workspace-hack crate (`cargo-hakari`) in workspaces with many `-p` selections collapses the
