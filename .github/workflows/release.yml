@@ -16,8 +16,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - name: Read the rustc pinned in rust-toolchain.toml
+        id: rustc
+        run: sed -n 's/^channel = "\(.*\)"$/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
         with:
+          toolchain: ${{ steps.rustc.outputs.channel }}
           components: rustfmt, clippy
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:
@@ -58,8 +62,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - name: Read the rustc pinned in rust-toolchain.toml
+        id: rustc
+        run: sed -n 's/^channel = "\(.*\)"$/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
         with:
+          toolchain: ${{ steps.rustc.outputs.channel }}
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:

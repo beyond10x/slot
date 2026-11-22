@@ -1,4 +1,8 @@
 //! The install snippet in the docs names the version being released.
+//!
+//! The one integration-test binary of this crate: further checks are modules.
+
+mod ci;
 
 #[test]
 fn getting_started_installs_this_version() {

@@ -57,6 +57,7 @@ tasks:
   check:
     desc: Run the complete offline repository gate.
     cmds:
+      - rustc --version
       - task: ui-check
       - task: ui
       - task: ui-ux
