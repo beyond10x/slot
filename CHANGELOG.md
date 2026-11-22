@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.23.0 — 2026-11-22
 
 - A limit on build processes per job: `slot job-parallel <N>` makes the daemon start every job
   without the pool's jobserver and with `CARGO_BUILD_JOBS=<P>` and `MAKEFLAGS=-j<P>` instead, where

@@ -1130,7 +1130,7 @@ has run longer than a set time, counted from `started_ms`; the queue wait is not
   limit. A client without `--timeout` and a daemon without the limit talk to each other
   unchanged.
 
-## 23. Build processes per job (unreleased)
+## 23. Build processes per job (0.23.0)
 
 **The problem.** Each `rust` or `other` job holds one slot, and its `cargo` reads one more token
 from the FIFO for every compiler it starts (§ 8). The daemon reads the same FIFO for the waiting
