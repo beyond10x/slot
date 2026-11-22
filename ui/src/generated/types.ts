@@ -105,7 +105,20 @@ priority: Priority,
 /**
  * Whether `priority` is `high` only because the job waited that long.
  */
-promoted: boolean, };
+promoted: boolean, 
+/**
+ * Rust jobs: the variables of the job's environment that decide what
+ * the compile cache can do (`crate::sccache::CACHE_VARS` and every
+ * `CARGO_PROFILE_*`), each as the job got it; a variable that is not
+ * set is absent. Absent for other toolchains and from a daemon that
+ * does not record it.
+ */
+cache_env?: { [key in string]?: string }, 
+/**
+ * What is unusual about the job's compile cache setup, one short text
+ * each (`crate::sccache::cache_warnings`); the job runs unchanged.
+ */
+warnings?: Array<string>, };
 
 export type Unit = { 
 /**

@@ -51,3 +51,22 @@ A local job otherwise gets the caller's full environment. A remote job starts fr
 daemon's environment, plus the variables its [toolchain](../toolchains.md) admits and the names
 in `SLOT_ENV`. A name that looks like a credential (it contains `TOKEN`, `SECRET`, `PASSWORD`,
 `PASSWD`, `CREDENTIAL`, `_KEY` or `AUTH`) crosses only when `SLOT_ENV` names it.
+
+## Recorded for a rust job
+
+The record of a rust job in the [job log](../how-it-works.md#job-log) has a `cache_env` map with
+these variables as the job got them, when they are set: `RUSTC_WRAPPER`,
+`CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_INCREMENTAL`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+`SCCACHE_SERVER_PORT`, `SCCACHE_DIR`, `RUSTUP_TOOLCHAIN` and every `CARGO_PROFILE_*`. No other
+variable is recorded. An empty value is recorded as an empty string; a value longer than 200
+characters is cut and ends in `…`. sccache's cache key holds the compiler flags and every
+`CARGO_*` variable, so these values say whether the job could be answered from the cache. Three
+values give a warning: the client prints `slot: warning: <text>` on stderr when the job starts,
+`slot status` lists it under the job, and the record has it in `warnings`. The job runs
+unchanged.
+
+| warning | when |
+|---|---|
+| `compile cache off: RUSTC_WRAPPER is empty` | `RUSTC_WRAPPER` is set and empty; with `RUSTC_WRAPPER` unset and `CARGO_BUILD_RUSTC_WRAPPER` empty, the warning names that variable |
+| `private sccache server (port N)` | `SCCACHE_SERVER_PORT` is a port other than 4226 |
+| `private sccache directory` | `SCCACHE_DIR` is set |

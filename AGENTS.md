@@ -220,8 +220,9 @@ Open, one line each, with where the design lives. A session starts with (e).
 - (a) The rest of the conductor contract (job priority is built; labels, version endpoint, OpenAPI,
   strict mode, run report, write token, prompt-prefix hook): the conductor repository,
   `docs/design/slot-integration.md`.
-- (c) Warnings for an empty `RUSTC_WRAPPER` while sccache is configured and for mixed
-  `CARGO_PROFILE_*` in one target directory: `docs/design.md` § 12, ideas 1 and 2, not built.
+- (c) A warning for mixed `CARGO_PROFILE_*` in one target directory: `docs/design.md` § 12,
+  idea 2, not built; a job's `cache_env` in the job log has the values to compare. The warning
+  for an empty `RUSTC_WRAPPER` (idea 1) is built, without asking whether sccache is configured.
 - (d) I/O and disk and cache sizes in the live view: about ½ to 1 day each; `io.stat` needs a
   root `Delegate=` drop-in for the user manager.
 - (e) The live daemon may still run an old binary: compare
@@ -243,8 +244,9 @@ Open, one line each, with where the design lives. A session starts with (e).
   is first in the queue, and every job behind it waits; `slot status` then reads "0 free" with
   few jobs running, which is not the lost-token case of (h):
   `story:a-whole-pool-request-does-not-stall-the-queue`.
-- (l) `task ui-ux` ran 148 s, 124 s and 107 s against a budget of 120 s, and nothing stops it
-  there: `story:ux-gate-step-ends-within-its-budget`.
+- (l) `task ui-ux` ran 148 s, 124 s and 107 s against a budget of 120 s with 59 to 64 tests, and
+  nothing stops it there. With 87 tests it ran 5.9 min in Playwright on a loaded host, its
+  slowest test 52.0 s: `story:ux-gate-step-ends-within-its-budget`.
 - (m) No `rust-toolchain.toml`: the local gate and CI each use the rustc they find.
 - (n) A pull request of planning files runs the full gate (307 s):
   `story:planning-only-pull-requests-skip-the-gate`.
@@ -252,6 +254,12 @@ Open, one line each, with where the design lives. A session starts with (e).
   sccache answered 26 % of rustc calls from the cache and refused 57 %, and 35 % of the units on
   disk repeat one built in another target directory:
   `story:jobs-record-what-the-compile-cache-did`.
+- (p) A job runs with the daemon's open-file limit (1,024 soft under systemd), not the
+  caller's; a test suite that opens more fails under `slot` and passes outside it:
+  `story:jobs-run-with-the-callers-open-file-limit`.
+- (q) The round keys of `ui/ux/baseline.json` (`reading_load.*`, `layout_shift.total`) predate
+  the header of 80 px: `node ux/ratchet.ts --round` fails until a round takes them in, and a
+  `reading_load` made worse names a decision id.
 
 ## Never
 

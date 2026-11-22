@@ -154,8 +154,9 @@ pub struct ServeArgs {
     #[arg(long, value_delimiter = ',', default_values_t = crate::call::DEFAULT_IGNORE.iter().map(|s| (*s).to_string()))]
     pub call_ignore: Vec<String>,
     /// Watch this user's sccache servers and write back the jobserver tokens
-    /// a server lost, once it had none free for 60 s while compiles waited;
-    /// `false` turns the watchdog off.
+    /// a server lost, once it had none free for 60 s while compiles waited,
+    /// and append each server's counters to `cache.jsonl` in the state
+    /// directory once a minute; `false` turns both off.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub sccache_watch: bool,
     /// A job waits while the filesystem of its directory or of

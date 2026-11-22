@@ -14,18 +14,40 @@
   button explains each header item, by pointer or keyboard. The wait percentiles, the cores of
   the jobs, the host CPU, the pressure and the recommended pool size moved from the header to the
   section each belongs to, with their current values.
+
 - Web view: the Queue, Running and Finished tables have one column order and one set of widths,
   so slots, wait, time and cores stand in line down the page. Finished has a result mark and the
   slots a job held. A job's session is named by its title. A queued job that waits for disk space
   or memory says so in a line under its row, and the Queue gives the command the rest of the row.
+
 - Web view: the output pane says the job's state in words ("queued, #4 of 6, waiting 31s",
   "running, output live", "failed (exit 101)") and lists what the tables cut or leave out: the
   whole command, the directory, the session with its id, slots, times, cores and memory.
+
 - Web view: the page title carries the counts ("6 running, 2 queued · slot <host>"), and the
   page has an icon. Text is 14 px, commands and output 13 px, nothing below 12 px. Nothing
   blinks: a running bar of the timeline has a steady edge, and red is left to a failure.
+
 - Web view: the Sessions table shows the id in every row and "no title" for a session without
   one; a timeline bar ends a cut label with "…".
+
+- Once a minute the daemon appends the counters of each running sccache server to
+  `<state-dir>/cache.jsonl`: Rust and C/C++ hits and misses, the calls the server refused by
+  reason, the cache size and its limit, and `restarted` when a counter went down. sccache keeps
+  these counters only since its last start. The daemon reads them only from a server that is
+  running, so it never starts one, and not from a server that used no CPU time since its last
+  line, so the reading does not keep an idle server from its idle exit.
+  `slot serve --sccache-watch false` turns it off.
+
+- The record of a rust job in the job log has `cache_env`: the values of `RUSTC_WRAPPER`,
+  `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_INCREMENTAL`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+  `SCCACHE_SERVER_PORT`, `SCCACHE_DIR`, `RUSTUP_TOOLCHAIN` and every `CARGO_PROFILE_*` the job
+  ran with, and no other variable.
+
+- A rust job whose environment switches the compile cache off (`RUSTC_WRAPPER` empty) or uses
+  an sccache server of its own (`SCCACHE_SERVER_PORT` other than 4226, or `SCCACHE_DIR`) is
+  warned: the client prints `slot: warning: …` when the job starts, `slot status` lists the
+  warning under the job, and the job's record has it in `warnings`. The job runs unchanged.
 
 ## 0.19.1 — 2026-11-22
 
