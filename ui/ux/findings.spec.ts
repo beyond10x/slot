@@ -384,3 +384,20 @@ test('UXF-034 busy-failed: every row of the Sessions table shows its id, and a s
   await expect(untitled.getByRole('cell').nth(0)).toHaveText('no title');
   await expect(untitled.getByRole('cell').nth(1)).toHaveText('9e8d7c6b');
 });
+
+for (const size of GATING) {
+  test(`UXF-037 busy-failed @ ${vpName(size)}: the machine charts come first, then Running, Queue and Finished`, async ({ page, baseURL }) => {
+    await start(page, baseURL, 'busy-failed', size);
+    const top = async (name: RegExp): Promise<number> => {
+      const box = await page.getByRole('heading', { name }).first().boundingBox();
+      if (!box) throw new Error(`no heading ${String(name)}`);
+      return Math.round(box.y);
+    };
+    const charts = [await top(/^Cores: used/), await top(/^Pressure/), await top(/^Pool size/)];
+    expect(new Set(charts).size, 'the three charts stand in one row').toBe(1);
+    const down = [charts[0], await top(/^Running/), await top(/^Queue/), await top(/^Finished/)];
+    expect(new Set(down).size, 'four different heights').toBe(4);
+    expect(down, 'order down the page').toEqual([...down].sort((a, b) => a - b));
+    expect(down[1], 'Running starts in the upper half of the first screen').toBeLessThan(size.height / 2);
+  });
+}
