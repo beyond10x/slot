@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { fmtDur } from '../lib/format.ts';
 import { checkoutLabel, cmdText, jobId, waitS } from '../lib/job.ts';
-import { level, levelText, servedQueue } from '../lib/queue.ts';
+import { level, levelText, servedQueue, waitsFor } from '../lib/queue.ts';
 import { jobs, select, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
@@ -32,14 +32,14 @@ const rows = computed(() => {
     <tbody>
       <tr v-for="r in rows" :key="r.id" :class="{ sel: store.selected === r.id }" @click="select(r.id)">
         <td class="num">#{{ r.pos }}</td>
-        <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id)">{{ r.id }}</button></td>
+        <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
         <td><ToolDot :name="r.job.toolchain" /></td>
         <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
         <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`">{{ r.checkout }}</td>
         <td class="muted opt">{{ r.job.session.slice(0, 8) }}</td>
         <td :class="{ muted: r.normal }">{{ r.level }}</td>
         <td class="num">{{ r.job.tokens }}</td>
-        <td class="num" :title="r.job.wait_reason || undefined">{{ r.wait }}<span v-if="r.job.wait_reason" class="why"> · {{ r.job.wait_reason.includes('filesystem') ? 'disk' : 'memory' }}</span></td>
+        <td class="num" :title="r.job.wait_reason || undefined">{{ r.wait }}<span v-if="r.job.wait_reason" class="why"> · {{ waitsFor(r.job) === 'memory' ? 'memory' : 'disk' }}</span></td>
       </tr>
       <tr v-if="!rows.length" class="empty"><td colspan="9" class="muted">queue empty</td></tr>
     </tbody>

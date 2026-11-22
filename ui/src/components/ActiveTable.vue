@@ -8,22 +8,12 @@ import CoresSpark from './CoresSpark.vue';
 import ToolDot from './ToolDot.vue';
 import UnitChips from './UnitChips.vue';
 
-/** Detail rows open by default for this many of the busiest jobs. */
-const OPEN_BUSIEST = 3;
-
-/** Explicit open/closed choices; jobs without one follow the busiest-3 default. */
-const toggled = reactive(new Map<number, boolean>());
+/** Jobs whose unit row the user opened. A row opens and closes only by its toggle, so no tick moves the rows below. */
+const opened = reactive(new Set<number>());
 
 const rows = computed(() => {
   const t = store.clock;
   const running = [...jobs.values()].filter((j) => j.state === 'running').sort((a, b) => jobId(a) - jobId(b));
-  const busiest = new Set(
-    running
-      .map((j) => jobId(j))
-      .filter((id) => live.has(id))
-      .sort((a, b) => (live.get(b)?.cores ?? 0) - (live.get(a)?.cores ?? 0))
-      .slice(0, OPEN_BUSIEST),
-  );
   return running.map((j) => {
     const id = jobId(j);
     const l = live.get(id);
@@ -33,7 +23,7 @@ const rows = computed(() => {
       job: j,
       checkout: checkoutLabel(j, '\n'),
       live: l,
-      open: toggled.get(id) ?? busiest.has(id),
+      open: opened.has(id),
       cmd: cmdText(j),
       phase: phase(l?.units ?? []),
       wait: fmtDur(waitS(j, t)),
@@ -46,7 +36,8 @@ const rows = computed(() => {
 });
 
 function toggle(id: number, open: boolean): void {
-  toggled.set(id, !open);
+  if (open) opened.delete(id);
+  else opened.add(id);
 }
 </script>
 
@@ -67,13 +58,13 @@ function toggle(id: number, open: boolean): void {
               :aria-label="`${r.open ? 'hide' : 'show'} units of job ${r.id}`"
               @click.stop="toggle(r.id, r.open)">{{ r.open ? '▾' : '▸' }}</button>
           </td>
-          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id)">{{ r.id }}</button></td>
+          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
           <td><ToolDot :name="r.job.toolchain" /></td>
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`">{{ r.checkout }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
           <td class="opt2">
             <button type="button" class="live" :class="{ on: store.selected === r.id }" title="watch this job's output live"
-              @click.stop="select(r.id)">● live</button>
+              @click.stop="select(r.id, $event)">● live</button>
           </td>
           <td><span class="phase" :class="r.phase">{{ r.phase }}</span></td>
           <td class="num">{{ r.job.tokens }}</td>

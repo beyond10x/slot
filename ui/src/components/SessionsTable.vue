@@ -36,7 +36,7 @@ const rows = computed(() =>
         <td class="num">{{ r.procs }}</td>
         <td class="num opt">{{ r.rss }}</td>
         <td class="opt"><CoresSpark :points="r.spark" :t1="store.clock" :span="sessionSparks.spanMs" /></td>
-        <td><span v-if="r.flag" class="badge" title="builds outside slot use more than 1 core">not on slot</span></td>
+        <td><span v-if="r.flag" class="badge" title="builds that are not on slot use more than 1 core">not on slot</span></td>
       </tr>
       <tr v-if="!rows.length" class="empty"><td colspan="7" class="muted">no sessions seen yet</td></tr>
     </tbody>

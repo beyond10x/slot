@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Web view: the Queue, Running and Finished tables come directly under the header; the host
+  panel, the Sessions table and the timeline follow. The header counts the jobs that failed in
+  the last 60 minutes, and the count opens the output of the newest one. Opening an output by
+  keyboard moves the focus into the pane; Escape closes it and returns the focus. A unit row
+  opens only by its toggle. The Finished table states a result in words ("failed (101)", "ok",
+  "cancelled"), and a build outside the pool is "not on slot" everywhere.
+
 ## 0.19.1 — 2026-11-22
 
 - Jobs show their Git repository and linked worktree name. Directories outside

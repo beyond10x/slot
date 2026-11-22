@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue';
 import { jobId, newestRunning } from './lib/job.ts';
+import { queueHeading, servedQueue } from './lib/queue.ts';
 import { jobs, select, store } from './store.ts';
 import HeaderBar from './components/HeaderBar.vue';
 import HostPanel from './components/HostPanel.vue';
@@ -17,6 +18,8 @@ const newest = computed(() => {
   return j ? jobId(j) : null;
 });
 
+const queueTitle = computed(() => queueHeading(servedQueue(jobs.values())));
+
 watch(
   [newest, () => store.followNewest],
   ([id, on]) => {
@@ -31,20 +34,20 @@ watch(
   <p v-if="!store.ready" class="muted waiting">loading jobs and history from the daemon…</p>
   <main v-else :class="{ nopane: store.selected === null }">
     <div>
+      <section>
+        <h2>{{ queueTitle }}</h2>
+        <QueueTable />
+        <h2>Running</h2>
+        <ActiveTable />
+        <h2>Finished</h2>
+        <DoneTable />
+      </section>
       <HostPanel />
       <section>
         <h2>Timeline: one bar per job. Pale part: waiting for a slot. Click a bar for its output.</h2>
         <TimelineChart />
         <h2>Cores in use: slot jobs (by toolchain) and whole host; below: jobs waiting for a slot</h2>
         <CoresChart />
-      </section>
-      <section>
-        <h2>Queue: waiting for slots, by level, oldest first</h2>
-        <QueueTable />
-        <h2>Running</h2>
-        <ActiveTable />
-        <h2>Finished</h2>
-        <DoneTable />
       </section>
       <section>
         <h2>Share of the pool: slot time (run time × slots held) and CPU per project, repository or session</h2>

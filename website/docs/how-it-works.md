@@ -274,17 +274,23 @@ shows:
 
 - slots in use out of the pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
   ([Headroom](headroom.md)); on the machine base, the line with the CPUs busy on the host, the
-  target, the pool's quota and the busiest owners outside the pool,
+  target, the pool's quota and the busiest owners outside the pool; when a job failed in the last
+  60 minutes, a **failed** count that opens the output of the newest one,
+- directly under the header, queued and running jobs: repository, command, state, wait, elapsed
+  time, cores, memory, session, and for a queued job its level; a running job's row opens on what
+  it compiles now,
+- finished jobs: result (`ok`, `failed (101)` with the exit code, `cancelled`), wait, duration,
+  CPU seconds, average cores, peak memory,
+- build cores on the whole host by tool family and by agent session, run by slot or **not on
+  slot**,
 - a timeline with one bar per job, coloured by toolchain; the pale part of a bar is the wait for
   a slot,
 - cores in use by slot jobs per toolchain, and by the whole host,
-- running and queued jobs: repository, command, state, wait, elapsed time, cores, memory, session,
-  and for a queued job its level,
-- finished jobs: exit code, wait, duration, CPU seconds, average cores, peak memory,
 - the share of the pool per project, repository or session for today, the last 24 hours or the
   last 7 days ([Usage](#usage)),
 - the live output of a job, opened by clicking its bar or its job number in a table; the job number
-  is a button, so the keyboard reaches it with Tab.
+  is a button, so the keyboard reaches it with Tab. Opened by the keyboard, the output takes the
+  focus; Escape closes it and puts the focus back on the job.
 
 It keeps the last 500 finished jobs in memory (`--keep-jobs`). The UI has no authentication;
 keep it on a loopback address. The same data is available as JSON from `/api/state`, as a stream

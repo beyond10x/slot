@@ -1,4 +1,5 @@
 // The UX ratchet: every metric is lower-is-better; the baseline only moves down, or up with a decision id.
+import { execFileSync } from 'node:child_process';
 
 export interface Entry {
   value: number;
@@ -22,7 +23,7 @@ export interface ToleranceRule {
 }
 
 export const RULES: ToleranceRule = {
-  absolute: { 'layout_shift.per_minute': 0.01 },
+  absolute: { 'layout_shift.total': 0.01 },
   relative: { 'reading_load.max': 0.1, 'reading_load.median': 0.1 },
 };
 
@@ -90,6 +91,18 @@ export function compare(base: Baseline, current: Metrics, main?: Baseline, skip:
     }
   }
   return { failures, next };
+}
+
+/** The baseline at `path` (from the repository root) on the main branch; undefined when no ref has it. */
+export function mainBaseline(cwd: string, path: string): Baseline | undefined {
+  for (const ref of ['origin/main', 'main']) {
+    try {
+      return JSON.parse(execFileSync('git', ['show', `${ref}:${path}`], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })) as Baseline;
+    } catch {
+      /* not on that ref, or the ref is not fetched */
+    }
+  }
+  return undefined;
 }
 
 /** `compare`, keeping only the failures `--update` cannot fix: worse values and worsened baselines. */

@@ -8,8 +8,9 @@ export default defineConfig({
   testMatch: '*.spec.ts',
   fullyParallel: true,
   workers: 2,
-  reporter: [['line']],
-  timeout: 120_000,
+  reporter: [['line'], ['./ux/slowest.ts']],
+  timeout: 60_000,
+  reportSlowTests: { max: 10, threshold: 5_000 },
   use: {
     baseURL: `http://127.0.0.1:${PORT}/`,
     launchOptions: process.env.UX_CHROME ? { executablePath: process.env.UX_CHROME } : {},

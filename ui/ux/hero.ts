@@ -47,7 +47,9 @@ try {
   await waitForServer();
   const browser = await chromium.launch(process.env.UX_CHROME ? { executablePath: process.env.UX_CHROME } : {});
   const ctx = async (): Promise<Page> => (await browser.newContext({ viewport: { width: 1600, height: 1000 } })).newPage();
-  await shot(await ctx(), 'crowded', async () => undefined, 'ui-host-census.png');
+  await shot(await ctx(), 'crowded', async (p) => {
+    await p.getByRole('heading', { name: /^Host/ }).evaluate((h) => window.scrollTo(0, h.getBoundingClientRect().top + window.scrollY - 140));
+  }, 'ui-host-census.png');
   await shot(await ctx(), 'queue-position', async (p) => {
     for (let i = 0; i < 2; i++) await p.getByRole('button', { name: /^show units of job/ }).first().click();
     await p.getByRole('heading', { name: /^Queue/ }).evaluate((h) => window.scrollTo(0, h.getBoundingClientRect().top + window.scrollY - 140));

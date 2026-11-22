@@ -57,19 +57,26 @@ reference and UI types. CI runs it in `.github/workflows/gate.yml`.
 
 `ui/ux/` holds the UI iteration loop. Every merge: `ui/ux/gates.spec.ts` (no sideways page scroll,
 no scrolling element but the output text, the `data-ux-region` header marks fully in view,
-axe-core 0 serious or critical) and `ui/ux/screen-only.spec.ts` (every scenario task done by
-pointer and by keyboard, at most 2 actions, no `false_complete`) at 1366x768 and 1280x720, against
+axe-core 0 serious or critical), `ui/ux/screen-only.spec.ts` (every scenario task done by
+pointer and by keyboard, at most 2 actions, no `false_complete`, a task on a job without a scroll)
+and `ui/ux/findings.spec.ts` (the assertions of closed findings) at 1366x768 and 1280x720, against
 the built `ui/dist` with every API answered from `ui/ux/scenarios.ts`; then `node ux/ratchet.ts`
 against `ui/ux/baseline.json`. Each run serves `ui/dist` on a free port (`ui/ux/port.ts`; `UX_PORT`
 sets one), so worktrees run the gates at the same time; `ui/ux/concurrent.e2e.ts` runs two at once.
 Playwright's Chromium headless shell must be installed
 (`pnpm exec playwright install --only-shell chromium` in `ui/`), and the DejaVu Sans font: the
 harness renders every page in it, so the gates measure the same layout on every host.
+Playwright stops a test at 60 s, and every run ends with its ten slowest tests (`ui/ux/slowest.ts`).
 
 - A change that improves a metric runs `node ux/ratchet.ts --update` and commits the new baseline
   in the same change. A baseline made worse names a decision id in that entry (`decision`).
-- A round: `task ux-round -- R-nn` measures every size and writes `ui/ux/rounds/R-nn/report.md`;
-  then `triage.md` (priority = severity × frequency × confidence ÷ cost, at most 5 changes) and,
+- A round: `task ux-round -- R-nn` measures every size and writes `ui/ux/rounds/R-nn/report.md`.
+  It exits non-zero when a result file is missing (a test that crashes writes none; the report
+  lists each and counts it as a gate problem or a screen-only failure) or when the round ratchet
+  fails (`node ux/ratchet.ts --round`, its last command; the report shows its lines). The round
+  ratchet also compares the keys that depend on the host's fonts (`reading_load.*`,
+  `layout_shift.total`); `--round --update` takes them in. Then
+  `triage.md` (priority = severity × frequency × confidence ÷ cost, at most 5 changes) and,
   for one layout or interaction change, `decision.md`. Every finding is a
   `ui/ux/findings/UXF-nnn.md`; a closed S1 or S2 names its regression asset
   (`ui/ux/findings.test.ts`). The change set is one task under the standing UX story in `.engineering/planning/story/`.
@@ -98,6 +105,11 @@ Build with `CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0`, and f
 with `worktree finish --discard-cache --archive` when the change is merged.
 
 ## Upgrading a running daemon
+
+Before the install, read `slot --version` of the installed binary and `git worktree list`: a
+version with a `+` suffix is a local build of another session. The release that replaces it must
+contain its changes, and both must write the same handover `VERSION` (`server/handover.rs`).
+After the reload, compare the job ids of `/api/state` before and after.
 
 Install the new binary over the old path, then `systemctl --user reload slot`. Reload sends
 SIGHUP. From 0.11.0 the daemon re-executes at once and hands running and queued jobs, their
@@ -227,6 +239,19 @@ Open, one line each, with where the design lives. A session starts with (e).
   `story:idle-slots-are-lent-to-the-queue`.
 - (j) Jobs that run under 5 s carry half of the queue wait:
   `story:short-jobs-start-ahead-of-long-ones`.
+- (k) A job that asks for every slot (`--tokens` at the limit) collects each freed slot while it
+  is first in the queue, and every job behind it waits; `slot status` then reads "0 free" with
+  few jobs running, which is not the lost-token case of (h):
+  `story:a-whole-pool-request-does-not-stall-the-queue`.
+- (l) `task ui-ux` ran 148 s, 124 s and 107 s against a budget of 120 s, and nothing stops it
+  there: `story:ux-gate-step-ends-within-its-budget`.
+- (m) No `rust-toolchain.toml`: the local gate and CI each use the rustc they find.
+- (n) A pull request of planning files runs the full gate (307 s):
+  `story:planning-only-pull-requests-skip-the-gate`.
+- (o) Which Rust units are compiled again, and how often, is recorded nowhere: on 2026-11-22
+  sccache answered 26 % of rustc calls from the cache and refused 57 %, and 35 % of the units on
+  disk repeat one built in another target directory:
+  `story:jobs-record-what-the-compile-cache-did`.
 
 ## Never
 

@@ -123,12 +123,46 @@ function endMessage(data: string): string {
 }
 
 const paneEl = useTemplateRef<HTMLElement>('paneEl');
+const closeEl = useTemplateRef<HTMLButtonElement>('closeEl');
+/** The control that held the focus when the pane was asked for; closing by the keyboard gives the focus back to it. */
+let opener: HTMLElement | null = null;
+
+function noteOpener(): void {
+  const a = document.activeElement;
+  if (a instanceof HTMLElement && a !== document.body && !paneEl.value?.contains(a)) opener = a;
+}
+
+/** Asked for by the keyboard, the pane takes the focus on "close"; the output is one Tab further. */
+function takeFocus(): void {
+  if (!store.paneFocus || store.selected !== props.id) return;
+  store.paneFocus = false;
+  noteOpener();
+  closeEl.value?.focus({ preventScroll: true });
+}
+watch(() => store.paneFocus, takeFocus, { flush: 'post' });
+
+/** Closes the pane; `refocus` puts the focus back on the control that opened it. */
+function close(refocus: boolean): void {
+  const o = opener;
+  select(null);
+  if (refocus && o?.isConnected) o.focus();
+}
+
+/** The Enter that opened the pane, still held down, must not press "close": a repeated key does nothing there. */
+function noRepeat(e: KeyboardEvent): void {
+  if (e.repeat) e.preventDefault();
+}
+
+/** Escape closes the pane from anywhere on the page, but not while it closes the list of a select. */
+function onKey(e: KeyboardEvent): void {
+  if (e.key !== 'Escape' || e.defaultPrevented || e.target instanceof HTMLSelectElement) return;
+  close(true);
+}
 
 /** As a bottom sheet (narrow windows) the pane can cover the control that opened it: scroll that control above the sheet. */
 function keepOpenerInSight(): void {
   const pane = paneEl.value;
-  const opener = document.activeElement;
-  if (!pane || !(opener instanceof HTMLElement) || opener === document.body || pane.contains(opener)) return;
+  if (!pane || !opener) return;
   if (getComputedStyle(pane).position !== 'fixed') return;
   const hdr = document.querySelector('header')?.getBoundingClientRect().bottom ?? 0;
   const r = opener.getBoundingClientRect();
@@ -137,7 +171,10 @@ function keepOpenerInSight(): void {
 }
 
 onMounted(() => {
+  noteOpener();
   keepOpenerInSight();
+  takeFocus();
+  document.addEventListener('keydown', onKey);
   const src = new EventSource(`api/jobs/${props.id}/output`);
   es = src;
   src.onopen = () => {
@@ -160,11 +197,14 @@ onMounted(() => {
     else stream.value = 'connecting';
   };
 });
-onUnmounted(() => es?.close());
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKey);
+  es?.close();
+});
 </script>
 
 <template>
-  <aside ref="paneEl" class="pane">
+  <aside ref="paneEl" class="pane" aria-label="job output">
     <div class="bar">
       <b class="title" :title="title">{{ title }}</b>
       <span class="status" :class="stream">{{ status }}</span>
@@ -172,7 +212,7 @@ onUnmounted(() => es?.close());
         <label title="keep the newest output in view"><input v-model="follow" type="checkbox" /> follow</label>
         <label title="switch to the most recently started running job by itself">
           <input v-model="store.followNewest" type="checkbox" /> follow newest</label>
-        <button type="button" @click="select(null)">close</button>
+        <button ref="closeEl" type="button" title="close the output (Escape)" @keydown="noRepeat" @click="close($event.detail === 0)">close</button>
       </span>
     </div>
     <pre ref="pre" tabindex="0" role="log" aria-live="off" :aria-label="`output of job ${props.id}`" @scroll.passive="onScroll"><div ref="dropped" class="dropped" :hidden="!dropped">… {{ dropped }} earlier lines dropped</div></pre>

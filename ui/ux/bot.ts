@@ -78,7 +78,7 @@ export async function play(page: Page, run: Opened, task: Task, mode: Mode): Pro
   if (task.kind === 'open-output') {
     const id = String(task.job);
     const target = await firstPresent([
-      page.getByRole('button', { name: new RegExp(`(^|\\D)${id}(\\D|$).*output|output.*(^|\\D)${id}(\\D|$)`, 'i') }),
+      page.getByRole('button', { name: new RegExp(`output of job ${id}(\\D|$)`, 'i') }),
       page.getByRole('row').filter({ has: page.getByRole('cell', { name: id, exact: true }) }),
     ]);
     if (!target) {

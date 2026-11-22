@@ -3,7 +3,7 @@
   "tolerances": {
     "counts": "0",
     "reading_load.*": "10 % (fonts differ between hosts)",
-    "layout_shift.per_minute": "0.01"
+    "layout_shift.total": "0.01"
   },
   "scenarios": {
     "busy-failed": {
@@ -12,19 +12,22 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 202,
-        "tolerance": 21
+        "value": 386,
+        "tolerance": 39,
+        "decision": "R-11-job-tables-first"
       },
       "reading_load.median": {
-        "value": 202,
-        "tolerance": 21
+        "value": 380.5,
+        "tolerance": 39,
+        "decision": "R-11-job-tables-first"
       },
-      "layout_shift.per_minute": {
-        "value": 0.035,
-        "tolerance": 0.01
+      "layout_shift.total": {
+        "value": 0.049,
+        "tolerance": 0.01,
+        "decision": "R-11-job-tables-first"
       },
       "screen_only.keyboard_tabs": {
-        "value": 26,
+        "value": 5,
         "tolerance": 0
       },
       "screen_only.keyboard_failed": {
@@ -32,11 +35,11 @@
         "tolerance": 0
       },
       "screen_only.actions": {
-        "value": 2,
+        "value": 1,
         "tolerance": 0
       },
       "screen_only.looks": {
-        "value": 3,
+        "value": 1,
         "tolerance": 0
       },
       "screen_only.steers": {
@@ -44,11 +47,11 @@
         "tolerance": 0
       },
       "screen_only.time_to_act_steps.max": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "actions_per_fix.max": {
-        "value": 2,
+        "value": 1,
         "tolerance": 0
       },
       "screen_only.failed": {
@@ -62,14 +65,16 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 205,
-        "tolerance": 21
+        "value": 353,
+        "tolerance": 36,
+        "decision": "R-11-job-tables-first"
       },
       "reading_load.median": {
-        "value": 205,
-        "tolerance": 21
+        "value": 353,
+        "tolerance": 36,
+        "decision": "R-11-job-tables-first"
       },
-      "layout_shift.per_minute": {
+      "layout_shift.total": {
         "value": 0.028,
         "tolerance": 0.01
       }
@@ -80,16 +85,17 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 548,
-        "tolerance": 55
+        "value": 472,
+        "tolerance": 48
       },
       "reading_load.median": {
-        "value": 548,
-        "tolerance": 55
+        "value": 472,
+        "tolerance": 48
       },
-      "layout_shift.per_minute": {
-        "value": 0.044,
-        "tolerance": 0.01
+      "layout_shift.total": {
+        "value": 0.089,
+        "tolerance": 0.01,
+        "decision": "R-11-job-tables-first"
       }
     },
     "idle": {
@@ -105,7 +111,7 @@
         "value": 202,
         "tolerance": 21
       },
-      "layout_shift.per_minute": {
+      "layout_shift.total": {
         "value": 0.035,
         "tolerance": 0.01
       }
@@ -116,14 +122,16 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 202,
-        "tolerance": 21
+        "value": 365,
+        "tolerance": 37,
+        "decision": "R-11-job-tables-first"
       },
       "reading_load.median": {
-        "value": 202,
-        "tolerance": 21
+        "value": 365,
+        "tolerance": 37,
+        "decision": "R-11-job-tables-first"
       },
-      "layout_shift.per_minute": {
+      "layout_shift.total": {
         "value": 0.035,
         "tolerance": 0.01
       },
@@ -136,11 +144,11 @@
         "tolerance": 0
       },
       "screen_only.actions": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "screen_only.looks": {
-        "value": 3,
+        "value": 2,
         "tolerance": 0
       },
       "screen_only.steers": {
@@ -148,11 +156,11 @@
         "tolerance": 0
       },
       "screen_only.time_to_act_steps.max": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "actions_per_fix.max": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "screen_only.failed": {
@@ -166,14 +174,16 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 202,
-        "tolerance": 21
+        "value": 372,
+        "tolerance": 38,
+        "decision": "R-11-job-tables-first"
       },
       "reading_load.median": {
-        "value": 202,
-        "tolerance": 21
+        "value": 372,
+        "tolerance": 38,
+        "decision": "R-11-job-tables-first"
       },
-      "layout_shift.per_minute": {
+      "layout_shift.total": {
         "value": 0.035,
         "tolerance": 0.01
       },
@@ -216,14 +226,16 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 202,
-        "tolerance": 21
+        "value": 372,
+        "tolerance": 38,
+        "decision": "R-11-job-tables-first"
       },
       "reading_load.median": {
-        "value": 202,
-        "tolerance": 21
+        "value": 372,
+        "tolerance": 38,
+        "decision": "R-11-job-tables-first"
       },
-      "layout_shift.per_minute": {
+      "layout_shift.total": {
         "value": 0.035,
         "tolerance": 0.01
       },
@@ -298,16 +310,19 @@
         "tolerance": 0
       },
       "reading_load.max": {
-        "value": 214,
-        "tolerance": 22
+        "value": 333,
+        "tolerance": 34,
+        "decision": "R-11-job-tables-first"
       },
       "reading_load.median": {
-        "value": 214,
-        "tolerance": 22
+        "value": 333,
+        "tolerance": 34,
+        "decision": "R-11-job-tables-first"
       },
-      "layout_shift.per_minute": {
-        "value": 0.005,
-        "tolerance": 0.01
+      "layout_shift.total": {
+        "value": 0.088,
+        "tolerance": 0.01,
+        "decision": "R-11-upgrade-pending-shift"
       }
     },
     "machine-headroom": {
@@ -346,12 +361,36 @@
       "screen_only.failed": {
         "value": 0,
         "tolerance": 0
+      },
+      "reading_load.max": {
+        "value": 342,
+        "tolerance": 35
+      },
+      "reading_load.median": {
+        "value": 342,
+        "tolerance": 35
+      },
+      "layout_shift.total": {
+        "value": 0.106,
+        "tolerance": 0.01
       }
     },
     "pool-share": {
       "gates.problems": {
         "value": 0,
         "tolerance": 0
+      },
+      "reading_load.max": {
+        "value": 386,
+        "tolerance": 39
+      },
+      "reading_load.median": {
+        "value": 380.5,
+        "tolerance": 39
+      },
+      "layout_shift.total": {
+        "value": 0.049,
+        "tolerance": 0.01
       }
     },
     "queue-levels": {
@@ -368,11 +407,11 @@
         "tolerance": 0
       },
       "screen_only.actions": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "screen_only.looks": {
-        "value": 3,
+        "value": 2,
         "tolerance": 0
       },
       "screen_only.steers": {
@@ -380,16 +419,28 @@
         "tolerance": 0
       },
       "screen_only.time_to_act_steps.max": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "actions_per_fix.max": {
-        "value": 1,
+        "value": 0,
         "tolerance": 0
       },
       "screen_only.failed": {
         "value": 0,
         "tolerance": 0
+      },
+      "reading_load.max": {
+        "value": 370,
+        "tolerance": 37
+      },
+      "reading_load.median": {
+        "value": 370,
+        "tolerance": 37
+      },
+      "layout_shift.total": {
+        "value": 0.035,
+        "tolerance": 0.01
       }
     }
   }

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { open } from './harness.ts';
+import { gateFile } from './metrics.ts';
 import { clsObserver, layoutShift, probe } from './probes.ts';
 import type { Probe } from './probes.ts';
 import { OPEN_PANE, SCENARIOS } from './scenarios.ts';
@@ -48,7 +49,7 @@ for (const sc of SCENARIOS) {
         problems: states.flatMap((s) => problems(s.probe).map((p) => `${s.moment}: ${p}`)),
       };
       mkdirSync(OUT, { recursive: true });
-      writeFileSync(join(OUT, `${sc.name}@${vpName(vp)}.json`), JSON.stringify(result, null, 2));
+      writeFileSync(join(OUT, gateFile(sc.name, vpName(vp))), JSON.stringify(result, null, 2));
       if (vp.gating) expect(result.problems, info.title).toEqual([]);
     });
   }
