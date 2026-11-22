@@ -982,3 +982,139 @@ fn an_urgent_job_starts_with_no_slot_free() {
     });
     assert_eq!(run_all(&f, h, vec![normal]), ["urgent", "normal"]);
 }
+
+/// `cargo` as a link to the shell: a command the rust toolchain matches
+/// that needs no Rust installation.
+fn fake_cargo(dir: &Path, script: &str, env: &[&str]) -> Request {
+    let cargo = dir.join("cargo");
+    if !cargo.exists() {
+        std::os::unix::fs::symlink("/bin/sh", &cargo).unwrap();
+    }
+    Request {
+        argv: vec![
+            cargo.to_string_lossy().into_owned(),
+            "-c".into(),
+            script.into(),
+        ],
+        cwd: dir.to_string_lossy().into_owned(),
+        env: ["PATH=/usr/bin:/bin"]
+            .iter()
+            .chain(env)
+            .map(|s| (*s).to_string())
+            .collect(),
+        ..Request::default()
+    }
+}
+
+fn last_logged(f: &Fixture) -> Job {
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    serde_json::from_str(log.lines().last().unwrap()).unwrap()
+}
+
+#[test]
+fn a_rust_job_logs_its_cache_environment_and_is_warned_when_the_cache_is_off() {
+    let f = start(2);
+    let req = fake_cargo(
+        &f.root,
+        "echo ran",
+        &[
+            "RUSTC_WRAPPER=",
+            "CARGO_INCREMENTAL=0",
+            "CARGO_PROFILE_DEV_DEBUG=line-tables-only",
+            "SCCACHE_SERVER_PORT=4303",
+            "API_TOKEN=secret",
+        ],
+    );
+    let c = send(&f.socket, req);
+    let mut before_start = Vec::new();
+    let mut started = false;
+    let mut code = None;
+    let mut out = String::new();
+    for line in BufReader::new(c).lines() {
+        match serde_json::from_str::<Frame>(&line.unwrap()).unwrap() {
+            Frame::Info { msg } if !started => before_start.push(msg),
+            Frame::Info { .. } | Frame::Err { .. } => {}
+            Frame::Out { b } => {
+                assert!(!before_start.is_empty(), "output before the warnings");
+                out += &b;
+            }
+            Frame::Start { .. } => started = true,
+            Frame::Exit { code: c } => {
+                code = Some(c);
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), "ran\n"),
+        "the job runs unchanged"
+    );
+    assert_eq!(
+        before_start,
+        [
+            "slot: warning: compile cache off: RUSTC_WRAPPER is empty",
+            "slot: warning: private sccache server (port 4303)",
+        ]
+    );
+    let job = last_logged(&f);
+    assert_eq!(job.toolchain, "rust");
+    assert_eq!(
+        job.warnings,
+        [
+            "compile cache off: RUSTC_WRAPPER is empty",
+            "private sccache server (port 4303)",
+        ]
+    );
+    let want: BTreeMap<String, String> = [
+        ("RUSTC_WRAPPER", ""),
+        ("CARGO_INCREMENTAL", "0"),
+        ("CARGO_PROFILE_DEV_DEBUG", "line-tables-only"),
+        ("SCCACHE_SERVER_PORT", "4303"),
+    ]
+    .iter()
+    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+    .collect();
+    assert_eq!(job.cache_env, Some(want));
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    assert!(
+        !log.contains("API_TOKEN") && !log.contains("\"PATH\""),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_rust_job_with_the_usual_setup_and_a_job_of_another_toolchain_get_no_warning() {
+    let f = start(2);
+    let r = run(&f, fake_cargo(&f.root, "true", &["RUSTC_WRAPPER=sccache"]));
+    assert_eq!((r.code, r.info.as_str()), (0, ""));
+    let job = last_logged(&f);
+    assert_eq!(
+        job.cache_env,
+        Some(BTreeMap::from([(
+            "RUSTC_WRAPPER".to_string(),
+            "sccache".to_string()
+        )]))
+    );
+    assert_eq!(job.warnings, Vec::<String>::new());
+    let r = run(&f, fake_cargo(&f.root, "true", &[]));
+    assert_eq!((r.code, r.info.as_str()), (0, ""));
+    assert_eq!(
+        last_logged(&f).cache_env,
+        Some(BTreeMap::new()),
+        "a rust job with none of the variables set"
+    );
+    let mut other = sh(&f.root, "true");
+    other.env = vec!["PATH=/usr/bin:/bin".into(), "RUSTC_WRAPPER=".into()];
+    let r = run(&f, other);
+    assert_eq!((r.code, r.info.as_str()), (0, ""));
+    let job = last_logged(&f);
+    assert_eq!((job.toolchain.as_str(), job.cache_env), ("other", None));
+    assert_eq!(job.warnings, Vec::<String>::new());
+    let line = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let line = line.lines().last().unwrap();
+    assert!(
+        !line.contains("cache_env") && !line.contains("warnings"),
+        "{line}"
+    );
+}

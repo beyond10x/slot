@@ -1,5 +1,6 @@
 //! A client that gets a signal cancels its job and never sends it again,
-//! whether the job was running or still queued.
+//! whether the job was running or still queued. Also here, on the same
+//! daemon harness: a warning of the daemon reaches the client's stderr.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -161,4 +162,42 @@ fn a_queued_job_is_not_sent_again_on_a_signal() {
     for secs in &tries {
         assert_eq!(d.logged(&["sleep", secs]), 1, "sleep {secs}");
     }
+}
+
+/// The daemon warns a rust job whose environment switches the compile cache
+/// off: the client prints the line when the job starts, the job runs, and
+/// its record in the job log carries the warning and the variable.
+#[test]
+fn a_rust_job_with_an_empty_rustc_wrapper_is_warned_on_stderr_and_in_the_log() {
+    let d = Daemon::start();
+    // `cargo` as a link to the shell: the rust toolchain matches the name.
+    let cargo = d.dir.path().join("cargo");
+    std::os::unix::fs::symlink("/bin/sh", &cargo).unwrap();
+    let cargo = cargo.to_str().unwrap();
+    let out = d
+        .client(&[SLOT, cargo, "-c", "exit 0"])
+        .env("RUSTC_WRAPPER", "")
+        .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+        .env_remove("SCCACHE_SERVER_PORT")
+        .env_remove("SCCACHE_DIR")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        err.lines()
+            .filter(|l| l.starts_with("slot: warning: "))
+            .collect::<Vec<_>>(),
+        ["slot: warning: compile cache off: RUSTC_WRAPPER is empty"],
+        "{err}"
+    );
+    let log = std::fs::read_to_string(d.dir.path().join("state/jobs.jsonl")).unwrap();
+    let line = log.lines().last().unwrap();
+    assert!(line.contains("\"toolchain\":\"rust\""), "{line}");
+    assert!(
+        line.contains("\"warnings\":[\"compile cache off: RUSTC_WRAPPER is empty\"]"),
+        "{line}"
+    );
+    assert!(line.contains("\"RUSTC_WRAPPER\":\"\""), "{line}");
+    assert!(!line.contains("SLOT_SOCKET"), "{line}");
 }

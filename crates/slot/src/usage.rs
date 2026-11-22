@@ -343,6 +343,8 @@ mod tests {
             target_dir: String::new(),
             priority: crate::types::Priority::default(),
             promoted: false,
+            cache_env: None,
+            warnings: Vec::new(),
         };
         serde_json::to_string(&j).unwrap()
     }

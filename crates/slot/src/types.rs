@@ -2,6 +2,8 @@
 //! `ui/src/generated/` are generated from these by `slot-docs ts-types` and
 //! drift-checked by `task check`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -109,6 +111,18 @@ pub struct Job {
     /// Whether `priority` is `high` only because the job waited that long.
     #[serde(default)]
     pub promoted: bool,
+    /// Rust jobs: the variables of the job's environment that decide what
+    /// the compile cache can do (`crate::sccache::CACHE_VARS` and every
+    /// `CARGO_PROFILE_*`), each as the job got it; a variable that is not
+    /// set is absent. Absent for other toolchains and from a daemon that
+    /// does not record it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cache_env: Option<BTreeMap<String, String>>,
+    /// What is unusual about the job's compile cache setup, one short text
+    /// each (`crate::sccache::cache_warnings`); the job runs unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Live numbers of one running job.
@@ -489,5 +503,39 @@ mod tests {
         assert_eq!(upgrade, "");
         assert_eq!(census.host_cores, 1.0);
         assert_eq!(census.classes.len(), 0);
+    }
+
+    /// A job-log line of 0.19.1 has neither `cache_env` nor `warnings`; a
+    /// job without them is written without them, so an older reader sees
+    /// the line it always saw.
+    #[test]
+    fn a_job_logged_before_the_cache_fields_reads_and_is_written_without_them() {
+        let old = r#"{"id":3,"argv":["sh","-c","exit 3"],"cwd":"/w","repo":"repo","session":"",
+            "client":"h:1","toolchain":"other","remote":false,"tokens":1,"state":"failed",
+            "enqueued_ms":1,"started_ms":2,"ended_ms":3,"exit":3,"cpu_s":0.0,
+            "compile_server_cpu_s":0.0,"peak_rss":0}"#;
+        let mut j: Job = serde_json::from_str(old).unwrap();
+        assert_eq!(j.cache_env, None);
+        assert_eq!(j.warnings, Vec::<String>::new());
+        let line = serde_json::to_string(&j).unwrap();
+        assert!(
+            !line.contains("cache_env") && !line.contains("warnings"),
+            "{line}"
+        );
+        j.cache_env = Some(BTreeMap::from([(
+            "RUSTC_WRAPPER".to_string(),
+            String::new(),
+        )]));
+        j.warnings = vec!["compile cache off: RUSTC_WRAPPER is empty".into()];
+        let line = serde_json::to_string(&j).unwrap();
+        assert!(
+            line.contains(r#""cache_env":{"RUSTC_WRAPPER":""}"#),
+            "{line}"
+        );
+        assert!(
+            line.contains(r#""warnings":["compile cache off: RUSTC_WRAPPER is empty"]"#),
+            "{line}"
+        );
+        assert_eq!(serde_json::from_str::<Job>(&line).unwrap(), j);
     }
 }

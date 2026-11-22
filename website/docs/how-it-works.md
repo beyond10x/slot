@@ -143,7 +143,20 @@ daemon started:
 sccache: 2 server(s), 0 short of tokens, refills since start: none
 ```
 
-`slot serve --sccache-watch false` turns the watchdog off.
+Once a minute the daemon also appends one line per running sccache server to
+`<state-dir>/cache.jsonl`: `t` (Unix milliseconds), `port`, `rust_hits`, `rust_misses`, `c_hits`,
+`c_misses`, `not_cached` (the calls the server refused, by its reason), `cache_size` and
+`max_cache_size` in bytes, and `restarted`, which is true when a counter is lower than in the
+line before for the same port. sccache counts from its last start and keeps the counters in
+memory only. The daemon reads them with `sccache --show-stats --stats-format json`, and only
+from a port whose server process runs and accepts connections: with no server there, sccache
+0.18.0 answers with zeros, as if a server had just started. A server whose process used no CPU
+time since its last line gets no new line, because its counters cannot have moved and every
+request restarts its idle timeout (`SCCACHE_IDLE_TIMEOUT`); a reading each minute would keep it
+running for good. A server that does not answer within 5 seconds is skipped and named once in
+the journal. The file is not rotated; a line is about 300 bytes.
+
+`slot serve --sccache-watch false` turns the watchdog and the counter log off.
 
 ## Waiting for disk and memory
 
@@ -223,6 +236,10 @@ started the job, when the client runs inside a Claude Code session (`CLAUDE_CODE
 `compile_server_cpu_s` is CPU time spent for this job inside an sccache server, which runs outside
 the job's process tree. Every job's environment carries `SLOT_JOB=<id>`; sccache passes the
 caller's environment to its compiler processes, so the daemon can attribute them to the job.
+
+A rust job's record also has `cache_env`, the variables that decide what the compile cache can
+do, and `warnings` when they switch the cache off or name an sccache server of its own: see
+[Environment variables](reference/environment.md#recorded-for-a-rust-job).
 
 The daemon reads the log back at start, so the web UI shows recent jobs across restarts.
 

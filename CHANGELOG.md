@@ -9,6 +9,24 @@
   opens only by its toggle. The Finished table states a result in words ("failed (101)", "ok",
   "cancelled"), and a build outside the pool is "not on slot" everywhere.
 
+- Once a minute the daemon appends the counters of each running sccache server to
+  `<state-dir>/cache.jsonl`: Rust and C/C++ hits and misses, the calls the server refused by
+  reason, the cache size and its limit, and `restarted` when a counter went down. sccache keeps
+  these counters only since its last start. The daemon reads them only from a server that is
+  running, so it never starts one, and not from a server that used no CPU time since its last
+  line, so the reading does not keep an idle server from its idle exit.
+  `slot serve --sccache-watch false` turns it off.
+
+- The record of a rust job in the job log has `cache_env`: the values of `RUSTC_WRAPPER`,
+  `CARGO_BUILD_RUSTC_WRAPPER`, `CARGO_INCREMENTAL`, `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
+  `SCCACHE_SERVER_PORT`, `SCCACHE_DIR`, `RUSTUP_TOOLCHAIN` and every `CARGO_PROFILE_*` the job
+  ran with, and no other variable.
+
+- A rust job whose environment switches the compile cache off (`RUSTC_WRAPPER` empty) or uses
+  an sccache server of its own (`SCCACHE_SERVER_PORT` other than 4226, or `SCCACHE_DIR`) is
+  warned: the client prints `slot: warning: …` when the job starts, `slot status` lists the
+  warning under the job, and the job's record has it in `warnings`. The job runs unchanged.
+
 ## 0.19.1 — 2026-11-22
 
 - Jobs show their Git repository and linked worktree name. Directories outside
