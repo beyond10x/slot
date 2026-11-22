@@ -10,7 +10,10 @@ interface Outputs {
   [id: string]: { chunks: Array<{ t: string; b: string }>; end: string };
 }
 
-/** Installed before any page script: `EventSource` is replaced; `window.__ux.push` delivers to open streams. */
+/**
+ * Installed before any page script: `EventSource` is replaced; `window.__ux.push` delivers to open
+ * streams; `window.__ux.settle` resolves when the page shows the state after a step.
+ */
 function fakeEventSource(outputs: Outputs): void {
   type Listener = (ev: MessageEvent<string>) => void;
   const sources: FakeES[] = [];
@@ -48,6 +51,28 @@ function fakeEventSource(outputs: Outputs): void {
       this.readyState = 2;
     }
   }
+  // Requests in flight. One ends a task after its body was read, so the page has used the answer by then.
+  let inFlight = 0;
+  const idle: Array<() => void> = [];
+  const fetchPage = window.fetch.bind(window);
+  window.fetch = (...args: Parameters<typeof fetch>) => {
+    inFlight++;
+    const ended = (): void => {
+      setTimeout(() => {
+        inFlight--;
+        if (inFlight === 0) for (const f of idle.splice(0)) f();
+      }, 0);
+    };
+    const res = fetchPage(...args);
+    res.then((r) => r.clone().arrayBuffer()).then(ended, ended);
+    return res;
+  };
+  const noRequest = (): Promise<void> => (inFlight === 0 ? Promise.resolve() : new Promise((ok) => idle.push(ok)));
+  let changes = 0;
+  new MutationObserver((list) => {
+    changes += list.length;
+  }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  const frame = (): Promise<void> => new Promise((ok) => requestAnimationFrame(() => ok()));
   const w = window as unknown as { EventSource: unknown; __ux: unknown };
   w.EventSource = FakeES;
   w.__ux = {
@@ -57,8 +82,25 @@ function fakeEventSource(outputs: Outputs): void {
     reconnect(): void {
       for (const src of sources) if (src.url.endsWith('api/events')) src.onopen?.(new Event('open'));
     },
+    async settle(frames: number): Promise<number> {
+      await noRequest();
+      // One frame draws the change, canvases included; then the page is settled at the first frame
+      // that changed nothing in the document and left no request in flight.
+      await frame();
+      for (let n = 1; n < frames; n++) {
+        const before = changes;
+        await frame();
+        if (changes === before && inFlight === 0) return n + 1;
+      }
+      return frames;
+    },
   };
 }
+
+/** Time of the page's timers that passes in a step: the page's clock timer runs every 1 s. */
+export const STEP_MS = 1100;
+/** The most frames a step waits for a frame that changes nothing: 1 s of frames. */
+export const SETTLE_FRAMES = 60;
 
 export interface Opened {
   /** Bodies of every `PUT api/limits`. */
@@ -69,6 +111,8 @@ export interface Opened {
   step: () => Promise<boolean>;
   /** Index of the step applied last; -1 before the first. */
   index: () => number;
+  /** Frames each step waited for the page to settle; `SETTLE_FRAMES` when it did not. */
+  settled: number[];
 }
 
 /** Opens the built page on `base` with every API answered from `sc`. */
@@ -113,10 +157,12 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
   await page.locator('main').waitFor();
   let i = -1;
   let elapsed = 0;
+  const settled: number[] = [];
   return {
     limitPuts,
     elapsed: () => elapsed,
     index: () => i,
+    settled,
     step: async () => {
       if (i + 1 >= sc.steps.length) return false;
       i++;
@@ -126,7 +172,11 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
       }
       elapsed += st.dt_s;
       await page.clock.setFixedTime(T0 + elapsed * 1000);
-      await page.waitForTimeout(1100);
+      // The 1.1 s a step took, without the wait: every timer of the page due in that time runs now,
+      // once (the store reads the clock in a 1 s timer), then the page's requests end and a frame
+      // passes that changes nothing.
+      await page.clock.fastForward(STEP_MS);
+      settled.push(await page.evaluate((n) => (window as unknown as { __ux: { settle(n: number): Promise<number> } }).__ux.settle(n), SETTLE_FRAMES));
       return true;
     },
   };

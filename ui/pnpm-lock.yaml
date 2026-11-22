@@ -12,9 +12,6 @@ importers:
         specifier: ^3.5.43
         version: 3.5.45(typescript@6.0.3)
     devDependencies:
-      '@axe-core/playwright':
-        specifier: 4.14.0
-        version: 4.14.0(playwright-core@1.65.0)
       '@playwright/test':
         specifier: 1.65.0
         version: 1.65.0
@@ -24,6 +21,9 @@ importers:
       '@vitejs/plugin-vue':
         specifier: ^6.0.9
         version: 6.0.10(vite@8.3.8(@types/node@22.20.5))(vue@3.5.45(typescript@6.0.3))
+      axe-core:
+        specifier: 4.14.0
+        version: 4.14.0
       typescript:
         specifier: ~6.0.3
         version: 6.0.3
@@ -35,12 +35,6 @@ importers:
         version: 3.3.14(typescript@6.0.3)
 
 packages:
-
-  '@axe-core/playwright@4.14.0':
-    resolution: {integrity: sha512-SGUhG5PIHd2eMdpgBF2PyQLOhX+qyDR2PT4cmoS4Qk2ak+jX/rrSvst9l0PGv5WTHolKpUMvVmoHpr4cZgf1RQ==}
-    engines: {node: '>=22.12.0'}
-    peerDependencies:
-      playwright-core: '>= 1.0.0'
 
   '@babel/helper-string-parser@7.29.13':
     resolution: {integrity: sha512-fWegr+WsEsiMVW4KUNdIIzzMTZSzNiqhy0//6+2MRi2d5NFNsL/AYwBQW8eBnRbTBVRnDVzjaJEUqKaCWjMMdQ==}
@@ -497,11 +491,6 @@ packages:
         optional: true
 
 snapshots:
-
-  '@axe-core/playwright@4.14.0(playwright-core@1.65.0)':
-    dependencies:
-      axe-core: 4.14.0
-      playwright-core: 1.65.0
 
   '@babel/helper-string-parser@7.29.13': {}
 

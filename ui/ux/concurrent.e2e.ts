@@ -23,7 +23,7 @@ function gateRun(): Promise<{ code: number | null; out: string }> {
   return new Promise((done) => p.on('close', (code) => done({ code, out })));
 }
 
-test('two gate runs at the same time both pass', { timeout: 240_000 }, async () => {
+test('two gate runs at the same time both pass', { timeout: 60_000 }, async () => {
   const runs = await Promise.all([gateRun(), gateRun()]);
   for (const [i, r] of runs.entries()) assert.equal(r.code, 0, `run ${i + 1} failed:\n${r.out}`);
 });

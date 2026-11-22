@@ -1,5 +1,5 @@
 // Measurements taken in the page at one state: layout contract, always-visible elements, reading load.
-import AxeBuilder from '@axe-core/playwright';
+import axe from 'axe-core';
 import type { Page } from '@playwright/test';
 
 /** Elements that must be fully in the viewport and not covered at every state. */
@@ -30,6 +30,32 @@ export interface Probe {
   hidden_always_visible: string[];
   words_in_view: number;
   axe_serious: string[];
+}
+
+/** The WCAG levels the gate holds. */
+const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
+
+/**
+ * The serious and critical axe-core violations of the page as it is now. The axe-core source goes
+ * into a page once and every state of that page is checked by it: loading it for each state, and
+ * again in a second page that only merges the result, took about two thirds of a state's time.
+ */
+export async function axeSerious(page: Page): Promise<string[]> {
+  const run = (): Promise<string[] | null> =>
+    page.evaluate(async (tags) => {
+      const inPage = (window as unknown as { axe?: typeof axe }).axe;
+      if (!inPage) return null;
+      const result = await inPage.run(document, { runOnly: { type: 'tag', values: tags } });
+      return result.violations
+        .filter((v) => v.impact === 'serious' || v.impact === 'critical')
+        .map((v) => `${v.id} (${v.nodes.length}): ${v.nodes.slice(0, 2).map((n) => n.target.join(' ')).join(', ')}`);
+    }, AXE_TAGS);
+  const first = await run();
+  if (first) return first;
+  await page.evaluate(axe.source);
+  const second = await run();
+  if (!second) throw new Error('axe-core did not load into the page');
+  return second;
 }
 
 export async function probe(page: Page): Promise<Probe> {
@@ -121,13 +147,7 @@ export async function probe(page: Page): Promise<Probe> {
     },
     { always: marked ? ALWAYS_VISIBLE : LEGACY, allowed: SCROLL_ALLOWED },
   );
-  const axe = await new AxeBuilder({ page })
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
-    .analyze();
-  const axe_serious = axe.violations
-    .filter((v) => v.impact === 'serious' || v.impact === 'critical')
-    .map((v) => `${v.id} (${v.nodes.length}): ${v.nodes.slice(0, 2).map((n) => n.target.join(' ')).join(', ')}`);
-  return { ...layout, axe_serious };
+  return { ...layout, axe_serious: await axeSerious(page) };
 }
 
 /** Installed before page scripts: sums layout shifts not caused by input. */
