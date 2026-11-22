@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-22",
-  "source": "CHANGELOG.md 0.1.0 to 0.20.0 and docs/design.md sections 10 to 19",
+  "source": "CHANGELOG.md 0.1.0 to 0.21.0 and docs/design.md sections 10 to 19",
   "items": [
     {
       "area": "Pool",
@@ -33,6 +33,13 @@
     },
     {
       "area": "Pool",
+      "label": "Waits for its target directory",
+      "status": "shipped",
+      "detail": "A cargo build takes no slot while another job of the pool compiles in its target directory; it stays queued with the reason and starts when that job has compiled or ended (0.21.0).",
+      "href": "/docs/how-it-works#waiting-for-disk-and-memory"
+    },
+    {
+      "area": "Pool",
       "label": "Frees disk from old target directories",
       "status": "shipped",
       "detail": "Under 40 GB free, the least recently built Cargo target directories that jobs used are deleted until 50 GB are free; the first release only reports what it would delete (0.15.0).",
@@ -56,7 +63,7 @@
       "area": "Pool",
       "label": "Job priority",
       "status": "shipped",
-      "detail": "slot --priority <level> or SLOT_PRIORITY sets a job's level; slot priority set <repo> <level> keeps rules per repository; a job queued 30 minutes counts as high; an urgent job may borrow slots the headroom holds back (0.17.0).",
+      "detail": "slot --priority <level> or SLOT_PRIORITY sets a job's level; slot priority set <repo> <level> keeps rules per repository; a job queued 30 minutes counts as high, a delay slot priority promote-after changes while the daemon runs (0.21.0); an urgent job may borrow slots the headroom holds back (0.17.0).",
       "href": "/docs/how-it-works#priority"
     },
     {
@@ -112,7 +119,7 @@
       "area": "Observation",
       "label": "Web UI",
       "status": "shipped",
-      "detail": "Three line charts (cores, pressure, pool size), then running, queued and finished jobs, the host census, sessions and a timeline, with live output, on 127.0.0.1:7411 (0.20.0). Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
+      "detail": "Four line charts (cores, pressure, pool size, what the compile cache answered per minute), then running, queued and finished jobs, the host census, sessions and a timeline, with live output, on 127.0.0.1:7411 (0.21.0). Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
       "href": "/docs/how-it-works#web-ui"
     },
     {

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.21.0 — 2026-11-22
 
 - The delay after which a waiting `normal` or `low` job counts as `high` changes while the daemon
   runs: `slot priority promote-after <seconds>` (0 never raises a job, `default` returns to
