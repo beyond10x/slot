@@ -2506,16 +2506,15 @@ impl Server {
         out
     }
 
+    /// Reads `/proc` once a second: the census, the jobs' CPU and the machine quota.
     async fn sampler(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
-        let mut last = Instant::now();
+        let mut scans = ScanInterval(Instant::now());
         // The census counts no CPU time in its first sample: it has no
         // earlier reading to compare with.
         let mut primed = false;
         loop {
             tick.tick().await;
-            let dt = last.elapsed().as_secs_f64();
-            last = Instant::now();
             let (base, percent) = {
                 let h = self.headroom.lock().expect("headroom lock");
                 (h.base, h.percent)
@@ -2525,8 +2524,9 @@ impl Server {
                 .then(|| self.own_cgroup.clone())
                 .flatten();
             let uid = self.uid;
-            let Ok((snap, sys, cgroups)) = tokio::task::spawn_blocking(move || {
+            let Ok((at, snap, sys, cgroups)) = tokio::task::spawn_blocking(move || {
                 (
+                    Instant::now(),
                     Snapshot::scan(),
                     procstat::system_cpu(),
                     own.map(|o| machine::read(Path::new(CGROUP_ROOT), uid, &o)),
@@ -2536,6 +2536,7 @@ impl Server {
             else {
                 continue;
             };
+            let dt = scans.next(at);
             let mut new_ids = Vec::new();
             let mut machine_quota = None;
             let event = {
@@ -4008,6 +4009,25 @@ fn look_path(name: &str, env: &[String]) -> Result<PathBuf> {
         }
     }
     Err(anyhow!("{name}: not found in PATH"))
+}
+
+/// The time a CPU sample covers: from one `/proc` scan to the next.
+///
+/// The scan runs on a blocking thread after the second's tick. Under load
+/// that thread starts late, so the time between two ticks is not the time
+/// between two scans: CPU time over 1.9 s divided by 1 s read 37 CPUs on a
+/// host of 20, and the next sample read too few. A scan that fails moves
+/// nothing, so the next sample covers both seconds.
+#[derive(Debug)]
+struct ScanInterval(Instant);
+
+impl ScanInterval {
+    /// Seconds since the previous scan, which `at` replaces.
+    fn next(&mut self, at: Instant) -> f64 {
+        let dt = at.saturating_duration_since(self.0).as_secs_f64();
+        self.0 = at;
+        dt
+    }
 }
 
 #[cfg(test)]

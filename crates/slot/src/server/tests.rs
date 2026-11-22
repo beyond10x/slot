@@ -2899,3 +2899,23 @@ fn the_cpu_limit_is_set_saved_and_read_back() {
     assert_eq!(f.server.state().cpu_busy_max, None);
     assert_eq!(restarted("s3"), (None, None, 25));
 }
+
+#[test]
+fn a_cpu_sample_covers_the_time_between_two_scans_not_two_ticks() {
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let mut scans = ScanInterval(at(100));
+    // Ticks at 1 s and 2 s; the scan of the first ran 0.9 s late.
+    let late = scans.next(at(2_000));
+    assert!((late - 1.9).abs() < 1e-9, "{late}");
+    let on_time = scans.next(at(2_100));
+    assert!((on_time - 0.1).abs() < 1e-9, "{on_time}");
+    // A scan that failed did not call `next`: the sample after it covers both seconds.
+    let after_a_failed_scan = scans.next(at(4_100));
+    assert!(
+        (after_a_failed_scan - 2.0).abs() < 1e-9,
+        "{after_a_failed_scan}"
+    );
+    // A clock that reads earlier than the last scan gives 0, never a negative interval.
+    assert_eq!(scans.next(at(4_000)), 0.0);
+}
