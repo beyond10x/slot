@@ -139,6 +139,10 @@ pub struct Config {
     /// The longest a job is held for the host's CPUs:
     /// [`cpu_limit::HOLD_MAX`] outside tests.
     pub cpu_hold_max: Duration,
+    /// CPU pressure of the host (`some avg10`, percent), for the brake of
+    /// admission by share. `None` reads the census sampler's, as everywhere
+    /// outside tests.
+    pub cpu_pressure: Option<fn() -> f64>,
     /// Bytes the target directories of synced workspaces may take together
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
@@ -291,6 +295,18 @@ struct Live {
     /// Set to `true` when the job ran past its run-time limit
     /// ([`Server::end_overdue`]); [`Server::supervise`] then ends it.
     overdue: watch::Sender<bool>,
+    /// The share of the CPUs it asks for by share ([`crate::shares`]).
+    share: f64,
+    /// It claimed its start: with admission by share it holds no slot, so
+    /// `held` does not tell a job that is about to start from a queued one.
+    claimed: bool,
+}
+
+impl Live {
+    /// Whether the job runs, or claimed its start and has no process yet.
+    fn started(&self) -> bool {
+        self.pid.is_some() || self.held > 0 || self.claimed
+    }
 }
 
 /// What stands between a queued cargo job and its target directory: the
@@ -339,7 +355,7 @@ fn target_use(active: &BTreeMap<i64, Live>, id: i64, now: i64, settle: i64) -> O
                 &mut u.running
             };
             slot.get_or_insert(*other);
-        } else if l.held > 0 {
+        } else if l.started() {
             u.starting.get_or_insert(*other);
         } else if (l.target_wait || l.waiter.is_some()) && (l.job.priority, *other) < ahead {
             ahead = (l.job.priority, *other);
@@ -423,6 +439,14 @@ struct Inner {
     machine: machine::Monitor,
     /// Machine base: the numbers of the last tick.
     machine_shown: machine::Shown,
+    /// Admission by share: the CPUs the running jobs may use together.
+    budget: crate::shares::Budget,
+    /// Admission by share: the figures of the last look.
+    share_view: crate::shares::View,
+    /// Admission by share: when it last looked, Unix ms.
+    share_last_ms: Option<i64>,
+    /// CPU pressure of the host at the last census sample, percent.
+    psi_cpu: f64,
 }
 
 /// The daemon.
@@ -484,6 +508,9 @@ pub struct Server {
     /// The mark and the floor of the CPU limit (`slot cpu-limit`), as saved
     /// in `limits.json`.
     cpu_limit: Mutex<cpu_limit::Limits>,
+    /// How queued jobs are admitted, with the bounds and the pressure mark
+    /// of admission by share (`slot admission`), as saved in `limits.json`.
+    shares: Mutex<crate::shares::Settings>,
     /// When this process started, Unix ms.
     born_ms: i64,
 }
@@ -675,6 +702,10 @@ impl Server {
                 targets,
                 machine: machine::Monitor::default(),
                 machine_shown: machine::Shown::default(),
+                budget: crate::shares::Budget::new(cores, f64::from(cores)),
+                share_view: crate::shares::View::default(),
+                share_last_ms: None,
+                psi_cpu: 0.0,
             }),
             events,
             history: Mutex::new(history),
@@ -728,6 +759,7 @@ impl Server {
                 saved.cpu_busy_max,
                 saved.cpu_busy_floor,
             )),
+            shares: Mutex::new(saved.shares()),
             born_ms: now_ms(),
         }))
     }
@@ -751,7 +783,7 @@ impl Server {
         let now = now_ms();
         let mut longest = 0u64;
         for l in g.active.values() {
-            if l.pid.is_none() && l.held == 0 {
+            if !l.started() {
                 continue;
             }
             let expected = g.memory.expected_runtime(&l.job.repo, &l.job.argv)?;
@@ -809,7 +841,7 @@ impl Server {
     /// Whether no job holds slots or runs a process: the moment to re-execute.
     fn nothing_running(&self) -> bool {
         let g = self.inner.lock().expect("server lock");
-        g.active.values().all(|l| l.pid.is_none() && l.held == 0)
+        g.active.values().all(|l| !l.started())
     }
 
     /// The jobserver pool.
@@ -1023,7 +1055,7 @@ impl Server {
         let taken = loop {
             {
                 let mut g = self.inner.lock().expect("server lock");
-                if !g.active.values().any(|l| l.held > 0 && l.pid.is_none()) {
+                if !g.active.values().any(|l| l.started() && l.pid.is_none()) {
                     g.handing_over = true;
                     break self.take_table(&mut g);
                 }
@@ -1297,6 +1329,10 @@ impl Server {
             g.active.insert(
                 id,
                 Live {
+                    // The record carries the share it asked for by share;
+                    // by slots it asked for its slots.
+                    share: r.job.share.unwrap_or(f64::from(r.job.tokens.max(1))),
+                    claimed: true,
                     job: r.job,
                     pid: Some(r.pid),
                     held: r.held,
@@ -1657,7 +1693,7 @@ impl Server {
             .unwrap_or_default();
         let project = crate::project::cached(&cwd).unwrap_or_default();
         let out = Arc::new(Ring::new(OUTPUT_KEEP));
-        let id = {
+        let (id, share) = {
             let mut g = self.inner.lock().expect("server lock");
             let (id, enqueued_ms) = if let Some(r) = resume {
                 r
@@ -1669,6 +1705,13 @@ impl Server {
             let expect_cores = self.expected_cores(&g.memory, &req.repo, &shown);
             let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
             let predicted_ms = g.memory.expected_runtime(&req.repo, &shown);
+            // A client that names slots asks for that share: one of 0.21.0
+            // and older knows no other way to ask.
+            let share = crate::shares::share_for(
+                req.tokens,
+                g.memory.predicted_share(&req.repo, &shown, now_ms()),
+                self.share_cap(),
+            );
             let job = Job {
                 id,
                 argv: shown.clone(),
@@ -1704,6 +1747,9 @@ impl Server {
                 collected: 0,
                 ahead: false,
                 queue_class: None,
+                share: self.shares_on().then_some(round2(share)),
+                share_used: None,
+                lent_s: 0.0,
             };
             g.active.insert(
                 id,
@@ -1730,9 +1776,11 @@ impl Server {
                     conn,
                     target_wait: false,
                     overdue: watch::Sender::new(false),
+                    share,
+                    claimed: false,
                 },
             );
-            id
+            (id, share)
         };
         if crate::project::cached(&cwd).is_none() {
             // git runs off the request path: a job is queued without waiting for it.
@@ -1751,13 +1799,25 @@ impl Server {
         }
 
         let ahead = self.pool.waiting_before(self.queued_level(id));
-        let free = self.pool.free();
-        if ahead > 0 || free < tokens {
-            let _ = tx.send(Frame::Info {
-                msg: format!(
-                    "slot: job {id} queued for {tokens} slot(s): {free} free, {ahead} request(s) ahead"
-                ),
-            });
+        if let Some(room) = self.pool.shares() {
+            if ahead > 0 || room.free < share || room.running >= room.max {
+                let _ = tx.send(Frame::Info {
+                    msg: format!(
+                        "slot: job {id} queued for a share of {share:.1} CPUs: {:.1} free, \
+                         {ahead} request(s) ahead",
+                        room.free.max(0.0)
+                    ),
+                });
+            }
+        } else {
+            let free = self.pool.free();
+            if ahead > 0 || free < tokens {
+                let _ = tx.send(Frame::Info {
+                    msg: format!(
+                        "slot: job {id} queued for {tokens} slot(s): {free} free, {ahead} request(s) ahead"
+                    ),
+                });
+            }
         }
         let mut disks = vec![cwd.clone()];
         if let Some(t) = toolchain::get(&req.env, "CARGO_TARGET_DIR").filter(|t| !t.is_empty()) {
@@ -1806,9 +1866,19 @@ impl Server {
                     .map_or((Priority::Normal, jobserver::Place::default()), |l| {
                         (l.job.priority, self.place_of(&l.job))
                     });
-                let w =
-                    self.pool
-                        .acquire_placed(tokens, level, u64::try_from(id).unwrap_or(0), place);
+                // What it asks for by share; by slots the pool reads only
+                // `tokens`.
+                let ask = jobserver::Ask {
+                    share,
+                    brief: predicted_short(g.active.get(&id).and_then(|l| l.job.predicted_ms)),
+                };
+                let w = self.pool.acquire_share(
+                    tokens,
+                    level,
+                    u64::try_from(id).unwrap_or(0),
+                    place,
+                    ask,
+                );
                 if let Some(l) = g.active.get_mut(&id) {
                     l.waiter = Some(w.handle());
                     l.target_wait = false;
@@ -1878,6 +1948,10 @@ impl Server {
                     let ahead = waiter.ahead();
                     g.active.get_mut(&id).map(|l| {
                         l.held = n;
+                        l.claimed = true;
+                        // By share the job waited in the queue with a
+                        // reason; by slots it has none here.
+                        l.job.wait_reason.clear();
                         l.waiter = None;
                         l.cpu_wait = false;
                         l.job.collected = 0;
@@ -2480,6 +2554,22 @@ impl Server {
             live.job.exit = end.code;
             live.job.ended_ms = now_ms();
             live.job.cpu_s = live.job.compile_server_cpu_s + end.cpu.unwrap_or(0.0);
+            let ran_ms = live.job.ended_ms - live.job.started_ms;
+            if live.job.share.is_some() && live.job.started_ms > 0 && ran_ms > 0 {
+                live.job.share_used = Some(round2(live.job.cpu_s * 1000.0 / ran_ms as f64));
+            }
+            // The budget of admission by share moves on how much slower
+            // than their best the jobs that ended ran.
+            if self.shares_on()
+                && live.job.started_ms > 0
+                && matches!(end.state, JobState::Ok | JobState::Failed)
+                && let Some(s) = crate::shares::slowdown(
+                    ran_ms,
+                    g.memory.best_runtime(&live.job.repo, &live.job.argv),
+                )
+            {
+                g.budget.finished(s);
+            }
             let job = live.job.clone();
             g.metrics.record(&job);
             g.memory.record(&job);
@@ -2601,6 +2691,7 @@ impl Server {
             let dt = scans.next(at);
             let mut new_ids = Vec::new();
             let mut machine_quota = None;
+            let share_changed: Vec<i64>;
             let event = {
                 let mut g = self.inner.lock().expect("server lock");
                 let (pb, pt) = g.sys_prev;
@@ -2694,11 +2785,16 @@ impl Server {
                 census.unmanaged_smoothed = g.controller.unmanaged();
                 g.window.recommend(census.recommended_tokens);
                 g.last_census = census.clone();
+                g.psi_cpu = sample.pressure.cpu;
+                // Admission by share looks once a tick, with this sample.
+                share_changed = self.share_step(&mut g, now_ms());
+                let shares = self.shares_on().then_some(g.share_view);
                 let m = g.machine_shown.clone();
                 // Read before the literal: its guard would live to the end of
                 // it, and `headroom_percent` and `call_apps` lock again.
                 let quota = self.headroom.lock().expect("headroom lock").quota;
                 Event::Tick {
+                    shares,
                     cpu_quota_percent: quota,
                     headroom_base: base,
                     busy_cores: m.busy,
@@ -2726,6 +2822,9 @@ impl Server {
                 }
             };
             self.send(&event);
+            for id in share_changed {
+                self.publish(id);
+            }
             if let Some(q) = machine_quota {
                 self.plan_machine_quota(q);
             }
@@ -2862,6 +2961,7 @@ impl Server {
         let run_limit = *self.run_limit.lock().expect("run limit lock");
         let job_parallel = *self.job_parallel.lock().expect("job parallel lock");
         let cpu = self.cpu_limits();
+        let shares = *self.shares.lock().expect("shares lock");
         let saved = {
             let h = self.headroom.lock().expect("headroom lock");
             limits::Saved {
@@ -2873,6 +2973,10 @@ impl Server {
                 job_parallel,
                 cpu_busy_max: cpu.cpu_busy_max,
                 cpu_busy_floor: cpu.cpu_busy_floor,
+                admission: shares.mode,
+                share_floor: shares.floor,
+                share_max: shares.max,
+                share_pressure_max: shares.pressure_max,
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -3106,6 +3210,231 @@ impl Server {
         Ok(self.cpu_limit_view())
     }
 
+    /// Whether admission is by share.
+    fn shares_on(&self) -> bool {
+        self.shares.lock().expect("shares lock").mode == crate::shares::Mode::Shares
+    }
+
+    /// The most the budget of admission by share may reach: the pool's CPU
+    /// quota where one is set, else the host's CPUs less the headroom.
+    fn share_cap(&self) -> f64 {
+        let (percent, quota) = {
+            let h = self.headroom.lock().expect("headroom lock");
+            (h.percent.min(limits::MAX_HEADROOM), h.quota)
+        };
+        let cores = f64::from(self.cores);
+        let by_headroom = cores * f64::from(100 - percent) / 100.0;
+        quota
+            .map_or(by_headroom, |q| (f64::from(q) / 100.0).min(cores))
+            .max(crate::shares::MIN_BUDGET)
+    }
+
+    /// Tokens that circulate with `percent` headroom: the pool less the
+    /// headroom, and by share no more than the budget's CPUs, so the FIFO
+    /// bounds the build processes inside jobs to the budget.
+    fn circulating(&self, percent: u8) -> usize {
+        let by_headroom = limits::effective_tokens(self.cfg.tokens, percent);
+        if !self.shares_on() {
+            return by_headroom;
+        }
+        let budget = self.inner.lock().expect("server lock").budget.value();
+        by_headroom.min(budget_tokens(budget))
+    }
+
+    /// The `GET /api/admission` answer.
+    pub fn admission_view(&self) -> crate::shares::View {
+        let settings = *self.shares.lock().expect("shares lock");
+        let g = self.inner.lock().expect("server lock");
+        if settings.mode == crate::shares::Mode::Shares
+            && g.share_view.admission == crate::shares::Mode::Shares
+        {
+            crate::shares::View {
+                floor: settings.floor(),
+                max: settings.max(),
+                pressure_max: settings.pressure_max(),
+                ..g.share_view
+            }
+        } else {
+            settings.view(self.cores)
+        }
+    }
+
+    /// Switches admission between slots and shares, or sets its bounds or
+    /// its pressure mark (`slot admission`), saves them and looks at once.
+    /// Switching to shares starts the budget anew.
+    pub fn set_admission(
+        &self,
+        req: &crate::shares::Request,
+    ) -> Result<crate::shares::View, String> {
+        let switched_on = {
+            let mut s = self.shares.lock().expect("shares lock");
+            let next = s.changed(req)?;
+            let on =
+                s.mode == crate::shares::Mode::Slots && next.mode == crate::shares::Mode::Shares;
+            *s = next;
+            on
+        };
+        self.save_limits();
+        let changed = {
+            let mut g = self.inner.lock().expect("server lock");
+            if switched_on {
+                g.budget = crate::shares::Budget::new(self.cores, self.share_cap());
+            }
+            self.share_step(&mut g, now_ms())
+        };
+        for id in changed {
+            self.publish(id);
+        }
+        Ok(self.admission_view())
+    }
+
+    /// The busy CPUs of the pool and the compile cache over the last
+    /// `n` samples, as admission by share reads them.
+    fn cpu_figure_last(&self, g: &Inner, now: i64, n: usize) -> cpu_limit::Figure {
+        if let Some(read) = self.cfg.cpu_busy {
+            return read().map_or(cpu_limit::Figure::Unknown, cpu_limit::Figure::Busy);
+        }
+        match g.host_busy.mean_last(now, n) {
+            Some(parts) => cpu_limit::Figure::Busy(parts),
+            None => cpu_limit::Figure::Unknown,
+        }
+    }
+
+    /// Admission by share, once a tick and after a change of its settings.
+    ///
+    /// By share: moves the budget, computes the free share from the census
+    /// and the jobs ([`crate::shares::room`]), hands it to the pool, sets
+    /// the tokens in circulation to the budget and tells each job queued
+    /// in the pool why it waits; a running job's used share and what it
+    /// lent go into its record. By slots: hands the queue back to the
+    /// pool's tokens once. Called under the server lock (`g`). Returns the
+    /// jobs whose record changed.
+    fn share_step(&self, g: &mut Inner, now: i64) -> Vec<i64> {
+        use crate::shares::{self, Mode};
+        let settings = *self.shares.lock().expect("shares lock");
+        let mut changed = Vec::new();
+        if settings.mode == Mode::Slots {
+            if self.pool.shares().is_some() {
+                self.pool.set_shares(None);
+                self.pool
+                    .set_limit(self.circulating(self.headroom_percent()));
+                for (id, l) in &mut g.active {
+                    // A job in the pool's queue has no reason of its own
+                    // by slots.
+                    let queued = l.waiter.is_some() && !l.job.wait_reason.is_empty();
+                    if queued {
+                        l.job.wait_reason.clear();
+                    }
+                    if l.job.share.take().is_some() || queued {
+                        l.job.share_used = None;
+                        changed.push(*id);
+                    }
+                }
+            }
+            g.share_view = settings.view(self.cores);
+            g.share_last_ms = None;
+            return changed;
+        }
+        let cap = self.share_cap();
+        let budget = g.budget.step(now, cap);
+        let busy = match self.cpu_figure_last(g, now, shares::WINDOW_S) {
+            cpu_limit::Figure::Busy(p) => p.counted(),
+            cpu_limit::Figure::Pending | cpu_limit::Figure::Unknown => 0.0,
+        };
+        let dt = g
+            .share_last_ms
+            .map_or(0.0, |t| (now - t).max(0) as f64 / 1000.0);
+        g.share_last_ms = Some(now);
+        let mut jobs = Vec::new();
+        for (id, l) in &mut g.active {
+            let share = round2(l.share);
+            if l.job.share != Some(share) {
+                l.job.share = Some(share);
+                changed.push(*id);
+            }
+            if l.started() {
+                let shown = l.recent.share(shares::WINDOW_S);
+                let idle =
+                    l.pid.is_some() && l.recent.idle(shares::IDLE_SAMPLES, shares::IDLE_CORES);
+                let young = l.pid.is_none() || now - l.job.started_ms < shares::START_MS;
+                if l.pid.is_some() {
+                    l.job.share_used = Some(round2(shown));
+                }
+                if idle {
+                    l.job.lent_s += (l.share - shown).max(0.0) * dt;
+                }
+                jobs.push(shares::Running {
+                    share: l.share,
+                    shown,
+                    young,
+                    idle,
+                });
+            } else if l.waiter.as_ref().is_some_and(WaiterHandle::granted) {
+                // Let through by the pool, not claimed yet.
+                jobs.push(shares::Running {
+                    share: l.share,
+                    shown: 0.0,
+                    young: true,
+                    idle: false,
+                });
+            }
+        }
+        let room = shares::room(budget, busy, &jobs);
+        let pressure = self.cfg.cpu_pressure.map_or(g.psi_cpu, |read| read());
+        let braking = pressure > settings.pressure_max();
+        self.pool.set_shares(Some(jobserver::ShareRoom {
+            free: room.free,
+            running: jobs.len(),
+            floor: settings.floor(),
+            max: settings.max(),
+            brake: braking,
+        }));
+        // The FIFO's tokens bound the build processes inside the jobs:
+        // as many as the budget has CPUs.
+        let limit = limits::effective_tokens(self.cfg.tokens, self.headroom_percent())
+            .min(budget_tokens(budget));
+        if self.pool.limit() != limit {
+            self.pool.set_limit(limit);
+        }
+        let left = self.pool.shares().unwrap_or_default();
+        g.share_view = shares::View {
+            admission: Mode::Shares,
+            floor: settings.floor(),
+            max: settings.max(),
+            pressure_max: settings.pressure_max(),
+            cpus: self.cores,
+            budget,
+            cap,
+            free: room.free,
+            busy,
+            starting: room.starting,
+            running: left.running,
+            idle: room.idle,
+            lent: room.lent,
+            pressure,
+            braking,
+        };
+        for (id, l) in &mut g.active {
+            let Some(w) = &l.waiter else { continue };
+            if w.granted() {
+                continue;
+            }
+            let reason = share_wait(
+                l.share,
+                predicted_short(l.job.predicted_ms),
+                &left,
+                &g.share_view,
+            );
+            if l.job.wait_reason != reason {
+                l.job.wait_reason = reason;
+                changed.push(*id);
+            }
+        }
+        changed.sort_unstable();
+        changed.dedup();
+        changed
+    }
+
     /// CPUs a job of `repo` that runs `argv` is expected to use: what its
     /// earlier runs used, at most the host's CPUs; 1 without history.
     fn expected_cores(&self, history: &admission::History, repo: &str, argv: &[String]) -> f64 {
@@ -3159,7 +3488,7 @@ impl Server {
             if *other == id {
                 continue;
             }
-            if l.pid.is_some() || l.held > 0 {
+            if l.started() {
                 load.running += 1;
                 if l.pid.is_none() || now - l.job.started_ms < cpu_limit::STARTING_MS {
                     load.starting += (l.expect_cores - l.recent.share(window)).max(0.0);
@@ -3697,8 +4026,7 @@ impl Server {
     /// smoothed CPU used outside the pool on the machine base.
     async fn apply_headroom(self: &Arc<Self>, percent: u8, persist: bool) -> limits::View {
         let percent = percent.min(limits::MAX_HEADROOM);
-        self.pool
-            .set_limit(limits::effective_tokens(self.cfg.tokens, percent));
+        self.pool.set_limit(self.circulating(percent));
         if persist {
             self.headroom.lock().expect("headroom lock").saved_percent = percent;
             self.save_limits();
@@ -3819,6 +4147,8 @@ impl Server {
             cpu_quota_percent: self.headroom.lock().expect("headroom lock").quota,
             tokens_unaccounted: self.unaccounted.load(Ordering::Relaxed) as u32,
             tokens_unaccounted_since_ms: self.unaccounted_since.load(Ordering::Relaxed),
+            shares: (self.shares_on() && g.share_view.admission == crate::shares::Mode::Shares)
+                .then_some(g.share_view),
             free: self.pool.free() as u32,
             active: g
                 .active
@@ -3875,6 +4205,46 @@ async fn past_limit(rx: Option<watch::Receiver<bool>>) {
         return;
     }
     std::future::pending::<()>().await;
+}
+
+/// `v` to two decimals, as job records carry shares.
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+/// Whether a job predicted to run `predicted_ms` is short: it starts ahead
+/// of the longer ones of its level, and under the pressure brake.
+fn predicted_short(predicted_ms: Option<u64>) -> bool {
+    predicted_ms.is_some_and(|ms| ms <= priority::SHORT_MS)
+}
+
+/// Tokens in circulation for a budget of `budget` CPUs, at least 1.
+fn budget_tokens(budget: f64) -> usize {
+    (budget.round() as usize).max(1)
+}
+
+/// Why a job of `share` CPUs waits in the pool's queue by share, with
+/// `left` the room after this look's grants and `v` its figures.
+fn share_wait(
+    share: f64,
+    short: bool,
+    left: &jobserver::ShareRoom,
+    v: &crate::shares::View,
+) -> String {
+    if left.running >= left.max {
+        return format!("{} jobs run, the most by share", left.max);
+    }
+    if v.braking && !short {
+        return format!(
+            "CPU pressure {:.0} % over {:.0} %: only short jobs start",
+            v.pressure, v.pressure_max
+        );
+    }
+    format!(
+        "waits for a share of {share:.1} CPUs: {:.1} of a budget of {:.1} free",
+        left.free.max(0.0),
+        v.budget
+    )
 }
 
 fn compile_server_work(g: &mut Inner, snap: &Snapshot) -> HashMap<i64, Vec<Proc>> {

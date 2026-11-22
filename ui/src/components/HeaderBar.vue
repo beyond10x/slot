@@ -4,6 +4,7 @@ import { fmtDur } from '../lib/format.ts';
 import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineSentence } from '../lib/headroom.ts';
 import { jobId } from '../lib/job.ts';
 import { failedStats, queueSummary, servedQueue } from '../lib/queue.ts';
+import { sharesLine } from '../lib/shares.ts';
 import { census, jobs, select, setHeadroom, store } from '../store.ts';
 
 const WINDOWS: ReadonlyArray<[number, string]> = [
@@ -51,6 +52,7 @@ const caption = computed(() =>
   headroomCaption(store.cores || store.tokens, store.tokens, draft.value, store.machine.headroom_base),
 );
 const machine = computed(() => machineSentence(store.machine, store.cores, store.cpuQuota));
+const shares = computed(() => sharesLine(store.shares));
 const call = computed(() =>
   store.callApps.length ? `call (${store.callApps.join(', ')}): headroom raised, back 2 min after the call` : '',
 );
@@ -143,6 +145,7 @@ onUnmounted(() => {
       <span v-if="loaded" id="headroom-caption" class="cap">{{ caption }}</span>
       <span v-if="store.error" class="chip err" :title="store.error">{{ store.error }}</span>
       <span v-if="store.headroomError" class="chip err" role="status" :title="store.headroomError">{{ store.headroomError }}</span>
+      <span v-if="shares" class="chip shares" :class="{ over: store.shares?.braking }" data-ux-region="shares" :title="shares">{{ shares }}</span>
       <span v-if="machine" class="chip machine" :class="{ over: store.machine.over_target }" data-ux-region="machine" :title="machine">{{ machine }}</span>
       <span v-if="store.upgrade" class="chip upgrade" data-ux-region="upgrade" role="status" :title="store.upgrade">{{ store.upgrade }}</span>
       <span v-if="call" class="chip call" :title="call">{{ call }}</span>
@@ -158,6 +161,7 @@ onUnmounted(() => {
         <div><dt>not on slot</dt><dd>Cores used by builds that do not run through slot. The Host section shows which sessions run them.</dd></div>
         <div><dt>chart window</dt><dd>The time span of every chart of the page.</dd></div>
         <div v-if="machine"><dt>machine</dt><dd>The headroom counts the whole machine: builds get the target less what other programs use, at least 2 CPUs. "Over target": builds are at that lowest limit and the machine is still busier. The Host section lists the other programs.</dd></div>
+        <div v-if="shares"><dt>by share</dt><dd>Jobs start by the CPUs they are expected to use, not by slots: a job starts while the CPUs the pool and the compile cache used over the last 5 s, plus the shares of jobs that just started, leave room for its share in the budget. The budget grows while jobs run as fast as before and shrinks when they slow down. "Idle lend": jobs that use almost no CPU leave their share to the queue. The share column shows what a job uses of the share it asked for.</dd></div>
         <div v-if="store.upgrade"><dt>upgrade pending</dt><dd>The daemon starts its new version at the first moment no job runs; until then it may hold new jobs back.</dd></div>
         <div v-if="call"><dt>call</dt><dd>A call uses the microphone or the camera, so the headroom is raised; it goes back 2 min after the call. Moving the slider now keeps your value.</dd></div>
       </dl>
@@ -210,6 +214,8 @@ h1 .host { grid-row: 2; grid-column: 1 / -1; max-width: 200px; overflow: hidden;
 .chip.err { flex-shrink: 0; background: #fde8e6; color: #8a1c12; font-weight: 600; }
 .chip.machine { background: #eef1f4; color: #2b3a48; }
 .chip.machine.over { background: #fde8e6; color: #8a1c12; }
+.chip.shares { background: #eef4ee; color: #24452a; }
+.chip.shares.over { background: #fde8e6; color: #8a1c12; }
 .chip.upgrade { background: #fff3d6; color: #6b4500; }
 .chip.call { flex-shrink: 1000; background: #e6f0ff; color: #1d4f91; }
 .help { position: absolute; top: calc(100% + 4px); right: 14px; z-index: 3; width: min(640px, calc(100vw - 28px)); padding: 10px 14px;

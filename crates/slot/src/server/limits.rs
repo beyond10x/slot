@@ -54,6 +54,40 @@ pub struct Saved {
     /// the file: [`crate::cpu_limit::DEFAULT_FLOOR`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_busy_floor: Option<usize>,
+    /// How queued jobs are admitted (`slot admission`); `slots`, and absent
+    /// from the file, until shares are named.
+    #[serde(default, skip_serializing_if = "is_slots")]
+    pub admission: crate::shares::Mode,
+    /// Jobs that run whatever the share says; `None`, and absent from the
+    /// file: [`crate::shares::DEFAULT_FLOOR`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_floor: Option<usize>,
+    /// The most jobs that run at once by share; `None`, and absent from the
+    /// file: [`crate::shares::DEFAULT_MAX`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_max: Option<usize>,
+    /// CPU pressure over which only short jobs start by share; `None`, and
+    /// absent from the file: [`crate::shares::DEFAULT_PRESSURE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_pressure_max: Option<f64>,
+}
+
+// serde hands `skip_serializing_if` a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_slots(m: &crate::shares::Mode) -> bool {
+    *m == crate::shares::Mode::Slots
+}
+
+impl Saved {
+    /// The admission settings saved here.
+    pub fn shares(&self) -> crate::shares::Settings {
+        crate::shares::Settings::loaded(
+            self.admission,
+            self.share_floor,
+            self.share_max,
+            self.share_pressure_max,
+        )
+    }
 }
 
 /// Reads the saved headroom; 0 when the file is missing or unreadable.
@@ -63,6 +97,7 @@ pub fn load(dir: &Path) -> Saved {
         .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
         .map(|s| {
             let cpu = crate::cpu_limit::Limits::loaded(s.cpu_busy_max, s.cpu_busy_floor);
+            let shares = s.shares();
             Saved {
                 headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
                 call_headroom_percent: s.call_headroom_percent.map(|c| c.min(MAX_HEADROOM)),
@@ -72,6 +107,10 @@ pub fn load(dir: &Path) -> Saved {
                 job_parallel: s.job_parallel.filter(|&n| n > 0),
                 cpu_busy_max: cpu.cpu_busy_max,
                 cpu_busy_floor: cpu.cpu_busy_floor,
+                admission: shares.mode,
+                share_floor: shares.floor,
+                share_max: shares.max,
+                share_pressure_max: shares.pressure_max,
             }
         })
         .unwrap_or_default()
@@ -441,5 +480,56 @@ mod tests {
         .unwrap();
         let s = load(dir.path());
         assert_eq!((s.cpu_busy_max, s.cpu_busy_floor), (Some(8.0), None));
+    }
+
+    #[test]
+    fn the_admission_is_kept_beside_the_headroom_and_absent_while_by_slots() {
+        use crate::shares::Mode;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let before = r#"{"headroom_percent":10,"base":"pool","run_limit_s":600,"job_parallel":4}"#;
+        std::fs::write(&file, before).unwrap();
+        let old = load(dir.path());
+        assert_eq!(old.shares(), crate::shares::Settings::default());
+        save(dir.path(), old).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            before,
+            "slots: the file is what a daemon without shares writes"
+        );
+        save(
+            dir.path(),
+            Saved {
+                admission: Mode::Shares,
+                share_floor: Some(2),
+                share_max: Some(30),
+                share_pressure_max: Some(45.0),
+                ..old
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.ends_with(
+                r#","admission":"shares","share_floor":2,"share_max":30,"share_pressure_max":45.0}"#
+            ),
+            "{text}"
+        );
+        let s = load(dir.path()).shares();
+        assert_eq!(
+            (s.mode, s.floor(), s.max(), s.pressure_max()),
+            (Mode::Shares, 2, 30, 45.0)
+        );
+        std::fs::write(
+            &file,
+            r#"{"headroom_percent":0,"admission":"shares","share_floor":9,"share_max":3}"#,
+        )
+        .unwrap();
+        let s = load(dir.path());
+        assert_eq!(
+            (s.admission, s.share_floor, s.share_max),
+            (Mode::Shares, None, None),
+            "a floor over the most written by hand drops both"
+        );
     }
 }

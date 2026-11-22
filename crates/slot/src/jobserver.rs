@@ -181,6 +181,8 @@ struct Inner {
     /// Surplus tokens still to take out: the reader keeps the next that come
     /// back (see [`Pool::remove`]).
     debt: usize,
+    /// Admission by CPU share: `Some` while it is on ([`Pool::set_shares`]).
+    shares: Option<ShareRoom>,
 }
 
 /// What a handover passes on about the pool besides the FIFO itself.
@@ -208,6 +210,32 @@ pub struct Place {
     /// waited the bound: from then on no later request of its level or below
     /// starts before it.
     pub passable: bool,
+}
+
+/// Admission by CPU share ([`Pool::set_shares`]): what the daemon computed
+/// at its last look, less what the pool let through since.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ShareRoom {
+    /// CPUs of the budget a request may ask for.
+    pub free: f64,
+    /// Jobs that run or were let through.
+    pub running: usize,
+    /// Under this many running jobs a request starts whatever it asks.
+    pub floor: usize,
+    /// No request starts while this many run.
+    pub max: usize,
+    /// CPU pressure is over its mark: only requests predicted short start.
+    pub brake: bool,
+}
+
+/// What a request asks for besides tokens, for admission by share.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ask {
+    /// CPUs.
+    pub share: f64,
+    /// Predicted to run a few seconds: it may start under the pressure
+    /// brake.
+    pub brief: bool,
 }
 
 /// A handle on a queued request's tokens, kept beside the job so a handover
@@ -241,6 +269,11 @@ impl WaiterHandle {
     pub fn class(&self) -> u8 {
         self.0.lock().expect("waiter lock").rank().1
     }
+
+    /// Whether the request was granted: it may start.
+    pub fn granted(&self) -> bool {
+        self.0.lock().expect("waiter lock").granted
+    }
 }
 
 struct WaiterState {
@@ -259,6 +292,8 @@ struct WaiterState {
     /// set. They stay with this request while it is `urgent` and go back to
     /// the held-back set when it is not: never to another request.
     lent: usize,
+    /// What it asks for while admission is by share.
+    ask: Ask,
 }
 
 impl WaiterState {
@@ -502,7 +537,7 @@ impl Pool {
     /// `level`: behind every request of its level or a higher one, ahead of
     /// every request of a lower one.
     pub fn acquire_at(&self, n: usize, level: Priority) -> Waiter {
-        self.queue(n, level, None, Place::default())
+        self.queue(n, level, None, Place::default(), None)
     }
 
     /// Queues a request for `n` tokens (capped at the limit) at queue level
@@ -512,17 +547,70 @@ impl Pool {
     /// memory, for its target directory, through an upgrade) comes back to
     /// the place its age gives it, not to the end.
     pub fn acquire_arrived(&self, n: usize, level: Priority, arrival: u64) -> Waiter {
-        self.queue(n, level, Some(arrival), Place::default())
+        self.queue(n, level, Some(arrival), Place::default(), None)
     }
 
     /// Like [`Pool::acquire_arrived`], with the request's [`Place`] inside
     /// its level.
     pub fn acquire_placed(&self, n: usize, level: Priority, arrival: u64, place: Place) -> Waiter {
-        self.queue(n, level, Some(arrival), place)
+        self.queue(n, level, Some(arrival), place, None)
     }
 
-    fn queue(&self, n: usize, level: Priority, arrival: Option<u64>, place: Place) -> Waiter {
+    /// Like [`Pool::acquire_placed`], with what the request asks for while
+    /// admission is by share ([`Pool::set_shares`]). Without it a request
+    /// asks for a share of its `n` tokens.
+    pub fn acquire_share(
+        &self,
+        n: usize,
+        level: Priority,
+        arrival: u64,
+        place: Place,
+        ask: Ask,
+    ) -> Waiter {
+        self.queue(n, level, Some(arrival), place, Some(ask))
+    }
+
+    /// Admits by share with `room`, or by tokens again with `None`.
+    ///
+    /// By share a request is granted while its share fits in `room.free`
+    /// (or fewer than `room.floor` jobs run, and never while `room.max`
+    /// run), in the order and with the passing of [`Pool::distribute`]; it
+    /// takes no token: a job runs on the implicit token every jobserver
+    /// client has, and the tokens in the FIFO bound the build processes
+    /// inside jobs. Tokens queued requests gathered go back to the FIFO.
+    /// What a grant takes from the room stays taken until the daemon sets
+    /// the room it computes next.
+    pub fn set_shares(&self, room: Option<ShareRoom>) {
+        let mut inner = self.inner.lock().expect("jobserver lock");
+        let was = inner.shares.is_some();
+        inner.shares = room;
+        if room.is_some() || was {
+            self.distribute(&mut inner, 0);
+            self.lend(&mut inner);
+        }
+        drop(inner);
+        self.wake.notify_all();
+    }
+
+    /// The room for shares, less what was let through since it was set;
+    /// `None` while admission is by tokens.
+    pub fn shares(&self) -> Option<ShareRoom> {
+        self.inner.lock().expect("jobserver lock").shares
+    }
+
+    fn queue(
+        &self,
+        n: usize,
+        level: Priority,
+        arrival: Option<u64>,
+        place: Place,
+        ask: Option<Ask>,
+    ) -> Waiter {
         let n = n.clamp(1, self.limit());
+        let ask = ask.unwrap_or(Ask {
+            share: n as f64,
+            brief: false,
+        });
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().expect("jobserver lock");
         let seq = arrival.unwrap_or(inner.next_seq);
@@ -538,6 +626,7 @@ impl Pool {
             place,
             ahead: false,
             lent: 0,
+            ask,
         }));
         inner.queue.push_back(Arc::clone(&state));
         self.distribute(&mut inner, 0);
@@ -621,6 +710,10 @@ impl Pool {
             .queue
             .make_contiguous()
             .sort_by_cached_key(|w| w.lock().expect("waiter lock").rank());
+        if inner.shares.is_some() {
+            self.distribute_shares(inner, incoming);
+            return;
+        }
         let mut hand = incoming;
         for w in &inner.queue {
             let mut st = w.lock().expect("waiter lock");
@@ -664,8 +757,23 @@ impl Pool {
                 break;
             }
         }
-        // Moved ahead: a request that starts, or stands, before one that
-        // priority, then arrival serves first and that still waits.
+        Self::grant_walked(inner, &granted, true);
+        match keeper {
+            Some(k) => inner.queue[k].lock().expect("waiter lock").got += hand,
+            None => self.write(hand),
+        }
+        let mut i = 0;
+        inner.queue.retain(|_| {
+            i += 1;
+            !granted.contains(&(i - 1))
+        });
+    }
+
+    /// Grants the requests at `granted` (indices into the ordered queue),
+    /// each with its tokens when `tokens`, else with none, and marks every
+    /// request that starts, or stands, before one that priority, then
+    /// arrival serves first and that still waits as moved ahead.
+    fn grant_walked(inner: &Inner, granted: &[usize], tokens: bool) {
         let waiting: Vec<(Priority, u64)> = inner
             .queue
             .iter()
@@ -680,17 +788,60 @@ impl Pool {
             let me = st.plain();
             if granted.contains(&i) {
                 st.ahead |= first_waiting.is_some_and(|f| f < me);
-                st.got = st.n;
+                st.got = if tokens { st.n } else { 0 };
                 st.grant();
             } else {
                 st.ahead |= behind.is_some_and(|b| b < me);
                 behind = Some(behind.map_or(me, |b| b.min(me)));
             }
         }
-        match keeper {
-            Some(k) => inner.queue[k].lock().expect("waiter lock").got += hand,
-            None => self.write(hand),
+    }
+
+    /// [`Pool::distribute`] while admission is by share: every token the
+    /// queued requests gathered goes back (lent ones to the held-back set),
+    /// with `incoming`; then the ordered queue is walked as by tokens, a
+    /// request being covered while it fits in the room ([`ShareRoom`]).
+    /// Granted requests take no token and take their share from the room.
+    fn distribute_shares(&self, inner: &mut Inner, incoming: usize) {
+        let Some(mut room) = inner.shares else {
+            return;
+        };
+        let mut hand = incoming;
+        for w in &inner.queue {
+            let mut st = w.lock().expect("waiter lock");
+            inner.held_back += st.lent;
+            hand += st.got - st.lent;
+            st.got = 0;
+            st.lent = 0;
         }
+        if inner.held_back > inner.reserve {
+            hand += inner.held_back - inner.reserve;
+            inner.held_back = inner.reserve;
+        }
+        self.write(hand);
+        let mut uncovered: Option<Priority> = None;
+        let mut granted: Vec<usize> = Vec::new();
+        for (i, w) in inner.queue.iter().enumerate() {
+            let st = w.lock().expect("waiter lock");
+            if uncovered.is_some_and(|l| st.level != l) {
+                break;
+            }
+            let fits = room.running < room.max
+                && (room.running < room.floor
+                    || (st.ask.share <= room.free + 1e-9 && (!room.brake || st.ask.brief)));
+            if fits {
+                room.free -= st.ask.share;
+                room.running += 1;
+                granted.push(i);
+                continue;
+            }
+            uncovered.get_or_insert(st.level);
+            if !st.place.passable {
+                break;
+            }
+        }
+        Self::grant_walked(inner, &granted, false);
+        inner.shares = Some(room);
         let mut i = 0;
         inner.queue.retain(|_| {
             i += 1;
@@ -709,7 +860,8 @@ impl Pool {
     /// most `size - limit` are in use beyond the limit; a lent token that
     /// comes back refills the held-back set like any other (see `reader`).
     fn lend(&self, inner: &mut Inner) {
-        if inner.pause {
+        // By share a request takes no token, held back or not.
+        if inner.pause || inner.shares.is_some() {
             return;
         }
         while inner.held_back > 0 && self.free() == 0 {
@@ -898,7 +1050,9 @@ impl Pool {
                         }
                     } else {
                         inner.reader_parked = false;
-                        if Self::head(&mut inner).is_some()
+                        // By share the queue takes no token: the reader
+                        // reads only to hold tokens back or take them out.
+                        if (inner.shares.is_none() && Self::head(&mut inner).is_some())
                             || inner.held_back < inner.reserve
                             || inner.debt > 0
                         {
@@ -928,7 +1082,9 @@ impl Pool {
                 continue;
             }
             // An urgent head gets the token before the held-back set does.
-            if inner.held_back < inner.reserve && !Self::urgent_head(&mut inner) {
+            if inner.held_back < inner.reserve
+                && (inner.shares.is_some() || !Self::urgent_head(&mut inner))
+            {
                 inner.held_back += 1;
                 continue;
             }
@@ -1769,5 +1925,150 @@ mod tests {
         p.release(was_urgent.take_held());
         assert!(ready_within(&mut normal, 1000).await);
         assert_eq!(p.held_back(), 2);
+    }
+
+    /// Room for shares: `free` CPUs, `running` jobs, the floor and the most.
+    fn room(free: f64, running: usize, floor: usize, max: usize) -> ShareRoom {
+        ShareRoom {
+            free,
+            running,
+            floor,
+            max,
+            brake: false,
+        }
+    }
+
+    fn ask(share: f64) -> Ask {
+        Ask {
+            share,
+            brief: false,
+        }
+    }
+
+    /// With shares on, a request starts while its share is free and takes
+    /// no token: three requests of 1 CPU with 2.25 CPUs free, two start,
+    /// the FIFO keeps both its tokens, nothing is missing; the third starts
+    /// when the room the daemon computes next has its share.
+    #[tokio::test]
+    async fn with_shares_a_request_starts_while_its_share_is_free_and_takes_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 2).unwrap();
+        p.set_shares(Some(room(2.25, 0, 1, 48)));
+        let mut a = p.acquire_share(1, Priority::Normal, 1, PASS, ask(1.0));
+        let mut b = p.acquire_share(1, Priority::Normal, 2, PASS, ask(1.0));
+        let mut c = p.acquire_share(1, Priority::Normal, 3, PASS, ask(1.0));
+        assert!(ready_within(&mut a, 1000).await);
+        assert!(ready_within(&mut b, 1000).await);
+        assert!(!ready_within(&mut c, 200).await, "0.25 free, it asks 1");
+        assert_eq!((a.held(), b.held(), c.held()), (0, 0, 0));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(p.free(), 2, "no token left the FIFO");
+        assert_eq!((p.missing(0), p.surplus(0)), (0, 0));
+        assert_eq!(p.shares().map(|r| r.running), Some(2));
+        assert!(p.shares().is_some_and(|r| (r.free - 0.25).abs() < 1e-9));
+        p.set_shares(Some(room(1.0, 2, 1, 48)));
+        assert!(ready_within(&mut c, 1000).await);
+        assert!(c.handle().granted());
+        assert_eq!(p.reconcile(), 0);
+    }
+
+    /// The floor starts jobs whatever the share says; the most starts none
+    /// beyond it however much is free.
+    #[tokio::test]
+    async fn with_shares_the_floor_always_runs_and_the_most_is_never_passed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 2).unwrap();
+        p.set_shares(Some(room(0.0, 0, 2, 3)));
+        let mut ws: Vec<Waiter> = (1..=3)
+            .map(|i| p.acquire_share(1, Priority::Normal, i, PASS, ask(4.0)))
+            .collect();
+        assert!(ready_within(&mut ws[0], 1000).await, "under the floor");
+        assert!(ready_within(&mut ws[1], 1000).await, "under the floor");
+        assert!(!ready_within(&mut ws[2], 200).await, "no share free");
+        p.set_shares(Some(room(100.0, 2, 2, 3)));
+        assert!(ready_within(&mut ws[2], 1000).await);
+        let mut d = p.acquire_share(1, Priority::Normal, 4, PASS, ask(0.1));
+        assert!(!ready_within(&mut d, 200).await, "3 run, the most");
+    }
+
+    /// The queue keeps its order with shares: a higher level first; a
+    /// request that may still be passed lets a later one of its level that
+    /// fits start; one that may no longer be passed holds every later one.
+    #[tokio::test]
+    async fn with_shares_the_queue_keeps_its_levels_and_its_passing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 2).unwrap();
+        p.set_shares(Some(room(1.0, 4, 1, 48)));
+        let mut big = p.acquire_share(1, Priority::Normal, 1, PASS, ask(3.0));
+        let mut small = p.acquire_share(1, Priority::Normal, 2, PASS, ask(0.5));
+        assert!(ready_within(&mut small, 1000).await, "passes the big one");
+        assert!(small.ahead());
+        assert!(!ready_within(&mut big, 100).await);
+        p.set_place(&big.handle(), Priority::Normal, FIXED);
+        let mut held = p.acquire_share(1, Priority::Normal, 3, PASS, ask(0.2));
+        assert!(
+            !ready_within(&mut held, 200).await,
+            "passed a fixed request"
+        );
+        let mut high = p.acquire_share(1, Priority::High, 4, PASS, ask(0.3));
+        assert!(ready_within(&mut high, 1000).await, "a higher level first");
+        p.set_shares(Some(room(3.0, 4, 1, 48)));
+        assert!(ready_within(&mut big, 1000).await);
+        assert!(!ready_within(&mut held, 200).await, "0.0 free after it");
+    }
+
+    /// Over the pressure mark only requests predicted short start; a long
+    /// one waits although its share is free, and the floor still runs.
+    #[tokio::test]
+    async fn with_shares_the_pressure_brake_lets_only_short_requests_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 2).unwrap();
+        let braking = ShareRoom {
+            brake: true,
+            ..room(10.0, 4, 1, 48)
+        };
+        p.set_shares(Some(braking));
+        let mut long = p.acquire_share(1, Priority::Normal, 1, PASS, ask(1.0));
+        let brief = Ask {
+            share: 1.0,
+            brief: true,
+        };
+        let mut short = p.acquire_share(1, Priority::Normal, 2, PASS, brief);
+        assert!(ready_within(&mut short, 1000).await);
+        assert!(
+            !ready_within(&mut long, 200).await,
+            "started under the brake"
+        );
+        p.set_shares(Some(ShareRoom {
+            running: 0,
+            ..braking
+        }));
+        assert!(ready_within(&mut long, 1000).await, "the floor runs");
+    }
+
+    /// Switching to shares hands back what queued requests gathered, and
+    /// switching back serves them from tokens again; every token stays
+    /// placed.
+    #[tokio::test]
+    async fn switching_between_slots_and_shares_keeps_every_token_placed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 3).unwrap();
+        let mut a = p.acquire(2);
+        assert!(ready_within(&mut a, 1000).await);
+        let mut big = p.acquire_share(3, Priority::Normal, 5, FIXED, ask(2.0));
+        assert!(reaches(|| big.held() == 1).await, "gathers the free token");
+        p.set_shares(Some(room(1.0, 1, 1, 48)));
+        assert_eq!(big.held(), 0, "gave it back");
+        assert!(reaches(|| p.free() == 1).await);
+        assert_eq!((p.missing(2), p.surplus(2)), (0, 0));
+        assert!(!ready_within(&mut big, 200).await, "2 asked, 1 free");
+        p.set_shares(None);
+        assert!(reaches(|| big.held() == 1).await, "slots again");
+        p.release(a.take_held());
+        assert!(ready_within(&mut big, 1000).await);
+        assert_eq!(big.held(), 3);
+        p.release(big.take_held());
+        assert!(reaches(|| p.free() == 3).await);
+        assert_eq!(p.reconcile(), 0);
     }
 }

@@ -4,6 +4,7 @@ import { fmtDur } from '../lib/format.ts';
 import { sessionName } from '../lib/host.ts';
 import { checkoutLabel, cmdText, jobId, waitS } from '../lib/job.ts';
 import { level, levelText, servedQueue, waitReasonText } from '../lib/queue.ts';
+import { shareCell } from '../lib/shares.ts';
 import { jobs, select, sessionTitles, store } from '../store.ts';
 import RepoName from './RepoName.vue';
 import ToolDot from './ToolDot.vue';
@@ -21,8 +22,7 @@ const rows = computed(() => {
     level: j.ahead ? `${levelText(j)} · ahead` : levelText(j),
     levelTitle: j.ahead ? 'moved ahead of a job that came before it' : '',
     normal: level(j) === 'normal' && !j.ahead,
-    slots: j.collected ? `${j.collected}/${j.tokens}` : String(j.tokens),
-    slotsTitle: j.collected ? `holds ${j.collected} of the ${j.tokens} slots it asked for` : '',
+    slots: shareCell(j),
     why: waitReasonText(j),
   }));
 });
@@ -34,7 +34,7 @@ const rows = computed(() => {
       <tr>
         <th class="c-lead num">pos</th><th class="c-job">job</th><th class="c-tool"><span>tool</span></th><th class="c-repo">repo</th>
         <th class="c-session h-b">session</th><th>command</th>
-        <th class="c-state">level</th><th class="c-slots num">slots</th><th class="c-wait num">wait</th>
+        <th class="c-state">level</th><th class="c-slots num">{{ store.shares ? 'share' : 'slots' }}</th><th class="c-wait num">wait</th>
         <th class="c-run q-fill"></th><th class="c-cores q-fill"></th><th class="c-extra q-fill"></th><th class="c-mem q-fill"></th>
       </tr>
     </thead>
@@ -48,7 +48,7 @@ const rows = computed(() => {
           <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
           <td class="c-state" :class="{ muted: r.normal }" :title="r.levelTitle || undefined">{{ r.level }}</td>
-          <td class="num" :title="r.slotsTitle || undefined">{{ r.slots }}</td>
+          <td class="num" :title="r.slots.title || undefined">{{ r.slots.text }}</td>
           <td class="num">{{ r.wait }}</td>
           <td class="q-fill" colspan="4"></td>
         </tr>

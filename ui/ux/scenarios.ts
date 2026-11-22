@@ -1,5 +1,5 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
-import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, State, Usage, UsageRow } from '../src/generated/types.ts';
+import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
 import { POOL_BASE } from '../src/lib/headroom.ts';
 import type { RecordedBucket } from '../src/lib/history.ts';
 import type { MachineNumbers } from '../src/lib/headroom.ts';
@@ -372,6 +372,28 @@ export const EMPTY_USAGE: Usage = {
   rows: [],
 };
 
+/** Admission by share: each job shows what it uses of the share it asked for, the header the free share and the budget. */
+function byShare(): Scenario {
+  const running = [
+    job(160, { share: 4.03, share_used: 3.6 }), job(161, { share: 1, share_used: 0.02 }), job(162, { share: 2.3, share_used: 2.1 }),
+  ];
+  const waiting = [{ ...queued(163, -20), share: 4.03, wait_reason: 'waits for a share of 4.0 CPUs: 3.2 of a budget of 15.0 free' }];
+  const finished = Array.from({ length: 5 }, (_, i) => done(150 + i, -300 + i * 40, { share: 2, share_used: 1.8 }));
+  const shares = (k: number): SharesView => ({
+    admission: 'shares', floor: 4, max: 48, pressure_max: 60, cpus: 20, budget: 15, cap: 20, free: 3.2, busy: 9 + (k % 2) * 0.1,
+    starting: 2.8, running: 3, idle: 1, lent: 1, pressure: 14, braking: false,
+  });
+  const st = { ...state([...running, ...waiting], finished, 20, 0), shares: shares(0) };
+  const t = (sec: number, k: number): Tick => ({ ...tick(s(sec), running, 20, 15, 0, 1, k), shares: shares(k) });
+  return {
+    name: 'by-share', anchor: false,
+    card: 'Jobs start by the CPUs they use, not by slots. Read how much of the budget is free and what the queued job waits for.',
+    state: st, history: history(running, 20, 15, 0, 1).map((h, k) => ({ ...h, shares: shares(k) })), cacheHistory: cacheCalls(),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [t(1, 1)] }, { moment: 'next tick', dt_s: 1, events: [t(2, 2)] }],
+    output: {}, task: { kind: 'see', expect: '3.2 of a budget of 15.0 CPUs free' },
+  };
+}
+
 function poolShare(): Scenario {
   const base = busyFailed();
   const slotTotal = 400_000;
@@ -400,7 +422,7 @@ function poolShare(): Scenario {
 
 export const SCENARIOS: Scenario[] = [
   busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), queueLevels(), crowded(), callMode(), upgradePending(), idle(),
-  machineHeadroom(), poolShare(), fresh(),
+  machineHeadroom(), poolShare(), fresh(), byShare(),
 ];
 
 /** Scenarios whose output pane is open from the start. */

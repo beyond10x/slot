@@ -1465,3 +1465,107 @@ when empty; the handover carries them in the job and recomputes them.
 - *Backfill by predicted end (EASY backfilling).* It would let a small job pass a large one only
   when it ends before the running jobs do. The prediction is missing for 44.5 % of the jobs, and a
   bound in time needs none.
+
+## 26. Admission by share (unreleased)
+
+**The problem.** A slot is a promise of one CPU that most jobs do not keep. A test job that
+sleeps on a socket holds its slot at 0 CPU, and a `cargo build` of a workspace that asked for 4
+slots runs 16 compilers in a compile cache server. Over 47,572 runs of the job log of one 20-CPU
+host (10.6 days to 2026-11-22), 11.3 % used under 0.1 CPU over their run; of the 8,069 that ran a
+minute or longer, 10.2 %. At the peak, 13 of 39 running jobs were such jobs, and up to 17 ran at
+once. Slots count what a job asked for; the CPUs count what it does.
+
+**The setting** (`shares.rs`, `server/limits.rs`). Admission is `slots` (the default) or
+`shares`, saved beside the headroom in `limits.json` as `admission` (absent by slots: the file
+is then byte for byte what a daemon without the setting writes), with `share_floor`,
+`share_max` and `share_pressure_max`. `GET` and `PUT /api/admission`, `slot admission
+[shares|slots] [--floor N] [--max N] [--pressure P]`, `State.shares` and the tick's `shares`
+(both absent by slots), one header line in `slot status`. A floor or a most under 1, a floor
+over the most, and a pressure mark outside (0, 100] are refused. By slots nothing of this section
+runs: the pool, its queue and every job's record are what they were.
+
+**A job's share** (`shares::share_for`, `admission::History::predicted_share`). The CPUs a job is
+expected to use: `cpu_s ÷ run time` of the earlier runs of the same repository and argv that
+ended on their own and ran a second or longer (the last 20), weighted by age with a half-life of
+12 h, the weighted 90th percentile, plus 15 %; at least 0.1, at most the budget's cap. `cpu_s`
+counts the compilers a compile cache server ran for the job (`compile_server_work`, § 24). With
+fewer than 3 runs the share is 1.0. A request for slots (`--tokens N`, clients 0.21.0 and older
+included) is read as a share of N CPUs. The share is fixed at enqueue and shown as `Job.share`.
+
+**Admission** (`jobserver::Pool::distribute_shares`, `shares::room`). The pool keeps its queue
+and its order (level, then unpassable, short and other requests, then arrival, § 25) and changes
+only the test for "fits": a request fits while
+
+1. fewer than `share_max` jobs run (48 by default), and
+2. fewer than `share_floor` jobs run (4 by default), or its share is at most the free share and,
+   while the brake holds, it is predicted short.
+
+The walk stops and passes as in § 25. The free share is
+`budget − busy − starting`:
+
+- *busy*: the CPUs of the pool and the compile cache (`Parts::counted`, § 24) over the last 5
+  samples of the census sampler (`RecentParts::mean_last`).
+- *starting*: for each job that started under 5 s ago or was let through and has not claimed
+  yet, its share less what its samples over those 5 s show, at least 0. A job counts in *busy*
+  once its CPU is in the samples, and in *starting* until then, so the figure has no gap.
+- *idle*: a running job whose last 2 samples are each under 0.1 CPU counts
+  with what it uses, not with its share: it is in neither *starting* nor anything else, and the
+  queue gets its share. `Job.lent_s` adds up, each look, its share less what it used, times the
+  seconds since the last look. When it uses CPU again its CPU is in *busy* within a sample, and
+  no further job starts until the free share covers one. The loans outstanding at once are bound
+  by `share_max`: 48, over the 39 jobs that ran at once at the peak of the log above (the pool
+  had 59 slots then).
+
+The daemon looks once a sampler tick (1 s) and after a change of the setting
+(`Server::share_step`): it computes the free share and hands it to the pool, which lets through
+what fits and keeps the rest for the requests that come before the next look. A queued job starts
+within one tick of the free share reaching its share. Each queued job's `wait_reason` says what
+it waits for ("waits for a share of 4.0 CPUs: 3.0 of a budget of 15.0 free", "48 jobs run, the
+most by share", or the brake).
+
+**The budget** (`shares::Budget`). It starts at 0.75 of the host's CPUs (15 of 20) and is never
+above its cap: the pool's CPU quota where one is set, else the host's CPUs less the headroom
+(§ 13). Every 5 s it looks at the slowdowns of the jobs that ended since: wall time over the
+best kept wall time of the same repository and argv (`History::best_runtime`, only when that is
+a second or longer). A median under 1.3 raises it by 0.5, over 2 multiplies it by 0.85; at least
+1 CPU. Switching to shares starts it anew.
+
+**The FIFO.** A job let through by share takes no token of the FIFO and
+holds only the implicit one every jobserver client has. The tokens in circulation are the pool
+less the headroom, and by share at most the budget rounded (`Pool::set_limit`), so the FIFO keeps
+bounding the compilers and test threads inside jobs to the budget. Switching hands every token a
+queued request gathered back to the FIFO or the held-back set; `Pool::placed` and
+`slot_tokens_unaccounted` count them as before. `Pool::lend` (urgent requests borrow held-back
+tokens) does not run by share: an urgent job starts first in the queue and is bound by the floor
+and the free share like any other.
+
+**The brake** (`share_pressure_max`, 60 % by default). Over this CPU pressure of the host
+(`/proc/pressure/cpu`, `some avg10`) only jobs predicted short (§ 25, at most 5 s) start; the
+floor still runs. The default from `census.jsonl` of the same host (34,190 one-minute windows to
+2026-11-22): the pressure's median was 12.1 %, its 75th percentile 41.7 %, its 90th 70.9 %. With
+15 or more of the 20 CPUs busy the median was 62.2 % (9,005 windows), with 18 or more 76.8 %. 60
+lies where the host is nearly full; it held in 15.3 % of the windows (over 50: 20.3 %, over 40:
+26.1 %).
+
+**Memory.** By share the admission by memory (§ 14, `--min-free-memory`, a job's predicted peak)
+holds a job as it does by slots: it runs before the pool's queue, so a job short of memory waits
+there with its reason and never reaches the share test.
+
+**What is shown.** `Job.share` (asked), `Job.share_used` (its CPUs over the last 5 samples, while
+it runs; at the end its `cpu_s ÷ run time`) and `Job.lent_s`, all `#[serde(default)]` and left
+out of the JSON when empty. `slot status` prints `shares: budget 15.0 of 17.0 CPUs, 3.2 free (9.0
+busy, 2.8 for jobs that just started), 12 running (4 to 48), 2 idle lend 2.0` and in each job
+line `share 2.3, uses 0.4`. The web view names the column `share` and shows `used/asked`, and
+the header's second row the free share, the budget and its cap. `slot usage` charges a job by
+share its share times its run, less the CPU-seconds it lent; the job that ran on the loan pays
+its own share. The handover state file is unchanged: a job's share is recomputed from the record
+it carries.
+
+**Not built.**
+
+- *A CPU weight per job*: a child cgroup per job with its own
+  `cpu.weight`, so a job over its share yields to one under it. It needs cgroup delegation of
+  `slot.service` (`Delegate=yes` in a drop-in of the user manager), which needs root.
+- *A second queue order*: shortest-predicted-first and least-attained-service
+  are what § 25 already does inside a level with short jobs first and the pass bound.
+- *A flag that names a share.* `--tokens N` is read as a share of N.

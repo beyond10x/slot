@@ -334,6 +334,40 @@ pub fn render_cpu_limit(v: &CpuLimitView) -> String {
     out
 }
 
+/// Reads how queued jobs are admitted (`slot admission`), or first
+/// changes it.
+pub fn admission(
+    addr: &str,
+    change: Option<&crate::shares::Request>,
+) -> Result<crate::shares::View> {
+    let path = "/api/admission";
+    let answer = match change {
+        None => request(addr, "GET", path, None),
+        Some(c) => request(addr, "PUT", path, Some(&serde_json::to_string(c)?)),
+    };
+    let answer = answer.map_err(|e| {
+        if e.to_string().contains(" 404") {
+            e.context("the daemon is older than this slot and admits by slots only")
+        } else {
+            e
+        }
+    })?;
+    serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
+}
+
+/// `slot admission`: how queued jobs are admitted, and by share the
+/// budget, the free share and the bounds now.
+pub fn render_admission(v: &crate::shares::View) -> String {
+    match v.admission {
+        crate::shares::Mode::Slots => format!(
+            "admission by slots: a job holds its slots while it runs \
+             (by share: {} to {} jobs, only short ones over {:.0} % CPU pressure)\n",
+            v.floor, v.max, v.pressure_max
+        ),
+        crate::shares::Mode::Shares => crate::shares::line(v),
+    }
+}
+
 /// The CPU limit line of `slot status`; `None` with no limit.
 fn cpu_limit_line(s: &State) -> Option<String> {
     let mark = s.cpu_busy_max?;
@@ -482,12 +516,19 @@ fn line(j: &Job, now: i64) -> String {
         None if !j.repo.is_empty() => format!("unverified · {}", j.repo),
         None => "repository unknown".into(),
     };
+    // By share a job holds no slots: its share, and what it uses, stand
+    // in that column.
+    let held = match (j.share, j.share_used) {
+        (Some(asked), Some(used)) => format!("share {asked:.1}, uses {used:.1}"),
+        (Some(asked), None) => format!("share {asked:.1}"),
+        (None, _) => format!("{:>2} slot(s)", j.tokens),
+    };
     let mut s = format!(
-        "#{:<5} {:<7} {:<9} {:>2} slot(s) {:>7}  {}  {}",
+        "#{:<5} {:<7} {:<9} {} {:>7}  {}  {}",
         j.id,
         state,
         j.toolchain,
-        j.tokens,
+        held,
         secs(now - since),
         identity,
         cmd
@@ -647,6 +688,9 @@ pub fn render(s: &State) -> String {
     if let Some(l) = cpu_limit_line(s) {
         out.push_str(&l);
     }
+    if let Some(v) = &s.shares {
+        out.push_str(&crate::shares::line(v));
+    }
     if !s.upgrade.is_empty() {
         out.push_str(&s.upgrade);
         out.push('\n');
@@ -705,6 +749,9 @@ mod tests {
             collected: 0,
             ahead: false,
             queue_class: None,
+            share: None,
+            share_used: None,
+            lent_s: 0.0,
         }
     }
 
@@ -1340,6 +1387,76 @@ mod tests {
                 .lines()
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn by_share_the_header_names_the_budget_and_each_job_its_share_and_what_it_uses() {
+        use crate::shares::{Mode, View};
+        let plain = State {
+            cores: 3,
+            tokens: 2,
+            limit: 2,
+            active: vec![job(5, JobState::Running, 2)],
+            ..State::default()
+        };
+        let out = render(&plain);
+        assert!(!out.contains("shares:"), "{out}");
+        assert!(out.contains("#5     running rust       2 slot(s)"), "{out}");
+        let mut run = job(3, JobState::Running, 1);
+        run.share = Some(1.0);
+        run.share_used = Some(0.02);
+        let mut queued = job(4, JobState::Queued, 1);
+        queued.share = Some(2.3);
+        queued.wait_reason = "waits for a share of 2.3 CPUs: 0.2 of a budget of 2.2 free".into();
+        let s = State {
+            shares: Some(View {
+                admission: Mode::Shares,
+                floor: 1,
+                max: 48,
+                pressure_max: 60.0,
+                cpus: 3,
+                budget: 2.26,
+                cap: 3.0,
+                free: 0.26,
+                busy: 0.0,
+                starting: 2.0,
+                running: 2,
+                idle: 0,
+                lent: 0.0,
+                pressure: 5.0,
+                braking: false,
+            }),
+            active: vec![run, queued],
+            ..plain
+        };
+        let out = render(&s);
+        assert!(
+            out.contains(
+                "shares: budget 2.3 of 3.0 CPUs, 0.3 free (0.0 busy, 2.0 for jobs that just \
+                 started), 2 running (1 to 48)\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("#3     running rust      share 1.0, uses 0.0"),
+            "{out}"
+        );
+        assert!(out.contains("#4     queued  rust      share 2.3"), "{out}");
+        assert!(
+            out.contains("waiting: waits for a share of 2.3 CPUs: 0.2 of a budget of 2.2 free"),
+            "{out}"
+        );
+        assert_eq!(
+            render_admission(&View {
+                admission: Mode::Slots,
+                floor: 4,
+                max: 48,
+                pressure_max: 60.0,
+                ..View::default()
+            }),
+            "admission by slots: a job holds its slots while it runs \
+             (by share: 4 to 48 jobs, only short ones over 60 % CPU pressure)\n"
         );
     }
 
