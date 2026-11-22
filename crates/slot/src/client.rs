@@ -172,8 +172,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         ..Request::default()
     };
     if let Some(dir) = crate::gate::dir_from_env() {
-        req.cwd = cwd.to_string_lossy().into_owned();
-        req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+        local_fields(&mut req, &cwd);
         return crate::gate::submit(&dir, &req);
     }
     if let Some(host) = s
@@ -196,15 +195,23 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                     "slot: remote build on {host} did not start ({e:#}); running it on this machine's daemon"
                 );
                 req.workspace = None;
-                req.cwd = cwd.to_string_lossy().into_owned();
-                req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+                local_fields(&mut req, &cwd);
                 submit_local(&s.socket, &req, UPGRADE_WAIT)
             }
         };
     }
+    local_fields(&mut req, &cwd);
+    submit_local(&s.socket, &req, UPGRADE_WAIT)
+}
+
+/// What only a daemon on this machine uses: the working directory, the whole
+/// environment and this process's open-file limit, which the job gets. A
+/// remote request has a filtered environment instead and no limit: the
+/// build server's applies.
+fn local_fields(req: &mut Request, cwd: &Path) {
     req.cwd = cwd.to_string_lossy().into_owned();
     req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
-    submit_local(&s.socket, &req, UPGRADE_WAIT)
+    req.nofile = Some(crate::proto::FileLimit::of_this_process());
 }
 
 /// The job's target directory on the server, from its `start` frame.
@@ -921,5 +928,16 @@ mod tests {
             3
         );
         assert_eq!(rx.recv().unwrap(), request());
+    }
+
+    #[test]
+    fn a_local_request_carries_the_callers_open_file_limit() {
+        let mut req = request();
+        assert_eq!(req.nofile, None);
+        local_fields(&mut req, Path::new("/w/sub"));
+        assert_eq!(req.cwd, "/w/sub");
+        assert_eq!(req.nofile, Some(crate::proto::FileLimit::of_this_process()));
+        let line = serde_json::to_string(&req).unwrap();
+        assert!(line.contains(r#""nofile":{"soft":"#), "{line}");
     }
 }

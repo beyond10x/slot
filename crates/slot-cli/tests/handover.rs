@@ -738,3 +738,291 @@ fn the_cpu_limit_holds_across_a_reload() {
     let done = wait_all(vec![("before".into(), before)], Duration::from_secs(20));
     assert_eq!(done[0].1, 0, "{}", done[0].3);
 }
+
+// adversary u4
+
+/// The soft (`which = 3`) or hard (`which = 4`) open-file limit of `pid`,
+/// read from `/proc/<pid>/limits` (`Max open files  <soft>  <hard>  files`).
+fn nofile_of(pid: &str, which: usize) -> u64 {
+    let t = std::fs::read_to_string(format!("/proc/{pid}/limits")).unwrap();
+    let line = t.lines().find(|l| l.starts_with("Max open files")).unwrap();
+    line.split_whitespace().nth(which).unwrap().parse().unwrap()
+}
+
+/// A daemon as [`Daemon::start`] starts it, with the soft open-file limit
+/// `soft`, as systemd gives `slot.service` 1,024.
+fn start_with_soft_nofile(soft: u64) -> Daemon {
+    let dir = tempfile::tempdir().unwrap();
+    let log = std::fs::File::create(dir.path().join("daemon.log")).unwrap();
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -Sn {soft} && exec \"$0\" \"$@\""))
+        .arg(SLOT)
+        .args(["serve", "--http", "off", "--cpu-quota", "false"])
+        .args(["--tokens", "4"])
+        .args(["--cpu-weight", "0", "--evict-below", "0"])
+        .args(["--call-headroom", "0", "--sccache-watch", "false"])
+        .args(["--min-free-disk", "0", "--min-free-memory", "0"])
+        .arg("--socket")
+        .arg(dir.path().join("sock"))
+        .arg("--state-dir")
+        .arg(dir.path().join("state"))
+        .env_remove("SLOT_JOB")
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .unwrap();
+    let d = Daemon { child, dir };
+    d.wait_until("the daemon to start", Duration::from_secs(10), |d| {
+        d.socket().exists()
+    });
+    d
+}
+
+/// What a job prints for a client older than the open-file limit: the
+/// request carries no `nofile`.
+fn job_of_an_older_client(d: &Daemon, script: &str) -> String {
+    let env: Vec<String> = std::env::vars()
+        .filter(|(k, _)| k != "SLOT_JOB" && k != "SLOT_HOST")
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    let req = serde_json::json!({
+        "argv": ["sh", "-c", script],
+        "cwd": d.dir.path().to_str().unwrap(),
+        "env": env,
+    });
+    let mut c = std::os::unix::net::UnixStream::connect(d.socket()).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    writeln!(c, "{req}").unwrap();
+    let mut out = String::new();
+    for line in BufReader::new(c.try_clone().unwrap()).lines() {
+        let v: serde_json::Value = serde_json::from_str(&line.unwrap()).unwrap();
+        match v["t"].as_str() {
+            Some("out") => out.push_str(v["b"].as_str().unwrap_or_default()),
+            Some("exit") => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// `slot sh -c <script>` from a caller whose soft open-file limit is `soft`.
+fn caller_with_soft_nofile(d: &Daemon, soft: u64, script: &str) -> Child {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -Sn {soft} && exec \"$0\" sh -c \"$1\""))
+        .arg(SLOT)
+        .arg(script)
+        .env("SLOT_SOCKET", d.socket())
+        .env_remove("SLOT_JOB")
+        .env_remove("SLOT_HOST")
+        .current_dir(d.dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// The soft open-file limit of `pid`, `None` once it is gone.
+fn soft_nofile_if_alive(pid: &str) -> Option<u64> {
+    let t = std::fs::read_to_string(format!("/proc/{pid}/limits")).ok()?;
+    let line = t.lines().find(|l| l.starts_with("Max open files"))?;
+    line.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// The pids of the daemon's children: the jobs it started.
+fn job_pids(d: &Daemon) -> Vec<String> {
+    let pid = d.child.id();
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .map(|tasks| {
+            tasks
+                .flatten()
+                .flat_map(|t| {
+                    std::fs::read_to_string(t.path().join("children"))
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(String::from)
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A daemon started with the soft limit 512, with a job running of a caller
+/// whose soft limit is `high` (up to 8,192). Before the daemon started jobs
+/// through `slot __exec`, it raised its own soft limit to `high` for that
+/// job; now the job's process has `high` and the daemon keeps 512. Returns
+/// the daemon, the caller and `high`.
+fn daemon_raised_by_a_running_job() -> (Daemon, Child, u64) {
+    let high = nofile_of("self", 4).min(8192);
+    assert!(high > 1024, "the test needs a hard limit above 1024");
+    let d = start_with_soft_nofile(512);
+    let pid = d.child.id().to_string();
+    assert_eq!(nofile_of(&pid, 3), 512);
+    let caller = caller_with_soft_nofile(&d, high, "sleep 3; ulimit -Sn");
+    d.wait_until(
+        "the caller's job to run with the caller's soft limit",
+        Duration::from_secs(20),
+        |d| {
+            job_pids(d)
+                .iter()
+                .any(|p| soft_nofile_if_alive(p) == Some(high))
+        },
+    );
+    assert_eq!(
+        nofile_of(&pid, 3),
+        512,
+        "the daemon keeps its own soft limit"
+    );
+    (d, caller, high)
+}
+
+/// Story acceptance 1: "`slot sh -c 'ulimit -Sn'` prints the caller's soft
+/// limit". A caller whose limit is lower than the daemon's soft limit at
+/// that moment (raised for another caller's job before) gets it by `prlimit`
+/// after the spawn, and the job's first instructions run before that: the
+/// job reads the daemon's raised limit. Five tries, each must print the
+/// caller's.
+#[test]
+fn a_caller_with_a_lower_limit_than_the_daemons_reads_its_own_from_the_first_instruction() {
+    const MID: u64 = 1024;
+    let (d, caller, high) = daemon_raised_by_a_running_job();
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        let c = caller_with_soft_nofile(&d, MID, "ulimit -Sn");
+        let done = wait_all(vec![("mid".into(), c)], Duration::from_secs(20));
+        assert_eq!(done[0].1, 0, "{}", done[0].3);
+        seen.push(done[0].2.trim().to_string());
+    }
+    let done = wait_all(vec![("caller".into(), caller)], Duration::from_secs(20));
+    assert_eq!(done[0].2, format!("{high}\n"), "{}", done[0].3);
+    assert_eq!(
+        seen,
+        vec![MID.to_string(); 5],
+        "a caller with the soft limit {MID} read the daemon's raised {high} in its job"
+    );
+}
+
+/// `website/docs/reference/environment.md`: "A request without a limit (a
+/// client older than this feature) runs with the limit the daemon had when
+/// it started." Story acceptance 2: "a newer daemon runs a request without
+/// it as today". A job of a client with a higher limit raises the daemon's
+/// own soft limit, and a reload re-executes the daemon, which inherits the
+/// raised limit: the new image reads that as its start limit. The job reads
+/// its limit after a pause, after the daemon's `prlimit`.
+#[test]
+fn after_a_reload_a_request_without_a_limit_still_gets_the_daemons_start_limit() {
+    const LOW: u64 = 512;
+    let (d, caller, high) = daemon_raised_by_a_running_job();
+    let before = job_of_an_older_client(&d, "sleep 0.5; ulimit -Sn");
+    assert_eq!(before, format!("{LOW}\n"), "before the reload: {}", d.log());
+
+    d.reload();
+    d.wait_until("the job handed over", Duration::from_secs(20), |d| {
+        d.log().contains("took over 1 running")
+    });
+    let after = job_of_an_older_client(&d, "sleep 0.5; ulimit -Sn");
+
+    let done = wait_all(vec![("caller".into(), caller)], Duration::from_secs(20));
+    assert_eq!(
+        (done[0].1, done[0].2.clone()),
+        (0, format!("{high}\n")),
+        "the caller's job has the caller's limit: {}",
+        done[0].3
+    );
+    assert_eq!(
+        after,
+        format!("{LOW}\n"),
+        "after the reload a request without a limit gets the limit the daemon raised for \
+         another job, not the one it started with"
+    );
+}
+
+/// A caller whose soft limit is lower than the one the daemon started with
+/// reads its own in the job's first instruction (the limit is lowered in
+/// the job's process by `slot __exec` before the job's command runs).
+#[test]
+fn a_caller_with_a_lower_limit_than_the_daemons_start_limit_reads_its_own() {
+    let high = nofile_of("self", 4).min(8192);
+    assert!(high > 1024, "the test needs a hard limit above 1024");
+    let d = start_with_soft_nofile(high);
+    let c = caller_with_soft_nofile(&d, 1000, "ulimit -Sn");
+    let done = wait_all(vec![("low".into(), c)], Duration::from_secs(20));
+    assert_eq!(
+        (done[0].1, done[0].2.as_str()),
+        (0, "1000\n"),
+        "{}",
+        done[0].3
+    );
+}
+
+/// A job started through `slot __exec` is the job's own process: the
+/// daemon's child runs the job's argv in its own process group, its record
+/// keeps that argv, and when its client goes the whole tree ends.
+#[test]
+fn a_job_started_with_its_callers_limit_is_its_own_process_and_ends_with_its_tree() {
+    let script = "sleep 30 & echo $!; wait";
+    let d = start_with_soft_nofile(2048);
+    let mut c = caller_with_soft_nofile(&d, 1000, script);
+    let mut out = BufReader::new(c.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let grandchild = line.trim().to_string();
+    assert!(!grandchild.is_empty(), "{}", d.log());
+
+    // The daemon's children: the job, and what the daemon itself runs
+    // (its samplers); none of them is `slot __exec` any more.
+    let children: Vec<(String, Vec<u8>)> = job_pids(&d)
+        .into_iter()
+        .filter_map(|p| {
+            let line = std::fs::read(format!("/proc/{p}/cmdline")).ok()?;
+            Some((p, line))
+        })
+        .collect();
+    let shown = |l: &[u8]| String::from_utf8_lossy(l).replace('\0', " ");
+    assert!(
+        children
+            .iter()
+            .all(|(_, l)| !l.windows(6).any(|w| w == b"__exec")),
+        "{:?}",
+        children.iter().map(|(_, l)| shown(l)).collect::<Vec<_>>()
+    );
+    let own = format!("sh\0-c\0{script}\0").into_bytes();
+    let root = &children
+        .iter()
+        .find(|(_, l)| *l == own)
+        .unwrap_or_else(|| {
+            panic!(
+                "no child of the daemon runs the job's own argv: {:?}",
+                children.iter().map(|(_, l)| shown(l)).collect::<Vec<_>>()
+            )
+        })
+        .0;
+    let stat = std::fs::read_to_string(format!("/proc/{root}/stat")).unwrap();
+    let after_comm = &stat[stat.rfind(')').unwrap() + 2..];
+    let pgrp = after_comm.split_whitespace().nth(2).unwrap();
+    assert_eq!(pgrp, root, "the job leads its own process group");
+    assert_eq!(soft_nofile_if_alive(&grandchild), Some(1000));
+    assert_eq!(nofile_of(&d.child.id().to_string(), 3), 2048);
+
+    c.kill().unwrap();
+    let _ = c.wait();
+    let gone = |pid: &str| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map_or(true, |s| s[s.rfind(')').unwrap() + 2..].starts_with('Z'))
+    };
+    d.wait_until("the job's tree to end", Duration::from_secs(20), |_| {
+        gone(root) && gone(&grandchild)
+    });
+    d.wait_until("the job's record", Duration::from_secs(20), |d| {
+        !d.logged("sleep 30").is_empty()
+    });
+    let log = std::fs::read_to_string(d.state().join("jobs.jsonl")).unwrap();
+    let rec: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        rec["argv"],
+        serde_json::json!(["sh", "-c", script]),
+        "{log}"
+    );
+}

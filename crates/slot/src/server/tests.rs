@@ -84,6 +84,8 @@ fn config(root: &Path, tokens: usize) -> Config {
             min_idle: Duration::from_secs(7200),
             dry_run: true,
         },
+        disk_free: None,
+        exec_shim: None,
         handover: true,
     }
 }
@@ -625,6 +627,8 @@ fn history_survives_restart() {
             min_idle: Duration::from_secs(7200),
             dry_run: true,
         },
+        disk_free: None,
+        exec_shim: None,
         handover: true,
     })
     .unwrap();
@@ -2476,17 +2480,20 @@ fn the_state_counts_slots_no_job_and_no_live_process_holds_and_since_when() {
     );
 }
 
-/// Declares, inside one test, the figure its daemon reads as the host's busy
-/// CPUs, in tenths of a CPU (negative: no figure), and the function that
-/// reads it. [`Config::cpu_busy`] is a plain function and the tests of this
-/// file run side by side in one process, so each test has a figure of its
-/// own.
+/// Declares, inside one test, the CPUs its daemon reads as busy in the pool,
+/// in tenths of a CPU (negative: no figure), with nothing in the compile
+/// cache or outside, and the function that reads it. [`Config::cpu_busy`]
+/// is a plain function and the tests of this file run side by side in one
+/// process, so each test has a figure of its own.
 macro_rules! host_busy {
     ($cell:ident, $read:ident, $tenths:expr) => {
         static $cell: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($tenths);
-        fn $read() -> Option<f64> {
+        fn $read() -> Option<cpu_limit::Parts> {
             let v = $cell.load(std::sync::atomic::Ordering::SeqCst);
-            (v >= 0).then(|| v as f64 / 10.0)
+            (v >= 0).then(|| cpu_limit::Parts {
+                pool: v as f64 / 10.0,
+                ..cpu_limit::Parts::default()
+            })
         }
     };
 }
@@ -2495,7 +2502,7 @@ macro_rules! host_busy {
 /// held jobs look again every 20 ms.
 fn start_busy(
     tokens: usize,
-    busy: fn() -> Option<f64>,
+    busy: fn() -> Option<cpu_limit::Parts>,
     change: impl FnOnce(&mut Config),
 ) -> Fixture {
     start_cfg(tokens, |c| {
@@ -2568,7 +2575,7 @@ fn a_start_is_held_while_the_host_is_busier_than_the_mark_and_let_go_when_it_fal
         state_of(&f, a) == JobState::Running
     });
     let (second, b) = submit(&f, sh(&f.root, "echo second"));
-    let held = "host busy: 18.4 of 20 CPUs + 1.0 for jobs that just started, mark 17.0";
+    let held = "host busy: pool 18.4 + compile cache 0.0 of 20 CPUs + 1.0 for jobs that just started, mark 17.0";
     wait_for_jobs(&f, "the second job to be held", || reason_of(&f, b) == held);
     assert_eq!(state_of(&f, b), JobState::Queued);
     let told = read_info_until(&second, "waiting");
@@ -2610,7 +2617,7 @@ fn nothing_is_held_under_the_floor_or_under_the_mark() {
     });
     let (c3, j3) = quiet(&f);
     wait_for_jobs(&f, "the third to be held: the floor runs", || {
-        reason_of(&f, j3).starts_with("host busy: 20.0 of 20 CPUs")
+        reason_of(&f, j3).starts_with("host busy: pool 20.0 + compile cache 0.0 of 20 CPUs")
     });
     assert_eq!(running(&f), [j1, j2]);
 
@@ -2653,8 +2660,9 @@ fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first()
         ids.push(id);
     }
     wait_for_jobs(&f, "ten jobs to be held", || {
-        ids.iter()
-            .all(|id| reason_of(&f, *id).starts_with("host busy: 18.4 of 20 CPUs"))
+        ids.iter().all(|id| {
+            reason_of(&f, *id).starts_with("host busy: pool 18.4 + compile cache 0.0 of 20 CPUs")
+        })
     });
     assert_eq!(running(&f), [a]);
     assert_eq!(f.server.cpu_limit_view().held, 10);
@@ -2669,7 +2677,7 @@ fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first()
         running(&f) == [a, ids[0], ids[1]]
             && held_at(
                 &ids[2..],
-                "host busy: 14.5 of 20 CPUs + 3.0 for jobs that just started",
+                "host busy: pool 14.5 + compile cache 0.0 of 20 CPUs + 3.0 for jobs that just started",
             )
     });
     assert_eq!(f.server.cpu_limit_view().held, 8);
@@ -2681,7 +2689,7 @@ fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first()
         running(&f) == [a, ids[0], ids[1], ids[2], ids[3]]
             && held_at(
                 &ids[4..],
-                "host busy: 12.5 of 20 CPUs + 5.0 for jobs that just started",
+                "host busy: pool 12.5 + compile cache 0.0 of 20 CPUs + 5.0 for jobs that just started",
             )
     });
     assert_eq!(f.server.cpu_limit_view().held, 6);
@@ -2710,7 +2718,7 @@ fn a_job_held_for_the_bound_starts_on_a_host_that_stays_busy() {
     );
     assert!(
         r.info.contains(&format!(
-            "slot: job {b} waiting: host busy: 18.4 of 20 CPUs"
+            "slot: job {b} waiting: host busy: pool 18.4 + compile cache 0.0 of 20 CPUs"
         )),
         "{}",
         r.info
@@ -2767,7 +2775,7 @@ fn without_a_mark_a_saturated_host_holds_nothing_and_the_file_is_unchanged() {
     });
     let (c5, j5) = quiet(&f);
     wait_for_jobs(&f, "the fifth to be held", || {
-        reason_of(&f, j5).starts_with("host busy: 20.0 of 20 CPUs")
+        reason_of(&f, j5).starts_with("host busy: pool 20.0 + compile cache 0.0 of 20 CPUs")
     });
     let view = set_cpu_limit(&f, None, None);
     assert_eq!((view.cpu_busy_max, view.cpu_busy_floor), (None, None));
@@ -3215,4 +3223,318 @@ fn adversary_u5_a_job_that_waited_the_bound_stays_unpassable_when_the_clock_step
         "started ahead of a job that had waited the bound; order {:?}",
         order(&f)
     );
+}
+
+// wave w1 u4
+
+/// A Cargo target directory under `root` with a tag and a little content,
+/// that a job of repository `repo` built into long ago.
+fn old_target(f: &Fixture, repo: &str) -> PathBuf {
+    let t = f.root.join("w").join(repo).join("target");
+    std::fs::create_dir_all(&t).unwrap();
+    std::fs::write(
+        t.join("CACHEDIR.TAG"),
+        format!("{}\n", crate::evict::CACHEDIR_SIGNATURE),
+    )
+    .unwrap();
+    std::fs::write(t.join("blob"), vec![0u8; 4096]).unwrap();
+    f.server
+        .inner
+        .lock()
+        .unwrap()
+        .targets
+        .insert(t.clone(), (repo.to_string(), 1));
+    t
+}
+
+/// With `--min-free-disk 50` and `--evict-below 40`, a filesystem at 45 GB
+/// free holds a job for disk; eviction runs at the larger mark, 50 GB, as
+/// soon as the job is held, and the job starts once the pass freed enough.
+#[test]
+fn eviction_starts_at_the_disk_holds_mark_and_the_held_job_starts() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const GB: u64 = crate::admission::GB;
+    static FREE: AtomicU64 = AtomicU64::new(60 * GB);
+    static TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    /// `FREE`, and 20 GB more once the target directory is gone.
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        let gone = TARGET.get().is_some_and(|t| !t.exists());
+        Some(FREE.load(SeqCst) + if gone { 20 * GB } else { 0 })
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 50 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 40 * GB,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+        c.resource_poll = Duration::from_millis(20);
+    });
+    let target = old_target(&f, "old");
+    TARGET.set(target.clone()).unwrap();
+    wait_for_jobs(&f, "the watch's first look", || {
+        f.server.state().evict.checked_ms > 0
+    });
+    assert!(target.exists(), "60 GB free: nothing to delete");
+
+    FREE.store(45 * GB, SeqCst);
+    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let r = collect(c);
+    assert!(
+        r.info.contains(&format!(
+            "slot: job {id} waiting: 45.0 GB free on the filesystem of"
+        )),
+        "held for disk first: {r:?}"
+    );
+    assert!(r.info.contains("builds need 50.0 GB"), "{r:?}");
+    assert_eq!((r.code, r.out.as_str()), (0, "ran\n"), "{r:?}");
+    assert!(!target.exists(), "evicted at 45 GB, under the mark of 50");
+    let e = f.server.state().evict;
+    assert_eq!(e.floor, 50 * GB, "the mark is the larger value");
+    assert_eq!(e.raised_from, 40 * GB, "and it says it was raised");
+    assert_eq!(e.last.len(), 1, "{e:?}");
+    assert_eq!(e.last[0].action, "deleted", "{e:?}");
+}
+
+/// `--evict-below 0` keeps eviction off, whatever `--min-free-disk` is: a
+/// job held for disk deletes nothing.
+#[test]
+fn evict_below_0_stays_off_whatever_the_disk_hold_is() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(45 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 50 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 0,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+        c.resource_poll = Duration::from_millis(20);
+    });
+    let target = old_target(&f, "old");
+    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    wait_for_jobs(&f, "the job to be held for disk", || {
+        reason_of(&f, id).contains("builds need 50.0 GB")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(target.exists(), "eviction is off");
+    let e = f.server.state().evict;
+    assert_eq!((e.floor, e.checked_ms), (0, 0), "{e:?}");
+    drop(c);
+}
+
+/// Declares, inside one test, the three parts of the CPUs its daemon reads
+/// as busy, each in tenths of a CPU, and the function that reads them.
+macro_rules! cpu_parts {
+    ($pool:ident, $cache:ident, $outside:ident, $read:ident, $p:expr, $c:expr, $o:expr) => {
+        static $pool: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($p);
+        static $cache: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($c);
+        static $outside: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($o);
+        fn $read() -> Option<cpu_limit::Parts> {
+            let tenths = |c: &std::sync::atomic::AtomicI64| {
+                c.load(std::sync::atomic::Ordering::SeqCst) as f64 / 10.0
+            };
+            Some(cpu_limit::Parts {
+                pool: tenths(&$pool),
+                compile_cache: tenths(&$cache),
+                outside: tenths(&$outside),
+            })
+        }
+    };
+}
+
+/// With the mark 17 and the floor 6 on a host of 20 CPUs, 10 CPUs busy
+/// outside the pool and the compile cache and 5 inside them do not hold a
+/// queued job; 12 in the pool and 6 in the compile cache do. The wait
+/// reason names the two parts, and `GET /api/cpu-limit` answers the parts
+/// and the CPUs outside both.
+#[test]
+fn the_cpu_limit_counts_the_pool_and_the_compile_cache_not_work_outside_them() {
+    use std::sync::atomic::Ordering::SeqCst;
+    cpu_parts!(POOL, CACHE, OUTSIDE, busy, 30, 20, 100);
+    let f = start_busy(16, busy, |_| {});
+    set_cpu_limit(&f, Some(17.0), Some(6));
+    let mut clients = Vec::new();
+    for _ in 0..6 {
+        clients.push(quiet(&f).0);
+    }
+    wait_for_jobs(&f, "the floor of 6 to run", || running(&f).len() == 6);
+
+    // 3 + 2 inside, 6.0 for the six that just started: 11 of 17. The whole
+    // host, 15 + 6, would be over the mark.
+    let (c, seventh) = quiet(&f);
+    clients.push(c);
+    wait_for_jobs(
+        &f,
+        "the seventh to start: work outside is not counted",
+        || state_of(&f, seventh) == JobState::Running,
+    );
+    assert_eq!(census_events(&f, "cpu_hold").len(), 0);
+
+    POOL.store(120, SeqCst);
+    CACHE.store(60, SeqCst);
+    OUTSIDE.store(15, SeqCst);
+    let (c, eighth) = quiet(&f);
+    clients.push(c);
+    wait_for_jobs(&f, "the eighth to be held for the pool's 18 CPUs", || {
+        reason_of(&f, eighth).starts_with("host busy: pool 12.0 + compile cache 6.0 of 20 CPUs")
+    });
+    let reason = reason_of(&f, eighth);
+    assert!(reason.ends_with(", mark 17.0"), "{reason}");
+    assert_eq!(state_of(&f, eighth), JobState::Queued);
+
+    let v = f.server.cpu_limit_view();
+    assert_eq!(
+        (v.pool, v.compile_cache, v.outside, v.busy, v.held),
+        (Some(12.0), Some(6.0), Some(1.5), Some(19.5), 1)
+    );
+    let (status, text) = get_cpu_limit(&f);
+    assert_eq!(status, 200, "{text}");
+    assert!(
+        text.contains(r#""pool":12.0,"compile_cache":6.0,"outside":1.5"#),
+        "{text}"
+    );
+    end_all(&f, clients);
+}
+
+/// A stand-in for `slot __exec` in `dir`: the lib tests run in the test
+/// harness, not in the slot binary. It takes the same arguments
+/// (`__exec --nofile S:H --arg0 A -- program args`), sets the limit and
+/// execs the program; each call appends its arguments to `dir/calls`.
+/// `slot-cli/tests/handover.rs` runs the real one.
+fn exec_shim(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let calls = dir.join("calls");
+    let script = dir.join("exec-shim");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{}'\n\
+             soft=${{3%%:*}}; hard=${{3##*:}}\n\
+             ulimit -S -n \"$soft\" 2>/dev/null\n\
+             ulimit -H -n \"$hard\" && ulimit -S -n \"$soft\" || exit 126\n\
+             shift 6\n\
+             exec \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// What `ulimit -Sn; ulimit -Hn` prints in a job of a client whose
+/// open-file limit is `nofile`.
+fn job_nofile(f: &Fixture, nofile: Option<crate::proto::FileLimit>) -> Res {
+    let mut req = sh(&f.root, "ulimit -Sn; ulimit -Hn");
+    req.nofile = nofile;
+    run(f, req)
+}
+
+fn limit_line(v: u64) -> String {
+    if v == u64::MAX {
+        "unlimited".into()
+    } else {
+        v.to_string()
+    }
+}
+
+/// A job runs with the open-file limit its client sends, not with the
+/// daemon's, from its first instruction; above the daemon's hard limit it
+/// gets that, and its client is warned once. A request without a limit, or
+/// with the daemon's own, runs with the daemon's and without the shim. The
+/// job record keeps the job's own argv.
+#[test]
+fn a_job_runs_with_the_open_file_limit_of_its_client() {
+    use crate::proto::FileLimit;
+    let shim_dir = tempfile::tempdir().unwrap();
+    let shim = exec_shim(shim_dir.path());
+    let f = start_cfg(2, |c| c.exec_shim = Some(shim));
+    let calls = || std::fs::read_to_string(shim_dir.path().join("calls")).unwrap_or_default();
+    let daemon = FileLimit::of_this_process();
+    for soft in [
+        daemon.soft / 2,
+        daemon.soft.saturating_mul(2).min(daemon.hard),
+    ] {
+        if soft == daemon.soft {
+            continue;
+        }
+        let r = job_nofile(
+            &f,
+            Some(FileLimit {
+                soft,
+                hard: daemon.hard,
+            }),
+        );
+        assert_eq!(r.code, 0, "{r:?}");
+        assert_eq!(
+            r.out,
+            format!("{}\n{}\n", limit_line(soft), limit_line(daemon.hard)),
+            "{r:?}"
+        );
+        assert!(!r.info.contains("open files"), "{r:?}");
+    }
+    assert!(
+        calls().contains(&format!(
+            "__exec --nofile {}:{} --arg0 sh -- ",
+            limit_line(daemon.soft / 2),
+            limit_line(daemon.hard)
+        )),
+        "{}",
+        calls()
+    );
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    for line in log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            v["argv"],
+            serde_json::json!(["sh", "-c", "ulimit -Sn; ulimit -Hn"]),
+            "{line}"
+        );
+    }
+
+    let before = calls();
+    for nofile in [None, Some(daemon)] {
+        let r = job_nofile(&f, nofile);
+        assert_eq!(
+            r.out,
+            format!("{}\n{}\n", limit_line(daemon.soft), limit_line(daemon.hard)),
+            "the daemon's limit: {r:?}"
+        );
+    }
+    assert_eq!(calls(), before, "no shim when nothing changes");
+
+    if daemon.hard < u64::MAX {
+        let r = job_nofile(
+            &f,
+            Some(FileLimit {
+                soft: daemon.hard + 1,
+                hard: u64::MAX,
+            }),
+        );
+        let hard = limit_line(daemon.hard);
+        assert_eq!(r.out, format!("{hard}\n{hard}\n"), "{r:?}");
+        assert_eq!(
+            r.info.matches("slot: warning: open files:").count(),
+            1,
+            "{r:?}"
+        );
+        assert!(
+            r.info.contains(&format!(
+                "the caller's limit is {}, the daemon's hard limit is {hard}: the job gets {hard}",
+                daemon.hard + 1
+            )),
+            "{r:?}"
+        );
+    }
 }

@@ -55,6 +55,32 @@ daemon's environment, plus the variables its [toolchain](../toolchains.md) admit
 in `SLOT_ENV`. A name that looks like a credential (it contains `TOKEN`, `SECRET`, `PASSWORD`,
 `PASSWD`, `CREDENTIAL`, `_KEY` or `AUTH`) crosses only when `SLOT_ENV` names it.
 
+## Open-file limit
+
+A local job runs with the open-file limit (`ulimit -n`, soft and hard) of the process that
+called `slot`, not with the daemon's: a daemon started by systemd has a soft limit of 1,024,
+a login shell often far more. The client sends its limit with the request. Where the caller's
+limit is above the daemon's hard limit, the job gets the daemon's hard limit, and the client
+prints one line:
+
+```text
+slot: warning: open files: the caller's limit is 2000000, the daemon's hard limit is 1000000: the job gets 1000000
+```
+
+The job has its limit from its first instruction on: when it differs from the daemon's, the
+daemon starts the job through the slot binary itself, which sets the limit in the job's
+process and then executes the job's command in its place (same process, same process group).
+The job's record, `slot status` and the web view show the job's own command. The daemon's
+own limit does not change, so a request without a limit (a client older than this feature)
+runs with the limit the daemon was started with, also after a reload.
+
+In remote mode the build server's limit applies: the client does not send its own, and the
+daemon there runs the job with its own limit. A job behind [the gate](../agent-integration.md#builds-in-a-sandbox-the-gate)
+runs in the sandbox with the sandbox's limit.
+
+Not covered: the other limits, among them the stack size (`ulimit -s`), the core file size and
+the number of processes. A job gets the daemon's values of those.
+
 ## Recorded for a rust job
 
 The record of a rust job in the [job log](../how-it-works.md#job-log) has a `cache_env` map with
