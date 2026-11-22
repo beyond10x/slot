@@ -2,14 +2,68 @@
 format: aep.planning-md/3
 id: story:jobs-ask-for-a-share-of-the-cpus
 kind: story
-status: draft
+status: active
 title: A job asks for a share of the CPUs, and the pool admits while that share is free
 summary: admission by CPU share between two bounds, no fixed count of slots
 relations:
 - serves: vision:O2
 - informed_by: story:idle-slots-are-lent-to-the-queue
 - informed_by: story:compile-servers-count-as-pool-load
-revision: 3
+scope:
+- confidence: cited
+  path: crates/slot/src/admission.rs
+- confidence: cited
+  path: crates/slot/src/census.rs
+- confidence: cited
+  path: crates/slot/src/cli.rs
+- confidence: inferred
+  path: crates/slot/src/client.rs
+- confidence: inferred
+  path: crates/slot/src/cpu_limit.rs
+- confidence: inferred
+  path: crates/slot/src/job_parallel.rs
+- confidence: cited
+  path: crates/slot/src/jobserver.rs
+- confidence: cited
+  path: crates/slot/src/policy.rs
+- confidence: cited
+  path: crates/slot/src/proto.rs
+- confidence: inferred
+  path: crates/slot/src/sccache.rs
+- confidence: inferred
+  path: crates/slot/src/server/handover.rs
+- confidence: inferred
+  path: crates/slot/src/server/limits.rs
+- confidence: inferred
+  path: crates/slot/src/server/machine.rs
+- confidence: cited
+  path: crates/slot/src/server/mod.rs
+- confidence: inferred
+  path: crates/slot/src/server/tests.rs
+- confidence: cited
+  path: crates/slot/src/status.rs
+- confidence: cited
+  path: crates/slot/src/toolchain.rs
+- confidence: cited
+  path: crates/slot/src/types.rs
+- confidence: inferred
+  path: docs/design.md
+- confidence: inferred
+  path: ui/src/components/ActiveTable.vue
+- confidence: inferred
+  path: ui/src/components/QueueTable.vue
+- confidence: inferred
+  path: ui/src/generated/types.ts
+- confidence: inferred
+  path: ui/ux/scenarios.ts
+- confidence: inferred
+  path: website/docs/how-it-works.md
+- confidence: inferred
+  path: website/docs/reference/cli.md
+revision: 30
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 5}
 ---
 ## Outcome
 

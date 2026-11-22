@@ -2,11 +2,43 @@
 format: aep.planning-md/3
 id: story:idle-slots-are-lent-to-the-queue
 kind: story
-status: draft
+status: active
 title: A job that leaves its slots idle does not keep the queue waiting
 relations:
 - serves: vision:O2
-revision: 1
+scope:
+- confidence: inferred
+  path: AGENTS.md
+- confidence: inferred
+  path: CHANGELOG.md
+- confidence: cited
+  path: crates/slot/src/cli.rs
+- confidence: cited
+  path: crates/slot/src/jobserver.rs
+- confidence: inferred
+  path: crates/slot/src/server/handover.rs
+- confidence: cited
+  path: crates/slot/src/server/mod.rs
+- confidence: cited
+  path: crates/slot/src/server/tests.rs
+- confidence: cited
+  path: crates/slot/src/status.rs
+- confidence: cited
+  path: crates/slot/src/types.rs
+- confidence: cited
+  path: crates/slot/src/usage.rs
+- confidence: cited
+  path: docs/design.md
+- confidence: inferred
+  path: ui/src/generated/types.ts
+- confidence: inferred
+  path: website/docs/how-it-works.md
+- confidence: inferred
+  path: website/docs/reference/cli.md
+revision: 17
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 3}
 ---
 ## Outcome
 

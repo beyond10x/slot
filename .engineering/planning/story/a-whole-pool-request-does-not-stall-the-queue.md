@@ -2,11 +2,37 @@
 format: aep.planning-md/3
 id: story:a-whole-pool-request-does-not-stall-the-queue
 kind: story
-status: draft
+status: active
 title: A job that asks for every slot does not keep freed slots idle while others wait
 relations:
 - serves: vision:O2
-revision: 1
+scope:
+- confidence: inferred
+  path: CHANGELOG.md
+- confidence: cited
+  path: crates/slot/src/jobserver.rs
+- confidence: cited
+  path: crates/slot/src/server/mod.rs
+- confidence: inferred
+  path: crates/slot/src/server/tests.rs
+- confidence: cited
+  path: crates/slot/src/status.rs
+- confidence: inferred
+  path: crates/slot/src/types.rs
+- confidence: cited
+  path: docs/design.md
+- confidence: cited
+  path: ui/src/components/QueueTable.vue
+- confidence: inferred
+  path: ui/src/generated/types.ts
+- confidence: inferred
+  path: ui/ux/scenarios.ts
+- confidence: cited
+  path: website/docs/how-it-works.md
+revision: 14
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:44Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:44Z", actor: "human:timo", revision: 3}
 ---
 ## Outcome
 

@@ -2,12 +2,34 @@
 format: aep.planning-md/3
 id: story:jobs-run-with-the-callers-open-file-limit
 kind: story
-status: draft
+status: active
 title: A job runs with the open-file limit of the process that called slot
 summary: a command run through slot gets the caller's open-file limit, not the daemon's
 relations:
 - serves: vision:O6
-revision: 1
+scope:
+- confidence: inferred
+  path: AGENTS.md
+- confidence: inferred
+  path: CHANGELOG.md
+- confidence: inferred
+  path: Cargo.toml
+- confidence: cited
+  path: crates/slot/src/client.rs
+- confidence: cited
+  path: crates/slot/src/gate.rs
+- confidence: cited
+  path: crates/slot/src/proto.rs
+- confidence: cited
+  path: crates/slot/src/server/mod.rs
+- confidence: inferred
+  path: crates/slot/src/server/tests.rs
+- confidence: cited
+  path: website/docs/reference/environment.md
+revision: 12
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:44Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:44Z", actor: "human:timo", revision: 3}
 ---
 ## Outcome
 
