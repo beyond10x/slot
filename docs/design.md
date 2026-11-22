@@ -1299,7 +1299,9 @@ while both are true:
     use inside the cache server counts once, here.
   - *compile cache*: the rest of each compile cache server's tree (`sccache` outside every
     job tree, `census::compile_cache_pids`): the server itself and the compilers it runs for
-    builds outside the pool.
+    builds outside the pool. A server is an `sccache` whose parent is the service manager
+    (`systemd`, pid 1); an `sccache` under `cargo` or another build tool is a client, and the
+    compiles and links it runs itself (the calls the server does not cache) count as *outside*.
   - *outside*: every other process; shown, not counted.
 
   The three parts do not overlap and add up to `Sample::host_cores`. The sampler runs once a

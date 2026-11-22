@@ -67,11 +67,12 @@ prints one line:
 slot: warning: open files: the caller's limit is 2000000, the daemon's hard limit is 1000000: the job gets 1000000
 ```
 
-The daemon raises its own soft limit to the job's before it starts the job, so the job has the
-limit from its first instruction on. A job whose limit is lower than the daemon's soft limit at
-that moment gets it set right after the start: a process the job started before that keeps the
-higher limit. A request without a limit (a client older than this feature) runs with the
-limit the daemon had when it started.
+The job has its limit from its first instruction on: when it differs from the daemon's, the
+daemon starts the job through the slot binary itself, which sets the limit in the job's
+process and then executes the job's command in its place (same process, same process group).
+The job's record, `slot status` and the web view show the job's own command. The daemon's
+own limit does not change, so a request without a limit (a client older than this feature)
+runs with the limit the daemon was started with, also after a reload.
 
 In remote mode the build server's limit applies: the client does not send its own, and the
 daemon there runs the job with its own limit. A job behind [the gate](../agent-integration.md#builds-in-a-sandbox-the-gate)

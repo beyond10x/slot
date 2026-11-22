@@ -17,6 +17,9 @@ fn main() -> ExitCode {
         Cmd::Shell(args) => Ok(shell(&args)),
         Cmd::Gate(args) => gate(&args),
         Cmd::Hold(args) => Ok(slot::gate::hold(&args.fifo)),
+        Cmd::Exec(args) => Ok(args
+            .nofile
+            .exec(&args.arg0, &args.command[0], &args.command[1..])),
         Cmd::Run(args) => Ok(build(
             &args.command,
             cli.local,

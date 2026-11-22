@@ -289,7 +289,9 @@ fn cpu_limit_text(mark: f64, floor: usize, cpus: u32) -> String {
         return format!("the CPU limit of {mark:.1} CPUs never holds a start: the host has {cpus}");
     }
     let run = if floor == 1 { "job runs" } else { "jobs run" };
-    format!("starts held while the host is busier than {mark:.1} CPUs and {floor} {run}")
+    format!(
+        "starts held while the pool and the compile cache use more than {mark:.1} CPUs and {floor} {run}"
+    )
 }
 
 /// `slot cpu-limit`: the values in force and the host's busy CPUs now.
@@ -1331,12 +1333,16 @@ mod tests {
         s.cpu_busy_floor = Some(4);
         assert_eq!(
             render(&s),
-            format!("{pool}starts held while the host is busier than 17.0 CPUs and 4 jobs run\n")
+            format!(
+                "{pool}starts held while the pool and the compile cache use more than 17.0 CPUs and 4 jobs run\n"
+            )
         );
         s.cpu_busy_floor = Some(1);
         assert_eq!(
             render(&s),
-            format!("{pool}starts held while the host is busier than 17.0 CPUs and 1 job runs\n")
+            format!(
+                "{pool}starts held while the pool and the compile cache use more than 17.0 CPUs and 1 job runs\n"
+            )
         );
         s.cpu_busy_max = Some(25.0);
         assert_eq!(
@@ -1348,7 +1354,7 @@ mod tests {
         assert!(
             render(&s).ends_with(
                 "outside the pool's slots\n\
-                 starts held while the host is busier than 17.5 CPUs and 1 job runs\n"
+                 starts held while the pool and the compile cache use more than 17.5 CPUs and 1 job runs\n"
             ),
             "{}",
             render(&s)
@@ -1394,21 +1400,21 @@ mod tests {
         };
         assert_eq!(
             render_cpu_limit(&v),
-            "starts held while the host is busier than 17.0 CPUs and 4 jobs run; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 4 jobs run; \
              now 18.4 of 20 CPUs busy, 3 jobs held\n"
         );
         v.held = 1;
         v.cpu_busy_floor = Some(1);
         assert_eq!(
             render_cpu_limit(&v),
-            "starts held while the host is busier than 17.0 CPUs and 1 job runs; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 1 job runs; \
              now 18.4 of 20 CPUs busy, 1 job held\n"
         );
         v.held = 0;
         v.busy = None;
         assert_eq!(
             render_cpu_limit(&v),
-            "starts held while the host is busier than 17.0 CPUs and 1 job runs; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 1 job runs; \
              no sample of the host's CPUs yet\n"
         );
         v.cpu_busy_max = Some(25.0);
@@ -1441,12 +1447,12 @@ mod tests {
         };
         assert_eq!(
             render_cpu_limit(&limits.view(20, Some(parts), 1)),
-            "starts held while the host is busier than 17.0 CPUs and 6 jobs run; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; \
              now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held\n"
         );
         assert_eq!(
             render_cpu_limit(&limits.view(20, None, 0)),
-            "starts held while the host is busier than 17.0 CPUs and 6 jobs run; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; \
              no sample of the host's CPUs yet\n"
         );
     }

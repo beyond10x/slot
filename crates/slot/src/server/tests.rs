@@ -84,6 +84,7 @@ fn config(root: &Path, tokens: usize) -> Config {
             dry_run: true,
         },
         disk_free: None,
+        exec_shim: None,
         handover: true,
     }
 }
@@ -625,6 +626,7 @@ fn history_survives_restart() {
             dry_run: true,
         },
         disk_free: None,
+        exec_shim: None,
         handover: true,
     })
     .unwrap();
@@ -3087,10 +3089,37 @@ fn the_cpu_limit_counts_the_pool_and_the_compile_cache_not_work_outside_them() {
     end_all(&f, clients);
 }
 
+/// A stand-in for `slot __exec` in `dir`: the lib tests run in the test
+/// harness, not in the slot binary. It takes the same arguments
+/// (`__exec --nofile S:H --arg0 A -- program args`), sets the limit and
+/// execs the program; each call appends its arguments to `dir/calls`.
+/// `slot-cli/tests/handover.rs` runs the real one.
+fn exec_shim(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let calls = dir.join("calls");
+    let script = dir.join("exec-shim");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{}'\n\
+             soft=${{3%%:*}}; hard=${{3##*:}}\n\
+             ulimit -S -n \"$soft\" 2>/dev/null\n\
+             ulimit -H -n \"$hard\" && ulimit -S -n \"$soft\" || exit 126\n\
+             shift 6\n\
+             exec \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
 /// What `ulimit -Sn; ulimit -Hn` prints in a job of a client whose
-/// open-file limit is `nofile`; the job sleeps `delay` first.
-fn job_nofile(f: &Fixture, nofile: Option<crate::proto::FileLimit>, delay: &str) -> Res {
-    let mut req = sh(&f.root, &format!("sleep {delay}; ulimit -Sn; ulimit -Hn"));
+/// open-file limit is `nofile`.
+fn job_nofile(f: &Fixture, nofile: Option<crate::proto::FileLimit>) -> Res {
+    let mut req = sh(&f.root, "ulimit -Sn; ulimit -Hn");
     req.nofile = nofile;
     run(f, req)
 }
@@ -3104,44 +3133,69 @@ fn limit_line(v: u64) -> String {
 }
 
 /// A job runs with the open-file limit its client sends, not with the
-/// daemon's; above the daemon's hard limit it gets that, and its client is
-/// warned once. A request without a limit runs with the daemon's.
+/// daemon's, from its first instruction; above the daemon's hard limit it
+/// gets that, and its client is warned once. A request without a limit, or
+/// with the daemon's own, runs with the daemon's and without the shim. The
+/// job record keeps the job's own argv.
 #[test]
 fn a_job_runs_with_the_open_file_limit_of_its_client() {
     use crate::proto::FileLimit;
-    let f = start(2);
+    let shim_dir = tempfile::tempdir().unwrap();
+    let shim = exec_shim(shim_dir.path());
+    let f = start_cfg(2, |c| c.exec_shim = Some(shim));
+    let calls = || std::fs::read_to_string(shim_dir.path().join("calls")).unwrap_or_default();
     let daemon = FileLimit::of_this_process();
-    // A raise when there is room under the hard limit (the job has it from
-    // its start); else a lower limit, set just after the start, which the
-    // job reads after a pause.
-    let (soft, delay) = if daemon.soft < daemon.hard {
-        (daemon.soft.saturating_mul(2).min(daemon.hard), "0")
-    } else {
-        (daemon.soft / 2, "0.2")
-    };
-    assert_ne!(soft, daemon.soft);
-    let r = job_nofile(
-        &f,
-        Some(FileLimit {
-            soft,
-            hard: daemon.hard,
-        }),
-        delay,
+    for soft in [
+        daemon.soft / 2,
+        daemon.soft.saturating_mul(2).min(daemon.hard),
+    ] {
+        if soft == daemon.soft {
+            continue;
+        }
+        let r = job_nofile(
+            &f,
+            Some(FileLimit {
+                soft,
+                hard: daemon.hard,
+            }),
+        );
+        assert_eq!(r.code, 0, "{r:?}");
+        assert_eq!(
+            r.out,
+            format!("{}\n{}\n", limit_line(soft), limit_line(daemon.hard)),
+            "{r:?}"
+        );
+        assert!(!r.info.contains("open files"), "{r:?}");
+    }
+    assert!(
+        calls().contains(&format!(
+            "__exec --nofile {}:{} --arg0 sh -- ",
+            limit_line(daemon.soft / 2),
+            limit_line(daemon.hard)
+        )),
+        "{}",
+        calls()
     );
-    assert_eq!(r.code, 0, "{r:?}");
-    assert_eq!(
-        r.out,
-        format!("{}\n{}\n", limit_line(soft), limit_line(daemon.hard)),
-        "{r:?}"
-    );
-    assert!(!r.info.contains("open files"), "{r:?}");
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    for line in log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            v["argv"],
+            serde_json::json!(["sh", "-c", "ulimit -Sn; ulimit -Hn"]),
+            "{line}"
+        );
+    }
 
-    let r = job_nofile(&f, None, "0.2");
-    assert_eq!(
-        r.out.lines().next(),
-        Some(limit_line(daemon.soft).as_str()),
-        "no limit sent: the daemon's: {r:?}"
-    );
+    let before = calls();
+    for nofile in [None, Some(daemon)] {
+        let r = job_nofile(&f, nofile);
+        assert_eq!(
+            r.out,
+            format!("{}\n{}\n", limit_line(daemon.soft), limit_line(daemon.hard)),
+            "the daemon's limit: {r:?}"
+        );
+    }
+    assert_eq!(calls(), before, "no shim when nothing changes");
 
     if daemon.hard < u64::MAX {
         let r = job_nofile(
@@ -3150,7 +3204,6 @@ fn a_job_runs_with_the_open_file_limit_of_its_client() {
                 soft: daemon.hard + 1,
                 hard: u64::MAX,
             }),
-            "0",
         );
         let hard = limit_line(daemon.hard);
         assert_eq!(r.out, format!("{hard}\n{hard}\n"), "{r:?}");

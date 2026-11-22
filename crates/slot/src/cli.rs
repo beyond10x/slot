@@ -81,6 +81,11 @@ pub enum Cmd {
     /// the sandboxed client closes the FIFO. Started by the daemon only.
     #[command(hide = true)]
     Hold(HoldArgs),
+    /// The process the daemon starts for a job whose open-file limit is not
+    /// its own: sets the limit, then executes the job's program in its
+    /// place (same pid, same process group). Started by the daemon only.
+    #[command(name = "__exec", hide = true)]
+    Exec(ExecArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -285,6 +290,20 @@ pub struct GateArgs {
 pub struct HoldArgs {
     /// The job's hold FIFO in a gate directory.
     pub fifo: PathBuf,
+}
+
+/// `slot __exec` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct ExecArgs {
+    /// The open-file limit, `SOFT:HARD`; `unlimited` for either.
+    #[arg(long, value_name = "SOFT:HARD", value_parser = crate::proto::FileLimit::parse)]
+    pub nofile: crate::proto::FileLimit,
+    /// The name the program sees as its own (`argv[0]`).
+    #[arg(long)]
+    pub arg0: OsString,
+    /// The program, a resolved path, and its arguments.
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    pub command: Vec<OsString>,
 }
 
 /// `slot run` arguments.
@@ -613,6 +632,7 @@ impl ServeArgs {
                 dry_run: self.evict_dry_run,
             },
             disk_free: None,
+            exec_shim: Some(PathBuf::from("/proc/self/exe")),
             handover: self.handover,
         })
     }
@@ -639,6 +659,39 @@ mod tests {
             panic!("not serve")
         };
         assert!(a.evict_dry_run);
+    }
+
+    #[test]
+    fn the_exec_shim_takes_the_jobs_argv_as_it_is() {
+        let cli = parse(&[
+            "__exec",
+            "--nofile",
+            "256:unlimited",
+            "--arg0",
+            "cc",
+            "--",
+            "/usr/bin/sh",
+            "-c",
+            "--nofile 1",
+            "--",
+        ])
+        .unwrap();
+        let Cmd::Exec(a) = cli.command else {
+            panic!("not __exec")
+        };
+        assert_eq!(
+            a.nofile,
+            crate::proto::FileLimit {
+                soft: 256,
+                hard: u64::MAX
+            }
+        );
+        assert_eq!(a.arg0, "cc");
+        assert_eq!(a.command, ["/usr/bin/sh", "-c", "--nofile 1", "--"]);
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("__exec"), "hidden: {help}");
     }
 
     #[test]

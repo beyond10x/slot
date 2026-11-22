@@ -126,15 +126,54 @@ impl FileLimit {
             .map_err(Into::into)
     }
 
-    /// Makes this the open-file limit of process `pid` (`prlimit`). What
-    /// that process started before keeps the limit it had.
-    pub fn set_for(self, pid: i32) -> std::io::Result<()> {
-        let Some(pid) = rustix::process::Pid::from_raw(pid) else {
-            return Err(std::io::ErrorKind::InvalidInput.into());
+    /// `SOFT:HARD`, `unlimited` for either: the value of `slot __exec
+    /// --nofile`.
+    pub fn arg(self) -> String {
+        format!("{}:{}", limit_text(self.soft), limit_text(self.hard))
+    }
+
+    /// Reads [`FileLimit::arg`].
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let one = |v: &str| match v {
+            "unlimited" => Ok(u64::MAX),
+            _ => v
+                .parse::<u64>()
+                .map_err(|_| format!("`{v}` is not a number of files or `unlimited`")),
         };
-        rustix::process::prlimit(Some(pid), rustix::process::Resource::Nofile, self.rlimit())
-            .map(drop)
-            .map_err(Into::into)
+        let (soft, hard) = s
+            .split_once(':')
+            .ok_or_else(|| format!("`{s}` is not SOFT:HARD"))?;
+        let l = Self {
+            soft: one(soft)?,
+            hard: one(hard)?,
+        };
+        if l.soft > l.hard {
+            return Err(format!("`{s}`: the soft limit is above the hard limit"));
+        }
+        Ok(l)
+    }
+
+    /// `slot __exec`: makes this the open-file limit of this process, then
+    /// executes `program` with `args` in its place, under the name `arg0`.
+    /// The pid, the process group and the environment stay, so the daemon
+    /// sees the job's own program from here on. Returns only when the
+    /// program could not be executed: the code to exit with.
+    pub fn exec(
+        self,
+        arg0: &std::ffi::OsStr,
+        program: &std::ffi::OsStr,
+        args: &[std::ffi::OsString],
+    ) -> i32 {
+        use std::os::unix::process::CommandExt as _;
+        if let Err(e) = self.set_for_this_process() {
+            eprintln!("slot: open-file limit {} not set: {e}", self.arg());
+        }
+        let e = std::process::Command::new(program)
+            .arg0(arg0)
+            .args(args)
+            .exec();
+        eprintln!("slot: {}: {e}", arg0.to_string_lossy());
+        127
     }
 
     /// The limit a job of a caller with this limit gets from a daemon whose
@@ -314,5 +353,17 @@ mod tests {
             l(8192, u64::MAX).for_job(u64::MAX),
             (l(8192, u64::MAX), None)
         );
+    }
+
+    #[test]
+    fn the_exec_shim_reads_the_limit_it_is_given() {
+        let l = |soft, hard| FileLimit { soft, hard };
+        for limit in [l(256, 4096), l(1024, u64::MAX), l(u64::MAX, u64::MAX)] {
+            assert_eq!(FileLimit::parse(&limit.arg()), Ok(limit));
+        }
+        assert_eq!(l(1024, u64::MAX).arg(), "1024:unlimited");
+        for bad in ["1024", "a:b", "4096:256", ":1"] {
+            assert!(FileLimit::parse(bad).is_err(), "{bad}");
+        }
     }
 }

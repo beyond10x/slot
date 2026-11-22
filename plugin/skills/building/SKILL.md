@@ -92,7 +92,7 @@ build processes per job` in its header). The job then has `CARGO_BUILD_JOBS` and
 set by the daemon. Do not override them, and do not pass `-j` yourself.
 
 A pool may hold the start of a queued job while its own jobs and the compile cache use many CPUs
-(`slot status` shows `starts held while the host is busier than N CPUs` in its header, and the
+(`slot status` shows `starts held while the pool and the compile cache use more than N CPUs` in its header, and the
 job's line says `host busy: pool … + compile cache … of … CPUs, mark …`). The job starts when
 the pool has room, after 10 minutes at the latest. It is waiting, not hung: do not cancel it and
 start it again, and do not run it outside the pool.

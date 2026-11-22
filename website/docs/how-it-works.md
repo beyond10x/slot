@@ -390,7 +390,7 @@ What is counted:
   between two samples is not in it. `slot cpu-limit` prints both parts and the CPUs outside them:
 
   ```text
-  starts held while the host is busier than 17.0 CPUs and 6 jobs run; now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held
+  starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held
   ```
 - **Jobs that just started.** A job that started in the last 30 seconds counts with the CPUs it
   is expected to use, less what the figure already shows of it. Without this every held job would
@@ -408,7 +408,7 @@ slot: job 12 waiting: host busy: pool 12.0 + compile cache 6.0 of 20 CPUs, mark 
 slot: job 13 waiting: host busy: pool 9.5 + compile cache 5.0 of 20 CPUs + 3.0 for jobs that just started, mark 17.0
 ```
 
-While the limit is on, `slot status` has the line `starts held while the host is busier than 17.0
+While the limit is on, `slot status` has the line `starts held while the pool and the compile cache use more than 17.0
 CPUs and 4 jobs run`. The check runs every 2 seconds and once more when the job has its slots, so
 a change of the mark reaches the queued jobs within 2 seconds, without a reload.
 

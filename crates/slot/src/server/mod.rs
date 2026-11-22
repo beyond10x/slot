@@ -143,6 +143,11 @@ pub struct Config {
     /// Free bytes on the filesystem of a path, for the disk hold and
     /// eviction. `None` asks the filesystem, as everywhere outside tests.
     pub disk_free: Option<fn(&Path) -> Option<u64>>,
+    /// The program that understands `slot __exec`, for a job whose
+    /// open-file limit is not the daemon's: `/proc/self/exe` (the daemon's
+    /// own image, also once the file was replaced) outside tests. `None`
+    /// runs every job with the daemon's limit.
+    pub exec_shim: Option<PathBuf>,
     /// On reload, hand running and queued jobs to the new binary instead of
     /// waiting for an idle pool (`handover`); the bounded hold is the fallback.
     pub handover: bool,
@@ -1933,10 +1938,29 @@ impl Server {
             Ok(p) => p,
             Err(e) => return self.finish(id, &tx, failed(format!("slot: {e}"))).ok(),
         };
-        let mut cmd = Command::new(&program);
-        cmd.arg0(&argv[0])
-            .args(&argv[1..])
-            .current_dir(&cwd)
+        // A job whose open-file limit is not the daemon's starts as `slot
+        // __exec`, which sets the limit in the job's own process and then
+        // executes the program in its place: the job has the limit from its
+        // first instruction, and nothing runs between fork and exec here.
+        let nofile = job_file_limit(&req, &tx);
+        let mut cmd = if let (Some(limit), Some(shim)) = (nofile, &self.cfg.exec_shim) {
+            let mut c = Command::new(shim);
+            c.arg0("slot")
+                .arg("__exec")
+                .arg("--nofile")
+                .arg(limit.arg())
+                .arg("--arg0")
+                .arg(&argv[0])
+                .arg("--")
+                .arg(&program)
+                .args(&argv[1..]);
+            c
+        } else {
+            let mut c = Command::new(&program);
+            c.arg0(&argv[0]).args(&argv[1..]);
+            c
+        };
+        cmd.current_dir(&cwd)
             .env_clear()
             .envs(env.iter().filter_map(|e| e.split_once('=')))
             .stdin(Stdio::null())
@@ -1950,7 +1974,6 @@ impl Server {
                 msg: format!("slot: warning: {w}"),
             });
         }
-        let nofile = job_file_limit(&req, &tx);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1960,9 +1983,6 @@ impl Server {
             }
         };
         let pid = child.id() as i32;
-        // A limit lower than the daemon's own soft one, or a lower hard
-        // limit, takes effect only now, on the running job.
-        let _ = nofile.set_for(pid);
         let pipes = [
             child.stdout.take().map(OwnedFd::from),
             child.stderr.take().map(OwnedFd::from),
@@ -4033,46 +4053,25 @@ fn evict_pass_with(
     (free, out)
 }
 
-/// The daemon's open-file limit before it raised its own for a job: what a
-/// job whose client sent none runs with.
-static START_NOFILE: std::sync::OnceLock<crate::proto::FileLimit> = std::sync::OnceLock::new();
-
-/// Held while the daemon reads and raises its own open-file limit, so two
-/// jobs that start at once do not lower each other's.
-static NOFILE_RAISE: Mutex<()> = Mutex::new(());
-
-/// The open-file limit job `req` runs with: its client's, capped at the
-/// daemon's hard limit (one `slot: warning:` on `tx` when it is capped), or
-/// for a request without one (a remote request, an older client) the
-/// daemon's limit before any raise. When the job's soft limit is above the
-/// daemon's own, the daemon raises its own first, so the job inherits it
-/// from its first instruction; a lower limit is set on the job after it
-/// started ([`crate::proto::FileLimit::set_for`]). No `unsafe`: nothing
-/// runs between fork and exec.
-fn job_file_limit(req: &Request, tx: &mpsc::UnboundedSender<Frame>) -> crate::proto::FileLimit {
-    use crate::proto::FileLimit;
-    let start = *START_NOFILE.get_or_init(FileLimit::of_this_process);
-    let Some(want) = req.job_nofile() else {
-        return start;
-    };
-    let _raising = NOFILE_RAISE.lock().expect("nofile lock");
-    let own = FileLimit::of_this_process();
+/// The open-file limit job `req` runs with when it is not the daemon's
+/// own: its client's, capped at the daemon's hard limit (one `slot:
+/// warning:` on `tx` when it is capped). `None` for a request without one
+/// (a remote request, an older client) and for a limit equal to the
+/// daemon's: the job inherits the daemon's, which the daemon never changes,
+/// so it is the limit the daemon started with, also after a reload.
+fn job_file_limit(
+    req: &Request,
+    tx: &mpsc::UnboundedSender<Frame>,
+) -> Option<crate::proto::FileLimit> {
+    let want = req.job_nofile()?;
+    let own = crate::proto::FileLimit::of_this_process();
     let (job, warning) = want.for_job(own.hard);
     if let Some(w) = warning {
         let _ = tx.send(Frame::Info {
             msg: format!("slot: warning: {w}"),
         });
     }
-    if job.soft > own.soft {
-        let raised = FileLimit {
-            soft: job.soft,
-            hard: own.hard,
-        };
-        if let Err(e) = raised.set_for_this_process() {
-            eprintln!("slot: open-file limit not raised to {}: {e}", job.soft);
-        }
-    }
-    job
+    (job != own).then_some(job)
 }
 
 /// Notes that `job` built into its target directory.

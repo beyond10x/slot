@@ -159,6 +159,9 @@ pub fn load1() -> f64 {
 #[derive(Debug, Clone)]
 struct Known {
     start: u64,
+    /// The process name it was classified under: a process that executes
+    /// another program (`slot __exec`, a wrapper) keeps its pid and start.
+    comm: String,
     class: Option<&'static str>,
     session: String,
 }
@@ -296,6 +299,7 @@ impl Census {
     fn classify(&mut self, p: &Proc) -> Known {
         if let Some(k) = self.known.get(&p.pid)
             && k.start == p.start
+            && k.comm == p.comm
         {
             return k.clone();
         }
@@ -307,6 +311,7 @@ impl Census {
         };
         let k = Known {
             start: p.start,
+            comm: p.comm.clone(),
             class,
             session,
         };
@@ -320,11 +325,24 @@ impl Census {
 /// that is not in `managed` and whose parent is not, with its whole tree,
 /// less the pids in `managed` (the compilers it runs for a job, which count
 /// for that job).
+///
+/// A server is a process of that name whose parent is the service manager
+/// (`systemd`, pid 1, or a parent no longer there): a server detaches from
+/// the client that started it. A process of that name under a build tool
+/// (`cargo`, `make`, another `sccache`) is a client, and the compiles and
+/// links it runs itself, the ones the server does not cache, are work
+/// outside the pool.
 #[allow(clippy::implicit_hasher)]
 pub fn compile_cache_pids(s: &Snapshot, servers: &[&str], managed: &HashSet<i32>) -> HashSet<i32> {
+    let comm: HashMap<i32, &str> = s.procs().map(|p| (p.pid, p.comm.as_str())).collect();
+    let parent: HashMap<i32, i32> = s.procs().map(|p| (p.pid, p.ppid)).collect();
+    let detached = |pid: &i32| {
+        let ppid = parent.get(pid).copied().unwrap_or(0);
+        ppid <= 1 || comm.get(&ppid).is_none_or(|c| *c == "systemd")
+    };
     let mut out = HashSet::new();
     for name in servers {
-        for d in s.daemons(name, managed) {
+        for d in s.daemons(name, managed).into_iter().filter(detached) {
             out.extend(
                 s.tree(d)
                     .iter()
@@ -644,5 +662,80 @@ mod tests {
     fn parses_psi() {
         let t = "some avg10=12.50 avg60=7.95 avg300=24.10 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
         assert!((psi_some_avg10(t) - 12.5).abs() < 1e-9);
+    }
+
+    /// A job started through `slot __exec` is sampled once as `slot` and
+    /// then, same pid and start, as the job's program: it is classified
+    /// again. Pid above the kernel's `pid_max`.
+    #[test]
+    fn a_process_that_executes_another_program_is_classified_again() {
+        const JOB: i32 = 9_200_001;
+        let snap = |comm: &str, ticks: u64| {
+            let mut s = Snapshot::default();
+            s.insert(crate::procstat::Proc {
+                pid: JOB,
+                ppid: 1,
+                ticks,
+                rss: 0,
+                comm: comm.into(),
+                start: 7,
+            });
+            s
+        };
+        let managed: HashSet<i32> = [JOB].into();
+        let mut c = Census::default();
+        c.sample(&snap("slot", 0), &managed, &HashSet::new(), 1.0);
+        let s = c.sample(&snap("rustc", 100), &managed, &HashSet::new(), 1.0);
+        assert!(
+            s.classes.contains_key(&("rust-compile", true)),
+            "{:?}",
+            s.classes
+        );
+    }
+
+    // adversary u4
+
+    /// A build outside the pool runs `RUSTC_WRAPPER=sccache`: cargo starts
+    /// an sccache *client* per compile, and the client runs every call the
+    /// server answers `UnhandledCompile` (not cacheable: bins, tests, links)
+    /// itself, as its own child. That is work outside the pool, not the
+    /// compile cache server's tree (`docs/design.md` § 24, *compile cache*:
+    /// "the rest of each compile cache server's tree"). Only the server
+    /// (parent: the service manager) and its compilers are the compile cache.
+    #[test]
+    fn an_sccache_client_of_a_build_outside_the_pool_is_not_the_compile_cache() {
+        const SERVER: i32 = 9_100_010;
+        const FOR_OTHERS: i32 = 9_100_011;
+        const CARGO: i32 = 9_100_020;
+        const CLIENT: i32 = 9_100_021;
+        const LOCAL_LINK: i32 = 9_100_022;
+        let proc = |pid: i32, ppid: i32, comm: &str, ticks: u64| crate::procstat::Proc {
+            pid,
+            ppid,
+            ticks,
+            rss: 0,
+            comm: comm.into(),
+            start: 0,
+        };
+        let snap = |t: u64| {
+            let mut s = Snapshot::default();
+            s.insert(proc(SERVER, 1, "sccache", t));
+            s.insert(proc(FOR_OTHERS, SERVER, "rustc", t * 2));
+            s.insert(proc(CARGO, 1, "cargo", t));
+            s.insert(proc(CLIENT, CARGO, "sccache", 0));
+            s.insert(proc(LOCAL_LINK, CLIENT, "rustc", t * 8));
+            s
+        };
+        let managed = HashSet::new();
+        let cache = compile_cache_pids(&snap(0), &["sccache"], &managed);
+        let mut c = Census::default();
+        c.sample(&snap(100), &managed, &cache, 1.0);
+        let p = c.sample(&snap(200), &managed, &cache, 1.0).parts();
+        assert_eq!(
+            cache,
+            [SERVER, FOR_OTHERS].into(),
+            "an outside build's sccache client and the link it runs are not the compile cache \
+             (parts {p:?})"
+        );
     }
 }
