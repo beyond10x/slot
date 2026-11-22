@@ -17,6 +17,28 @@
   beside the headroom; `GET` and `PUT /api/run-limit` read and change them; `slot status` shows
   the limit when one is set.
 
+## 0.21.1 — 2026-11-22
+
+- Lost build slots come back while other processes have the pool open. A process killed with
+  jobserver tokens in hand (a cancel, a `timeout`, a watcher that kills by run time) took them
+  with it, and the daemon wrote them back only while no process but itself had the pool's FIFO
+  open, which a busy pool never reaches: tokens stayed lost for up to 173 minutes, and after 12
+  jobs were killed at once at least 19 to 23 of 50 slots were held by no live process while 30
+  or more jobs waited. Every 15 s the daemon now counts the most each live process with the FIFO
+  open can hold (for `cargo`, `make` and `ninja` its child processes less one, for any other
+  process the larger of its child processes and threads less one, and one more for a process
+  with several threads) and writes back what is missing beyond that, the smaller of two counts
+  in a row: within 45 s. What a live process can hold by that count is never written back,
+  however long the process holds it, and whether its children are compilers or clients of a
+  compile server.
+- More tokens in circulation than the pool has (a slot released twice) are taken out within
+  45 s while jobs run; before, only when no job ran. Journal line, census event
+  `tokens_removed`.
+- `slot status` shows `lost slots: <n> that no job and no live process holds, oldest for <time>`
+  between the two counts; `/api/state` carries `tokens_unaccounted` and
+  `tokens_unaccounted_since_ms`, `/metrics` the gauge `slot_tokens_unaccounted`. The census
+  event `tokens_restored` also names `holders` and `bound`.
+
 ## 0.21.0 — 2026-11-22
 
 - The delay after which a waiting `normal` or `low` job counts as `high` changes while the daemon

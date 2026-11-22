@@ -128,14 +128,37 @@ When no job runs and none waits, every token must be back in the FIFO. The daemo
 restores tokens that a killed process took with it, or removes surplus ones, and logs
 `slot: jobserver reconciled by <n> tokens`.
 
-A busy pool is never idle, so the daemon also checks every 15 seconds while jobs wait and the FIFO
-is empty. If no process but the daemon has the FIFO open, every token must be in the FIFO, held
-back for headroom, granted to a running job, or taken by the first queued request; what is missing
-was taken by a compiler that was killed (a cancel, a `timeout`). The daemon writes the smaller of
-two shortfalls 15 seconds apart back and logs
+A busy pool is never idle, so the daemon also counts every 15 seconds while jobs run. A token is
+in the FIFO, held back for headroom, granted to a running job, taken by the first queued request,
+or in a process that has the FIFO open. What is in none of these was taken by a process that was
+killed (a cancel, a `timeout`).
+
+The daemon cannot read how many tokens a live process holds, so it counts the most each can hold
+and never writes back a token a live process may have:
+
+| process with the FIFO open | counts for |
+|---|---|
+| `cargo`, `make` or `ninja` | its child processes, less one |
+| any other process, such as `rustc` | the larger of its child processes and its threads, less one |
+| either, with more than one thread | one more |
+
+The first unit of work runs on the token the process was started with, hence "less one". The
+child processes count whatever they are: a `cargo` whose children are sccache clients holds a
+token for each after the first, with no compiler below it. A process that holds its tokens for
+minutes without using a CPU keeps its share; only its end removes it.
+
+What is missing beyond that sum is lost. The daemon writes the smaller of two such shortfalls
+15 seconds apart back, so a lost token is in circulation again within 45 seconds, and logs
 `slot: <n> jobserver token(s) were lost … wrote them back`; `/metrics` counts them in
-`slot_tokens_restored_total`. While any process has the FIFO open (a compiler, or a cargo nested in
-a job that inherited the jobserver) it cannot tell a lost token from one in use, so it waits.
+`slot_tokens_restored_total`. Between the two counts `slot status` shows
+`lost slots: <n> that no job and no live process holds, oldest for <time>`, and `/metrics` the
+gauge `slot_tokens_unaccounted`. Because the count per process is an upper bound, up to one lost
+token for each process with several threads stays out until such a process ends.
+
+The same count finds a surplus: more tokens than the pool has, after a slot was released twice.
+The daemon takes out the smaller of two surpluses 15 seconds apart, from the FIFO or as the next
+tokens come back, and logs
+`slot: <n> jobserver token(s) more than the pool's <size> … took them out`.
 
 ## Run-time limit
 

@@ -367,7 +367,18 @@ run_limit_s?: number,
  * The most a job may name with `slot --timeout`, seconds; absent from a
  * daemon without the run-time limit.
  */
-run_limit_max_s?: number, };
+run_limit_max_s?: number, 
+/**
+ * Tokens that neither a job nor a live process with the pool open
+ * accounts for, as the daemon counted them last: lost, and written back
+ * once two counts in a row agree. 0 from a daemon that predates it.
+ */
+tokens_unaccounted: number, 
+/**
+ * Since when tokens are unaccounted for, Unix milliseconds; 0 while
+ * there are none.
+ */
+tokens_unaccounted_since_ms: number, };
 
 export type By = "project" | "repo" | "session";
 
