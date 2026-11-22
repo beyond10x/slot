@@ -124,6 +124,9 @@ Change this repository in a managed worktree (`worktree create --repo ../slot --
 Run `git fetch origin` first and pass `--base origin/main`: the default base is the local
 `HEAD`, and a local `main` that was not pulled gives a tree many releases old (a UX round
 and a review were once started on 0.10.0 while `origin/main` was 0.19.0).
+Pass `--seed-target` (`worktree` 0.21.0 and later; `WORKTREE_SEED_TARGET=1` does the same): it
+copies the dependency artifacts of the repository's newest built checkout into the new tree's
+`target/`, so the first `cargo` call there does not compile every dependency again.
 Build with `CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0`, and finish the tree
 with `worktree finish --discard-cache --archive` when the change is merged.
 
@@ -233,7 +236,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.20.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.21.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 admission by disk and memory, headroom and call mode, headroom of the machine, slots named by the
 job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, the gate for builds in a sandbox, handover on reload, lost-token
 recovery, and eviction of local target directories (deletes by default, `evict.json` sets a dry run).
@@ -304,6 +307,38 @@ Open, one line each, with where the design lives. A session starts with (e).
   a script job (`task check`) records no target directory, so its inner cargo still blocks on
   the lock of a running build.
 - (t) The web view has no dark theme.
+- (u) The pool size (`slot serve --tokens`) changes only at a full restart, and a restart drains:
+  the old daemon runs every running and queued job to its end under the old size, while new
+  calls find no socket and run outside the pool, unrecorded. Measured with 69 jobs: about 4 ended
+  a minute. The pool size belongs in `limits.json` beside the headroom, changed by a command.
+- (v) Script jobs hold slots they do not use: over 3 hours, 256 jobs whose command was a script
+  held 60 % of the slot-hours at 0.74 CPUs per slot (plain `cargo` jobs: 1.47), and 63 of them
+  ran over 5 minutes. One sample had every slot of 17 taken, 59 jobs queued and the pool at
+  7.8 CPUs. The same cause as (i). 100 of the 256 named no repository, so no priority rule and
+  no usage row matched them.
+- (w) After `slot: job N queued` the client prints nothing until the job starts, so a shell that
+  waits 30 minutes looks hung. It should print the place in the queue from time to time.
+- (x) Priority rules that put the busiest repositories on `high` make every other job wait for
+  the promotion delay: in 40 minutes 55 of 62 `normal` jobs started only promoted, median wait
+  1,841 s, while `high` jobs waited 204 s. The delay is a setting now
+  (`slot priority promote-after`); the default is still 1800 s, and levels are strict, not shares.
+- (y) The usage table labels a row `unverified` without saying what it means: the job named no
+  checkout and its project was not read from a git remote, so the name is the directory's.
+- (z) The default pool size is the number of CPUs, on the assumption that a slot keeps one CPU
+  busy. Measured on a host of 20 CPUs: 0.90 CPUs per slot over 3 hours, a quarter of the
+  slot-hours in jobs under 0.25 CPUs per slot, and the compilers run in the compile cache server,
+  outside the job. With 17 running slots 15.2 CPUs were busy and 59 jobs queued; with 50 running
+  slots (`--tokens 59`, headroom 15 %, the same CPU quota) 20.0 were busy and the longest wait
+  fell from 31 minutes to under 5; in 15 minutes 12.3 jobs a minute ended against 7.7, the 90th
+  percentile of the queue wait was 97 s against 1,467 s, and single jobs ran longer (4 commands
+  seen in both windows, `pnpm build` 8 s then 120 s).
+  Design, the operator's, not built: no fixed count. The daemon reads the CPUs of the host and
+  what the pool uses, and admits the head of the queue while a share of CPU is free for it (about
+  0.4 CPUs per job); below that it admits nothing. A lower and an upper bound on the number of
+  running jobs hold both ends. `policy::Controller` already computes a pool size from the census
+  every tick and only shows it (`recommended_tokens`); (i) and (v) are cases of the same change.
+  A job then asks for a share of the CPUs, not for a number of slots:
+  `story:jobs-ask-for-a-share-of-the-cpus`.
 
 ## Never
 
