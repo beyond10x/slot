@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::{BroadcastStream, UnboundedReceiverStream};
 
 use super::Server;
+use crate::sccache::{CacheMinute, Counters, cache_minutes};
 
 static UI: Dir<'_> = include_dir!("$OUT_DIR/ui");
 
@@ -36,6 +37,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/metrics", get(metrics))
         .route("/api/history", get(history))
         .route("/api/chart-history", get(chart_history))
+        .route("/api/cache-history", get(cache_history))
         .route("/api/limits", get(limits_get).put(limits_put))
         .route("/api/usage", get(usage))
         .route("/api/priority", get(priority_get).put(priority_put))
@@ -194,22 +196,41 @@ async fn chart_history(
 }
 
 fn read_chart_history(path: &FsPath, now: i64) -> io::Result<Vec<ChartSample>> {
+    let first = now.saturating_sub(CHART_WINDOW_MS);
+    let mut samples = read_tail(path, first, CHART_TAIL_START, |s: &ChartSample| {
+        (s.n > 0 && s.t > 0 && s.host_cores >= 0.0 && s.waiting >= 0.0).then_some(s.t)
+    })?;
+    samples.retain(|s| (first..=now).contains(&s.t));
+    samples.sort_by_key(|s| s.t);
+    Ok(samples)
+}
+
+/// The complete lines at the end of the log at `path` that read as a `T`
+/// with a time (`time`), in the file's order; none when there is no file.
+///
+/// Most of a log is outside the chart: the last `start` bytes are read, and
+/// twice as many (up to [`CHART_TAIL_LIMIT`]) only while they hold no record
+/// older than `first`.
+fn read_tail<T: serde::de::DeserializeOwned>(
+    path: &FsPath,
+    first: i64,
+    start: u64,
+    time: impl Fn(&T) -> Option<i64>,
+) -> io::Result<Vec<T>> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
     let len = file.metadata()?.len();
-    let first = now.saturating_sub(CHART_WINDOW_MS);
-    let mut amount = CHART_TAIL_START.min(len);
+    let mut amount = start.max(1).min(len);
     loop {
-        // Most of the log is outside the chart. Expand the tail only when
-        // it has no complete sample older than the requested window.
         let offset = len - amount;
         file.seek(SeekFrom::Start(offset))?;
         let mut tail = Vec::new();
         (&mut file).take(amount).read_to_end(&mut tail)?;
-        let start = if offset == 0 {
+        // The first line of a tail that starts inside the file is cut.
+        let begin = if offset == 0 {
             0
         } else {
             tail.iter()
@@ -217,28 +238,51 @@ fn read_chart_history(path: &FsPath, now: i64) -> io::Result<Vec<ChartSample>> {
                 .map_or(tail.len(), |p| p + 1)
         };
         let mut earlier = false;
-        let mut samples: Vec<_> = tail[start..]
+        let records: Vec<T> = tail[begin..]
             .split_inclusive(|&b| b == b'\n')
             .filter_map(|line| {
-                // The writer appends a newline with each completed window.
+                // The writer ends each record with a newline.
                 if line.last() != Some(&b'\n') {
                     return None;
                 }
-                let sample: ChartSample = serde_json::from_slice(line).ok()?;
-                if sample.n == 0 || sample.t <= 0 || sample.host_cores < 0.0 || sample.waiting < 0.0
-                {
-                    return None;
-                }
-                earlier |= sample.t < first;
-                (first..=now).contains(&sample.t).then_some(sample)
+                let record: T = serde_json::from_slice(line).ok()?;
+                earlier |= time(&record)? < first;
+                Some(record)
             })
             .collect();
-        if earlier || offset == 0 || amount == CHART_TAIL_LIMIT {
-            samples.sort_by_key(|s| s.t);
-            return Ok(samples);
+        if earlier || offset == 0 || amount >= CHART_TAIL_LIMIT {
+            return Ok(records);
         }
         amount = (amount * 2).min(len).min(CHART_TAIL_LIMIT);
     }
+}
+
+async fn cache_history(
+    State(s): State<Arc<Server>>,
+) -> Result<axum::Json<Vec<CacheMinute>>, StatusCode> {
+    let path = s.cfg.state_dir.join("cache.jsonl");
+    let minutes = tokio::task::spawn_blocking(move || {
+        read_cache_history(&path, super::now_ms(), CHART_TAIL_START)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(axum::Json(minutes))
+}
+
+/// The compiler calls per minute of the chart window, from the counters at
+/// the end of `cache.jsonl` ([`cache_minutes`]). The reading before the
+/// window is what the first one in it is compared with; a port that has
+/// none in the tail starts counting at its first reading.
+fn read_cache_history(path: &FsPath, now: i64, start: u64) -> io::Result<Vec<CacheMinute>> {
+    let first = now.saturating_sub(CHART_WINDOW_MS);
+    let mut records = read_tail(path, first, start, |c: &Counters| {
+        (c.t > 0 && c.port != 0).then_some(c.t)
+    })?;
+    records.sort_by_key(|c| c.t);
+    let mut minutes = cache_minutes(&records);
+    minutes.retain(|m| (first..=now).contains(&m.t));
+    Ok(minutes)
 }
 
 async fn events(
@@ -291,4 +335,117 @@ async fn asset(uri: axum::http::Uri) -> Response {
         _ => "application/octet-stream",
     };
     ([(header::CONTENT_TYPE, mime)], f.contents()).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000_000;
+    const MIN: i64 = 60_000;
+
+    fn line(t: i64, port: u16, hits: u64, misses: u64) -> String {
+        let c = Counters {
+            t,
+            port,
+            rust_hits: hits,
+            rust_misses: misses,
+            ..Counters::default()
+        };
+        serde_json::to_string(&c).unwrap() + "\n"
+    }
+
+    #[test]
+    fn cache_history_is_read_from_the_tail_of_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.jsonl");
+        assert!(
+            read_cache_history(&path, NOW, 4096).unwrap().is_empty(),
+            "no log yet"
+        );
+
+        // A second server's only earlier reading stands at the start of the
+        // file, far before the tail.
+        let mut text = line(NOW - 12 * 60 * MIN, 4303, 1_000, 0);
+        // 200 readings from before the window, the last one 7 h ago.
+        for k in 1..=200 {
+            text += &line(
+                NOW - 7 * 60 * MIN - (200 - k) * MIN,
+                4226,
+                k as u64 * 3,
+                k as u64,
+            );
+        }
+        // 40 readings in the window, the last one now: more than 4096 bytes,
+        // so the first tail holds no reading from before the window.
+        for i in 1..=40 {
+            let n = 200 + i as u64;
+            text += &line(NOW - (40 - i) * MIN, 4226, n * 3, n);
+            if i == 20 {
+                text += "not json\n";
+                text += &line(NOW - 20 * MIN, 4303, 1_500, 0);
+            }
+        }
+        let in_window = 40 * line(NOW, 4226, 720, 240).len() as u64;
+        assert!(in_window > 4096 && in_window < 8192, "{in_window}");
+        // A line the writer has not finished is no record.
+        text += r#"{"t":1800000000000,"port":4226,"rust_hits":999999"#;
+        std::fs::write(&path, &text).unwrap();
+        assert!(
+            text.len() as u64 > 2 * 8192,
+            "the tail is a part of the file"
+        );
+
+        let tail = read_cache_history(&path, NOW, 4096).unwrap();
+        assert_eq!(
+            tail.len(),
+            40,
+            "the first one is compared with the reading before the window"
+        );
+        for (i, m) in tail.iter().enumerate() {
+            assert_eq!(m.t, NOW - (39 - i as i64) * MIN);
+            assert_eq!((m.hits, m.misses, m.not_cached), (3, 1, 0), "{m:?}");
+        }
+
+        // The whole file: the second server's reading in the window has one
+        // before it now.
+        let whole = read_cache_history(&path, NOW, CHART_TAIL_START).unwrap();
+        assert_eq!(whole.len(), 40);
+        let hits: Vec<u64> = whole.iter().map(|m| m.hits).collect();
+        assert_eq!(hits[19], 3 + 500);
+        assert_eq!(hits.iter().sum::<u64>(), 40 * 3 + 500);
+
+        // A reading after `now` (a clock set back) is left out.
+        assert_eq!(
+            read_cache_history(&path, NOW - MIN, 4096).unwrap().len(),
+            39
+        );
+    }
+
+    #[test]
+    fn chart_history_keeps_the_valid_samples_of_the_window_in_time_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("census.jsonl");
+        assert!(read_chart_history(&path, NOW).unwrap().is_empty());
+        let sample = |t: i64, n: u32| {
+            format!("{{\"t\":{t},\"host_cores\":2.5,\"waiting\":1.0,\"n\":{n}}}\n")
+        };
+        let text = [
+            sample(NOW - 7 * 60 * MIN, 10),
+            sample(NOW - 20_000, 10),
+            sample(NOW - 30_000, 10),
+            sample(NOW - 10_000, 0),
+            "{\"t\":1,\"host_cores\":-1.0,\"waiting\":0.0,\"n\":10}\n".into(),
+            sample(NOW + 10_000, 10),
+            format!("{{\"t\":{NOW},\"host_cores\":1.0"),
+        ]
+        .concat();
+        std::fs::write(&path, text).unwrap();
+        let got: Vec<i64> = read_chart_history(&path, NOW)
+            .unwrap()
+            .iter()
+            .map(|s| s.t)
+            .collect();
+        assert_eq!(got, [NOW - 30_000, NOW - 20_000]);
+    }
 }

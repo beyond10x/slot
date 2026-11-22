@@ -416,6 +416,29 @@ total: UsageRow,
  */
 rows: Array<UsageRow>, };
 
+export type CacheMinute = { 
+/**
+ * When the later reading was made, Unix milliseconds.
+ */
+t: number, 
+/**
+ * Calls answered from the cache.
+ */
+hits: number, 
+/**
+ * Calls compiled after a miss.
+ */
+misses: number, 
+/**
+ * Calls the servers refused to cache: the sum of `reasons`.
+ */
+not_cached: number, 
+/**
+ * The refused calls by the server's reason; a reason with no call is
+ * left out.
+ */
+reasons: Record<string, number>, };
+
 export type CensusClass = { 
 /**
  * Tool family, for example `rust-compile`, `go-test`, `node-test`.

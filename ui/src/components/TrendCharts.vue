@@ -1,12 +1,18 @@
 <script setup lang="ts">
-import { census, store } from '../store.ts';
+import { computed } from 'vue';
+import { MINUTE_MS, cachePoint, describeMinute, emptyText, percentOrDash } from '../lib/cache.ts';
+import type { CachePoint } from '../lib/cache.ts';
+import type { HostSample } from '../lib/host.ts';
+import { cacheChart, census, chartWindow, store } from '../store.ts';
 import LinesChart from './LinesChart.vue';
 import type { Line } from './LinesChart.vue';
 import SectionHead from './SectionHead.vue';
 
-// The three line charts of the machine, above the job tables: what the host does comes before who waits for it.
+// The line charts of the machine, above the job tables: what the host does comes before who waits for it.
 const percent = (v: number | undefined): string => (v === undefined ? '' : `${v.toFixed(0)} %`);
 const cores = (v: number | undefined): string => (v === undefined ? '' : v.toFixed(1));
+
+const host = (): readonly HostSample[] => chartWindow.value.host;
 
 const CORES: readonly Line[] = [
   { label: 'all programs', color: '#444444', value: (s) => s.hostCores, now: () => cores(census.value?.host_cores) },
@@ -28,29 +34,54 @@ const POOL: readonly Line[] = [
   },
   { label: 'pool size', color: '#6e6e6e', value: (s) => s.tokens, step: true, dashed: true, now: () => String(store.tokens) },
 ];
+
+// The compile cache: what share of the compiler calls of a minute it answered. A value in the legend is the newest
+// minute's; a minute without a call has no share, so it reads as a dash and not as 0 %.
+const cachePoints = (): readonly CachePoint[] => cacheChart.value.points;
+const newest = computed(() => (cacheChart.value.latest ? cachePoint(cacheChart.value.latest) : undefined));
+const CACHE: readonly Line<CachePoint>[] = [
+  { label: 'of all calls', color: '#0072B2', value: (p) => p.all, now: () => percentOrDash(newest.value?.all) },
+  { label: 'of cacheable calls', color: '#8c6d31', value: (p) => p.cacheable, dashed: true, now: () => percentOrDash(newest.value?.cacheable) },
+];
+const cacheEmpty = computed(() => emptyText(cacheChart.value.recorded, cacheChart.value.points.filter((p) => Number.isFinite(p.all)).length));
+const cacheNote = computed(() => describeMinute(cacheChart.value.latest));
 </script>
 
 <template>
   <section class="trend" aria-label="Machine charts">
     <div>
       <SectionHead text="Cores: used on the whole machine" />
-      <LinesChart :lines="CORES" unit="cores" :min-top="store.cores" />
+      <LinesChart :lines="CORES" :points="host" unit="cores" :min-top="store.cores" />
     </div>
     <div>
-      <SectionHead text="Pressure: time some task waited (10 s average)" />
-      <LinesChart :lines="PRESSURE" unit="%" :min-top="10" :max-top="100" />
+      <SectionHead text="Pressure: time some task waited (10 s)" />
+      <LinesChart :lines="PRESSURE" :points="host" unit="%" :min-top="10" :max-top="100" />
     </div>
     <div>
       <SectionHead text="Pool size: slots, observed and not applied" />
-      <LinesChart :lines="POOL" unit="slots" :min-top="1" />
+      <LinesChart :lines="POOL" :points="host" unit="slots" :min-top="1" />
+    </div>
+    <div>
+      <SectionHead text="Compile cache: calls it answered" />
+      <LinesChart :lines="CACHE" :points="cachePoints" unit="%" :min-top="100" :max-top="100" :span="MINUTE_MS" :empty="cacheEmpty" :note="cacheNote" />
     </div>
   </section>
 </template>
 
 <style scoped>
-.trend { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 0 24px; padding: 0 14px 4px; }
+/* Four charts in one row where each gets the 285 px of the widest heading; beside the output pane two rows of two; one column in a narrow window. */
+.trend { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 24px; padding: 0 14px 4px; }
+@container (max-width: 1239px) { .trend { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 639px) { .trend { grid-template-columns: minmax(0, 1fr); } }
 .trend > div { min-width: 0; }
 .trend :deep(h2) { margin-top: 12px; }
-/* One legend line is kept even while the first reading has not arrived, so the tables below do not move. */
-.trend :deep(.legend) { min-height: 20px; }
+/*
+ * The legend's height is kept, so the tables below do not move while the first reading has not arrived or when a number
+ * gets one more digit: two lines where a chart is narrower than the 385 px of the widest legend, one line where it is wider.
+ */
+.trend :deep(.legend) { min-height: 40px; align-content: flex-start; }
+/* Four in a row: the plots give the second legend line its 20 px, so the tables start where they do beside one line. */
+@container (min-width: 1240px) and (max-width: 1639px) { .trend { --plot-h: 60px; } }
+@container (min-width: 822px) and (max-width: 1239px) { .trend :deep(.legend) { min-height: 20px; } }
+@container (min-width: 1640px) { .trend :deep(.legend) { min-height: 20px; } }
 </style>

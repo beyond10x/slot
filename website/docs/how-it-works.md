@@ -299,6 +299,10 @@ shows:
   ([Headroom](headroom.md)); on the machine base, the line with the CPUs busy on the host, the
   target, the pool's quota and the busiest owners outside the pool; when a job failed in the last
   60 minutes, a **failed** count that opens the output of the newest one,
+- in the row of line charts, **Compile cache**: for each minute, the share of the compiler calls
+  that sccache answered from its cache, of all calls and of the cacheable ones (hits and misses),
+  read from `GET /api/cache-history`, which the daemon computes from the lines of `cache.jsonl`
+  ([sccache watchdog](#sccache-watchdog)),
 - directly under the header, queued and running jobs: repository, command, state, wait, elapsed
   time, cores, memory, session, and for a queued job its level; a running job's row opens on what
   it compiles now,

@@ -119,6 +119,7 @@ fn ts_types() -> String {
         slot::usage::By::decl(),
         slot::usage::UsageRow::decl(),
         slot::usage::Usage::decl(),
+        slot::sccache::CacheMinute::decl(),
         CensusClass::decl(),
         CensusSession::decl(),
         HostCensus::decl(),
