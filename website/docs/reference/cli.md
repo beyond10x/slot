@@ -47,7 +47,7 @@ slot serve [OPTIONS]
 - `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off (default `25`)
 - `--min-free-memory`: A job waits while available memory, less what jobs that started in the last 30 s still take, is below its expected peak (from earlier runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway (default `4`)
 - `--upgrade-hold`: After `systemctl --user reload slot`, the longest time no new job starts while jobs still run, seconds. Then jobs start again, and the next hold begins when the running jobs are expected to end within it (from earlier runs of the same command) or none runs. 0 never holds (default `60`)
-- `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes (default `1800`)
+- `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes. `slot priority promote-after` changes it at run time; a value set that way wins over this option until `slot priority promote-after default` removes it (default `1800`)
 - `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
 - `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. Directories of a repository with a queued or running job, or built in the last 2 h, are kept. 0 turns it off (default `40`)
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
@@ -162,6 +162,17 @@ List the rules
 slot priority list [OPTIONS]
 ```
 
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+#### `slot priority promote-after`
+
+Set how long a queued `normal` or `low` job waits before it is ordered as `high`, while the daemon runs
+
+```text
+slot priority promote-after [OPTIONS] <SECONDS>
+```
+
+- `<SECONDS>`: Seconds; 0 never promotes a job; `default` goes back to the daemon's `--promote-after`. The value applies to the jobs already queued, is kept in `priority.json` in the state directory and wins over `--promote-after` across reloads and restarts, until `default` removes it
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cancel`

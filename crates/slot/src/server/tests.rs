@@ -853,8 +853,9 @@ fn a_rule_set_at_run_time_wins_over_the_jobs_own_level() {
     let set = |pattern: &str, level| {
         f.server
             .set_priority(&priority::Request {
-                pattern: pattern.into(),
+                pattern: Some(pattern.into()),
                 level,
+                promote_after_s: None,
             })
             .unwrap()
     };
@@ -879,8 +880,9 @@ fn priority_rules_survive_a_daemon_restart() {
     ] {
         f.server
             .set_priority(&priority::Request {
-                pattern: pattern.into(),
+                pattern: Some(pattern.into()),
                 level,
+                promote_after_s: None,
             })
             .unwrap();
     }
@@ -929,6 +931,214 @@ fn a_low_job_starts_after_30_minutes_despite_a_stream_of_high_jobs() {
     assert_eq!(level_of(&f, "repo-a"), (Priority::High, true), "31 min");
     queued.push(queue(&f, "h2", "api", Some(Priority::High)));
     assert_eq!(run_all(&f, h, queued), ["low", "h1", "h2"]);
+}
+
+/// Sets the promotion delay as `slot priority promote-after` does.
+fn promote_after(f: &Fixture, to: priority::PromoteAfter) -> priority::View {
+    f.server
+        .set_priority(&priority::Request {
+            promote_after_s: Some(to),
+            ..priority::Request::default()
+        })
+        .unwrap()
+}
+
+/// The promotion delay changes while the daemon runs: a `normal` job that
+/// has waited 400 s (on a clock the test moves) is `normal` under
+/// `--promote-after` 1800, `high` from the moment the delay is 300, and
+/// starts before the `high` jobs that came after it. No restart between.
+#[test]
+fn a_delay_set_at_run_time_promotes_a_job_that_already_waits() {
+    use priority::PromoteAfter::{Default, Seconds};
+    static SKEW_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(1, |c| c.clock = clock);
+    let h = holder(&f);
+    let mut queued = vec![
+        queue(&f, "waited", "repo-a", None),
+        queue(&f, "h1", "web", Some(Priority::High)),
+    ];
+    SKEW_MS.store(400_000, Ordering::SeqCst);
+    f.server.rerank();
+    assert_eq!(f.server.priority_view().promote_after_s, 1800);
+    assert_eq!(level_of(&f, "repo-a"), (Priority::Normal, false), "of 1800");
+
+    assert_eq!(promote_after(&f, Seconds(300)).promote_after_s, 300);
+    assert_eq!(level_of(&f, "repo-a"), (Priority::High, true), "of 300");
+
+    assert_eq!(promote_after(&f, Seconds(0)).promote_after_s, 0);
+    assert_eq!(level_of(&f, "repo-a"), (Priority::Normal, false), "never");
+
+    assert_eq!(promote_after(&f, Default).promote_after_s, 1800);
+    assert_eq!(level_of(&f, "repo-a"), (Priority::Normal, false), "option");
+
+    promote_after(&f, Seconds(300));
+    assert_eq!(level_of(&f, "repo-a"), (Priority::High, true));
+    queued.push(queue(&f, "h2", "api", Some(Priority::High)));
+    assert_eq!(run_all(&f, h, queued), ["waited", "h1", "h2"]);
+}
+
+/// The delay is saved beside the rules: a change of one keeps the other,
+/// the saved delay wins over the option of the daemon that starts next, and
+/// `default` takes it out of the file again.
+#[test]
+fn the_promotion_delay_survives_a_daemon_restart_beside_the_rules() {
+    use priority::PromoteAfter::{Default, Seconds};
+    let f = start(1);
+    let rule = |pattern: &str, level| {
+        f.server
+            .set_priority(&priority::Request {
+                pattern: Some(pattern.into()),
+                level: Some(level),
+                promote_after_s: None,
+            })
+            .unwrap()
+    };
+    let saved = || std::fs::read_to_string(f.root.join("state").join(priority::FILE)).unwrap();
+    let restarted = |socket: &str| {
+        Server::new(Config {
+            socket: f.root.join(socket),
+            promote_after: Duration::from_secs(900),
+            ..config(&f.root, 1)
+        })
+        .unwrap()
+        .priority_view()
+    };
+    rule("repo-a", Priority::High);
+    promote_after(&f, Seconds(300));
+    let v = rule("web-*", Priority::Low);
+    assert_eq!((v.rules.len(), v.promote_after_s), (2, 300));
+    assert!(saved().contains(r#""promote_after_s":300"#), "{}", saved());
+    let v = restarted("s2");
+    assert_eq!(
+        (v.rules.len(), v.promote_after_s),
+        (2, 300),
+        "the saved delay wins over --promote-after 900"
+    );
+
+    assert_eq!(promote_after(&f, Default).promote_after_s, 1800);
+    assert!(!saved().contains("promote_after_s"), "{}", saved());
+    let v = restarted("s3");
+    assert_eq!(
+        (v.rules.len(), v.promote_after_s),
+        (2, 900),
+        "no saved delay: the option of that daemon, and the rules are kept"
+    );
+}
+
+/// Status and text of the answer to `PUT /api/priority` with `body`, sent
+/// as `content_type`, from the handler the router calls.
+fn put_priority(f: &Fixture, content_type: &str, body: &str) -> (u16, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    let state = axum::extract::State(Arc::clone(&f.server));
+    let body = axum::body::Bytes::from(body.to_owned());
+    answer(http::priority_put(state, headers, body))
+}
+
+/// Status and text of the answer to `GET /api/priority`.
+fn get_priority(f: &Fixture) -> (u16, String) {
+    use axum::response::IntoResponse;
+    let state = axum::extract::State(Arc::clone(&f.server));
+    answer(async move { http::priority_get(state).await.into_response() })
+}
+
+fn answer(r: impl Future<Output = axum::response::Response>) -> (u16, String) {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            let r = r.await;
+            let status = r.status().as_u16();
+            let text = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+            (status, String::from_utf8(text.to_vec()).unwrap())
+        })
+}
+
+#[test]
+fn put_priority_takes_a_rule_a_delay_or_both() {
+    let f = start(1);
+    let json = "application/json";
+    let view = |(status, text): (u16, String)| {
+        assert_eq!(status, 200, "{text}");
+        let v: priority::View = serde_json::from_str(&text).unwrap();
+        let rules: Vec<String> = v
+            .rules
+            .iter()
+            .map(|r| format!("{} {}", r.pattern, r.level))
+            .collect();
+        (rules.join(", "), v.promote_after_s)
+    };
+    let put = |body: &str| put_priority(&f, json, body);
+    assert_eq!(view(get_priority(&f)), (String::new(), 1800));
+    assert_eq!(
+        view(put(r#"{"pattern":"repo-a","level":"high"}"#)),
+        ("repo-a high".to_string(), 1800),
+        "the body of a client without the delay"
+    );
+    assert_eq!(
+        view(put(r#"{"promote_after_s":300}"#)),
+        ("repo-a high".to_string(), 300),
+        "no pattern: only the delay"
+    );
+    assert_eq!(
+        view(get_priority(&f)),
+        ("repo-a high".to_string(), 300),
+        "GET reports the delay in force"
+    );
+    assert_eq!(
+        view(put(r#"{"pattern":"repo-a","level":null}"#)),
+        (String::new(), 300),
+        "removing a rule keeps the delay"
+    );
+    assert_eq!(
+        view(put(
+            r#"{"pattern":"web-*","level":"low","promote_after_s":0}"#
+        )),
+        ("web-* low".to_string(), 0),
+        "both in one body"
+    );
+    assert_eq!(
+        view(put(r#"{"promote_after_s":null}"#)),
+        ("web-* low".to_string(), 1800),
+        "null: the daemon's option again"
+    );
+}
+
+#[test]
+fn put_priority_refuses_a_body_with_neither_and_an_invalid_one() {
+    let f = start(1);
+    let json = "application/json";
+    put_priority(&f, json, r#"{"pattern":"repo-a","level":"high"}"#);
+    put_priority(&f, json, r#"{"promote_after_s":300}"#);
+    let before = f.server.priority_view();
+    assert_eq!((before.rules.len(), before.promote_after_s), (1, 300));
+    for bad in [
+        "{}",
+        r#"{"level":"high"}"#,
+        r#"{"level":"low","promote_after_s":60}"#,
+        r#"{"pattern":""}"#,
+        r#"{"pattern":" ","promote_after_s":60}"#,
+        r#"{"promote_after_s":-5}"#,
+        r#"{"promote_after_s":"60"}"#,
+        r#"{"promote_after_s":1.5}"#,
+        r#"{"pattern":"repo-a","level":"asap"}"#,
+        "not json",
+        "",
+    ] {
+        let (status, text) = put_priority(&f, json, bad);
+        assert_eq!(status, 400, "{bad}: {text}");
+        assert!(text.starts_with("slot: "), "{bad}: {text}");
+        assert_eq!(f.server.priority_view(), before, "{bad} changed nothing");
+    }
+    let (status, _) = put_priority(&f, "text/plain", r#"{"promote_after_s":60}"#);
+    assert_eq!(status, 415, "a body a page can post without a preflight");
+    assert_eq!(f.server.priority_view(), before);
 }
 
 #[test]

@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 pub use crate::server::limits::View as LimitsView;
+use crate::server::priority::PromoteAfter;
 pub use crate::server::priority::View as PriorityView;
 use crate::types::{Checkout, HeadroomBase, Job, JobState, Priority, State};
 
@@ -121,6 +122,45 @@ pub fn priority(addr: &str, change: Option<(&str, Option<Priority>)>) -> Result<
     serde_json::from_str(&body).with_context(|| format!("{addr}: /api/priority"))
 }
 
+/// Sets the promotion delay (`slot priority promote-after`), or with
+/// [`PromoteAfter::Default`] returns to the daemon's `--promote-after`.
+pub fn promote_after(addr: &str, to: PromoteAfter) -> Result<PriorityView> {
+    let body = serde_json::json!({ "promote_after_s": to }).to_string();
+    let answer = request(addr, "PUT", "/api/priority", Some(&body)).map_err(|e| {
+        if e.to_string().contains("missing field `pattern`") {
+            e.context("the daemon is older than this slot and cannot change the delay")
+        } else {
+            e
+        }
+    })?;
+    serde_json::from_str(&answer).with_context(|| format!("{addr}: /api/priority"))
+}
+
+/// The promotion delay of `v` in words: `30m00s`.
+fn promote_after_text(v: &PriorityView) -> String {
+    secs(
+        i64::try_from(v.promote_after_s)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1000),
+    )
+}
+
+/// `slot priority promote-after`: one line with the delay now in force,
+/// and after `default` where it comes from.
+pub fn render_promote_after(v: &PriorityView, asked: PromoteAfter) -> String {
+    let source = match asked {
+        PromoteAfter::Default => ", the daemon's --promote-after",
+        PromoteAfter::Seconds(_) => "",
+    };
+    if v.promote_after_s == 0 {
+        return format!("no queued job goes as high for waiting{source}\n");
+    }
+    format!(
+        "a job queued longer than {} goes as high{source}\n",
+        promote_after_text(v)
+    )
+}
+
 /// `slot priority list`: one line per rule, then the promotion limit.
 pub fn render_priority(v: &PriorityView) -> String {
     use std::fmt::Write as _;
@@ -136,7 +176,7 @@ pub fn render_priority(v: &PriorityView) -> String {
         let _ = writeln!(
             out,
             "a job queued longer than {} goes as high",
-            secs(v.promote_after_s as i64 * 1000)
+            promote_after_text(v)
         );
     }
     out
@@ -836,6 +876,41 @@ mod tests {
         assert_eq!(
             render_priority(&PriorityView::default()),
             "no priority rules: every job is normal unless it asks otherwise\n"
+        );
+    }
+
+    #[test]
+    fn the_promotion_delay_in_one_line() {
+        let view = |promote_after_s| PriorityView {
+            rules: Vec::new(),
+            promote_after_s,
+        };
+        assert_eq!(
+            render_promote_after(&view(300), PromoteAfter::Seconds(300)),
+            "a job queued longer than 5m00s goes as high\n"
+        );
+        assert_eq!(
+            render_promote_after(&view(0), PromoteAfter::Seconds(0)),
+            "no queued job goes as high for waiting\n"
+        );
+        assert_eq!(
+            render_promote_after(&view(1800), PromoteAfter::Default),
+            "a job queued longer than 30m00s goes as high, the daemon's --promote-after\n"
+        );
+        assert_eq!(
+            render_promote_after(&view(0), PromoteAfter::Default),
+            "no queued job goes as high for waiting, the daemon's --promote-after\n"
+        );
+        let far = view(u64::MAX);
+        assert!(
+            render_priority(&far).ends_with("goes as high\n"),
+            "no overflow"
+        );
+        assert_eq!(
+            render_promote_after(&far, PromoteAfter::Seconds(u64::MAX))
+                .lines()
+                .count(),
+            1
         );
     }
 }

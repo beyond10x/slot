@@ -140,11 +140,15 @@ async fn limits_put(State(s): State<Arc<Server>>, headers: HeaderMap, body: Byte
     axum::Json(s.update_limits(req).await).into_response()
 }
 
-async fn priority_get(State(s): State<Arc<Server>>) -> impl IntoResponse {
+pub(super) async fn priority_get(State(s): State<Arc<Server>>) -> impl IntoResponse {
     axum::Json(s.priority_view())
 }
 
-async fn priority_put(State(s): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
+pub(super) async fn priority_put(
+    State(s): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let port = s.cfg.http.map_or(0, |a| a.port());
     if let Some(r) = refuse_change(&headers, port) {
         return r.into_response();

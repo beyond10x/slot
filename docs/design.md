@@ -947,3 +947,28 @@ Not covered: CPU and memory of the sandboxed command are not sampled into the jo
 process is idle); the sandbox's own cgroup limits apply. The gate does not authenticate clients:
 whoever can write to the directory can queue jobs, which is the sandbox the directory is shared
 with.
+
+## 20. The promotion delay as a run-time setting (unreleased)
+
+A queued `normal` or `low` job that has waited longer than the promotion delay is ordered as
+`high` (`server/priority.rs`, `level`), so no level waits forever. The delay was only the option
+`slot serve --promote-after`. A reload re-executes the daemon with the old process's arguments
+(§ 15.2), so a new value in the unit file took effect only at a full restart, which ends every
+job.
+
+- **Where it lives.** `priority.json` in the state directory, beside the rules: an optional
+  `promote_after_s`. Present, it wins over `--promote-after`; absent, the option applies, so a
+  file written before the setting existed keeps its behaviour. The daemon holds the rules and the
+  delay in one table under one lock (`priority::Table`) and writes the whole table on every
+  change, so a change of the rules keeps the delay and the reverse.
+- **How it changes.** `PUT /api/priority` with `{"promote_after_s": <seconds>}`; `null` removes
+  the field, and 0 is a delay of its own (never promote). `slot priority promote-after
+  <seconds|default>` sends it. The body form `{"pattern", "level"}` is unchanged, both forms may
+  share one body, and a body with neither is refused with 400.
+- **When it applies.** The level of every queued job is recomputed from the table on each
+  change and once a second (`Server::rerank`), so jobs already queued are ordered by the new
+  delay at once. A job promoted under a shorter delay goes back to its own level when the delay
+  grows past its wait.
+- **Versions.** The file's reader ignores fields it does not know, so a daemon without the
+  setting reads a file that has it and orders by its own option. When that older daemon saves a
+  rule it writes the file without the field: a downgrade loses the delay, not the rules.

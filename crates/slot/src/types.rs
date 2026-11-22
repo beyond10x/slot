@@ -106,7 +106,8 @@ pub struct Job {
     pub target_dir: String,
     /// The level a queued job is ordered by: the rule for its repository,
     /// else its own `--priority`, raised to `high` once it waited longer
-    /// than `--promote-after`. `normal` from a daemon without levels.
+    /// than the promotion delay (`--promote-after`, or the one set with
+    /// `slot priority promote-after`). `normal` from a daemon without levels.
     #[serde(default)]
     pub priority: Priority,
     /// Whether `priority` is `high` only because the job waited that long.

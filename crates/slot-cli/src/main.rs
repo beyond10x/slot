@@ -100,9 +100,15 @@ fn gate(args: &slot::cli::GateArgs) -> Result<i32> {
 }
 
 /// `slot priority set|unset|list`: changes the rules, then prints them.
+/// `slot priority promote-after`: sets the delay, then prints it.
 fn priority(cmd: &slot::cli::PriorityCmd) -> Result<i32> {
     use slot::cli::PriorityCmd;
     let v = match cmd {
+        PriorityCmd::PromoteAfter(a) => {
+            let v = slot::status::promote_after(&a.http, a.seconds)?;
+            print!("{}", slot::status::render_promote_after(&v, a.seconds));
+            return Ok(0);
+        }
         PriorityCmd::Set(a) => slot::status::priority(&a.http, Some((&a.pattern, Some(a.level))))?,
         PriorityCmd::Unset(a) => slot::status::priority(&a.http, Some((&a.pattern, None)))?,
         PriorityCmd::List(a) => slot::status::priority(&a.http, None)?,

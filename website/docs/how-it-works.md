@@ -65,8 +65,8 @@ slot: job 3 waited 5s for a build slot, ran 0s
 
 Every job has a level: `urgent`, `high`, `normal` (the default) or `low`. Queued `urgent` jobs get
 free slots first, then `high`, `normal` and `low` ones; inside a level, jobs are admitted in the
-order they arrived. A `normal` or `low` job that has waited more than 30 minutes (`slot serve
---promote-after`, in seconds; 0 turns it off) counts as `high`, ahead of every `high` job that
+order they arrived. A `normal` or `low` job that has waited more than 30 minutes (a delay that
+`slot priority promote-after` changes, see below) counts as `high`, ahead of every `high` job that
 arrived after it, so no level waits forever. A running job is never stopped for a queued one.
 
 `urgent` is for repair work on the pool itself. When no slot is free, an `urgent` job starts at
@@ -93,6 +93,23 @@ the queued jobs at once, and is kept in `priority.json` in the state directory. 
 removes the rule). `slot status` ends each queued line with the job's level, and `high (waited)`
 for a job raised because it waited; the web UI's queue has a `level` column. Both list the queue
 in the order it is served.
+
+The delay before a waiting job counts as `high` starts as the daemon's option `slot serve
+--promote-after` (seconds, 1800 by default; 0 never raises a job). Change it without a restart:
+
+```sh
+slot priority promote-after 300      # raise a job after 5 minutes of waiting
+slot priority promote-after 0        # never raise a job for waiting
+slot priority promote-after default  # back to the daemon's --promote-after
+```
+
+Each prints the delay now in force, such as `a job queued longer than 5m00s goes as high`. The
+new delay applies to the jobs already queued, within a second. It is kept in `priority.json`
+beside the rules and wins over `--promote-after` after a reload or a restart, until `default`
+removes it from the file. `slot priority list` and `GET /api/priority` (`promote_after_s`) show
+the delay in force. `PUT /api/priority` sets it with `{"promote_after_s": 300}`, and a `null`
+value returns to the daemon's option; the body may name a rule as well, and a body with neither
+a `pattern` nor `promote_after_s` is refused (400).
 
 The first job in that order takes slots as they come free and keeps them until it has all it
 asked for: a job that needs 4 slots is not overtaken by later 1-slot jobs of its level or below,
