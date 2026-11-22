@@ -105,6 +105,18 @@ outside load, never below 2 CPUs and never above the target. The daemon sets a n
 when it moved by half a CPU or more, at most every 10 seconds. The slot count is the same as on
 the pool base.
 
+:::warning
+
+A compile server that runs as a unit of its own, such as one sccache server shared by every
+build, counts as outside load, although it compiles for the pool's jobs. On a host where the
+Rust compiles go through such a server, the machine base leaves the jobs only what the server
+does not use. Measured on a 20-CPU host at 15 %: the server used 7 to 10 CPUs, the pool's quota
+moved between 2 and 8 CPUs for 17 slots, the pool was throttled in 61 % of its scheduling
+periods, and the same commands ran 2.4 times as long as on the pool base. Keep the pool base on
+such a host. The pool base is the default.
+
+:::
+
 `slot status` and the web UI header show the line above: what is busy, the target, the quota
 now, and the five busiest owners outside the pool (applications in your `app.slice`, login
 sessions, docker containers, `system.slice`). `over target` means the pool is down to its

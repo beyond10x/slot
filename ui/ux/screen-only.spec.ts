@@ -50,11 +50,16 @@ for (const sc of SCENARIOS) {
         expect(r.false_complete, 'false_complete').toBe(false);
         if (mode === 'pointer') expect(r.actions, 'actions per fix').toBeLessThanOrEqual(MAX_ACTIONS_PER_FIX);
         expect(r.notes.filter((n) => n.includes('out of sight')), 'the opening control stays in sight').toEqual([]);
-        // A task on a job starts in the first screen at the gating sizes: no scroll before the action (UXF-019, UXF-020).
-        if (vp.gating && (task.kind === 'open-output' || task.kind === 'queue-position')) {
+        // Opening an output starts in the first screen at the gating sizes: no scroll before the action (UXF-019, UXF-020).
+        if (vp.gating && task.kind === 'open-output') {
           expect(r.looks, 'the job is in the first screen (looks below 3)').toBeLessThan(3);
           expect(r.time_to_act_steps, 'scrolls before the action').toBe(0);
-          if (task.kind === 'open-output' && mode === 'pointer') expect(r.actions, 'one action opens the output').toBe(1);
+          if (mode === 'pointer') expect(r.actions, 'one action opens the output').toBe(1);
+        }
+        // The Running table comes before the Queue (UXF-037, decision running-before-queue): with every
+        // slot busy a place in the queue is at most one scroll below the first screen.
+        if (vp.gating && task.kind === 'queue-position') {
+          expect(r.time_to_act_steps, 'scrolls before the place in the queue').toBeLessThanOrEqual(1);
         }
       });
     }
