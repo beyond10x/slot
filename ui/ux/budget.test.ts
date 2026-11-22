@@ -22,6 +22,13 @@ test('every Playwright run ends with its ten slowest tests, slowest first', () =
   assert.deepEqual(slowest([{ title: 'only', ms: 450 }]), ['  0.5 s  only']);
 });
 
+// `vite preview` loads Vite and its plugins before it listens; the gate's own server only reads files.
+test('the built UI is served by the gate server, on the port of the run', () => {
+  const web = config.webServer as { command: string; url: string };
+  assert.equal(web.command, `node --disable-warning=ExperimentalWarning ux/serve.ts dist ${process.env.UX_PORT}`);
+  assert.equal(web.url, `http://127.0.0.1:${process.env.UX_PORT}/`);
+});
+
 test('a run about to be stopped names the tests it is in, longest first', () => {
   assert.deepEqual(report([{ title: 'a', ms: 1200 }]), ['Slowest tests:', '  1.2 s  a']);
   assert.deepEqual(report([{ title: 'a', ms: 1200 }], [{ title: 'b', ms: 300 }, { title: 'c', ms: 41_000 }]), [
@@ -38,23 +45,26 @@ function task(taskfile: string, name: string): string[] {
   return lines.slice(start + 1, end === -1 ? undefined : end).map((l) => l.trim()).filter((l) => l !== '');
 }
 
-test('both UX steps run all their commands under one deadline of 120 s', () => {
+// The test commands of both steps run under one deadline, each started as itself, not through npx
+// or pnpm: at load 175 `npx playwright --version` took 6.8 s and the binary 2.5 s. The docs typecheck
+// is a compile, not a test (9.3 s to 26.9 s there): it runs before the deadline, as the UI's runs in `ui-check`.
+test('both UX steps run all their test commands under one deadline of 120 s', () => {
   const taskfile = readFileSync(fileURLToPath(new URL('../../Taskfile.yml', import.meta.url)), 'utf8');
   const ui = task(taskfile, 'ui-ux');
   assert.deepEqual(ui.slice(ui.indexOf('cmds:') + 1), [
     '- |',
     "node ux/deadline.ts 120 sh -exc '",
-    'pnpm exec playwright test',
+    './node_modules/.bin/playwright test',
     'node ux/ratchet.ts',
     "node --test --disable-warning=ExperimentalWarning ux/concurrent.e2e.ts'",
   ]);
   const site = task(taskfile, 'site-ux');
   assert.deepEqual(site.slice(site.indexOf('cmds:') + 1), [
+    '- ./node_modules/.bin/tsc --noEmit -p ux/tsconfig.json',
     '- |',
     "node ../ui/ux/deadline.ts 120 sh -exc '",
     'node --test --disable-warning=ExperimentalWarning "ux/*.test.ts"',
-    'npx tsc --noEmit -p ux/tsconfig.json',
-    'npx playwright test',
+    './node_modules/.bin/playwright test',
     "node ux/ratchet.ts'",
   ]);
   const gate = task(taskfile, 'check');

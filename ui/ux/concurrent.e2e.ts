@@ -12,7 +12,8 @@ function gateRun(): Promise<{ code: number | null; out: string }> {
   const env = { ...process.env };
   delete env.UX_PORT;
   delete env.UX_ALL;
-  const p = spawn('pnpm', ['exec', 'playwright', 'test', '--workers=1', '--grep', 'layout idle @ 1366x768'], {
+  // The runner itself, not through pnpm: pnpm's start took seconds of the step on a loaded host.
+  const p = spawn(join(ui, 'node_modules', '.bin', 'playwright'), ['test', '--workers=1', '--grep', 'layout idle @ 1366x768'], {
     cwd: ui,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
