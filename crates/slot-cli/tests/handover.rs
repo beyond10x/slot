@@ -426,23 +426,31 @@ fn reloads_keep_running_and_queued_jobs_their_output_and_slots() {
     );
     // A client counted in `sockets()` may not be queued yet when the first
     // reload comes, so the count queued varies; what is handed over must be
-    // what the next binary takes over.
-    let first = |prefix: &str| {
-        let rest = &log[log
-            .find(prefix)
-            .unwrap_or_else(|| panic!("{prefix}:\n{log}"))
-            + prefix.len()..];
-        let n: Vec<usize> = rest
+    // what the next binary takes over, in each handover.
+    let counts = |prefix: &str, nth: usize| {
+        let (at, _) = log
+            .match_indices(prefix)
+            .nth(nth)
+            .unwrap_or_else(|| panic!("{prefix} #{}:\n{log}", nth + 1));
+        let n: Vec<usize> = log[at + prefix.len()..]
             .split_whitespace()
             .take(4)
             .filter_map(|w| w.parse().ok())
             .collect();
         (n[0], n[1])
     };
-    let (running, queued) = first("handing ");
-    assert_eq!((running, queued), first("took over "), "{log}");
+    let (running, queued) = counts("handing ", 0);
+    assert_eq!((running, queued), counts("took over ", 0), "{log}");
     assert_eq!(running, 20, "{log}");
     assert!(queued > 0, "nothing queued at the first reload:\n{log}");
+    // No job ends before the release, so the second handover carries every
+    // running job. Its count of queued jobs varies: the image that took them
+    // over queues them again in tasks of their own, and one the reload comes
+    // before is not in the table yet. Its client sees the connection close
+    // before a start and submits again.
+    let (running2, queued2) = counts("handing ", 1);
+    assert_eq!((running2, queued2), counts("took over ", 1), "{log}");
+    assert_eq!(running2, 20, "the second handover:\n{log}");
     assert!(!log.contains("reconciled"), "tokens went missing:\n{log}");
     for (tag, code, out, err) in &done {
         assert_eq!(*code, 7, "client {tag}: {err}");
@@ -527,7 +535,7 @@ fn a_burst_of_reloads_never_ends_the_daemon() {
         d.log().matches("took over").count() >= 2
     });
     release(&d);
-    let done = wait_all(clients, Duration::from_secs(30));
+    let done = wait_all(clients, Duration::from_secs(10));
     let log = d.log();
     for (tag, code, out, err) in &done {
         assert_eq!(*code, 3, "client {tag}: {err}\n{log}");
@@ -812,4 +820,58 @@ fn the_cpu_limit_holds_across_a_reload() {
     std::fs::write(d.dir.path().join("release"), "").unwrap();
     let done = wait_all(vec![("before".into(), before)], Duration::from_secs(20));
     assert_eq!(done[0].1, 0, "{}", done[0].3);
+}
+
+// adversary u3
+
+/// Jobs that end while a handover runs. `resume` puts each running job into
+/// the table and starts its supervisor before it puts the next one in, so a
+/// job that ended during the handover can be finished while jobs that still
+/// hold slots are not in the table yet: the table is empty, `finish` runs
+/// the idle reconcile, and the FIFO is filled up to the pool's size beside
+/// the slots those jobs hold. The reload test lets its jobs end only after
+/// both handovers, so no job ends during one there. Here every job ends as
+/// the reload comes; no reconcile may move a token, in any round.
+#[test]
+fn jobs_that_end_during_a_handover_leave_the_slot_count_alone() {
+    const JOBS: usize = 8;
+    let d = Daemon::start(JOBS, &[]);
+    // Four rounds: up to 6 s each at a load of 90 on 20 CPUs.
+    for round in 0..4 {
+        let mut clients = Vec::new();
+        for i in 0..JOBS {
+            let tag = format!("r{round}j{i}-");
+            let script = format!(
+                ": > {tag}started; while [ ! -e release{round} ]; do sleep 0.01; done; \
+                 echo {tag}end"
+            );
+            clients.push((tag.clone(), d.client(&script)));
+        }
+        d.wait_until(
+            "every job of the round running",
+            Duration::from_secs(10),
+            |d| started(d) == JOBS * (round + 1),
+        );
+        std::fs::write(d.dir.path().join(format!("release{round}")), []).unwrap();
+        d.reload();
+        d.wait_until("the round's handover", Duration::from_secs(20), |d| {
+            d.log().matches("took over").count() > round
+        });
+        let done = wait_all(clients, Duration::from_secs(20));
+        for (tag, code, out, err) in &done {
+            assert_eq!(
+                (*code, out.as_str()),
+                (0, format!("{tag}end\n").as_str()),
+                "{err}"
+            );
+        }
+        d.wait_until("every slot back", Duration::from_secs(10), |d| {
+            d.free_tokens() == JOBS
+        });
+        let log = d.log();
+        assert!(
+            !log.contains("reconciled"),
+            "round {round}: a reconcile moved tokens while jobs held them:\n{log}"
+        );
+    }
 }

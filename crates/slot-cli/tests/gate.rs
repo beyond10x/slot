@@ -138,8 +138,12 @@ fn wait_for(p: &Path) {
     until(&format!("{} to appear", p.display()), || p.exists());
 }
 
-/// Whether process `pid` has `path` open.
+/// Whether process `pid` has `path` open. The kernel names an open file by
+/// its canonical path, so `path` is compared in that form.
 fn opened_by(pid: u32, path: &Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
     std::fs::read_dir(format!("/proc/{pid}/fd")).is_ok_and(|d| {
         d.flatten()
             .any(|f| std::fs::read_link(f.path()).is_ok_and(|l| l == path))
@@ -251,5 +255,28 @@ fn without_a_gate_the_client_runs_outside_the_pool_and_says_so() {
         String::from_utf8_lossy(&out.stderr).contains("ran outside the pool"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+// adversary u3
+
+/// `Setup::start` waits until the gate has its request FIFO open by
+/// comparing each link in `/proc/<pid>/fd` with the FIFO's path as the test
+/// built it. The kernel names the canonical path, so with a temporary
+/// directory reached through a symlink (`TMPDIR` on a symlinked directory)
+/// the wait never ends and every test of this file fails after 10 s.
+#[test]
+fn opened_by_sees_a_file_opened_through_a_symlinked_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let path = link.join("requests.fifo");
+    let _open = std::fs::File::create(&path).unwrap();
+    assert!(
+        opened_by(std::process::id(), &path),
+        "{} is open in this process",
+        path.display()
     );
 }

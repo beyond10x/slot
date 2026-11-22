@@ -1199,14 +1199,22 @@ impl Server {
         }
         let n_running = state.running.len();
         let snap = Snapshot::scan();
+        // Every running job goes into the table before any supervisor starts
+        // and before the first client is accepted. A job that ended during
+        // the handover is finished as soon as its supervisor runs; with a
+        // job still missing from the table, that finish would find no job
+        // holding slots and the idle reconcile would fill the FIFO beside
+        // the slots the missing jobs hold.
+        let mut adopted = Vec::with_capacity(n_running);
         for r in state.running {
             let conn = r.conn.and_then(|i| conns.get_mut(i).and_then(Option::take));
             let out = h.take(r.stdout);
             let err = h.take(r.stderr);
             let (id, pid) = (r.job.id, r.pid);
-            // Into the table before the first client is accepted, so an idle
-            // reconcile never takes the tokens these jobs hold.
             let (tx, gone, keep) = self.adopt_running(r, out, err, conn.as_ref(), &snap);
+            adopted.push((id, pid, tx, gone, keep, conn));
+        }
+        for (id, pid, tx, gone, keep, conn) in adopted {
             let s = Arc::clone(self);
             tokio::spawn(async move {
                 let _keep = keep;
