@@ -343,6 +343,19 @@ Open, one line each, with where the design lives. A session starts with (e).
   every tick and only shows it (`recommended_tokens`); (i) and (v) are cases of the same change.
   A job then asks for a share of the CPUs, not for a number of slots:
   `story:jobs-ask-for-a-share-of-the-cpus`.
+- (aa) The CPU limit for starts (`slot cpu-limit`) counts every process on the host, so work
+  that runs outside the pool holds the pool's jobs. Measured 2026-11-22 on a host of 20 CPUs
+  with the mark 17 and the floor 6: one hour with 6.7 to 10.0 CPUs busy passed with a queue wait
+  of 0 s at the median and 64 s at the 90th percentile (706 jobs, 278 held, none reached the
+  10-minute bound). Then 7.7 to 10.8 of 16 to 20 busy CPUs were processes outside the pool and
+  outside the compile cache server: for 11 minutes 31 to 41 jobs stood queued, 78 jobs waited
+  204 s at the median (311 s at the 90th percentile), the CPU pressure stayed at 58 to 77 %,
+  and the limit was switched off. Not built: a figure that counts only the pool's cgroup and
+  the compile cache server's, or a floor that follows the queue. Before switching the limit on,
+  read how many CPUs run outside both (`systemd-cgtop`, or the census `classes` against
+  `host_cores`). A watch that switches the limit off on the queue wait must count the ages of
+  the queued jobs: the waits of started jobs alone read 46 s while 39 queued jobs had a median
+  age of 200 s.
 
 ## Never
 
