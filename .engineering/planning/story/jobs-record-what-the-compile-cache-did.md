@@ -6,7 +6,7 @@ status: draft
 title: Jobs record what the compile cache did, and the cache counters are kept per minute
 relations:
 - serves: vision:O6
-revision: 1
+revision: 2
 ---
 ## Outcome
 
@@ -53,5 +53,6 @@ what the compile cache did, and per minute what each cache server answered.
 
 ## Scope
 
-- `crates/slot/src/proc.rs`, `crates/slot/src/server/mod.rs`, `crates/slot/src/types.rs`
+- `crates/slot/src/procstat.rs`, `crates/slot/src/sccache.rs`, `crates/slot/src/server/mod.rs`,
+  `crates/slot/src/types.rs`
 - `crates/slot/src/usage.rs`, `crates/slot/src/cli.rs`, `docs/design.md` § 12
