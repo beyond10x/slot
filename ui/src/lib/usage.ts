@@ -28,7 +28,7 @@ export function usageUrl(w: UsageWindow, by: By, now: Date): string {
   return `api/usage?from=${windowStart(w, now)}&to=${now.getTime()}&by=${by}`;
 }
 
-const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
+const pct = (x: number): string => `${(x * 100).toFixed(1)} %`;
 
 function groupLabel(r: UsageRow, by: By): string {
   if (by === 'session') return r.title || r.key.slice(0, 8) || '(none)';

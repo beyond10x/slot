@@ -67,6 +67,41 @@ export function machineLine(m: MachineNumbers, cores: number, quotaPercent: numb
   );
 }
 
+/** What the CPU limit on all builds together comes to, in words; `held` when the limit is what holds builds back. */
+function buildsLimit(m: MachineNumbers, quotaPercent: number | null): string {
+  if (quotaPercent === null) return 'builds have no CPU limit';
+  const cpus = (quotaPercent / 100).toFixed(1);
+  return m.over_target || m.quota_floor ? `builds are held to ${cpus} CPUs` : `builds may use ${cpus} CPUs`;
+}
+
+/**
+ * The header's sentence on the machine base: how busy the machine is, how much of that other programs
+ * use, and what builds get. Null on the pool base or with no headroom.
+ */
+export function machineSentence(m: MachineNumbers, cores: number, quotaPercent: number | null): string | null {
+  if (m.headroom_base !== 'machine' || !(m.target_cores > 0)) return null;
+  return (
+    `machine${m.over_target ? ' over target' : ''}: ${m.busy_cores.toFixed(1)} of ${cores} CPUs busy, ` +
+    `other programs use ${m.outside_cores.toFixed(1)}; ${buildsLimit(m, quotaPercent)}`
+  );
+}
+
+/**
+ * Every machine number in sentences, for the host panel: the target, the load, who uses the part outside
+ * the pool, and the limit on builds. Null on the pool base or with no headroom.
+ */
+export function machineDetail(m: MachineNumbers, cores: number, quotaPercent: number | null): string | null {
+  if (m.headroom_base !== 'machine' || !(m.target_cores > 0)) return null;
+  const owners = m.outside.map((o) => `${o.name} ${o.cores.toFixed(1)}`).join(', ');
+  const limit = buildsLimit(m, quotaPercent) + (quotaPercent !== null && m.quota_floor ? ', the lowest limit slot sets' : '');
+  return (
+    `The machine may use ${m.target_cores.toFixed(1)} of ${cores} CPUs` +
+    `${m.over_target ? ' and is over that target' : ''}: ${m.busy_cores.toFixed(1)} are busy, ` +
+    `${m.outside_cores.toFixed(1)} of them by programs outside the pool${owners ? ` (${owners})` : ''}. ` +
+    `${limit[0].toUpperCase()}${limit.slice(1)}.`
+  );
+}
+
 /**
  * Error text for an answer from `PUT api/limits` that is not JSON, or null
  * when it is. A daemon older than 0.3.0 has no such path and answers with

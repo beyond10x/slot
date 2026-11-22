@@ -27,8 +27,8 @@ const done = computed(() => (props.live ? unitsDone(props.live) : 0));
 </template>
 
 <style scoped>
-.units { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; padding: 2px 0 4px 22px; white-space: normal; }
+.units { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding: 0; white-space: normal; }
 .chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid; border-radius: 3px; padding: 0 6px 0 0;
-  font: 12px/18px ui-monospace, monospace; background: #fff; }
-.chip b { color: #fff; font-weight: 600; padding: 0 5px; border-radius: 2px 0 0 2px; font-family: system-ui, sans-serif; font-size: 11px; }
+  font: 13px/20px var(--mono); background: #fff; color: var(--fg); }
+.chip b { color: #fff; font-weight: 600; padding: 0 5px; border-radius: 2px 0 0 2px; font-family: system-ui, sans-serif; font-size: 12px; }
 </style>

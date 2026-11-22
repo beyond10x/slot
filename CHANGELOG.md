@@ -9,6 +9,28 @@
   opens only by its toggle. The Finished table states a result in words ("failed (101)", "ok",
   "cancelled"), and a build outside the pool is "not on slot" everywhere.
 
+- Web view: the header is 80 px high in every state at 1280 px and wider; a refused change, the
+  machine line, a pending upgrade and a call share its second line instead of adding rows. A "?"
+  button explains each header item, by pointer or keyboard. The wait percentiles, the cores of
+  the jobs, the host CPU, the pressure and the recommended pool size moved from the header to the
+  section each belongs to, with their current values.
+
+- Web view: the Queue, Running and Finished tables have one column order and one set of widths,
+  so slots, wait, time and cores stand in line down the page. Finished has a result mark and the
+  slots a job held. A job's session is named by its title. A queued job that waits for disk space
+  or memory says so in a line under its row, and the Queue gives the command the rest of the row.
+
+- Web view: the output pane says the job's state in words ("queued, #4 of 6, waiting 31s",
+  "running, output live", "failed (exit 101)") and lists what the tables cut or leave out: the
+  whole command, the directory, the session with its id, slots, times, cores and memory.
+
+- Web view: the page title carries the counts ("6 running, 2 queued · slot <host>"), and the
+  page has an icon. Text is 14 px, commands and output 13 px, nothing below 12 px. Nothing
+  blinks: a running bar of the timeline has a steady edge, and red is left to a failure.
+
+- Web view: the Sessions table shows the id in every row and "no title" for a session without
+  one; a timeline bar ends a cut label with "…".
+
 - Once a minute the daemon appends the counters of each running sccache server to
   `<state-dir>/cache.jsonl`: Rust and C/C++ hits and misses, the calls the server refused by
   reason, the cache size and its limit, and `restarted` when a counter went down. sccache keeps

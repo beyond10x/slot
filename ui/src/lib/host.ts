@@ -117,6 +117,16 @@ export function sessionLabel(s: CensusSession): string {
   return s.title || (s.session ? s.session.slice(0, 8) : '(no session)');
 }
 
+/** The Sessions table's first two cells: the title or "no title", and the first 8 characters of the id (empty for processes without a session). */
+export function sessionCells(s: CensusSession): { name: string; untitled: boolean; id: string } {
+  return { name: s.title || (s.session ? 'no title' : '(no session)'), untitled: !s.title, id: s.session.slice(0, 8) };
+}
+
+/** A job's session as the job tables name it: the title the census gave for that id, else the first 8 characters of the id. */
+export function sessionName(id: string, titles: ReadonlyMap<string, string>): string {
+  return titles.get(id) || id.slice(0, 8);
+}
+
 /** Sessions by cores, then unmanaged cores, then label. */
 export function orderSessions(list: readonly CensusSession[]): CensusSession[] {
   return [...list].sort(

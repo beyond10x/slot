@@ -278,10 +278,10 @@ function callMode(): Scenario {
   const st = state([...running, ...waiting], finished, 20, 40, apps);
   return {
     name: 'call-mode', anchor: false,
-    card: 'A call holds the headroom at 40 %; two builds wait for disk space and memory, not for slots.',
+    card: 'A call holds the headroom at 40 %; two builds wait for disk space and memory, not for slots. Read what the first one waits for.',
     state: st, history: history(running, 20, 12, 40, 2, apps),
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 12, 40, 2, 1, apps)] }],
-    output: {}, task: null,
+    output: {}, task: { kind: 'see', expect: 'free space on the build filesystem is below 25 GB' },
   };
 }
 
@@ -307,6 +307,16 @@ function idle(): Scenario {
   return {
     name: 'idle', anchor: false, card: 'Nothing builds. The page must say so.',
     state: st, history: history([], 20, 20, 0, 0),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), [], 20, 20, 0, 0, 1)] }],
+    output: {}, task: null,
+  };
+}
+
+/** The daemon started a moment ago: no job has run, so all three job tables are empty. */
+function fresh(): Scenario {
+  return {
+    name: 'fresh', anchor: false, card: 'The daemon has just started and no job has run yet. The page must say so in every table.',
+    state: state([], [], 20, 0), history: [tick(s(-1), [], 20, 20, 0, 0, 0)],
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), [], 20, 20, 0, 0, 1)] }],
     output: {}, task: null,
   };
@@ -349,12 +359,13 @@ function poolShare(): Scenario {
     key, title: '', jobs, unverified_repo_jobs: 0, slot_s: slot, cpu_s: cpu, wait_s: wait * jobs, wait_p50_s: wait, wait_max_s: wait * 6,
     slot_share: slot / slotTotal, cpu_share: cpu / cpuTotal,
   });
+  // In the daemon's order: slot time descending, then key.
   const rows = [
-    r(REPOS[0], 146_000, 93_000, 1338, 46), r(REPOS[1], 94_000, 94_000, 189, 60), r(REPOS[2], 37_000, 70_000, 327, 69),
-    r(REPOS[3], 30_000, 4_000, 338, 81), r(REPOS[4], 93_000, 99_000, 2597, 62),
+    r(REPOS[0], 146_000, 93_000, 1338, 46), r(REPOS[1], 94_000, 94_000, 189, 60), r(REPOS[4], 93_000, 99_000, 2597, 62),
+    r(REPOS[2], 37_000, 70_000, 327, 69), r(REPOS[3], 30_000, 4_000, 338, 81),
   ];
   rows[1].unverified_repo_jobs = rows[1].jobs;
-  rows[2].unverified_repo_jobs = 4;
+  rows[3].unverified_repo_jobs = 4;
   const usage: Usage = {
     from_ms: T0 - 86_400_000, to_ms: T0, by: 'project', rows,
     total: { key: '', title: '', jobs: 4789, unverified_repo_jobs: 0, slot_s: slotTotal, cpu_s: cpuTotal, wait_s: 0, wait_p50_s: 42, wait_max_s: 385, slot_share: 1, cpu_share: 1 },
@@ -368,7 +379,7 @@ function poolShare(): Scenario {
 
 export const SCENARIOS: Scenario[] = [
   busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), queueLevels(), crowded(), callMode(), upgradePending(), idle(),
-  machineHeadroom(), poolShare(),
+  machineHeadroom(), poolShare(), fresh(),
 ];
 
 /** Scenarios whose output pane is open from the start. */

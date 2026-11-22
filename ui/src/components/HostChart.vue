@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, useTemplateRef } from 'vue';
-import { AXIS, FONT, RECORDED_CPU, animate, drawAxis, drawExact, drawRecorded, sizeCanvas } from '../canvas.ts';
+import { AXIS, FONT, INK, RECORDED_CPU, animate, drawAxis, drawExact, drawRecorded, sizeCanvas } from '../canvas.ts';
 import { familyColor, stack } from '../lib/host.ts';
 import { chartWindow, now, store } from '../store.ts';
 
 const H = 160;
-const TOP_PAD = 16;
+const TOP_PAD = 18;
 
 const cv = useTemplateRef<HTMLCanvasElement>('cv');
 
@@ -65,7 +65,8 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, stripes: Canv
   drawExact(ctx, pts, X, (p) => Y(p.hostCores));
 
   if (pool > 0) {
-    ctx.strokeStyle = '#c4302b';
+    // The pool line is grey: red is the colour of a failure.
+    ctx.strokeStyle = '#6e6e6e';
     ctx.setLineDash([5, 4]);
     drawExact(ctx, pts, X, (p) => Y(p.tokens), true);
     ctx.setLineDash([]);
@@ -73,11 +74,11 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D, stripes: Canv
 
   ctx.font = FONT;
   ctx.textBaseline = 'top';
-  ctx.fillStyle = '#666';
+  ctx.fillStyle = INK;
   ctx.fillText(`${top.toFixed(0)} cores · line: all processes on the host · dashed: pool ${pool}`, 4, 2);
   if (buckets.length) {
     ctx.fillStyle = RECORDED_CPU;
-    ctx.fillText('10 s recorded averages · all processes', 4, 16);
+    ctx.fillText('10 s recorded averages · all processes', 4, 18);
   } else if (!pts.length) ctx.fillText(store.historyLoaded ? 'no samples in this window' : 'loading history…', 4, 18);
 }
 

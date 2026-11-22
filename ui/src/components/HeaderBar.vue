@@ -1,11 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import { fmtDur } from '../lib/format.ts';
-import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineLine } from '../lib/headroom.ts';
+import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineSentence } from '../lib/headroom.ts';
 import { jobId } from '../lib/job.ts';
-import { failedStats, queueSummary, servedQueue, waitStats } from '../lib/queue.ts';
+import { failedStats, queueSummary, servedQueue } from '../lib/queue.ts';
 import { census, jobs, select, setHeadroom, store } from '../store.ts';
-import ToolDot from './ToolDot.vue';
 
 const WINDOWS: ReadonlyArray<[number, string]> = [
   [120, '2 min'],
@@ -15,8 +14,16 @@ const WINDOWS: ReadonlyArray<[number, string]> = [
   [21600, '6 h'],
 ];
 
+/** The first state has arrived: until then the header shows its name and keeps the room of its numbers. */
+const loaded = computed(() => store.tokens > 0);
 const limit = computed(() => store.limit || store.tokens);
 const used = computed(() => Math.max(0, limit.value - store.free));
+const withheld = computed(() => Math.max(0, store.tokens - limit.value));
+const connection = computed(() => {
+  if (store.connected) return { word: 'connected', title: 'connected to the daemon: the page follows it second by second' };
+  if (!loaded.value) return { word: 'connecting…', title: 'waiting for the first answer of the daemon' };
+  return { word: 'not connected', title: 'not connected to the daemon: the numbers are the last ones received' };
+});
 
 /** Slider value; follows the daemon except while the user moves it. */
 const draft = ref(store.headroom);
@@ -43,105 +50,177 @@ const onHeadroom = (e: Event): void => pick(Number((e.target as HTMLInputElement
 const caption = computed(() =>
   headroomCaption(store.cores || store.tokens, store.tokens, draft.value, store.machine.headroom_base),
 );
-const machine = computed(() => machineLine(store.machine, store.cores, store.cpuQuota));
+const machine = computed(() => machineSentence(store.machine, store.cores, store.cpuQuota));
+const call = computed(() =>
+  store.callApps.length ? `call (${store.callApps.join(', ')}): headroom raised, back 2 min after the call` : '',
+);
 const running = computed(() => {
   let n = 0;
   for (const j of jobs.values()) if (j.state === 'running') n++;
   return n;
 });
 const queue = computed(() => queueSummary(servedQueue(jobs.values()), store.clock));
-const waits = computed(() => waitStats(jobs.values(), store.clock));
-/** Failed jobs of the same 60 minutes; the button opens the output of the one that ended last. */
+/** Failed jobs of the last 60 minutes; the button opens the output of the one that ended last. */
 const failed = computed(() => {
   const f = failedStats(jobs.values(), store.clock);
   return f.newest ? { n: f.n, id: jobId(f.newest) } : null;
 });
-const pct = (v: number | null): string => (v === null ? '–' : fmtDur(v));
+
+/** The explanation of every item of the header: open by a click or Enter on "?", or while the pointer is on it. */
+const pinned = ref(false);
+const hovered = ref(false);
+const help = computed(() => pinned.value || hovered.value);
+const helpBtn = useTemplateRef<HTMLButtonElement>('helpBtn');
+function toggleHelp(): void {
+  pinned.value = !pinned.value;
+  hovered.value = false;
+}
+function onEscape(e: KeyboardEvent): void {
+  if (!help.value) return;
+  pinned.value = false;
+  hovered.value = false;
+  e.preventDefault();
+  helpBtn.value?.focus();
+}
+function onOutside(e: MouseEvent): void {
+  if (pinned.value && e.target instanceof Node && !el.value?.contains(e.target)) pinned.value = false;
+}
 
 const el = useTemplateRef<HTMLElement>('el');
 let ro: ResizeObserver | null = null;
 onMounted(() => {
+  document.addEventListener('click', onOutside);
   const h = el.value;
   if (!h) return;
   ro = new ResizeObserver(() => document.documentElement.style.setProperty('--hdr', h.offsetHeight + 'px'));
   ro.observe(h);
 });
-onUnmounted(() => ro?.disconnect());
+onUnmounted(() => {
+  document.removeEventListener('click', onOutside);
+  ro?.disconnect();
+});
 </script>
 
 <template>
-  <header ref="el">
-    <h1>slot · {{ store.host }}<template v-if="store.cores"> · {{ store.cores }} cores</template></h1>
-    <span class="conn" data-ux-region="connection" :class="{ ok: store.connected }" role="img"
-      :aria-label="store.connected ? 'live: connected to the daemon' : 'not connected to the daemon'"
-      :title="store.connected ? 'live: connected to the daemon' : 'not connected to the daemon'"></span>
-    <span v-if="store.error" class="bad">{{ store.error }}</span>
-    <span data-ux-region="slots" :title="limit < store.tokens ? `${store.tokens - limit} slot(s) withheld for headroom` : 'slots in use'">slots
-      <span class="tokens"><i v-for="k in store.tokens" :key="k" :class="{ on: k <= used, off: k > limit }"></i></span>
-      <b>{{ used }}/{{ limit }}</b></span>
-    <span class="headroom" data-ux-region="headroom">
-      <label title="Share of the CPU kept free for you (browser, video calls). Builds get the rest: fewer slots, and a CPU quota on all build jobs together.">
-        headroom for you
-        <input type="range" min="0" :max="MAX_HEADROOM" :step="HEADROOM_STEP" :value="draft"
-          aria-describedby="headroom-caption" @input="onHeadroom" /></label>
-      <b>{{ draft }}%</b>
-      <span class="presets" role="group" aria-label="headroom presets">
-        <button v-for="p in HEADROOM_PRESETS" :key="p" type="button" :aria-pressed="draft === p" @click="pick(p)">{{ p }} %</button>
+  <header ref="el" @keydown.esc="onEscape">
+    <div class="row1" :class="{ pending: !loaded }">
+      <div class="tile brand">
+        <h1><span class="name">slot</span><span class="sr"> · </span><span class="host" :title="`${store.host} · ${store.cores} cores`">{{ store.host }}<template v-if="store.cores"> · {{ store.cores }} cores</template></span></h1>
+        <span class="conn" data-ux-region="connection" :class="{ ok: store.connected, wait: !loaded }" :title="connection.title"><i></i>{{ connection.word }}</span>
+      </div>
+      <span class="tile" data-ux-region="slots">
+        <span class="k">slots in use</span>
+        <span class="v"><span class="tokens" aria-hidden="true"><i v-for="k in store.tokens" :key="k" :class="{ on: k <= used, off: k > limit }"></i></span> <b>{{ used }}/{{ limit }}</b></span>
       </span>
-      <span id="headroom-caption" class="muted">{{ caption }}</span></span>
-    <span v-if="store.callApps.length" class="call"
-      title="Call mode: a call uses the microphone or the camera, so the headroom is raised; it goes back 2 min after the call. Moving the slider now keeps your value.">
-      call · {{ store.callApps.join(', ') }}</span>
-    <span v-if="store.headroomError" class="bad">{{ store.headroomError }}</span>
-    <span v-if="machine" class="machine" :class="{ over: store.machine.over_target }" data-ux-region="machine" role="status"
-      title="Headroom of the machine: the pool's CPU quota is the target less what runs outside the pool, at least 2 CPUs. Over target: the pool is at that floor and the machine is still busier.">
-      {{ machine }}</span>
-    <span v-if="store.upgrade" class="upgrade" data-ux-region="upgrade" role="status"
-      title="The daemon re-executes a new binary at the first moment no job runs; until then it may hold new jobs.">
-      {{ store.upgrade }}</span>
-    <span>running <b>{{ running }}</b></span>
-    <span data-ux-region="queue">queue <b>{{ queue.length }}</b> · longest wait <b>{{ fmtDur(queue.longestS) }}</b></span>
-    <span :title="`slot wait (start - enqueue) of ${waits.n} jobs finished in the last 60 min; gave up = cancelled while queued`">
-      wait p50 <b>{{ pct(waits.p50) }}</b> · p90 <b>{{ pct(waits.p90) }}</b> · gave up <b>{{ waits.gaveUp }}</b>
-      <span class="muted">(60 min)</span></span>
-    <button v-if="failed" type="button" class="failed" :aria-label="`failed ${failed.n} (60 min): output of job ${failed.id}, the newest failed job`"
-      :title="`open the output of job ${failed.id}, the newest of ${failed.n} failed in the last 60 min`"
-      @click="select(failed.id, $event)">failed <b>{{ failed.n }}</b> <span class="muted">(60 min)</span></button>
-    <span>job cores <b>{{ store.jobCores.toFixed(1) }}</b></span>
-    <span>host CPU <b>{{ (store.sysCpu * 100).toFixed(0) }}</b>%</span>
-    <span v-if="census" title="CPU pressure (some avg10); cores of builds that are not on slot; pool size the controller recommends, not enforced">
-      PSI cpu <b>{{ census.psi_cpu.toFixed(0) }}</b>% · not on slot <b>{{ census.unmanaged_cores.toFixed(1) }}</b> cores
-      · recommended <b>{{ census.recommended_tokens }}/{{ store.tokens }}</b> <span class="muted">(observe)</span></span>
-    <label>window
-      <select v-model.number="store.windowS">
-        <option v-for="[s, label] in WINDOWS" :key="s" :value="s">{{ label }}</option>
-      </select></label>
-    <span class="legend"><ToolDot v-for="n in store.toolchains" :key="n" :name="n" /></span>
+      <span class="tile headroom" data-ux-region="headroom">
+        <label class="k" for="headroom">headroom for you</label>
+        <span class="v">
+          <input id="headroom" type="range" min="0" :max="MAX_HEADROOM" :step="HEADROOM_STEP" :value="draft"
+            aria-describedby="headroom-caption" @input="onHeadroom" /> <b class="pc">{{ draft }} %</b>
+          <span class="presets" role="group" aria-label="headroom presets">
+            <button v-for="p in HEADROOM_PRESETS" :key="p" type="button" class="btn" :aria-pressed="draft === p" @click="pick(p)">{{ p }} %</button>
+          </span>
+        </span>
+      </span>
+      <span class="tile"><span class="k">running</span> <b class="v">{{ running }}</b></span>
+      <span class="pair" data-ux-region="queue">
+        <span class="tile"><span class="k">queue</span> <b class="v">{{ queue.length }}</b></span>
+        <span class="tile"><span class="k">longest wait</span> <b class="v">{{ queue.length ? fmtDur(queue.longestS) : '–' }}</b></span>
+      </span>
+      <button v-if="failed" type="button" class="tile failed" :aria-label="`failed ${failed.n} (60 min): output of job ${failed.id}, the newest failed job`"
+        @click="select(failed.id, $event)"><span class="k">failed</span> <span class="v"><b>{{ failed.n }}</b> <span class="span">(60 min)</span></span></button>
+      <span v-if="census" class="tile"><span class="k">not on slot</span> <span class="v"><b>{{ census.unmanaged_cores.toFixed(1) }}</b> <span class="span">cores</span></span></span>
+      <span class="end">
+        <label class="tile"><span class="k">chart window</span>
+          <span class="v"><select v-model.number="store.windowS">
+            <option v-for="[s, label] in WINDOWS" :key="s" :value="s">{{ label }}</option>
+          </select></span></label>
+        <button ref="helpBtn" type="button" class="btn helpbtn" aria-label="what the header shows" :aria-expanded="help" aria-controls="header-help"
+          @click="toggleHelp" @mouseenter="hovered = true" @mouseleave="hovered = false">?</button>
+      </span>
+    </div>
+    <div class="row2">
+      <span v-if="loaded" id="headroom-caption" class="cap">{{ caption }}</span>
+      <span v-if="store.error" class="chip err" :title="store.error">{{ store.error }}</span>
+      <span v-if="store.headroomError" class="chip err" role="status" :title="store.headroomError">{{ store.headroomError }}</span>
+      <span v-if="machine" class="chip machine" :class="{ over: store.machine.over_target }" data-ux-region="machine" :title="machine">{{ machine }}</span>
+      <span v-if="store.upgrade" class="chip upgrade" data-ux-region="upgrade" role="status" :title="store.upgrade">{{ store.upgrade }}</span>
+      <span v-if="call" class="chip call" :title="call">{{ call }}</span>
+    </div>
+    <div v-if="help" id="header-help" class="help" role="region" aria-label="what the header shows"
+      @mouseenter="hovered = true" @mouseleave="hovered = false">
+      <dl>
+        <div><dt>connected</dt><dd>The page follows the daemon second by second. "Not connected": the numbers are the last ones received.</dd></div>
+        <div><dt>slots in use</dt><dd>Slots that running jobs hold, of the slots builds may use now. A dashed box is a slot the headroom keeps back{{ withheld ? ` (${withheld} now)` : '' }}.</dd></div>
+        <div><dt>headroom for you</dt><dd>Share of the CPU kept free for you (browser, video calls). Builds get the rest: fewer slots, and one CPU limit on all build jobs together. The line below the numbers says what that comes to.</dd></div>
+        <div><dt>running, queue, longest wait</dt><dd>Jobs that hold slots, jobs that wait, and how long the oldest of them has waited. The Queue table names what each one waits for.</dd></div>
+        <div><dt>failed</dt><dd>Jobs that ended with an error in the last 60 min. The button opens the output of the newest one.</dd></div>
+        <div><dt>not on slot</dt><dd>Cores used by builds that do not run through slot. The Host section shows which sessions run them.</dd></div>
+        <div><dt>chart window</dt><dd>The time span of every chart of the page.</dd></div>
+        <div v-if="machine"><dt>machine</dt><dd>The headroom counts the whole machine: builds get the target less what other programs use, at least 2 CPUs. "Over target": builds are at that lowest limit and the machine is still busier. The Host section lists the other programs.</dd></div>
+        <div v-if="store.upgrade"><dt>upgrade pending</dt><dd>The daemon starts its new version at the first moment no job runs; until then it may hold new jobs back.</dd></div>
+        <div v-if="call"><dt>call</dt><dd>A call uses the microphone or the camera, so the headroom is raised; it goes back 2 min after the call. Moving the slider now keeps your value.</dd></div>
+      </dl>
+    </div>
   </header>
 </template>
 
 <style scoped>
-header { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; background: var(--bg); z-index: 2; }
-h1 { font-size: 15px; margin: 0; }
-b { font-variant-numeric: tabular-nums; }
-.tokens { display: inline-flex; gap: 2px; vertical-align: middle; }
-.tokens i { width: 9px; height: 14px; background: #e3e3e3; border-radius: 2px; }
-.tokens i.on { background: #444; }
-.tokens i.off { background: transparent; outline: 1px dashed #bbb; outline-offset: -1px; }
-.headroom { display: inline-flex; gap: 6px; align-items: center; }
-.headroom label { display: inline-flex; gap: 6px; align-items: center; }
-.headroom input { width: 110px; }
-.call { padding: 1px 7px; border-radius: 9px; background: #e6f0ff; color: #1d4f91; }
-.upgrade { padding: 1px 7px; border-radius: 9px; background: #fff3d6; color: #6b4500; }
-.machine { padding: 1px 7px; border-radius: 9px; background: #eef1f4; color: #2b3a48; overflow-wrap: anywhere; }
-.machine.over { background: #fde8e6; color: #8a1c12; }
-.presets { display: inline-flex; gap: 2px; }
-.presets button { min-width: 24px; min-height: 24px; padding: 0 6px; border: 1px solid #bbb; border-radius: 3px; background: #fff;
-  color: var(--fg); cursor: pointer; font-variant-numeric: tabular-nums; }
-.presets button[aria-pressed='true'] { background: #444; border-color: #444; color: #fff; }
-.failed { min-height: 24px; margin: -3px 0; padding: 0 6px; border: 1px solid #e5a5a2; border-radius: 3px; background: #fff; color: #b00; cursor: pointer; }
-.conn { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: #c33; }
-.conn.ok { background: #2a2; }
-.legend > span { margin-right: 12px; }
+/*
+ * Two rows of fixed height: the numbers, then one line for what the headroom comes to and for status lines.
+ * A status line that appears takes room in the second row, so the page below never moves.
+ */
+header { position: sticky; top: 0; z-index: 2; padding: 7px 14px 6px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.row1 { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 20px; min-height: 37px; }
+.row1.pending > :not(.brand) { visibility: hidden; }
+.tile { display: inline-flex; flex-direction: column; justify-content: space-between; height: 37px; min-width: 0; }
+.pair, .end { display: inline-flex; gap: 14px; }
+.end { margin-left: auto; align-items: flex-end; gap: 10px; }
+.k { font-size: 12px; line-height: 15px; color: var(--mute); white-space: nowrap; }
+.v { display: inline-flex; align-items: center; gap: 6px; height: 22px; font-size: 13px; line-height: 22px; white-space: nowrap; }
+b, b.v { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.span { color: var(--mute); }
+.brand { display: grid; grid-template-columns: auto auto; justify-content: start; align-content: space-between; column-gap: 8px; }
+h1 { display: contents; margin: 0; font-size: inherit; font-weight: inherit; }
+h1 .name { font-size: 16px; font-weight: 700; line-height: 22px; }
+h1 .host { grid-row: 2; grid-column: 1 / -1; max-width: 200px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 15px;
+  color: var(--mute); white-space: nowrap; }
+.conn { align-self: center; font-size: 12px; line-height: 15px; color: var(--mute); white-space: nowrap; }
+.conn i { display: inline-block; width: 8px; height: 8px; margin-right: 4px; border-radius: 50%; background: #c62828; }
+.conn.ok i { background: #1e8e3e; }
+.conn.wait i { background: #b0b0b0; }
+.conn:not(.ok):not(.wait) { color: var(--bad); font-weight: 600; }
+.tokens { display: inline-flex; gap: 2px; }
+.tokens i { width: 5px; height: 14px; background: #dcdcdc; border-radius: 1px; }
+.tokens i.on { background: var(--ink); }
+.tokens i.off { background: transparent; outline: 1px dashed #9a9a9a; outline-offset: -1px; }
+.headroom input { width: 88px; }
+.pc { min-width: 40px; text-align: right; }
+.presets { display: inline-flex; gap: 3px; margin-left: 2px; }
+.presets .btn { padding: 0 6px; font-variant-numeric: tabular-nums; }
+.failed { padding: 0 8px; margin: 0 -8px; border: 1px solid #e0a09c; border-radius: 4px; background: #fff; color: var(--bad); cursor: pointer;
+  text-align: left; }
+.failed:hover { background: #fdf1f0; }
+.failed .k, .failed .span { color: var(--bad); }
+.helpbtn { border-radius: 50%; padding: 0; width: 24px; font-weight: 700; }
+.row2 { display: flex; align-items: center; gap: 10px; height: 24px; margin-top: 5px; overflow: hidden; font-size: 13px; white-space: nowrap; }
+.cap { flex: none; color: var(--mute); font-variant-numeric: tabular-nums; }
+.chip { flex: 0 1 auto; min-width: 0; padding: 0 8px; border-radius: 10px; overflow: hidden; text-overflow: ellipsis; line-height: 20px;
+  font-variant-numeric: tabular-nums; }
+.chip.err { flex-shrink: 0; background: #fde8e6; color: #8a1c12; font-weight: 600; }
+.chip.machine { background: #eef1f4; color: #2b3a48; }
+.chip.machine.over { background: #fde8e6; color: #8a1c12; }
+.chip.upgrade { background: #fff3d6; color: #6b4500; }
+.chip.call { flex-shrink: 1000; background: #e6f0ff; color: #1d4f91; }
+.help { position: absolute; top: calc(100% + 4px); right: 14px; z-index: 3; width: min(640px, calc(100vw - 28px)); padding: 10px 14px;
+  border: 1px solid var(--ctl); border-radius: 6px; background: #fff; box-shadow: 0 6px 18px rgb(0 0 0 / 14%); font-size: 13px; }
+dl { margin: 0; display: grid; gap: 6px; }
+dl > div { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 0 12px; }
+dt { font-weight: 600; }
+dd { margin: 0; color: var(--ink); }
+/* A narrow window wraps the first row and lets a long status line take a second line; the page keeps its place by the observed height. */
+@media (max-width: 1100px) {
+  .row2 { flex-wrap: wrap; height: auto; min-height: 24px; gap: 4px 10px; white-space: normal; }
+  .chip { white-space: normal; }
+}
 </style>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, useTemplateRef } from 'vue';
-import { AXIS, FONT, animate, drawAxis, drawExact, sizeCanvas } from '../canvas.ts';
+import { AXIS, FONT, INK, animate, drawAxis, drawExact, sizeCanvas } from '../canvas.ts';
 import type { HostSample } from '../lib/host.ts';
 import { chartWindow, now, store } from '../store.ts';
 
@@ -10,6 +10,8 @@ export interface Line {
   value: (s: HostSample) => number;
   step?: boolean;
   dashed?: boolean;
+  /** The newest value in words, shown in the legend after the label. */
+  now?: () => string;
 }
 
 const props = defineProps<{
@@ -49,7 +51,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   ctx.setLineDash([]);
   ctx.font = FONT;
   ctx.textBaseline = 'top';
-  ctx.fillStyle = '#666';
+  ctx.fillStyle = INK;
   ctx.fillText(`${top} ${props.unit}`, 4, 1);
 }
 
@@ -67,14 +69,14 @@ onUnmounted(() => stop());
     <canvas ref="cv" style="height: 80px"></canvas>
     <div class="legend">
       <span v-for="l in lines" :key="l.label">
-        <i :class="{ dashed: l.dashed }" :style="{ borderColor: l.color }"></i>{{ l.label }}
+        <i :class="{ dashed: l.dashed }" :style="{ borderColor: l.color }"></i>{{ l.label }}<b v-if="l.now?.()">{{ l.now() }}</b>
       </span>
     </div>
   </div>
 </template>
 
 <style scoped>
-.legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--mute); margin-top: 2px; }
-.legend i { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 4px; }
+.legend i { display: inline-block; width: 14px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 5px; }
 .legend i.dashed { border-top-style: dashed; }
+.legend b { margin-left: 5px; }
 </style>

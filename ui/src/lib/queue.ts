@@ -31,6 +31,17 @@ export function waitsFor(j: Job): 'disk space' | 'memory' | 'slots' {
   return j.wait_reason.includes('filesystem') ? 'disk space' : 'memory';
 }
 
+/** The daemon's reason as a line of text: "waits for disk space: free space … is below 25 GB"; empty for a job that waits for a slot. */
+export function waitReasonText(j: Job): string {
+  return j.wait_reason ? `waits for ${waitsFor(j)}: ${j.wait_reason}` : '';
+}
+
+/** A queued job's place in the order the pool serves, 1 first, and the queue's length; null when it is not queued. */
+export function queuePlace(queue: readonly Job[], id: number): { pos: number; of: number } | null {
+  const k = queue.findIndex((j) => jobId(j) === id);
+  return k < 0 ? null : { pos: k + 1, of: queue.length };
+}
+
 /**
  * The Queue's heading. It names what the listed jobs wait for, slots last, so it says
  * "waiting for slots" only when no listed job waits for disk space or memory.
