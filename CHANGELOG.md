@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.19.1 — 2026-11-22
 
 - Jobs show their Git repository and linked worktree name. Directories outside
   Git show **No repository**. Historical jobs keep their recorded names marked
