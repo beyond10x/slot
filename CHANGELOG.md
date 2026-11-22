@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- A limit on build processes per job: `slot job-parallel <N>` makes the daemon start every job
+  without the pool's jobserver and with `CARGO_BUILD_JOBS=<P>` and `MAKEFLAGS=-j<P>` instead, where
+  P is N, or the slots the job holds when those are more (`slot --tokens`). `cargo` then makes a
+  jobserver of its own with P tokens and `make` runs P recipes at once; the job still waits for
+  and holds its slots, and only its compilers stop reading the pool's FIFO. `off` is the default
+  and changes nothing. Why: with the pool's jobserver a freed slot goes to whoever reads the FIFO
+  first, and the `cargo` processes of running jobs read it against the one daemon (on a pool of 50
+  slots, 7 `cargo` processes against the daemon, one with 19 compilers, 10 jobs running and 49
+  waiting); cargo ignores `CARGO_BUILD_JOBS` and `-j` while it inherits a jobserver, so a bound
+  per job exists only outside the pool. What it costs: the pool then bounds jobs, not compilers,
+  so S slots can run up to S × N build processes; a job no longer narrows when the pool is full;
+  the bound is per `cargo` and per `make`, so a script that runs two at once runs twice as many.
+  A `cargo` that is killed takes no slots of the pool with it. The setting applies to the jobs
+  that start after the change, is kept in `limits.json` beside the headroom and holds across
+  reloads; `GET` and `PUT /api/job-parallel` read and change it (`{"job_parallel": 4}`, `null`
+  for off, under 1 refused); `slot status` shows `at most 4 build processes per job, outside the
+  pool's slots` while it is on, and `/api/state` has `job_parallel`.
+
 ## 0.22.0 — 2026-11-22
 
 - A run-time limit for jobs: `slot run-limit <duration>` makes the daemon end a job that has run

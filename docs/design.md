@@ -1129,3 +1129,128 @@ has run longer than a set time, counted from `started_ms`; the queue wait is not
   them; when it saves the headroom it writes the file without them, so a downgrade loses the
   limit. A client without `--timeout` and a daemon without the limit talk to each other
   unchanged.
+
+## 23. Build processes per job (unreleased)
+
+**The problem.** Each `rust` or `other` job holds one slot, and its `cargo` reads one more token
+from the FIFO for every compiler it starts (§ 8). The daemon reads the same FIFO for the waiting
+jobs, as one reader among the `cargo` processes of the running ones. Measured on one host with a
+pool of 50 slots: 7 `cargo` processes read the FIFO against the daemon; one `cargo` had 19 child
+processes; 10 jobs ran while 49 waited. 15 tokens written back raised the compilers under `cargo`
+from 19 to 34 and the running jobs from 9 to 10. A freed slot goes to the compilers of jobs that
+already run, not to the queue.
+
+**No bound per job inside the pool.** The first design set `CARGO_BUILD_JOBS=N` beside the pool's
+jobserver. cargo does not read it there (cargo 1.99.1, commit `5f94df478`, paths in the cargo
+repository):
+
+- `src/compiler/build_runner/mod.rs:109-116`: `jobs` only sizes the jobserver cargo makes when
+  it inherits none (`Client::new(bcx.jobs())` in the `None` arm of `jobserver_from_env()`).
+- `src/compiler/job_queue/mod.rs:607-609`: the only bound on units at once is
+  `active.len() < tokens.len() + 1`, the tokens in hand; `jobs` is not compared.
+- `src/compiler/build_config.rs:79-85`: a `-j` beside an inherited jobserver gets the warning
+  "ignoring the `-j` parameter"; the value from `build.jobs` or `CARGO_BUILD_JOBS` is dropped the
+  same way, without one.
+- The only other reader of `jobs` is `NUM_JOBS` for build scripts
+  (`src/compiler/custom_build.rs:374`).
+
+A probe confirmed it: 12 independent empty crates, a wrapper that counts the compiler units alive
+at once, outside any pool.
+
+| environment of `cargo build` | most units at once |
+|---|---|
+| no jobserver, `CARGO_BUILD_JOBS=2` | 2 |
+| inherited FIFO with 8 tokens, `CARGO_BUILD_JOBS=2` | 9 |
+| inherited FIFO with 8 tokens, no `CARGO_BUILD_JOBS` | 9 |
+| inherited FIFO with 8 tokens, `cargo build -j 2` | 9, and the warning |
+
+**The mechanism** (`job_parallel.rs`, `toolchain::own_jobserver`). With the setting at N the
+daemon starts a job without the pool's jobserver. After the toolchain made the job's environment,
+the four variables of `toolchain::STRIPPED` are taken out again and two are set:
+`CARGO_BUILD_JOBS=<P>` and `MAKEFLAGS=-j<P>`, P = max(N, slots the job holds). This happens in the
+one place that starts a job (`Server::run_job`), after `Toolchain::env`, so it covers every
+toolchain, a remote job (the server's daemon builds its environment there) and a gated job (the
+hold process writes that environment to `<id>.env`; `gate::rewrite_auth` finds no
+`--jobserver-auth` to rewrite). cargo finds `MAKEFLAGS=-j<P>` with no `--jobserver-auth`
+(`jobserver` 0.1.35 `src/lib.rs:254-274`: the first of `CARGO_MAKEFLAGS`, `MAKEFLAGS`, `MFLAGS`
+that is set, here an error of kind `NoJobserver`, which cargo takes as "none",
+`src/context/mod.rs:325-337`), makes a jobserver of P tokens and hands it to rustc and to build
+scripts in `CARGO_MAKEFLAGS`. The job waits for and holds its slots as before. What the
+toolchains derive from held slots stays: `GOFLAGS -p`, `GOMAXPROCS`, `IGNITE_TEST_JOBS`, the
+test-thread defaults.
+
+- **Settings.** `limits.json`: optional `job_parallel` (absent: off, and the file is then
+  byte for byte what a daemon without the setting writes). `GET` and `PUT /api/job-parallel`
+  (`{"job_parallel": 4}`, `null` for off; under 1, and a body without the field, are refused with
+  400), `slot job-parallel [<N>|off]`, `State.job_parallel`, one header line in `slot status`.
+- **When it is fixed.** At the job's start, like the run-time limit (§ 22). A job that runs keeps
+  its environment; the setting reaches the jobs that start after it.
+- **Handover.** Nothing travels: the new image reads `limits.json` at its start, and a running
+  job has its environment already. The handover format and its `VERSION` are unchanged.
+- **A nested `slot` call** (a `slot cargo …` inside a job) runs directly with the job's
+  environment (`client::nested`), so it makes a jobserver of P of its own.
+
+**`MAKEFLAGS=-j<P>` and build scripts.** The variable stays in the environment of a build
+script, because cargo hands its jobserver on in `CARGO_MAKEFLAGS` only
+(`src/compiler/custom_build.rs:388` `inherit_jobserver`, `crates/cargo-util/src/process_builder.rs:519`
+`configure`, `jobserver` 0.1.35 `src/lib.rs:383-386`). The crates build scripts use do not read it
+there:
+
+- `cc` 1.9.0 takes its jobserver from `jobserver::Client::from_env()`
+  (`src/parallel/job_token.rs:129-130`), which reads `CARGO_MAKEFLAGS` first: cargo's jobserver.
+  It starts no `make`.
+- `cmake` 0.1.58 sets `MAKEFLAGS` to the value of `CARGO_MAKEFLAGS` for a Makefile build
+  (`src/lib.rs:841-864`): cargo's jobserver. For another generator it passes `--parallel
+  $NUM_JOBS` (`:883-887`), and `NUM_JOBS` is P.
+- `jobserver::Client::configure_make` sets all three variables (`src/lib.rs:406-412`).
+
+So a `make` started through these stays inside its cargo's P. A build script that starts `make`
+itself and sets no `MAKEFLAGS` gets `-j<P>` beside cargo's P; of 331 build scripts in one
+registry cache of 2,378 crates, none starts `make` or `ninja` directly. For that reason the
+variable is set for every job and not only for a job whose command is `make`: a `make` anywhere
+in a job's process tree is bounded, where without the variable it would run one recipe at a
+time and a `make -j` in a script would have no bound at all.
+
+**sccache.** sccache 0.18.0 leaves `CARGO_BUILD_JOBS` out of its cache key
+(`src/compiler/rust.rs:1580-1586`; in from 0.12.0, absent in 0.11.0), and `MAKEFLAGS` was never
+in it (only `CARGO_*` variables are). The setting changes no key. An sccache server always makes
+a jobserver of its own, one token per CPU (`src/jobserver.rs:48-55`), whatever the job's
+environment says.
+
+**What reads the FIFO's holders.**
+
+- The token watch (§ 21, `Server::token_pass`) acts only while tokens are unplaced. With every
+  job on a bound of its own nothing but the daemon reads the FIFO, nothing is unplaced, and each
+  pass ends at `missing == 0` with `tokens_unaccounted` 0. A job from before the switch still
+  holds the FIFO and is counted as before (`jobserver::Holder::may_hold`).
+- The `sccache:` line of `slot status` counts the tokens of each sccache server's private pipe
+  (`sccache.rs`), not the pool's.
+- `Context::free_tokens`, the default of the test-thread variables when `--test-threads` is 0,
+  reads the FIFO's fill at the job's start. With the setting on no compiler takes tokens, so it
+  is the slots no job holds.
+
+**Measured through a daemon.** The same 12 crates, one job at a time through a private daemon of
+this build with a pool of 8 slots:
+
+| setting | the job's environment | most units at once |
+|---|---|---|
+| off | the pool's `--jobserver-auth` in `MAKEFLAGS` and `CARGO_MAKEFLAGS` | 8 (its slot and 7 tokens) |
+| 4 | `CARGO_BUILD_JOBS=4`, `MAKEFLAGS=-j4` | 4 |
+| 2 | `CARGO_BUILD_JOBS=2`, `MAKEFLAGS=-j2` | 2 |
+| 2, job with `--tokens 6` | `CARGO_BUILD_JOBS=6`, `MAKEFLAGS=-j6` | 6 |
+| 4, `make` with 8 recipes (GNU Make 4.4.1) | `MAKEFLAGS=-j4` | 4 |
+
+Each run compiled the 12 crates (13 units with cargo's probe of the compiler), all 8 tokens were
+in the FIFO afterwards and the daemon logged no lost token.
+
+**The cost.** The pool bounds jobs, not compilers: S slots run up to S jobs of one slot and
+S × N build processes, where the pool alone allowed S. A job no longer narrows when the pool is
+full. The bound is per `cargo` and per `make`: a script that runs two `cargo` commands at once
+runs 2 × P. `CPUQuota` of the headroom (§ 13) still caps the CPU time of all jobs together. What
+the pool keeps: the number of jobs, the queue order, admission by memory and disk, and every
+slot a toolchain holds up front (go, node-test, ignite).
+
+**Not chosen: a FIFO per job that the daemon feeds from the pool.** It would keep "every compiler
+holds a pool slot" and still bound a job, and one job's `cargo` and `make` processes would share
+one bound. It needs a FIFO and a feeder per job, the daemon cannot see how many tokens a job
+wants, and each FIFO has to cross a handover. Open if S × N turns out too wide.

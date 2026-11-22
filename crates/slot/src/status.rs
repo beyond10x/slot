@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+pub use crate::job_parallel::View as JobParallelView;
 pub use crate::run_limit::View as RunLimitView;
 pub use crate::server::limits::View as LimitsView;
 use crate::server::priority::PromoteAfter;
@@ -214,6 +215,52 @@ fn run_limit_line(s: &State) -> Option<String> {
     Some(format!(
         "run-time limit {limit}: a job that runs longer is ended; `slot --timeout` names up to {}\n",
         crate::run_limit::text(max)
+    ))
+}
+
+/// Reads the limit on build processes per job (`slot job-parallel`), or
+/// first sets it or switches it off.
+pub fn job_parallel(
+    addr: &str,
+    limit: Option<crate::job_parallel::Setting>,
+) -> Result<JobParallelView> {
+    let path = "/api/job-parallel";
+    let answer = match limit {
+        None => request(addr, "GET", path, None),
+        Some(l) => {
+            let body = serde_json::to_string(&crate::job_parallel::Request {
+                job_parallel: l.value(),
+            })?;
+            request(addr, "PUT", path, Some(&body))
+        }
+    };
+    let answer = answer.map_err(|e| {
+        if e.to_string().contains(" 404") {
+            e.context("the daemon is older than this slot and has no limit per job")
+        } else {
+            e
+        }
+    })?;
+    serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
+}
+
+/// `slot job-parallel`: the value in force.
+pub fn render_job_parallel(v: &JobParallelView) -> String {
+    match v.job_parallel {
+        Some(1) => "at most 1 build process per job; it takes no slot of the pool\n".into(),
+        Some(n) => {
+            format!("at most {n} build processes per job; they take no slots of the pool\n")
+        }
+        None => "no limit per job: every build process takes a slot of the pool\n".into(),
+    }
+}
+
+/// The job-parallel line of `slot status`; `None` with no limit.
+fn job_parallel_line(s: &State) -> Option<String> {
+    let n = s.job_parallel?;
+    let processes = if n == 1 { "process" } else { "processes" };
+    Some(format!(
+        "at most {n} build {processes} per job, outside the pool's slots\n"
     ))
 }
 
@@ -495,6 +542,9 @@ pub fn render(s: &State) -> String {
     if let Some(l) = run_limit_line(s) {
         out.push_str(&l);
     }
+    if let Some(l) = job_parallel_line(s) {
+        out.push_str(&l);
+    }
     if !s.upgrade.is_empty() {
         out.push_str(&s.upgrade);
         out.push('\n');
@@ -758,6 +808,83 @@ mod tests {
         assert_eq!((old.run_limit_s, old.run_limit_max_s), (None, None));
         let line = serde_json::to_string(&old).unwrap();
         assert!(!line.contains("run_limit"), "{line}");
+    }
+
+    #[test]
+    fn the_bound_per_job_is_a_header_line_when_it_is_on() {
+        let mut s = State {
+            tokens: 4,
+            limit: 4,
+            free: 4,
+            ..State::default()
+        };
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n",
+            "off: no line"
+        );
+        s.job_parallel = Some(4);
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n\
+             at most 4 build processes per job, outside the pool's slots\n"
+        );
+        s.job_parallel = Some(1);
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n\
+             at most 1 build process per job, outside the pool's slots\n"
+        );
+        s.run_limit_s = Some(600);
+        s.run_limit_max_s = Some(3600);
+        assert!(
+            render(&s).ends_with(
+                "names up to 1h\nat most 1 build process per job, outside the pool's slots\n"
+            ),
+            "{}",
+            render(&s)
+        );
+        let old: State = serde_json::from_str(
+            r#"{"host":"h","cores":4,"tokens":4,"free":4,"active":[],"done":[],"now_ms":0,"toolchains":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.job_parallel, None);
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("job_parallel"), "{line}");
+        let on: State =
+            serde_json::from_str(&line.replacen('{', r#"{"job_parallel":3,"#, 1)).unwrap();
+        assert_eq!(on.job_parallel, Some(3));
+    }
+
+    #[test]
+    fn slot_job_parallel_in_one_line() {
+        use crate::job_parallel::View;
+        assert_eq!(
+            render_job_parallel(&View {
+                job_parallel: Some(4)
+            }),
+            "at most 4 build processes per job; they take no slots of the pool\n"
+        );
+        assert_eq!(
+            render_job_parallel(&View {
+                job_parallel: Some(1)
+            }),
+            "at most 1 build process per job; it takes no slot of the pool\n"
+        );
+        assert_eq!(
+            render_job_parallel(&View { job_parallel: None }),
+            "no limit per job: every build process takes a slot of the pool\n"
+        );
+    }
+
+    #[test]
+    fn a_daemon_without_the_limit_per_job_says_so() {
+        let addr = answer_once("HTTP/1.0 404 Not Found\r\n\r\nslot: no such API path\n");
+        let e = job_parallel(&addr, None).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("older than this slot and has no limit per job"),
+            "{e:#}"
+        );
     }
 
     #[test]

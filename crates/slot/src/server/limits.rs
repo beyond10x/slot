@@ -41,6 +41,11 @@ pub struct Saved {
     /// absent from the file: [`crate::run_limit::DEFAULT_MAX_S`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_limit_max_s: Option<u64>,
+    /// Build processes one job may run at once (`slot job-parallel`);
+    /// `None`, and absent from the file: no limit, jobs get the pool's
+    /// jobserver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_parallel: Option<usize>,
 }
 
 /// Reads the saved headroom; 0 when the file is missing or unreadable.
@@ -54,6 +59,7 @@ pub fn load(dir: &Path) -> Saved {
             base: s.base,
             run_limit_s: s.run_limit_s.filter(|&l| l > 0),
             run_limit_max_s: s.run_limit_max_s.filter(|&m| m > 0),
+            job_parallel: s.job_parallel.filter(|&n| n > 0),
         })
         .unwrap_or_default()
 }
@@ -285,6 +291,53 @@ mod tests {
             (zero.run_limit_s, zero.run_limit_max_s),
             (None, None),
             "a 0 written by hand is no limit, not a limit of 0 s"
+        );
+    }
+
+    #[test]
+    fn the_bound_per_job_is_kept_beside_the_headroom_and_absent_when_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let before = r#"{"headroom_percent":30,"base":"machine","run_limit_s":600}"#;
+        std::fs::write(&file, before).unwrap();
+        let old = load(dir.path());
+        assert_eq!(old.job_parallel, None, "a file from before the setting");
+        save(dir.path(), old).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            before,
+            "off: the file is what a daemon without the setting writes"
+        );
+        save(
+            dir.path(),
+            Saved {
+                job_parallel: Some(4),
+                ..old
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(r#""job_parallel":4"#), "{text}");
+        let s = load(dir.path());
+        assert_eq!(s.job_parallel, Some(4));
+        assert_eq!(
+            (s.headroom_percent, s.base, s.run_limit_s),
+            (30, HeadroomBase::Machine, Some(600))
+        );
+        save(
+            dir.path(),
+            Saved {
+                job_parallel: None,
+                ..s
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        std::fs::write(&file, r#"{"headroom_percent":0,"job_parallel":0}"#).unwrap();
+        assert_eq!(
+            load(dir.path()).job_parallel,
+            None,
+            "a 0 written by hand is no limit, not a bound of 0"
         );
     }
 

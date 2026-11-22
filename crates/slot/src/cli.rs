@@ -94,6 +94,9 @@ pub enum Cmd {
     /// Show or set the run-time limit: how long a job may run before the
     /// daemon ends it.
     RunLimit(RunLimitArgs),
+    /// Show or set the limit on build processes per job: with it a job's
+    /// compilers run on a bound of the job's own, not on slots of the pool.
+    JobParallel(JobParallelArgs),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
@@ -397,6 +400,25 @@ pub struct RunLimitArgs {
     pub http: String,
 }
 
+/// `slot job-parallel` arguments. Without any, prints the value in force.
+#[derive(Debug, Clone, Args)]
+pub struct JobParallelArgs {
+    /// Build processes one job may run at once, from 1; `off` for no
+    /// limit, the default. With a limit N the daemon starts a job without
+    /// the pool's jobserver and with `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j`
+    /// set to N, or to the slots the job holds if that is more (`slot
+    /// --tokens`): `cargo` and `make` in the job then bound themselves and
+    /// take no slots of the pool, so the pool limits how many jobs run, not
+    /// how many compilers. It applies to the jobs that start after the
+    /// change, is kept in `limits.json` in the state directory and holds
+    /// across reloads and restarts.
+    #[arg(value_name = "N|off")]
+    pub limit: Option<crate::job_parallel::Setting>,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
 /// `slot priority list` options.
 #[derive(Debug, Clone, Args)]
 pub struct PriorityListArgs {
@@ -668,6 +690,30 @@ mod tests {
         assert!(args(&["soon"]).is_err());
         assert!(args(&["10m", "--max", "off"]).is_err());
         assert!(args(&["10m", "--max", "0"]).is_err());
+    }
+
+    #[test]
+    fn job_parallel_takes_a_count_or_off() {
+        use crate::job_parallel::Setting;
+        let limit = |args: &[&str]| {
+            let mut argv = vec!["job-parallel"];
+            argv.extend(args);
+            parse(&argv).map(|cli| {
+                let Cmd::JobParallel(a) = cli.command else {
+                    panic!("not job-parallel")
+                };
+                a.limit
+            })
+        };
+        assert_eq!(limit(&[]).unwrap(), None, "prints the value in force");
+        assert_eq!(limit(&["4"]).unwrap(), Some(Setting::At(4)));
+        assert_eq!(limit(&["1"]).unwrap(), Some(Setting::At(1)));
+        assert_eq!(limit(&["off"]).unwrap(), Some(Setting::Off));
+        assert!(limit(&["0"]).is_err(), "0 is refused");
+        assert!(limit(&["four"]).is_err());
+        assert!(limit(&["4", "5"]).is_err());
+        let cli = parse(&["job-parallel", "2", "--http", "127.0.0.1:9"]).unwrap();
+        assert!(matches!(cli.command, Cmd::JobParallel(ref a) if a.http == "127.0.0.1:9"));
     }
 
     #[test]

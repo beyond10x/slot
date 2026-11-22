@@ -163,6 +163,160 @@ fn jobserver_env_reaches_command_and_client_jobs_are_dropped() {
     assert!(r.out.contains(&auth), "{}", r.out);
     assert!(r.out.contains("jobs=\n"), "{}", r.out);
     assert!(r.out.contains("tag=1\n"), "{}", r.out);
+    assert_eq!(f.server.job_parallel_view().job_parallel, None);
+}
+
+/// What a job's own shell sees of the four variables the daemon owns, for a
+/// client that set all four itself. `tokens` are the slots the job names.
+fn owned_env(f: &Fixture, tokens: Option<u32>) -> String {
+    let mut req = sh(
+        &f.root,
+        "echo jobs=${CARGO_BUILD_JOBS-unset}; echo make=${MAKEFLAGS-unset}; \
+         echo mflags=${MFLAGS-unset}; echo cargo=${CARGO_MAKEFLAGS-unset}",
+    );
+    req.tokens = tokens;
+    req.env = std::env::vars()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(
+            [
+                "CARGO_BUILD_JOBS=9",
+                "MAKEFLAGS=-j8",
+                "MFLAGS=-j8",
+                "CARGO_MAKEFLAGS=-j --jobserver-auth=fifo:/theirs",
+            ]
+            .map(String::from),
+        )
+        .collect();
+    let r = run(f, req);
+    assert_eq!(r.code, 0, "{r:?}");
+    r.out
+}
+
+fn set_job_parallel(f: &Fixture, n: Option<usize>) -> Option<usize> {
+    f.server
+        .set_job_parallel(&job_parallel::Request { job_parallel: n })
+        .unwrap()
+        .job_parallel
+}
+
+/// With `slot job-parallel 3` a job that starts gets a bound of its own in
+/// place of the pool's jobserver: `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` at 3,
+/// or at the slots it holds if those are more, and nothing that names the
+/// pool's FIFO. A client's own values never get through. Switched off, the
+/// next job gets the pool's jobserver again.
+#[test]
+fn with_a_bound_per_job_a_job_gets_its_own_jobserver_and_not_the_pools() {
+    let f = start(6);
+    let pool = format!(
+        "-j --jobserver-auth=fifo:{}",
+        f.server.pool().path().display()
+    );
+    let off = format!("jobs=unset\nmake={pool}\nmflags=unset\ncargo={pool}\n");
+    let own = |p: usize| format!("jobs={p}\nmake=-j{p}\nmflags=unset\ncargo=unset\n");
+    assert_eq!(owned_env(&f, None), off, "off: the pool's jobserver");
+    assert_eq!(set_job_parallel(&f, Some(3)), Some(3));
+    assert_eq!(owned_env(&f, None), own(3), "a job of one slot");
+    assert_eq!(owned_env(&f, Some(2)), own(3), "fewer slots than the bound");
+    assert_eq!(owned_env(&f, Some(5)), own(5), "a job that holds 5 slots");
+    assert_eq!(set_job_parallel(&f, None), None);
+    assert_eq!(owned_env(&f, Some(5)), off, "off again: as before");
+    wait_for_jobs(&f, "every slot back", || f.server.pool().free() == 6);
+}
+
+/// Status and text of the answer to `PUT /api/job-parallel` with `body`.
+fn put_job_parallel(f: &Fixture, content_type: &str, body: &str) -> (u16, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    let state = axum::extract::State(Arc::clone(&f.server));
+    let body = axum::body::Bytes::from(body.to_owned());
+    answer(http::job_parallel_put(state, headers, body))
+}
+
+/// Status and text of the answer to `GET /api/job-parallel`.
+fn get_job_parallel(f: &Fixture) -> (u16, String) {
+    use axum::response::IntoResponse;
+    let state = axum::extract::State(Arc::clone(&f.server));
+    answer(async move { http::job_parallel_get(state).await.into_response() })
+}
+
+/// The bound set through `PUT /api/job-parallel`, the call `slot
+/// job-parallel` makes, is saved beside the headroom, read back by `GET`,
+/// shown in the state `slot status` reads and in force in the daemon that
+/// starts next. A value under 1 is refused; `null` switches it off.
+#[test]
+fn the_bound_per_job_is_set_saved_and_read_back() {
+    let f = start(2);
+    let json = "application/json";
+    let view = |(status, text): (u16, String)| {
+        assert_eq!(status, 200, "{text}");
+        let v: job_parallel::View = serde_json::from_str(&text).unwrap();
+        v.job_parallel
+    };
+    let saved = || std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    let restarted = |socket: &str| {
+        Server::new(Config {
+            socket: f.root.join(socket),
+            ..config(&f.root, 2)
+        })
+        .unwrap()
+    };
+    assert_eq!(view(get_job_parallel(&f)), None);
+    assert_eq!(f.server.state().job_parallel, None);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(Arc::clone(&f.server).set_headroom(50));
+    assert!(!saved().contains("job_parallel"), "{}", saved());
+
+    assert_eq!(
+        view(put_job_parallel(&f, json, r#"{"job_parallel":4}"#)),
+        Some(4)
+    );
+    assert_eq!(view(get_job_parallel(&f)), Some(4));
+    assert!(saved().contains(r#""job_parallel":4"#), "{}", saved());
+    assert!(saved().contains(r#""headroom_percent":50"#), "{}", saved());
+    assert_eq!(f.server.state().job_parallel, Some(4));
+    rt.block_on(Arc::clone(&f.server).set_headroom(25));
+    assert!(
+        saved().contains(r#""job_parallel":4"#),
+        "a headroom change keeps the bound: {}",
+        saved()
+    );
+    let next = restarted("s2");
+    assert_eq!(next.job_parallel_view().job_parallel, Some(4));
+    assert_eq!(next.limits().headroom_percent, 25);
+
+    for bad in [
+        "{}",
+        r#"{"job_parallel":0}"#,
+        r#"{"job_parallel":-2}"#,
+        r#"{"job_parallel":"4"}"#,
+        r#"{"job_parallel":1.5}"#,
+        "not json",
+        "",
+    ] {
+        let (status, text) = put_job_parallel(&f, json, bad);
+        assert_eq!(status, 400, "{bad}: {text}");
+        assert!(text.starts_with("slot: "), "{bad}: {text}");
+        assert_eq!(
+            f.server.job_parallel_view().job_parallel,
+            Some(4),
+            "{bad} changed nothing"
+        );
+    }
+    let (status, _) = put_job_parallel(&f, "text/plain", r#"{"job_parallel":2}"#);
+    assert_eq!(status, 415, "a body a page can post without a preflight");
+    assert_eq!(f.server.job_parallel_view().job_parallel, Some(4));
+
+    assert_eq!(
+        view(put_job_parallel(&f, json, r#"{"job_parallel":null}"#)),
+        None,
+        "null switches it off"
+    );
+    assert!(!saved().contains("job_parallel"), "{}", saved());
+    assert_eq!(f.server.state().job_parallel, None);
+    assert_eq!(restarted("s3").job_parallel_view().job_parallel, None);
 }
 
 #[test]

@@ -140,6 +140,22 @@ fn with_jobserver(c: &Context, env: Vec<String>) -> Vec<String> {
     env
 }
 
+/// `env` of a job whose build processes are bounded per job (`slot
+/// job-parallel`, [`crate::job_parallel`]), in place of the pool's
+/// jobserver: none of [`STRIPPED`] as a toolchain or the client set them,
+/// then `CARGO_BUILD_JOBS=<p>` and `MAKEFLAGS=-j<p>`. With no
+/// `--jobserver-auth` in its environment `cargo` makes a jobserver of its
+/// own with `p` tokens and hands it to rustc and to build scripts in
+/// `CARGO_MAKEFLAGS`; `make` runs `p` recipes at once. Applied to the
+/// environment of every toolchain, so a `cargo` or `make` started inside a
+/// script, a test runner or the go command is bounded too.
+pub fn own_jobserver(env: Vec<String>, p: usize) -> Vec<String> {
+    let mut env = unset(env, STRIPPED);
+    env.push(format!("CARGO_BUILD_JOBS={p}"));
+    env.push(format!("MAKEFLAGS=-j{p}"));
+    env
+}
+
 /// Whether a variable name looks like a credential (`CARGO_REGISTRY_TOKEN`,
 /// `CARGO_REGISTRIES_X_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_KEY`). Such a
 /// variable never crosses to a remote host through a toolchain's prefix
@@ -614,6 +630,51 @@ mod tests {
         assert!(
             go.contains(&"GOMAXPROCS=2".to_string()) && !go.contains(&"GOMAXPROCS=4".to_string())
         );
+    }
+
+    #[test]
+    fn a_job_with_its_own_bound_gets_no_pool_jobserver_under_any_toolchain() {
+        let c = Context {
+            jobserver_auth: "fifo:/p".into(),
+            held: 1,
+            free_tokens: 7,
+            ..Context::default()
+        };
+        let client = [
+            "CARGO_BUILD_JOBS=9",
+            "MAKEFLAGS=-j8",
+            "MFLAGS=-j8",
+            "CARGO_MAKEFLAGS=-j --jobserver-auth=fifo:/theirs",
+            "PATH=/bin",
+            "RUST_TEST_THREADS=3",
+        ];
+        for tc in registry(4) {
+            let name = tc.name();
+            let pool = tc.env(&c, v(&client));
+            let own = own_jobserver(pool.clone(), 4);
+            for want in ["CARGO_BUILD_JOBS=4", "MAKEFLAGS=-j4"] {
+                assert_eq!(
+                    own.iter().filter(|e| *e == want).count(),
+                    1,
+                    "{name}: {want} once in {own:?}"
+                );
+            }
+            for key in ["CARGO_MAKEFLAGS", "MFLAGS"] {
+                assert_eq!(get(&own, key), None, "{name}: {key} in {own:?}");
+            }
+            assert_eq!(get(&own, "CARGO_BUILD_JOBS"), Some("4"), "{name}");
+            assert_eq!(get(&own, "MAKEFLAGS"), Some("-j4"), "{name}");
+            assert!(
+                !own.iter().any(|e| e.contains("jobserver-auth")),
+                "{name}: the pool's FIFO is named in {own:?}"
+            );
+            // Everything else a toolchain sets stays as it is.
+            let rest = |env: &[String]| unset(env.to_vec(), STRIPPED);
+            assert_eq!(rest(&own), rest(&pool), "{name}");
+        }
+        let go = own_jobserver(Go { parallel: 4 }.env(&c, v(&[])), 6);
+        assert!(go.contains(&"GOFLAGS=-p=1".to_string()), "{go:?}");
+        assert!(go.contains(&"CARGO_BUILD_JOBS=6".to_string()), "{go:?}");
     }
 
     #[test]

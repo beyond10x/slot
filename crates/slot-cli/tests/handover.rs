@@ -537,3 +537,95 @@ fn a_handed_over_job_keeps_its_run_time_limit_and_its_start() {
         d.free_tokens() == 2
     });
 }
+
+/// `slot job-parallel 3`, set through the command while a job runs, holds
+/// across a reload. The image that took over names the bound in `slot
+/// job-parallel` and `slot status` and starts a job with `CARGO_BUILD_JOBS`
+/// and `MAKEFLAGS=-j` at 3 and without the pool's jobserver. The job that
+/// started before the setting keeps the pool's jobserver through the reload
+/// and ends as usual. `off` takes the value out of `limits.json` again.
+#[test]
+fn the_bound_per_job_holds_across_a_reload() {
+    let bind = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = bind.local_addr().unwrap();
+    drop(bind);
+    let d = Daemon::start_with_http(2, &[], &addr.to_string());
+    let slot = |args: &[&str]| {
+        let o = Command::new(SLOT)
+            .args(args)
+            .args(["--http", &addr.to_string()])
+            .env_remove("SLOT_JOB")
+            .env_remove("SLOT_HOST")
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let limits = || std::fs::read_to_string(d.state().join("limits.json")).unwrap_or_default();
+    let on = "at most 3 build processes per job; they take no slots of the pool\n";
+    let off = "no limit per job: every build process takes a slot of the pool\n";
+    let env = "echo jobs=${CARGO_BUILD_JOBS-unset} make=${MAKEFLAGS-unset} \
+               cargo=${CARGO_MAKEFLAGS-unset}";
+    d.wait_until("the web address", Duration::from_secs(10), |_| {
+        http_get(addr, "/api/state").is_some()
+    });
+    let (code, out, err) = slot(&["job-parallel"]);
+    assert_eq!((code, out.as_str()), (Some(0), off), "{err}");
+
+    let before = d.client(&format!(
+        "{env}; i=0; while [ ! -e release ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done; \
+         test -e release"
+    ));
+    d.wait_until("the first job's output", Duration::from_secs(30), |_| {
+        dashboard_output_contains(addr, 1, "jobs=unset")
+    });
+    let (code, out, err) = slot(&["job-parallel", "3"]);
+    assert_eq!((code, out.as_str()), (Some(0), on), "{err}");
+    assert!(limits().contains(r#""job_parallel":3"#), "{}", limits());
+    let (code, _, err) = slot(&["job-parallel", "0"]);
+    assert_eq!(code, Some(2), "0 is refused by the command: {err}");
+    assert!(err.contains("at least 1"), "{err}");
+
+    d.reload();
+    d.wait_until("the job handed over", Duration::from_secs(10), |d| {
+        d.log().contains("took over 1 running") && http_get(addr, "/api/state").is_some()
+    });
+    let (code, out, err) = slot(&["job-parallel"]);
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), on),
+        "after the reload: {err}"
+    );
+    let (_, status, err) = slot(&["status"]);
+    assert!(
+        status.contains("at most 3 build processes per job, outside the pool's slots\n"),
+        "{status}{err}"
+    );
+    let after = d.client(env);
+    let done = wait_all(vec![("after".into(), after)], Duration::from_secs(20));
+    assert_eq!(done[0].1, 0, "{}", done[0].3);
+    assert_eq!(done[0].2, "jobs=3 make=-j3 cargo=unset\n");
+
+    std::fs::write(d.dir.path().join("release"), "").unwrap();
+    let done = wait_all(vec![("before".into(), before)], Duration::from_secs(20));
+    let pool = format!(
+        "-j --jobserver-auth=fifo:{}",
+        d.state().join("jobserver.fifo").display()
+    );
+    assert_eq!(done[0].1, 0, "{}", done[0].3);
+    assert_eq!(
+        done[0].2,
+        format!("jobs=unset make={pool} cargo={pool}\n"),
+        "the job from before the setting"
+    );
+
+    let (code, out, err) = slot(&["job-parallel", "off"]);
+    assert_eq!((code, out.as_str()), (Some(0), off), "{err}");
+    assert!(!limits().contains("job_parallel"), "{}", limits());
+    d.wait_until("every slot back", Duration::from_secs(10), |d| {
+        d.free_tokens() == 2
+    });
+}

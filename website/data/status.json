@@ -33,6 +33,13 @@
     },
     {
       "area": "Pool",
+      "label": "Build processes per job",
+      "status": "shipped",
+      "detail": "slot job-parallel 4 starts every job with a bound of its own (CARGO_BUILD_JOBS and MAKEFLAGS=-j) in place of the pool's jobserver: compilers take no slots, a freed slot goes to the queue, and the pool limits jobs, not compilers (up to slots x 4 of them). Off until it is set.",
+      "href": "/docs/how-it-works#build-processes-per-job"
+    },
+    {
+      "area": "Pool",
       "label": "Waits for disk and memory",
       "status": "shipped",
       "detail": "A job queues while its filesystem has under 25 GB free or available memory is below its expected peak (0.5.0).",

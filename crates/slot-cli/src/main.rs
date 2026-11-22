@@ -40,6 +40,10 @@ fn main() -> ExitCode {
             print!("{}", slot::status::render_run_limit(&v));
             0
         }),
+        Cmd::JobParallel(args) => slot::status::job_parallel(&args.http, args.limit).map(|v| {
+            print!("{}", slot::status::render_job_parallel(&v));
+            0
+        }),
         Cmd::Cancel(args) => Ok(client::cancel(args.id, &Settings::from_env())),
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);
