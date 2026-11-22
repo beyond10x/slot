@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.21.1 — 2026-11-22
 
 - Lost build slots come back while other processes have the pool open. A process killed with
   jobserver tokens in hand (a cancel, a `timeout`, a watcher that kills by run time) took them
