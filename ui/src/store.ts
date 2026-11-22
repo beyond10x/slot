@@ -63,6 +63,8 @@ export const store = reactive({
   selected: null as number | null,
   /** Output pane switches to the most recently started running job by itself. */
   followNewest: false,
+  /** The pane was asked for by the keyboard and has not taken the focus yet. */
+  paneFocus: false,
 });
 
 let skew = 0;
@@ -224,9 +226,14 @@ export async function start(): Promise<void> {
   store.ready = true;
 }
 
-/** Opens the output pane on a job; closing it (null) also stops following the newest job. */
-export function select(id: number | null): void {
+/**
+ * Opens the output pane on a job; closing it (null) also stops following the newest job.
+ * `click` is the click that asked for it: one made by the keyboard (Enter or Space on a button,
+ * `detail` 0) moves the focus into the pane.
+ */
+export function select(id: number | null, click?: UIEvent): void {
   store.selected = id;
+  store.paneFocus = id !== null && click?.detail === 0;
   if (id === null) store.followNewest = false;
 }
 

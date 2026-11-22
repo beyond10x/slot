@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { fmtBytes, fmtClock, fmtDur } from '../lib/format.ts';
-import { cmdText, jobId, runS, splitJobs, times, waitS } from '../lib/job.ts';
+import { cmdText, jobId, resultText, runS, splitJobs, times, waitS } from '../lib/job.ts';
 import { jobs, select, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
@@ -13,7 +13,7 @@ const rows = computed(() =>
       id: jobId(j),
       job: j,
       cmd: cmdText(j),
-      exit: j.state === 'cancelled' ? 'cancelled' : String(j.exit),
+      result: resultText(j),
       bad: j.exit !== 0,
       wait: fmtDur(waitS(j, end)),
       dur: fmtDur(dur),
@@ -30,18 +30,18 @@ const rows = computed(() =>
   <table>
     <thead>
       <tr>
-        <th>#</th><th>tool</th><th>repo</th><th>command</th><th>exit</th>
+        <th>#</th><th>tool</th><th>repo</th><th>command</th><th>result</th>
         <th class="num">wait</th><th class="num">duration</th><th class="num">CPU s</th><th class="num opt">avg cores</th>
         <th class="num opt">peak RSS</th><th>ended</th>
       </tr>
     </thead>
     <tbody>
       <tr v-for="r in rows" :key="r.id" :class="{ sel: store.selected === r.id }" @click="select(r.id)">
-        <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id)">{{ r.id }}</button></td>
+        <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
         <td><ToolDot :name="r.job.toolchain" /></td>
         <td class="repo" :title="r.job.repo">{{ r.job.repo }}</td>
         <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
-        <td :class="{ bad: r.bad }">{{ r.exit }}</td>
+        <td :class="{ bad: r.bad }">{{ r.result }}</td>
         <td class="num">{{ r.wait }}</td>
         <td class="num">{{ r.dur }}</td>
         <td class="num">{{ r.cpu }}</td>

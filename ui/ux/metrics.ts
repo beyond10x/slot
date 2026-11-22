@@ -41,6 +41,36 @@ const readAll = <T>(dir: string): T[] =>
 export const readGates = (out: string): GateFile[] => readAll<GateFile>(join(out, 'gates'));
 export const readBots = (out: string): BotFile[] => readAll<BotFile>(join(out, 'bot'));
 
+export const MODES: Array<BotFile['mode']> = ['pointer', 'keyboard'];
+/** Name of the file gates.spec.ts writes for a scenario at a size, in `ux/out/gates`. */
+export const gateFile = (scenario: string, viewport: string): string => `${scenario}@${viewport}.json`;
+/** Name of the file screen-only.spec.ts writes for a task at a size in a mode, in `ux/out/bot`. */
+export const botFile = (scenario: string, viewport: string, mode: BotFile['mode']): string => `${scenario}@${viewport}-${mode}.json`;
+
+export interface ResultFiles {
+  /** Paths relative to `ux/out`. */
+  gates: string[];
+  bots: string[];
+}
+
+/** The files one run of both specs writes at `viewports`. A test that crashes writes none. */
+export function expectedFiles(scenarios: ReadonlyArray<{ name: string; task: unknown }>, viewports: readonly string[]): ResultFiles {
+  const files: ResultFiles = { gates: [], bots: [] };
+  for (const sc of scenarios) {
+    for (const vp of viewports) {
+      files.gates.push(`gates/${gateFile(sc.name, vp)}`);
+      if (sc.task) for (const mode of MODES) files.bots.push(`bot/${botFile(sc.name, vp, mode)}`);
+    }
+  }
+  return files;
+}
+
+/** The expected files that are not in `out`. */
+export const missingFiles = (out: string, expected: ResultFiles): ResultFiles => ({
+  gates: expected.gates.filter((f) => !existsSync(join(out, f))),
+  bots: expected.bots.filter((f) => !existsSync(join(out, f))),
+});
+
 function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
@@ -59,7 +89,8 @@ export function metrics(gates: GateFile[], bots: BotFile[]): Metrics {
     const words = g.states.map((s) => s.probe.words_in_view);
     put(g.scenario, 'reading_load.max', Math.max(...words));
     put(g.scenario, 'reading_load.median', median(words));
-    put(g.scenario, 'layout_shift.per_minute', Math.round(g.layout_shift.total / Math.max(1, g.minutes) * 1000) / 1000);
+    // The shift of one scenario from its page load on. No rate: a scenario lasts 1 to 6 simulated seconds.
+    put(g.scenario, 'layout_shift.total', Math.round(g.layout_shift.total * 1000) / 1000);
   }
   for (const b of bots) {
     if (b.viewport !== RATCHET_VIEWPORT) continue;

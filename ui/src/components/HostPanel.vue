@@ -38,7 +38,7 @@ const POOL: readonly Line[] = [
         <LinesChart :lines="POOL" unit="slots" :min-top="1" />
       </div>
     </div>
-    <h2>Sessions: cores per agent session now, highlighted when its builds bypass slot</h2>
+    <h2>Sessions: cores per agent session now, highlighted when its builds are not on slot</h2>
     <SessionsTable />
   </section>
 </template>

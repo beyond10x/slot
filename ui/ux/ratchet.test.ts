@@ -36,7 +36,7 @@ test('a baseline worse than main needs a decision id', () => {
 test('reading load tolerates 10 %, counts nothing', () => {
   assert.equal(toleranceFor('reading_load.max', 205), 21);
   assert.equal(toleranceFor('screen_only.actions', 2), 0);
-  assert.equal(toleranceFor('layout_shift.per_minute', 0.5), 0.01);
+  assert.equal(toleranceFor('layout_shift.total', 0.5), 0.01);
 });
 
 test('keys that depend on the host fonts are carried over on a merge', () => {

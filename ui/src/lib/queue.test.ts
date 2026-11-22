@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job } from '../generated/types.ts';
 import { jobId } from './job.ts';
-import { levelText, percentile, queueSummary, servedQueue, waitStats } from './queue.ts';
+import { failedStats, levelText, percentile, queueHeading, queueSummary, servedQueue, waitStats } from './queue.ts';
 
 function job(over: Partial<Job>): Job {
   return {
@@ -101,4 +101,34 @@ test('a failed job that never started is neither a wait nor a give-up', () => {
   const now = 10 * H;
   const s = waitStats([job({ id: 1, state: 'failed', enqueued_ms: now - 5000, ended_ms: now - 4000, exit: 127 })], now);
   assert.deepEqual(s, { n: 0, p50: null, p90: null, gaveUp: 0 });
+});
+
+test('failed jobs of the window are counted, and the one that ended last is the newest', () => {
+  const now = 10 * H;
+  const s = failedStats([
+    job({ id: 1, state: 'failed', started_ms: now - 9000, ended_ms: now - 5000, exit: 1 }),
+    job({ id: 2, state: 'failed', started_ms: now - 9000, ended_ms: now - 1000, exit: 101 }),
+    job({ id: 3, state: 'failed', started_ms: now - 9000, ended_ms: now - 1000, exit: 2 }),
+    job({ id: 4, state: 'failed', started_ms: now - 2 * H, ended_ms: now - H - 1, exit: 1 }),
+    job({ id: 5, state: 'ok', started_ms: now - 9000, ended_ms: now - 500 }),
+    job({ id: 6, state: 'cancelled', ended_ms: now - 400, exit: -1 }),
+    job({ id: 7, state: 'running', started_ms: now - 300 }),
+  ], now);
+  assert.equal(s.n, 3);
+  assert.equal(s.newest && jobId(s.newest), 3);
+});
+
+test('no failed job in the window: nothing to count and nothing to open', () => {
+  const now = 10 * H;
+  assert.deepEqual(failedStats([job({ id: 1, state: 'ok', started_ms: now - 9000, ended_ms: now - 500 })], now), { n: 0, newest: undefined });
+});
+
+test('the queue heading names what the listed jobs wait for, slots last', () => {
+  const disk = job({ id: 1, wait_reason: 'free space on the build filesystem is below 25 GB' });
+  const memory = job({ id: 2, wait_reason: 'available memory is below what the job needs' });
+  assert.equal(queueHeading([]), 'Queue: waiting for slots, by level, oldest first');
+  assert.equal(queueHeading([job({ id: 3 })]), 'Queue: waiting for slots, by level, oldest first');
+  assert.equal(queueHeading([memory, disk]), 'Queue: waiting for disk space and memory, by level, oldest first');
+  assert.equal(queueHeading([job({ id: 3 }), disk]), 'Queue: waiting for disk space and slots, by level, oldest first');
+  assert.equal(queueHeading([job({ id: 3 }), memory, disk]), 'Queue: waiting for disk space, memory and slots, by level, oldest first');
 });

@@ -25,6 +25,22 @@ export function servedQueue(list: Iterable<Job>): Job[] {
   );
 }
 
+/** What a queued job waits for: a slot, or what the daemon's admission names in `wait_reason`. */
+export function waitsFor(j: Job): 'disk space' | 'memory' | 'slots' {
+  if (!j.wait_reason) return 'slots';
+  return j.wait_reason.includes('filesystem') ? 'disk space' : 'memory';
+}
+
+/**
+ * The Queue's heading. It names what the listed jobs wait for, slots last, so it says
+ * "waiting for slots" only when no listed job waits for disk space or memory.
+ */
+export function queueHeading(queue: readonly Job[]): string {
+  const kinds = (['disk space', 'memory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
+  const what = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : (kinds[0] ?? 'slots');
+  return `Queue: waiting for ${what}, by level, oldest first`;
+}
+
 /** Nearest-rank percentile (0 < p <= 100) of ascending values; null when empty. */
 export function percentile(sorted: readonly number[], p: number): number | null {
   if (!sorted.length) return null;
@@ -37,6 +53,23 @@ export function queueSummary(queue: readonly Job[], now: number): { length: numb
   let oldest = Infinity;
   for (const j of queue) oldest = Math.min(oldest, times(j).queued);
   return { length: queue.length, longestS: queue.length ? Math.max(0, (now - oldest) / 1000) : 0 };
+}
+
+/** Jobs that failed within the last `windowMs`, and the one that ended last (highest id on a tie). */
+export function failedStats(list: Iterable<Job>, now: number, windowMs = 3_600_000): { n: number; newest: Job | undefined } {
+  let n = 0;
+  let newest: Job | undefined;
+  let newestEnd = -Infinity;
+  for (const j of list) {
+    const ended = times(j).ended;
+    if (j.state !== 'failed' || ended === null || ended < now - windowMs) continue;
+    n++;
+    if (ended > newestEnd || (ended === newestEnd && newest && jobId(j) > jobId(newest))) {
+      newest = j;
+      newestEnd = ended;
+    }
+  }
+  return { n, newest };
 }
 
 export interface WaitStats {

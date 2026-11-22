@@ -36,6 +36,7 @@ tasks:
       - rm -rf ux/out
       - pnpm exec playwright test || true
       - node ux/round.ts {{.CLI_ARGS}}
+      - node ux/ratchet.ts --round
 
   ui-hero:
     desc: Render the docs hero screenshots from the UX scenarios into website/static/img (needs ui/dist and pngquant).

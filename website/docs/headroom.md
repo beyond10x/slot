@@ -115,8 +115,8 @@ The base is saved with the headroom. `slot headroom --base pool` puts the fixed 
 
 ## Not covered
 
-- Builds that do not run through slot. The web UI shows them as unmanaged cores in the host
-  census. On the machine base their CPU lowers the pool's quota.
+- Builds that do not run through slot. The web UI shows them as **not on slot** in the header and
+  the host census. On the machine base their CPU lowers the pool's quota.
 - A daemon not started by systemd: only the slot limit applies, and `slot headroom` says
   `cpu quota not applied: not running in a systemd user unit`.
 - Memory and disk IO. The headroom limits CPU only.

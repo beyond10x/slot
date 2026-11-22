@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job, LiveJob } from '../generated/types.ts';
-import { barLabel, jobId, newestRunning, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
+import { barLabel, jobId, newestRunning, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
 
 function job(over: Partial<Job>): Job {
   return {
@@ -71,4 +71,10 @@ test('tooltip shows exit only for finished jobs and live numbers when given', ()
   const done = tooltipText(job({ state: 'failed', started_ms: 2000, ended_ms: 3000, exit: 101, cpu_s: 12 }), undefined, 9000);
   assert.match(done, /\nstate failed exit 101\n/);
   assert.match(done, /\nCPU 12 s {2}peak RSS $/);
+});
+
+test('a finished job states its result in words, a failed one with its exit code', () => {
+  assert.equal(resultText(job({ state: 'ok' })), 'ok');
+  assert.equal(resultText(job({ state: 'failed', exit: 101 })), 'failed (101)');
+  assert.equal(resultText(job({ state: 'cancelled', exit: -1 })), 'cancelled');
 });

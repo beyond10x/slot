@@ -35,6 +35,9 @@ export function runS(j: Job, now: number): number | null {
   return t.started === null ? null : ((t.ended ?? now) - t.started) / 1000;
 }
 
+/** A job's result in words: "ok", "cancelled", and "failed (101)" with the exit code. */
+export const resultText = (j: Job): string => (j.state === 'failed' ? `failed (${j.exit})` : j.state);
+
 /** Active jobs by id ascending; the last `limit` finished jobs by id descending. */
 export function splitJobs(list: Iterable<Job>, limit = 60): { active: Job[]; done: Job[] } {
   const active: Job[] = [];

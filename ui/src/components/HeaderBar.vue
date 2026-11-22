@@ -2,8 +2,9 @@
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import { fmtDur } from '../lib/format.ts';
 import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineLine } from '../lib/headroom.ts';
-import { queueSummary, servedQueue, waitStats } from '../lib/queue.ts';
-import { census, jobs, setHeadroom, store } from '../store.ts';
+import { jobId } from '../lib/job.ts';
+import { failedStats, queueSummary, servedQueue, waitStats } from '../lib/queue.ts';
+import { census, jobs, select, setHeadroom, store } from '../store.ts';
 import ToolDot from './ToolDot.vue';
 
 const WINDOWS: ReadonlyArray<[number, string]> = [
@@ -50,6 +51,11 @@ const running = computed(() => {
 });
 const queue = computed(() => queueSummary(servedQueue(jobs.values()), store.clock));
 const waits = computed(() => waitStats(jobs.values(), store.clock));
+/** Failed jobs of the same 60 minutes; the button opens the output of the one that ended last. */
+const failed = computed(() => {
+  const f = failedStats(jobs.values(), store.clock);
+  return f.newest ? { n: f.n, id: jobId(f.newest) } : null;
+});
 const pct = (v: number | null): string => (v === null ? '–' : fmtDur(v));
 
 const el = useTemplateRef<HTMLElement>('el');
@@ -98,10 +104,13 @@ onUnmounted(() => ro?.disconnect());
     <span :title="`slot wait (start - enqueue) of ${waits.n} jobs finished in the last 60 min; gave up = cancelled while queued`">
       wait p50 <b>{{ pct(waits.p50) }}</b> · p90 <b>{{ pct(waits.p90) }}</b> · gave up <b>{{ waits.gaveUp }}</b>
       <span class="muted">(60 min)</span></span>
+    <button v-if="failed" type="button" class="failed" :aria-label="`failed ${failed.n} (60 min): output of job ${failed.id}, the newest failed job`"
+      :title="`open the output of job ${failed.id}, the newest of ${failed.n} failed in the last 60 min`"
+      @click="select(failed.id, $event)">failed <b>{{ failed.n }}</b> <span class="muted">(60 min)</span></button>
     <span>job cores <b>{{ store.jobCores.toFixed(1) }}</b></span>
     <span>host CPU <b>{{ (store.sysCpu * 100).toFixed(0) }}</b>%</span>
-    <span v-if="census" title="CPU pressure (some avg10); cores of builds slot does not run; pool size the controller recommends, not enforced">
-      PSI cpu <b>{{ census.psi_cpu.toFixed(0) }}</b>% · unmanaged builds <b>{{ census.unmanaged_cores.toFixed(1) }}</b> cores
+    <span v-if="census" title="CPU pressure (some avg10); cores of builds that are not on slot; pool size the controller recommends, not enforced">
+      PSI cpu <b>{{ census.psi_cpu.toFixed(0) }}</b>% · not on slot <b>{{ census.unmanaged_cores.toFixed(1) }}</b> cores
       · recommended <b>{{ census.recommended_tokens }}/{{ store.tokens }}</b> <span class="muted">(observe)</span></span>
     <label>window
       <select v-model.number="store.windowS">
@@ -131,6 +140,7 @@ b { font-variant-numeric: tabular-nums; }
 .presets button { min-width: 24px; min-height: 24px; padding: 0 6px; border: 1px solid #bbb; border-radius: 3px; background: #fff;
   color: var(--fg); cursor: pointer; font-variant-numeric: tabular-nums; }
 .presets button[aria-pressed='true'] { background: #444; border-color: #444; color: #fff; }
+.failed { min-height: 24px; margin: -3px 0; padding: 0 6px; border: 1px solid #e5a5a2; border-radius: 3px; background: #fff; color: #b00; cursor: pointer; }
 .conn { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: #c33; }
 .conn.ok { background: #2a2; }
 .legend > span { margin-right: 12px; }

@@ -57,19 +57,26 @@ reference and UI types. CI runs it in `.github/workflows/gate.yml`.
 
 `ui/ux/` holds the UI iteration loop. Every merge: `ui/ux/gates.spec.ts` (no sideways page scroll,
 no scrolling element but the output text, the `data-ux-region` header marks fully in view,
-axe-core 0 serious or critical) and `ui/ux/screen-only.spec.ts` (every scenario task done by
-pointer and by keyboard, at most 2 actions, no `false_complete`) at 1366x768 and 1280x720, against
+axe-core 0 serious or critical), `ui/ux/screen-only.spec.ts` (every scenario task done by
+pointer and by keyboard, at most 2 actions, no `false_complete`, a task on a job without a scroll)
+and `ui/ux/findings.spec.ts` (the assertions of closed findings) at 1366x768 and 1280x720, against
 the built `ui/dist` with every API answered from `ui/ux/scenarios.ts`; then `node ux/ratchet.ts`
 against `ui/ux/baseline.json`. Each run serves `ui/dist` on a free port (`ui/ux/port.ts`; `UX_PORT`
 sets one), so worktrees run the gates at the same time; `ui/ux/concurrent.e2e.ts` runs two at once.
 Playwright's Chromium headless shell must be installed
 (`pnpm exec playwright install --only-shell chromium` in `ui/`), and the DejaVu Sans font: the
 harness renders every page in it, so the gates measure the same layout on every host.
+Playwright stops a test at 60 s, and every run ends with its ten slowest tests (`ui/ux/slowest.ts`).
 
 - A change that improves a metric runs `node ux/ratchet.ts --update` and commits the new baseline
   in the same change. A baseline made worse names a decision id in that entry (`decision`).
-- A round: `task ux-round -- R-nn` measures every size and writes `ui/ux/rounds/R-nn/report.md`;
-  then `triage.md` (priority = severity × frequency × confidence ÷ cost, at most 5 changes) and,
+- A round: `task ux-round -- R-nn` measures every size and writes `ui/ux/rounds/R-nn/report.md`.
+  It exits non-zero when a result file is missing (a test that crashes writes none; the report
+  lists each and counts it as a gate problem or a screen-only failure) or when the round ratchet
+  fails (`node ux/ratchet.ts --round`, its last command; the report shows its lines). The round
+  ratchet also compares the keys that depend on the host's fonts (`reading_load.*`,
+  `layout_shift.total`); `--round --update` takes them in. Then
+  `triage.md` (priority = severity × frequency × confidence ÷ cost, at most 5 changes) and,
   for one layout or interaction change, `decision.md`. Every finding is a
   `ui/ux/findings/UXF-nnn.md`; a closed S1 or S2 names its regression asset
   (`ui/ux/findings.test.ts`). The change set is one task under the standing UX story in `.engineering/planning/story/`.
