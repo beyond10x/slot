@@ -33,6 +33,14 @@ pub struct Saved {
     /// What the headroom is a share of; the pool in a file from before 0.16.
     #[serde(default)]
     pub base: HeadroomBase,
+    /// Seconds a job may run before the daemon ends it (`slot run-limit`);
+    /// `None`, and absent from the file: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_limit_s: Option<u64>,
+    /// The most a job may name with `slot --timeout`, seconds; `None`, and
+    /// absent from the file: [`crate::run_limit::DEFAULT_MAX_S`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_limit_max_s: Option<u64>,
 }
 
 /// Reads the saved headroom; 0 when the file is missing or unreadable.
@@ -44,6 +52,8 @@ pub fn load(dir: &Path) -> Saved {
             headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
             call_headroom_percent: s.call_headroom_percent.map(|c| c.min(MAX_HEADROOM)),
             base: s.base,
+            run_limit_s: s.run_limit_s.filter(|&l| l > 0),
+            run_limit_max_s: s.run_limit_max_s.filter(|&m| m > 0),
         })
         .unwrap_or_default()
 }
@@ -186,6 +196,7 @@ mod tests {
                 headroom_percent: 35,
                 call_headroom_percent: None,
                 base: HeadroomBase::Pool,
+                ..Saved::default()
             },
         )
         .unwrap();
@@ -197,6 +208,7 @@ mod tests {
                 headroom_percent: 20,
                 call_headroom_percent: Some(0),
                 base: HeadroomBase::Pool,
+                ..Saved::default()
             },
         )
         .unwrap();
@@ -218,6 +230,7 @@ mod tests {
                 headroom_percent: 45,
                 call_headroom_percent: None,
                 base: HeadroomBase::Machine,
+                ..Saved::default()
             },
         )
         .unwrap();
@@ -226,6 +239,53 @@ mod tests {
         let r: Request = serde_json::from_str(r#"{"headroom_base":"machine"}"#).unwrap();
         assert_eq!(r.headroom_base, Some(HeadroomBase::Machine));
         assert!(serde_json::from_str::<Request>(r#"{"headroom_base":"host"}"#).is_err());
+    }
+
+    #[test]
+    fn the_run_limit_is_kept_beside_the_headroom_and_an_older_file_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        std::fs::write(&file, r#"{"headroom_percent":30,"base":"machine"}"#).unwrap();
+        let old = load(dir.path());
+        assert_eq!((old.run_limit_s, old.run_limit_max_s), (None, None));
+        assert_eq!(
+            (old.headroom_percent, old.base),
+            (30, HeadroomBase::Machine)
+        );
+        save(
+            dir.path(),
+            Saved {
+                run_limit_s: Some(600),
+                run_limit_max_s: Some(7200),
+                ..old
+            },
+        )
+        .unwrap();
+        let s = load(dir.path());
+        assert_eq!((s.run_limit_s, s.run_limit_max_s), (Some(600), Some(7200)));
+        assert_eq!((s.headroom_percent, s.base), (30, HeadroomBase::Machine));
+        save(
+            dir.path(),
+            Saved {
+                run_limit_s: None,
+                ..s
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(!text.contains("run_limit_s"), "{text}");
+        assert!(text.contains(r#""run_limit_max_s":7200"#), "{text}");
+        std::fs::write(
+            &file,
+            r#"{"headroom_percent":0,"run_limit_s":0,"run_limit_max_s":0}"#,
+        )
+        .unwrap();
+        let zero = load(dir.path());
+        assert_eq!(
+            (zero.run_limit_s, zero.run_limit_max_s),
+            (None, None),
+            "a 0 written by hand is no limit, not a limit of 0 s"
+        );
     }
 
     #[test]

@@ -120,7 +120,19 @@ cache_env?: { [key in string]?: string },
  * What is unusual about the job's compile cache setup, one short text
  * each (`crate::sccache::cache_warnings`); the job runs unchanged.
  */
-warnings?: Array<string>, };
+warnings?: Array<string>, 
+/**
+ * Seconds the job may run from its start before the daemon ends it:
+ * its own `--timeout`, else the daemon's limit (`crate::run_limit`).
+ * Absent while the job is queued, for a job without a limit and from a
+ * daemon without the run-time limit.
+ */
+limit_s?: number, 
+/**
+ * Whether the daemon ended the job at `limit_s`; its exit code is then
+ * 124.
+ */
+timed_out?: boolean, };
 
 export type Unit = { 
 /**
@@ -345,7 +357,17 @@ quota_floor: boolean,
  * Machine base: the pool is at its floor and the host is still busier
  * than the target.
  */
-over_target: boolean, };
+over_target: boolean, 
+/**
+ * Seconds a job may run before the daemon ends it (`slot run-limit`);
+ * absent with no limit and from a daemon without one.
+ */
+run_limit_s?: number, 
+/**
+ * The most a job may name with `slot --timeout`, seconds; absent from a
+ * daemon without the run-time limit.
+ */
+run_limit_max_s?: number, };
 
 export type By = "project" | "repo" | "session";
 

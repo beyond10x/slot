@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+pub use crate::run_limit::View as RunLimitView;
 pub use crate::server::limits::View as LimitsView;
 use crate::server::priority::PromoteAfter;
 pub use crate::server::priority::View as PriorityView;
@@ -159,6 +160,61 @@ pub fn render_promote_after(v: &PriorityView, asked: PromoteAfter) -> String {
         "a job queued longer than {} goes as high{source}\n",
         promote_after_text(v)
     )
+}
+
+/// Reads the run-time limit (`slot run-limit`), or first sets the limit,
+/// the most a job may name, or both.
+pub fn run_limit(
+    addr: &str,
+    limit: Option<crate::run_limit::Setting>,
+    max: Option<u64>,
+) -> Result<RunLimitView> {
+    use crate::run_limit::{Request, Setting};
+    let path = "/api/run-limit";
+    let answer = if limit.is_none() && max.is_none() {
+        request(addr, "GET", path, None)
+    } else {
+        let body = serde_json::to_string(&Request {
+            run_limit_s: limit.map(|l| match l {
+                Setting::Off => 0,
+                Setting::Seconds(s) => s,
+            }),
+            run_limit_max_s: max,
+        })?;
+        request(addr, "PUT", path, Some(&body))
+    };
+    let answer = answer.map_err(|e| {
+        if e.to_string().contains(" 404") {
+            e.context("the daemon is older than this slot and has no run-time limit")
+        } else {
+            e
+        }
+    })?;
+    serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
+}
+
+/// `slot run-limit`: the limit in force and the most a job may name.
+pub fn render_run_limit(v: &RunLimitView) -> String {
+    let max = crate::run_limit::text(v.run_limit_max_s);
+    match v.run_limit_s {
+        Some(limit) => format!(
+            "a job that runs longer than {} is ended (exit 124); `slot --timeout` names up to {max}\n",
+            crate::run_limit::text(limit)
+        ),
+        None => format!(
+            "no run-time limit; a job that names one with `slot --timeout` gets up to {max}\n"
+        ),
+    }
+}
+
+/// The run-time limit line of `slot status`; `None` with no limit.
+fn run_limit_line(s: &State) -> Option<String> {
+    let limit = crate::run_limit::text(s.run_limit_s?);
+    let max = s.run_limit_max_s.unwrap_or(crate::run_limit::DEFAULT_MAX_S);
+    Some(format!(
+        "run-time limit {limit}: a job that runs longer is ended; `slot --timeout` names up to {}\n",
+        crate::run_limit::text(max)
+    ))
 }
 
 /// `slot priority list`: one line per rule, then the promotion limit.
@@ -422,6 +478,9 @@ pub fn render(s: &State) -> String {
     if let Some(l) = machine_line(s) {
         out.push_str(&l);
     }
+    if let Some(l) = run_limit_line(s) {
+        out.push_str(&l);
+    }
     if !s.upgrade.is_empty() {
         out.push_str(&s.upgrade);
         out.push('\n');
@@ -471,6 +530,8 @@ mod tests {
             promoted: false,
             cache_env: None,
             warnings: Vec::new(),
+            limit_s: None,
+            timed_out: false,
         }
     }
 
@@ -651,6 +712,64 @@ mod tests {
             ..State::default()
         };
         assert_eq!(render(&s), "4 slots, 4 free, 0 running, 0 queued\n");
+    }
+
+    #[test]
+    fn the_run_time_limit_is_a_header_line_when_one_is_set() {
+        let mut s = State {
+            tokens: 4,
+            limit: 4,
+            free: 4,
+            run_limit_max_s: Some(3600),
+            ..State::default()
+        };
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n",
+            "no limit: no line"
+        );
+        s.run_limit_s = Some(600);
+        assert_eq!(
+            render(&s),
+            "4 slots, 4 free, 0 running, 0 queued\n\
+             run-time limit 10m: a job that runs longer is ended; `slot --timeout` names up to 1h\n"
+        );
+        let old: State = serde_json::from_str(
+            r#"{"host":"h","cores":4,"tokens":4,"free":4,"active":[],"done":[],"now_ms":0,"toolchains":[]}"#,
+        )
+        .unwrap();
+        assert_eq!((old.run_limit_s, old.run_limit_max_s), (None, None));
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("run_limit"), "{line}");
+    }
+
+    #[test]
+    fn slot_run_limit_in_one_line() {
+        use crate::run_limit::View;
+        assert_eq!(
+            render_run_limit(&View {
+                run_limit_s: Some(600),
+                run_limit_max_s: 3600
+            }),
+            "a job that runs longer than 10m is ended (exit 124); `slot --timeout` names up to 1h\n"
+        );
+        assert_eq!(
+            render_run_limit(&View {
+                run_limit_s: None,
+                run_limit_max_s: 5400
+            }),
+            "no run-time limit; a job that names one with `slot --timeout` gets up to 1h30m\n"
+        );
+    }
+
+    #[test]
+    fn a_daemon_without_the_run_time_limit_says_so() {
+        let addr = answer_once("HTTP/1.0 404 Not Found\r\n\r\nslot: no such API path\n");
+        let e = run_limit(&addr, None, None).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("older than this slot and has no run-time limit"),
+            "{e:#}"
+        );
     }
 
     #[test]

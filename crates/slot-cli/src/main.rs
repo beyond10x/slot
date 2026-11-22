@@ -23,6 +23,7 @@ fn main() -> ExitCode {
             &cli.fetch,
             args.tokens.or(cli.tokens),
             args.priority.or(cli.priority),
+            args.timeout.or(cli.timeout),
         )),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
@@ -35,6 +36,10 @@ fn main() -> ExitCode {
             })
         }
         Cmd::Priority(cmd) => priority(&cmd),
+        Cmd::RunLimit(args) => slot::status::run_limit(&args.http, args.limit, args.max).map(|v| {
+            print!("{}", slot::status::render_run_limit(&v));
+            0
+        }),
         Cmd::Cancel(args) => Ok(client::cancel(args.id, &Settings::from_env())),
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);
@@ -58,6 +63,7 @@ fn main() -> ExitCode {
                 &cli.fetch,
                 cli.tokens,
                 cli.priority,
+                cli.timeout,
             ))
         }
     };
@@ -76,6 +82,7 @@ fn build(
     fetch: &[String],
     tokens: Option<u32>,
     priority: Option<slot::types::Priority>,
+    timeout: Option<u64>,
 ) -> i32 {
     if local {
         return client::run_local(argv);
@@ -84,6 +91,7 @@ fn build(
     s.fetch = fetch.to_vec();
     s.tokens = tokens;
     s.priority = priority;
+    s.timeout = timeout;
     client::run(argv, &s)
 }
 

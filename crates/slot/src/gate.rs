@@ -199,6 +199,7 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         cancel: None,
         tokens: client.tokens,
         priority: client.priority,
+        timeout_s: client.timeout_s,
     }
 }
 
@@ -593,14 +594,22 @@ fn submit_inner(dir: &Path, req: &Request) -> std::result::Result<i32, Fallback>
         }
     };
     let mut cancelled_at: Option<Instant> = None;
+    // What this client exits with when the daemon ends the job: 130 for a
+    // cancel, 124 for a job ended at its run-time limit.
+    let mut stopped_code = 130;
     let mut gate_gone = false;
     let code = loop {
         if let Ok(Some(st)) = child.try_wait() {
             break st.code().unwrap_or_else(|| 128 + st.signal().unwrap_or(0));
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(Event::Frame(Frame::Exit { .. })) if cancelled_at.is_none() => {
-                eprintln!("slot: job {job} cancelled");
+            Ok(Event::Frame(Frame::Exit { code })) if cancelled_at.is_none() => {
+                if code == crate::run_limit::EXIT {
+                    // The daemon's `info` frame said why.
+                    stopped_code = code;
+                } else {
+                    eprintln!("slot: job {job} cancelled");
+                }
                 let _ = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(child.id() as i32),
                     nix::sys::signal::Signal::SIGTERM,
@@ -621,7 +630,7 @@ fn submit_inner(dir: &Path, req: &Request) -> std::result::Result<i32, Fallback>
         }
     };
     if cancelled_at.is_some() {
-        return Ok(130);
+        return Ok(stopped_code);
     }
     let _ = hold.write_all(format!("exit {code}\n").as_bytes());
     drop(hold);
@@ -687,6 +696,7 @@ mod tests {
             cwd: "/does/not/exist/on/the/host".into(),
             env: vec!["A=1".into()],
             tokens: Some(3),
+            timeout_s: Some(1800),
             checkout: Some(crate::types::Checkout::Worktree {
                 name: "feature".into(),
             }),
@@ -697,6 +707,7 @@ mod tests {
         assert_eq!(r.hold_for, Some(vec!["cargo".into(), "build".into()]));
         assert_eq!(r.cwd, "/g");
         assert_eq!(r.tokens, Some(3));
+        assert_eq!(r.timeout_s, Some(1800));
         assert_eq!(
             r.checkout,
             Some(crate::types::Checkout::Worktree {

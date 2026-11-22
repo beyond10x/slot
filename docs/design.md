@@ -972,3 +972,42 @@ job.
 - **Versions.** The file's reader ignores fields it does not know, so a daemon without the
   setting reads a file that has it and orders by its own option. When that older daemon saves a
   rule it writes the file without the field: a downgrade loses the delay, not the rules.
+
+## 21. The run-time limit (unreleased)
+
+A job that hangs holds its slots until its client goes away. The run-time limit ends a job that
+has run longer than a set time, counted from `started_ms`; the queue wait is not part of it
+(`run_limit.rs`).
+
+- **Settings.** `limits.json`, beside the headroom: optional `run_limit_s` (absent: no limit, the
+  default of a fresh install) and `run_limit_max_s` (the most a job may name; absent: 3600).
+  `GET` and `PUT /api/run-limit` read and change them, `slot run-limit <duration|off> [--max
+  <duration>]` sends the change. A field left out of the body keeps its value, `run_limit_s` 0
+  turns the limit off, and a limit over the maximum is refused with 400, so the maximum is never
+  below what every job gets anyway.
+- **A job's limit** (`run_limit::job_limit`). Its own `timeout_s` (`slot --timeout`,
+  `SLOT_TIMEOUT`; a field of the request that an older daemon ignores), capped at the maximum;
+  else the limit.
+- **A wrapped `timeout` extends nothing.** The alternative, giving a job that starts with coreutils
+  `timeout` that command's time, was dropped: a `timeout 1800` goes in front of every command by
+  habit, and the limit then bounds almost no job. Only `slot --timeout` extends a job. The
+  daemon still reads the time of a `timeout` that is the first or
+  second word of the command (`run_limit::wrapper_timeout`), for one `info` frame at submission
+  when it names more than the job's limit: the job ends earlier than its caller wrote, and the
+  line names the `slot --timeout` to use.
+- **When it is fixed.** At the job's start, from the settings of that moment, and written to the
+  job record as `limit_s`. A later `slot run-limit` changes the jobs that start afterwards. A
+  setting that reached back would end a job that was started under a promise of more time.
+- **Enforcement.** Once a second (`Server::end_overdue`) every running job with `limit_s` whose
+  run time reached it is marked `timed_out` and its supervisor is told. The supervisor ends it as
+  it ends a cancelled job: SIGTERM to the process group, SIGKILL after 5 s. The job is logged as
+  `failed` with exit 124 and `timed_out`, and the client gets one `info` frame and exit 124. A
+  job whose client already went away is cancelled, not timed out.
+- **Handover.** `limit_s`, `timed_out` and `started_ms` are fields of the job record, which a
+  handover passes on whole (§ 15.2), and the request of a queued job carries `timeout_s`. The
+  handover format and its `VERSION` are unchanged. The new image's watch counts on from
+  `started_ms`; a job that was signalled by the old image and not yet reaped is signalled again.
+- **Versions.** A daemon without the limit reads a `limits.json` that has the fields and ignores
+  them; when it saves the headroom it writes the file without them, so a downgrade loses the
+  limit. A client without `--timeout` and a daemon without the limit talk to each other
+  unchanged.

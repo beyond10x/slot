@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- A run-time limit for jobs: `slot run-limit <duration>` makes the daemon end a job that has run
+  longer (`10m`, `90s`, `1h` or plain seconds; `off` for no limit, which stays the default). The
+  time counts from the job's start, not from when it queued. The job ends as with `slot cancel`
+  (SIGTERM to its process group, SIGKILL 5 s later); the client exits 124 after one line with the
+  job, its run time, its limit and how to name a longer one, and the job's record has
+  `"timed_out":true` and `limit_s`. A job names its own time with `slot --timeout <duration>`,
+  `slot run --timeout` or `SLOT_TIMEOUT`, up to the most a job may name (`slot run-limit --max`,
+  1 h by default; a longer value is capped and the client is told). A `timeout` command in front
+  of the job's command extends nothing: `slot timeout 1800 cargo test` ends at the limit, and
+  when such a `timeout` names more than the job's limit the client prints one line at submission
+  with the `slot --timeout` to use instead. The limit a job starts with stays its limit, across a
+  reload too. The settings are kept in `limits.json`
+  beside the headroom; `GET` and `PUT /api/run-limit` read and change them; `slot status` shows
+  the limit when one is set.
+
 ## 0.21.0 — 2026-11-22
 
 - The delay after which a waiting `normal` or `low` job counts as `high` changes while the daemon

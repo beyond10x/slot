@@ -18,6 +18,7 @@ slot [OPTIONS] <COMMAND>
 - `--local`: Run the command here, without the daemon (default `false`)
 - `--tokens`: Slots the job holds, in place of the count slot derives from the command. For work the daemon cannot see, such as a script that starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The daemon caps it at the slots in circulation (the pool less the headroom), so the job never waits forever. Ignored with `--local` (env `SLOT_TOKENS`)
 - `--priority`: The job's queue level: queued `urgent` jobs get free slots first, then `high`, `normal` and `low` ones; with no slot free, an `urgent` job starts on one the headroom holds back. A rule set with `slot priority set` for the job's repository wins over it. Ignored with `--local` (env `SLOT_PRIORITY`)
+- `--timeout`: How long the job may run, counted from its start, in place of the daemon's run-time limit (`slot run-limit`): seconds, or a number with `s`, `m` or `h`, such as `90s`, `30m` or `1h`. The daemon ends a job that runs longer (SIGTERM, SIGKILL 5 s later) and the job exits 124. It is capped at the most a job may name, 1 h unless `slot run-limit --max` changed it. A `timeout` command in front of the job's command does not extend it. Ignored with `--local` (env `SLOT_TIMEOUT`)
 - `--fetch`: With `SLOT_HOST` set: after the job exits 0, copy PATH back from the build server into the checkout. PATH is relative to the repository root; `target/…` is read from the job's target directory on the server. Repeat for more paths. Without `SLOT_HOST` the output is already here and this does nothing
 
 ### `slot serve`
@@ -98,6 +99,7 @@ slot run [OPTIONS] <COMMAND>...
 
 - `--tokens`: Slots the job holds, as `slot --tokens N`; capped at the slots in circulation. Ignored with `--local`
 - `--priority`: The job's queue level, as `slot --priority LEVEL`
+- `--timeout`: How long the job may run, as `slot --timeout DURATION`
 - `<COMMAND>`: The command and its arguments
 
 ### `slot status`
@@ -173,6 +175,18 @@ slot priority promote-after [OPTIONS] <SECONDS>
 ```
 
 - `<SECONDS>`: Seconds; 0 never promotes a job; `default` goes back to the daemon's `--promote-after`. The value applies to the jobs already queued, is kept in `priority.json` in the state directory and wins over `--promote-after` across reloads and restarts, until `default` removes it
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+### `slot run-limit`
+
+Show or set the run-time limit: how long a job may run before the daemon ends it
+
+```text
+slot run-limit [OPTIONS] [DURATION|off]
+```
+
+- `<LIMIT>`: How long a job may run, counted from its start: seconds, or a number with `s`, `m` or `h` (`90s`, `10m`, `1h`); `off` for no limit. The daemon ends a job that runs longer (SIGTERM to its processes, SIGKILL 5 s later) and the job exits 124. The limit applies to the jobs that start after the change, is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `--max`: The most a job may name with `slot --timeout`; 1 h until it is set
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cancel`

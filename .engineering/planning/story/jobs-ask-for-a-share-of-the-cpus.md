@@ -9,7 +9,7 @@ relations:
 - serves: vision:O2
 - informed_by: story:idle-slots-are-lent-to-the-queue
 - informed_by: story:compile-servers-count-as-pool-load
-revision: 1
+revision: 3
 ---
 ## Outcome
 
@@ -80,3 +80,136 @@ a CPU.
 
 `story:idle-slots-are-lent-to-the-queue` and `story:compile-servers-count-as-pool-load` are
 cases of this change.
+
+## Research, 2026-11-22
+
+Read on the pages by a research pass; values marked (start) are starting values of this story,
+not taken from a source.
+
+Policy:
+
+- Shortest-remaining-time-first gives the lowest mean response time, and with heavy-tailed job
+  sizes it costs the long jobs little: <https://www.cs.cmu.edu/~harchol/Papers/Sigmetrics01.pdf>.
+- With sizes not known, least-attained-service is the best size-blind order when sizes have a
+  decreasing failure rate: <https://arxiv.org/html/math/0412182>. A multi-level feedback queue
+  is its practical form: <https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched-mlfq.pdf>.
+- A limit on running jobs is a first-come queue in front of a shared processor. A low limit acts
+  like first-come-first-served, so mean response time grows with the spread of job sizes; the
+  limit is tuned by a feedback loop: <https://www.cs.cmu.edu/~harchol/Papers/icde06.pdf>.
+- When the submitters wait for their jobs (a closed system), queue order gains less than in an
+  open one:
+  <https://www.usenix.org/legacy/events/nsdi06/tech/full_papers/schroeder/schroeder_html/index.html>.
+
+Build systems:
+
+- GNU make `-l` starts no job while the load is over a limit; 3.81 fixed a burst of starts and
+  4.4 replaced the load average by the runnable count:
+  <https://www.gnu.org/software/make/manual/html_node/Parallel.html>.
+- Bazel admits local actions by declared resources and has a switch, off by default, that admits
+  by measured CPU load over a window instead of per-action estimates
+  (`--experimental_cpu_load_scheduling` in
+  <https://raw.githubusercontent.com/bazelbuild/bazel/master/src/main/java/com/google/devtools/build/lib/exec/ExecutionOptions.java>).
+- Portage pairs `--jobs` with `--load-average` and calls the load average "a damped value":
+  <https://wiki.gentoo.org/wiki/MAKEOPTS>. Ninja, Nix, Pants and GitLab Runner use fixed counts.
+
+Signals:
+
+- Pressure stall information: "some" is the share of time at least one task is stalled; its
+  known users act on memory pressure, not CPU: <https://docs.kernel.org/accounting/psi.html>.
+  No source gives a target for CPU pressure or for runnable tasks per CPU.
+- The load average counts tasks in uninterruptible sleep and lags a minute:
+  <https://www.brendangregg.com/blog/2017-08-08/linux-load-averages.html>.
+- Adaptive concurrency limits of services compare a sample latency with the best seen and move
+  the limit by a step per window: <https://github.com/Netflix/concurrency-limits>,
+  <https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/adaptive_concurrency_filter>.
+
+Shares:
+
+- Kubernetes takes requests under one CPU; the request is a reservation at admission and a
+  weight under contention:
+  <https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/>.
+- Estimates from history: samples weighted by age (half-life 12 h for CPU), the weighted mean
+  for batch jobs, a high percentile for serving jobs, then a margin of 10 to 15 %:
+  <https://john.e-wilkes.com/papers/2020-EuroSys-Autopilot.pdf>.
+- `cpu.weight` shares CPU among competing groups and bounds neither runnable tasks nor memory:
+  <https://docs.kernel.org/admin-guide/cgroup-v2.html>.
+
+## Design that follows
+
+1. The objective is the slowdown of a job: its wall time over the best earlier wall time of the
+   same repository and command. Not jobs per minute.
+2. A job's share is predicted from the job log: CPU seconds over wall time of earlier runs,
+   weighted by age, a high percentile plus 15 %, at least 0.1; an unknown command counts 1.0
+   (start).
+3. The daemon admits the head of the queue while the CPUs busy over the last 5 s (the pool's
+   cgroup and the compile cache server), plus the shares of jobs started in those 5 s, plus the
+   candidate's share, stay within a budget.
+4. The budget starts at 15 CPUs on a host of 20 (the level measured busy with 17 slots) and
+   never passes the pool's CPU quota. Every 5 s: median slowdown of finished jobs under 1.3
+   raises it by 0.5; over 2 multiplies it by 0.85 (start).
+5. CPU pressure of the host is a brake, not the target: over a threshold taken from the log,
+   only short jobs start.
+6. Queue order: shortest predicted wall time first; waiting lowers a job's key, so a long job
+   starts.
+7. A command whose earlier runs ended within 5 s starts at once, up to the upper bound.
+8. One child cgroup per job; a job's `cpu.weight` falls after it used 10 s of CPU (start), so
+   the kernel favours jobs that have run little.
+9. Bounds: at least 4 running jobs (start); at most 48, and no more than the predicted peak
+   memory allows (start).
+10. A job holds no slot of its own beyond the implicit one. The jobserver FIFO keeps bounding
+    the compiler processes inside jobs; the daemon takes tokens out or returns them as the
+    budget moves.
+
+Not chosen: a larger fixed pool (jobs hit their time limits at 50); a load-average limit (damped,
+counts I/O waiters, reworked twice in make); kernel weights alone (no bound on runnable tasks or
+memory); CPU pressure as the only target (no sourced value, and it saturates with many tasks).
+
+To measure before building: the compile cache server's CPU per minute beside the jobs' CPU;
+jobs per minute and slowdown at budgets of 13, 15 and 17; the host's utilisation stored with
+every job record, because history taken under contention understates a job's share.
+
+## Requests for more than CPU
+
+The operator's words: a client could request "cpu shares, memory, disk, io bandwidth", and
+"depending on what's available we get scheduled earlier or later".
+
+What the host confines today (read from the daemon's cgroup, 2026-11-22):
+
+- CPU: one quota for all jobs (`cpu.max`, 17 of 20 CPUs with a headroom of 15 %) and one weight
+  (`cpu.weight` 20). Nothing per job.
+- Memory: no limit (`memory.max` is `max`). Admission waits while the host has under 4 GB free
+  (`--min-free-memory`). `--memory-max` puts each job in a scope with a `MemoryMax`; it is off
+  and was never run beyond starting jobs.
+- Disk: admission waits under `--min-free-disk`; eviction frees old target directories.
+- I/O: nothing. The `io` controller is not delegated to the user manager (the daemon's cgroup
+  has `cpu memory pids`), so neither `io.weight` nor `io.max` can be set without a root drop-in.
+- The compile cache server runs in a unit of its own, outside all of this.
+
+Design:
+
+11. A request names a CPU share and may name memory, disk and I/O. What it leaves out is
+    predicted from the job log: peak RSS of earlier runs for memory, the growth of the target
+    directory for disk.
+12. A job starts when every named resource fits: its CPU share within the budget, its memory
+    within the memory free now minus the predicted peaks of the jobs that started in the last
+    30 s, its disk above the free-disk floor. A job that fits starts ahead of an older one that
+    does not, and waiting raises the older job's turn so it is not passed for ever.
+13. Each job runs in a cgroup of its own with `cpu.weight` from its share and `memory.max` from
+    its request with a margin, so a job that exceeds its memory is killed alone.
+14. I/O is admitted by the host's I/O pressure as a brake until the `io` controller is
+    delegated; then a job's cgroup gets `io.weight`. Measured I/O pressure was 5 to 9 % on the
+    day of this story: not the bottleneck.
+
+## The token FIFO loses slots when jobs are killed
+
+Measured the same day, after 11 jobs were killed for running over 10 minutes: in three counts
+the pool's limit was 50, 0 slots were free, 14 to 17 were granted to running jobs, and the 6 to
+8 processes that had the FIFO open (all `cargo`, one build script) had 11 child processes
+between them. At least 19 slots were held by no live process. The daemon writes lost slots back
+only while no other process has the FIFO open, which does not happen on a busy pool
+(`story:lost-tokens-return-on-a-busy-pool`).
+
+A killed `cargo` takes the tokens it drew with it. With admission by CPU share the shared FIFO
+is not needed to bound jobs; the open question is whether it stays for the compiler processes
+inside a job, or each job gets a job count of its own (`-j` from its share) and no token can be
+lost.
