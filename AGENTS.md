@@ -337,6 +337,8 @@ Open, one line each, with where the design lives. A session starts with (e).
   0.4 CPUs per job); below that it admits nothing. A lower and an upper bound on the number of
   running jobs hold both ends. `policy::Controller` already computes a pool size from the census
   every tick and only shows it (`recommended_tokens`); (i) and (v) are cases of the same change.
+  A job then asks for a share of the CPUs, not for a number of slots:
+  `story:jobs-ask-for-a-share-of-the-cpus`.
 
 ## Never
 
