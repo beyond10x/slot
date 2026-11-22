@@ -1,6 +1,7 @@
 // Measurements taken in a docs page: layout contract, always-visible elements, accessibility.
-import AxeBuilder from '@axe-core/playwright';
+import axe from 'axe-core';
 import type { Page } from '@playwright/test';
+import { hydrated, settle, settleScript } from './settle.ts';
 import { DESKTOP_MIN_WIDTH } from './viewports.ts';
 
 /** DejaVu Sans on every host: the workstation's sans-serif is narrower than CI's (ui/ux UXF-016). */
@@ -107,27 +108,57 @@ export async function layout(page: Page, docPage: boolean): Promise<Omit<Probe, 
   );
 }
 
+/** The WCAG levels the gate holds. */
+const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
+
+/**
+ * The serious and critical axe-core violations of the page as it is now. axe-core runs in the
+ * page itself, loaded once: no second page that only merges the result (as ui/ux/probes.ts).
+ */
 export async function axeSerious(page: Page): Promise<string[]> {
-  const axe = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']).analyze();
-  return axe.violations
-    .filter((v) => v.impact === 'serious' || v.impact === 'critical')
-    .map((v) => `${v.id} (${v.nodes.length}): ${v.nodes.slice(0, 2).map((n) => n.target.join(' ')).join(', ')}`);
+  const run = (): Promise<string[] | null> =>
+    page.evaluate(async (tags) => {
+      const inPage = (window as unknown as { axe?: typeof axe }).axe;
+      if (!inPage) return null;
+      const result = await inPage.run(document, { runOnly: { type: 'tag', values: tags } });
+      return result.violations
+        .filter((v) => v.impact === 'serious' || v.impact === 'critical')
+        .map((v) => `${v.id} (${v.nodes.length}): ${v.nodes.slice(0, 2).map((n) => n.target.join(' ')).join(', ')}`);
+    }, AXE_TAGS);
+  const first = await run();
+  if (first) return first;
+  await page.evaluate(axe.source);
+  const second = await run();
+  if (!second) throw new Error('axe-core did not load into the page');
+  return second;
 }
 
 /** Installed before page scripts: sums layout shifts not caused by input. */
 export function clsObserver(): void {
-  const w = window as unknown as { __uxCls: number };
+  const w = window as unknown as { __uxCls: number; __uxClsTake(): void };
   w.__uxCls = 0;
-  new PerformanceObserver((list) => {
-    for (const e of list.getEntries() as Array<PerformanceEntry & { value: number; hadRecentInput: boolean }>) {
+  const add = (entries: PerformanceEntryList): void => {
+    for (const e of entries as Array<PerformanceEntry & { value: number; hadRecentInput: boolean }>) {
       if (!e.hadRecentInput) w.__uxCls += e.value;
     }
-  }).observe({ type: 'layout-shift', buffered: true });
+  };
+  const po = new PerformanceObserver((list) => add(list.getEntries()));
+  po.observe({ type: 'layout-shift', buffered: true });
+  // Shifts the observer was not called with yet.
+  w.__uxClsTake = () => add(po.takeRecords());
 }
 
-export const layoutShift = (page: Page): Promise<number> => page.evaluate(() => (window as unknown as { __uxCls: number }).__uxCls);
+export const layoutShift = (page: Page): Promise<number> =>
+  page.evaluate(() => {
+    const w = window as unknown as { __uxCls: number; __uxClsTake(): void };
+    w.__uxClsTake();
+    return w.__uxCls;
+  });
 
-/** Opens `path` in `theme`, with the pinned font, and waits for the page to settle. */
+/**
+ * Opens `path` in `theme`, with the pinned font, and waits until the page is hydrated and at rest
+ * (`settle.ts`), not for a fixed time.
+ */
 export async function openPage(page: Page, path: string, theme: 'light' | 'dark'): Promise<void> {
   await page.addInitScript((t) => {
     try {
@@ -137,6 +168,7 @@ export async function openPage(page: Page, path: string, theme: 'light' | 'dark'
     }
   }, theme);
   await page.addInitScript(clsObserver);
+  await page.addInitScript(settleScript);
   await page.addInitScript((css) => {
     document.addEventListener('DOMContentLoaded', () => {
       const st = document.createElement('style');
@@ -147,5 +179,6 @@ export async function openPage(page: Page, path: string, theme: 'light' | 'dark'
   await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: theme });
   await page.goto(path, { waitUntil: 'load' });
   await page.evaluate(() => document.fonts.ready);
-  await page.waitForTimeout(300);
+  await hydrated(page);
+  await settle(page);
 }

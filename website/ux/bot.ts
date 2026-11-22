@@ -4,6 +4,7 @@
 // look, a link taken only because nothing names the task is one steer.
 import type { Page } from '@playwright/test';
 import { BASE_PATH } from './pages.ts';
+import { arrived, pageSignature, settle } from './settle.ts';
 import type { Task } from './tasks.ts';
 import { FALLBACK_LINKS } from './tasks.ts';
 
@@ -80,26 +81,105 @@ const atBottom = (page: Page): Promise<boolean> =>
 async function look(page: Page, mode: Mode): Promise<void> {
   if (mode === 'keyboard') await page.keyboard.press('PageDown');
   else await page.mouse.wheel(0, Math.round((page.viewportSize()?.height ?? 700) * 0.8));
-  await page.waitForTimeout(120);
+  // PageDown is drawn over several frames: the reader looks when the scroll ended.
+  await settle(page, true);
 }
 
 const currentRoute = (page: Page): string => new URL(page.url()).pathname.slice(BASE_PATH.length).replace(/\/$/, '');
 
-/** Moves focus with Tab from the top of the page (or of an open menu) to `selector`'s `nth` match; the count, or -1. */
+/** The search box of the navbar. */
+const SEARCH_BOX = '.navbar input[type="search"], .navbar input[aria-label*="search" i]';
+/** Tab presses sent at once; the page drops those after the one that reached the target. */
+const TAB_BATCH = 25;
+const MAX_TABS = 250;
+const TAB = { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 };
+
+interface TabCount {
+  pressed: number;
+  reached: number;
+  waiting(): boolean;
+  stop(): void;
+}
+
+/**
+ * Moves focus with Tab from the top of the page (or of an open menu) to `selector`'s `nth` match; the count, or -1.
+ *
+ * The page counts the presses itself and drops every Tab after the one that put the focus on the
+ * target, so the presses go out in batches and not one round trip each.
+ *
+ * The search box loads its index when it first gets the focus and takes the focus back when the
+ * index arrived, wherever the reader is by then (DXF-010, open): how many presses that costs depends on
+ * how fast the index loads. The reader therefore waits on the search box until its index is there
+ * (at most 5 s) and tabs on from it; the count is the one of a reader who is not thrown back.
+ */
 async function tabToSelector(page: Page, selector: string, nth = 0): Promise<number> {
-  await page.evaluate(() => {
-    const menuOpen = !!document.querySelector('.navbar-sidebar--show');
-    if (!menuOpen) {
-      (document.activeElement as HTMLElement | null)?.blur();
-      window.scrollTo(0, 0);
+  await page.evaluate(
+    ({ s, i, box }) => {
+      const menuOpen = !!document.querySelector('.navbar-sidebar--show');
+      if (!menuOpen) {
+        (document.activeElement as HTMLElement | null)?.blur();
+        window.scrollTo(0, 0);
+      }
+      const w = window as unknown as { __uxTab?: TabCount };
+      w.__uxTab?.stop();
+      let onBox = 0;
+      const key = (e: KeyboardEvent): void => {
+        if (e.key !== 'Tab') return;
+        if (count.reached >= 0 || count.waiting()) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        } else if (e.type === 'keydown') {
+          count.pressed++;
+        }
+      };
+      const focus = (): void => {
+        if (count.reached < 0 && document.querySelectorAll(s)[i] === document.activeElement) count.reached = count.pressed;
+      };
+      const count: TabCount = {
+        pressed: 0,
+        reached: -1,
+        // The search box has the focus and is not a combobox yet: its index is loading.
+        waiting() {
+          const at = document.activeElement;
+          if (!at || !at.matches(box) || at.getAttribute('role') === 'combobox') return false;
+          if (!onBox) onBox = performance.now();
+          return performance.now() < onBox + 5000;
+        },
+        stop() {
+          window.removeEventListener('keydown', key, true);
+          window.removeEventListener('keyup', key, true);
+          window.removeEventListener('focusin', focus, true);
+        },
+      };
+      window.addEventListener('keydown', key, true);
+      window.addEventListener('keyup', key, true);
+      window.addEventListener('focusin', focus, true);
+      w.__uxTab = count;
+    },
+    { s: selector, i: nth, box: SEARCH_BOX },
+  );
+  const cdp = await page.context().newCDPSession(page);
+  let reached = -1;
+  let pressed = 0;
+  while (reached < 0 && pressed < MAX_TABS) {
+    const keys: Array<Promise<unknown>> = [];
+    for (let i = 0; i < Math.min(TAB_BATCH, MAX_TABS - pressed); i++) {
+      keys.push(cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...TAB }));
+      keys.push(cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...TAB }));
     }
-  });
-  for (let tabs = 1; tabs <= 250; tabs++) {
-    await page.keyboard.press('Tab');
-    const at = await page.evaluate(({ s, i }) => document.querySelectorAll(s)[i] === document.activeElement, { s: selector, i: nth });
-    if (at) return tabs;
+    await Promise.all(keys);
+    const now = await page.evaluate(() => {
+      const c = (window as unknown as { __uxTab: TabCount }).__uxTab;
+      return { reached: c.reached, pressed: c.pressed, waiting: c.waiting() };
+    });
+    ({ reached, pressed } = now);
+    if (reached < 0 && now.waiting) {
+      await page.waitForFunction(() => !(window as unknown as { __uxTab: TabCount }).__uxTab.waiting(), undefined, { timeout: 6000 }).catch(() => undefined);
+    }
   }
-  return -1;
+  await page.evaluate(() => (window as unknown as { __uxTab: TabCount }).__uxTab.stop());
+  await cdp.detach();
+  return reached;
 }
 
 const tabTo = (page: Page, index: number): Promise<number> => tabToSelector(page, 'a[href]', index);
@@ -109,12 +189,12 @@ const tabTo = (page: Page, index: number): Promise<number> => tabToSelector(page
  * that names one of the task's words (one action). True when that opened another page.
  */
 async function search(page: Page, task: Task, mode: Mode, res: BotResult): Promise<boolean> {
-  const box = page.locator('.navbar input[type="search"], .navbar input[aria-label*="search" i]').first();
+  const box = page.locator(SEARCH_BOX).first();
   if (!(await box.count()) || !(await box.isVisible())) return false;
   const before = currentRoute(page);
   res.actions++;
   if (mode === 'keyboard') {
-    const reached = await tabToSelector(page, '.navbar input[type="search"], .navbar input[aria-label*="search" i]');
+    const reached = await tabToSelector(page, SEARCH_BOX);
     if (reached < 0) {
       res.notes.push('the search box is not reachable by Tab');
       return false;
@@ -124,6 +204,7 @@ async function search(page: Page, task: Task, mode: Mode, res: BotResult): Promi
     await box.click();
   }
   await page.keyboard.type(task.words[0], { delay: 20 });
+  // No task of `tasks.ts` searches today: this path keeps its fixed waits until one does.
   await page.waitForTimeout(800);
   const options = await page.evaluate(() =>
     [...document.querySelectorAll('[role="option"]')]
@@ -167,16 +248,19 @@ export async function run(page: Page, task: Task, mode: Mode, viewport: string):
       }
       if (jump && !(await found())) {
         res.actions++;
+        let taken = mode === 'pointer';
         if (mode === 'keyboard') {
           const tabs = await tabTo(page, jump.index);
           if (tabs >= 0) {
             res.keyboard_tabs += tabs;
             await page.keyboard.press('Enter');
+            taken = true;
           }
         } else {
           await page.locator('a[href]').nth(jump.index).click();
         }
-        await page.waitForTimeout(300);
+        if (taken) await page.waitForFunction((hash) => location.hash === hash, `#${jump.hash}`, { timeout: 5000 }).catch(() => undefined);
+        await settle(page);
         res.path.push(`${jump.name} -> #${jump.hash}`);
       }
       // Down from where the reader is; past the end, once more from the top.
@@ -190,7 +274,7 @@ export async function run(page: Page, task: Task, mode: Mode, viewport: string):
           if (fromTop) break;
           fromTop = true;
           await page.evaluate(() => window.scrollTo(0, 0));
-          await page.waitForTimeout(120);
+          await settle(page);
           res.looks++;
           continue;
         }
@@ -213,7 +297,7 @@ export async function run(page: Page, task: Task, mode: Mode, viewport: string):
     }
     if (!chosen) {
       await page.evaluate(() => window.scrollTo(0, 0));
-      await page.waitForTimeout(150);
+      await settle(page);
       if (await search(page, task, mode, res)) {
         visited.add(currentRoute(page));
         continue;
@@ -234,6 +318,7 @@ export async function run(page: Page, task: Task, mode: Mode, viewport: string):
         } else {
           await toggle.click();
         }
+        // No task opens the menu today: this path keeps its fixed wait until one does.
         await page.waitForTimeout(400);
         res.path.push('menu');
         const inMenu = (await visibleLinks(page)).filter((l) => !visited.has(l.route) && l.route !== route);
@@ -258,6 +343,7 @@ export async function run(page: Page, task: Task, mode: Mode, viewport: string):
     if (steer) res.steers++;
     res.actions++;
     const before = page.url();
+    const signature = await pageSignature(page);
     if (mode === 'keyboard') {
       const tabs = await tabTo(page, chosen.index);
       if (tabs < 0) {
@@ -269,9 +355,7 @@ export async function run(page: Page, task: Task, mode: Mode, viewport: string):
     } else {
       await page.locator('a[href]').nth(chosen.index).click();
     }
-    await page.waitForFunction((old) => location.href !== old, before, { timeout: 5000 }).catch(() => undefined);
-    await page.waitForLoadState('load');
-    await page.waitForTimeout(250);
+    await arrived(page, before, signature);
     visited.add(chosen.route);
     res.path.push(`${chosen.name} -> ${currentRoute(page) || 'landing'}`);
   }
