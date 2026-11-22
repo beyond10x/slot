@@ -159,6 +159,9 @@ pub fn load1() -> f64 {
 #[derive(Debug, Clone)]
 struct Known {
     start: u64,
+    /// The process name it was classified under: a process that executes
+    /// another program (`slot __exec`, a wrapper) keeps its pid and start.
+    comm: String,
     class: Option<&'static str>,
     session: String,
 }
@@ -185,6 +188,12 @@ pub struct Sample {
     pub sessions: BTreeMap<String, Group>,
     /// Cores of every process on the host over the interval.
     pub host_cores: f64,
+    /// Cores of the processes inside slot jobs (`managed`), whatever their
+    /// class: part of `host_cores`.
+    pub pool_cores: f64,
+    /// Cores of the compile cache servers' processes that are not inside a
+    /// slot job: part of `host_cores`, apart from `pool_cores`.
+    pub compile_cache_cores: f64,
     /// Pressure stall information.
     pub pressure: Pressure,
     /// One-minute load average.
@@ -192,6 +201,16 @@ pub struct Sample {
 }
 
 impl Sample {
+    /// `host_cores` in the three parts the CPU limit reads: the pool, the
+    /// compile cache, and the rest of the host.
+    pub fn parts(&self) -> crate::cpu_limit::Parts {
+        crate::cpu_limit::Parts {
+            pool: self.pool_cores,
+            compile_cache: self.compile_cache_cores,
+            outside: (self.host_cores - self.pool_cores - self.compile_cache_cores).max(0.0),
+        }
+    }
+
     /// Cores of all build processes, and of those slot does not run.
     pub fn build_cores(&self) -> (f64, f64) {
         let mut all = 0.0;
@@ -214,8 +233,16 @@ pub struct Census {
 }
 
 impl Census {
-    /// Samples the whole host. `managed` holds every pid inside a slot job.
-    pub fn sample(&mut self, s: &Snapshot, managed: &HashSet<i32>, dt: f64) -> Sample {
+    /// Samples the whole host. `managed` holds every pid inside a slot job,
+    /// `compile_cache` the pids of the compile cache servers outside every
+    /// job ([`compile_cache_pids`]); a pid in both counts for the pool.
+    pub fn sample(
+        &mut self,
+        s: &Snapshot,
+        managed: &HashSet<i32>,
+        compile_cache: &HashSet<i32>,
+        dt: f64,
+    ) -> Sample {
         let mut out = Sample {
             pressure: pressure(),
             load1: load1(),
@@ -223,6 +250,8 @@ impl Census {
         };
         let mut cur = HashMap::new();
         let mut total = 0u64;
+        let mut pool = 0u64;
+        let mut cache = 0u64;
         for p in s.procs() {
             let d = match self.prev.get(&p.pid) {
                 Some(&old) if p.ticks >= old => p.ticks - old,
@@ -232,6 +261,11 @@ impl Census {
             };
             cur.insert(p.pid, p.ticks);
             total += d;
+            if managed.contains(&p.pid) {
+                pool += d;
+            } else if compile_cache.contains(&p.pid) {
+                cache += d;
+            }
             let k = self.classify(p);
             let Some(class) = k.class else { continue };
             let cores = if dt > 0.0 {
@@ -256,6 +290,8 @@ impl Census {
         self.prev = cur;
         if dt > 0.0 {
             out.host_cores = total as f64 / CLK_TCK / dt;
+            out.pool_cores = pool as f64 / CLK_TCK / dt;
+            out.compile_cache_cores = cache as f64 / CLK_TCK / dt;
         }
         out
     }
@@ -263,6 +299,7 @@ impl Census {
     fn classify(&mut self, p: &Proc) -> Known {
         if let Some(k) = self.known.get(&p.pid)
             && k.start == p.start
+            && k.comm == p.comm
         {
             return k.clone();
         }
@@ -274,12 +311,47 @@ impl Census {
         };
         let k = Known {
             start: p.start,
+            comm: p.comm.clone(),
             class,
             session,
         };
         self.known.insert(p.pid, k.clone());
         k
     }
+}
+
+/// The processes of the compile cache servers named `servers` (process
+/// names, such as `sccache`) that are outside every slot job: each server
+/// that is not in `managed` and whose parent is not, with its whole tree,
+/// less the pids in `managed` (the compilers it runs for a job, which count
+/// for that job).
+///
+/// A server is a process of that name whose parent is the service manager
+/// (`systemd`, pid 1, or a parent no longer there): a server detaches from
+/// the client that started it. A process of that name under a build tool
+/// (`cargo`, `make`, another `sccache`) is a client, and the compiles and
+/// links it runs itself, the ones the server does not cache, are work
+/// outside the pool.
+#[allow(clippy::implicit_hasher)]
+pub fn compile_cache_pids(s: &Snapshot, servers: &[&str], managed: &HashSet<i32>) -> HashSet<i32> {
+    let comm: HashMap<i32, &str> = s.procs().map(|p| (p.pid, p.comm.as_str())).collect();
+    let parent: HashMap<i32, i32> = s.procs().map(|p| (p.pid, p.ppid)).collect();
+    let detached = |pid: &i32| {
+        let ppid = parent.get(pid).copied().unwrap_or(0);
+        ppid <= 1 || comm.get(&ppid).is_none_or(|c| *c == "systemd")
+    };
+    let mut out = HashSet::new();
+    for name in servers {
+        for d in s.daemons(name, managed).into_iter().filter(detached) {
+            out.extend(
+                s.tree(d)
+                    .iter()
+                    .map(|p| p.pid)
+                    .filter(|pid| !managed.contains(pid)),
+            );
+        }
+    }
+    out
 }
 
 /// The title of a Claude Code session, read from its local transcript
@@ -464,6 +536,59 @@ mod tests {
         s.split(' ').map(String::from).collect()
     }
 
+    /// The host's CPU in three parts that do not overlap: the pool (job
+    /// trees and the compilers a compile cache server runs for a job), the
+    /// rest of the compile cache server, and everything else. Pids above
+    /// the kernel's `pid_max`, so no real process is read.
+    #[test]
+    fn the_host_splits_into_pool_compile_cache_and_outside() {
+        const JOB: i32 = 9_000_001;
+        const JOB_CHILD: i32 = 9_000_002;
+        const SERVER: i32 = 9_000_010;
+        const FOR_JOB: i32 = 9_000_011;
+        const FOR_OTHERS: i32 = 9_000_012;
+        const EDITOR: i32 = 9_000_020;
+        let proc = |pid: i32, ppid: i32, comm: &str, ticks: u64| crate::procstat::Proc {
+            pid,
+            ppid,
+            ticks,
+            rss: 0,
+            comm: comm.into(),
+            start: 0,
+        };
+        let snap = |t: u64| {
+            let mut s = Snapshot::default();
+            s.insert(proc(JOB, 1, "sh", t * 5));
+            s.insert(proc(JOB_CHILD, JOB, "cargo", t * 3));
+            s.insert(proc(SERVER, 1, "sccache", t));
+            s.insert(proc(FOR_JOB, SERVER, "rustc", t * 4));
+            s.insert(proc(FOR_OTHERS, SERVER, "rustc", t * 5));
+            s.insert(proc(EDITOR, 1, "code", t * 10));
+            s
+        };
+        // The job's tree, and the server's compiler that carries its tag.
+        let managed: HashSet<i32> = [JOB, JOB_CHILD, FOR_JOB].into();
+        let cache = compile_cache_pids(&snap(0), &["sccache"], &managed);
+        assert_eq!(cache, [SERVER, FOR_OTHERS].into());
+
+        let mut c = Census::default();
+        c.sample(&snap(100), &managed, &cache, 1.0);
+        let s = c.sample(&snap(200), &managed, &cache, 1.0);
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(s.host_cores, 28.0), "{}", s.host_cores);
+        let p = s.parts();
+        assert!(
+            close(p.pool, 12.0) && close(p.compile_cache, 6.0) && close(p.outside, 10.0),
+            "{p:?}"
+        );
+        assert!(close(p.counted(), 18.0) && close(p.host(), s.host_cores));
+        let none = compile_cache_pids(&snap(0), &["sccache"], &[SERVER].into());
+        assert!(
+            none.is_empty(),
+            "a server inside a job is the job's: {none:?}"
+        );
+    }
+
     #[test]
     fn classes_cover_the_build_tools() {
         for (comm, line, want) in [
@@ -537,5 +662,80 @@ mod tests {
     fn parses_psi() {
         let t = "some avg10=12.50 avg60=7.95 avg300=24.10 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
         assert!((psi_some_avg10(t) - 12.5).abs() < 1e-9);
+    }
+
+    /// A job started through `slot __exec` is sampled once as `slot` and
+    /// then, same pid and start, as the job's program: it is classified
+    /// again. Pid above the kernel's `pid_max`.
+    #[test]
+    fn a_process_that_executes_another_program_is_classified_again() {
+        const JOB: i32 = 9_200_001;
+        let snap = |comm: &str, ticks: u64| {
+            let mut s = Snapshot::default();
+            s.insert(crate::procstat::Proc {
+                pid: JOB,
+                ppid: 1,
+                ticks,
+                rss: 0,
+                comm: comm.into(),
+                start: 7,
+            });
+            s
+        };
+        let managed: HashSet<i32> = [JOB].into();
+        let mut c = Census::default();
+        c.sample(&snap("slot", 0), &managed, &HashSet::new(), 1.0);
+        let s = c.sample(&snap("rustc", 100), &managed, &HashSet::new(), 1.0);
+        assert!(
+            s.classes.contains_key(&("rust-compile", true)),
+            "{:?}",
+            s.classes
+        );
+    }
+
+    // adversary u4
+
+    /// A build outside the pool runs `RUSTC_WRAPPER=sccache`: cargo starts
+    /// an sccache *client* per compile, and the client runs every call the
+    /// server answers `UnhandledCompile` (not cacheable: bins, tests, links)
+    /// itself, as its own child. That is work outside the pool, not the
+    /// compile cache server's tree (`docs/design.md` § 24, *compile cache*:
+    /// "the rest of each compile cache server's tree"). Only the server
+    /// (parent: the service manager) and its compilers are the compile cache.
+    #[test]
+    fn an_sccache_client_of_a_build_outside_the_pool_is_not_the_compile_cache() {
+        const SERVER: i32 = 9_100_010;
+        const FOR_OTHERS: i32 = 9_100_011;
+        const CARGO: i32 = 9_100_020;
+        const CLIENT: i32 = 9_100_021;
+        const LOCAL_LINK: i32 = 9_100_022;
+        let proc = |pid: i32, ppid: i32, comm: &str, ticks: u64| crate::procstat::Proc {
+            pid,
+            ppid,
+            ticks,
+            rss: 0,
+            comm: comm.into(),
+            start: 0,
+        };
+        let snap = |t: u64| {
+            let mut s = Snapshot::default();
+            s.insert(proc(SERVER, 1, "sccache", t));
+            s.insert(proc(FOR_OTHERS, SERVER, "rustc", t * 2));
+            s.insert(proc(CARGO, 1, "cargo", t));
+            s.insert(proc(CLIENT, CARGO, "sccache", 0));
+            s.insert(proc(LOCAL_LINK, CLIENT, "rustc", t * 8));
+            s
+        };
+        let managed = HashSet::new();
+        let cache = compile_cache_pids(&snap(0), &["sccache"], &managed);
+        let mut c = Census::default();
+        c.sample(&snap(100), &managed, &cache, 1.0);
+        let p = c.sample(&snap(200), &managed, &cache, 1.0).parts();
+        assert_eq!(
+            cache,
+            [SERVER, FOR_OTHERS].into(),
+            "an outside build's sccache client and the link it runs are not the compile cache \
+             (parts {p:?})"
+        );
     }
 }

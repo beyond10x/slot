@@ -304,6 +304,10 @@ mod tests {
             warnings: Vec::new(),
             limit_s: None,
             timed_out: false,
+            predicted_ms: None,
+            collected: 0,
+            ahead: false,
+            queue_class: None,
         }
     }
 

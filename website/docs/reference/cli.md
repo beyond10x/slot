@@ -45,12 +45,13 @@ slot serve [OPTIONS]
 - `--call-off-after`: Seconds without capture after which a call counts as ended and the headroom goes back (default `120`)
 - `--call-ignore`: Applications whose capture is not a call (level meters, mixers), comma-separated; replaces the default list (default `claude,pavucontrol,pwvucontrol,easyeffects,helvum,qpwgraph,coppwr,noisetorch`)
 - `--sccache-watch`: Watch this user's sccache servers and write back the jobserver tokens a server lost, once it had none free for 60 s while compiles waited, and append each server's counters to `cache.jsonl` in the state directory once a minute; `false` turns both off (default `true`)
-- `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off (default `25`)
+- `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off. Above `--evict-below`, eviction starts here instead (default `25`)
 - `--min-free-memory`: A job waits while available memory, less what jobs that started in the last 30 s still take, is below its expected peak (from earlier runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway (default `4`)
 - `--upgrade-hold`: After `systemctl --user reload slot`, the longest time no new job starts while jobs still run, seconds. Then jobs start again, and the next hold begins when the running jobs are expected to end within it (from earlier runs of the same command) or none runs. 0 never holds (default `60`)
 - `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes. `slot priority promote-after` changes it at run time; a value set that way wins over this option until `slot priority promote-after default` removes it (default `1800`)
+- `--pass-for`: A queued job may be passed by later jobs of its own level only until it has waited this long: by a job predicted to run 5 s or less, and by a job that fits in the slots a larger request collected and cannot use yet. From then on it starts before every job that came after it. A job of a lower level never passes it. 0: nobody passes; the queue is served by level, then arrival (default `300`)
 - `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
-- `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. Directories of a repository with a queued or running job, or built in the last 2 h, are kept. 0 turns it off (default `40`)
+- `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. The mark is `--min-free-disk` when that is larger, so eviction runs whenever jobs wait for disk; a job that starts to wait makes it look at once. Directories of a repository with a queued or running job, or built in the last 2 h, are kept. 0 turns it off, whatever `--min-free-disk` is (default `40`)
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
 
@@ -202,13 +203,13 @@ slot job-parallel [OPTIONS] [N|off]
 
 ### `slot cpu-limit`
 
-Show or set the CPU limit: the start of a queued job is held while the whole host is busier than a mark
+Show or set the CPU limit: the start of a queued job is held while the pool's jobs and the compile cache use more CPUs than a mark
 
 ```text
 slot cpu-limit [OPTIONS] [CPUs|off]
 ```
 
-- `<MARK>`: Busy CPUs of the host from which the start of a queued job is held, from 1 (`17`, `17.5`); `off` for no limit, the default. The figure is the CPU time of every process on the host over the last 10 s, whoever started it, with what jobs that started in the last 30 s are expected to add. A job held for 10 minutes starts whatever the figure says. A mark above the host's CPU count never holds. The mark reaches queued jobs within 2 seconds, is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `<MARK>`: Busy CPUs from which the start of a queued job is held, from 1 (`17`, `17.5`); `off` for no limit, the default. The figure is the CPU time over the last 10 s of the pool's jobs (with the compilers a compile cache server runs for them) and of the rest of the compile cache server, with what jobs that started in the last 30 s are expected to add; work outside both is shown, not counted. Without arguments it prints both parts and the CPUs outside them. A job held for 10 minutes starts whatever the figure says. A mark above the host's CPU count never holds. The mark reaches queued jobs within 2 seconds, is kept in `limits.json` in the state directory and holds across reloads and restarts
 - `--floor`: Jobs that may always run, whatever the host's CPUs do, from 1; 4 until one is named. `off` forgets it
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 

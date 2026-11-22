@@ -155,7 +155,7 @@ function state(active: Job[], doneJobs: Job[], tokens: number, headroom: number,
     cpu_quota_percent: headroom ? (100 - headroom) * 20 : null, free: Math.max(0, limit - used), active,
     done: doneJobs, now_ms: T0, toolchains: ['rust', 'go', 'node-test', 'generic'], call_apps: callApps,
     sccache: { enabled: true, servers: 1, short: 0, refills: 0, tokens: 0, last_refill_ms: 0 }, upgrade: '',
-    evict: { floor: 0, dry_run: true, known: 0, free: 0, checked_ms: 0, last: [], deleted_bytes: 0 }, ...POOL_BASE,
+    evict: { floor: 0, raised_from: 0, dry_run: true, known: 0, free: 0, checked_ms: 0, last: [], deleted_bytes: 0 }, ...POOL_BASE,
     tokens_unaccounted: 0, tokens_unaccounted_since_ms: 0,
   };
 }
@@ -243,10 +243,10 @@ function queueLevels(): Scenario {
   const running = [job(160), job(161), job(162), job(163), job(164), job(165)];
   const waiting = [
     { ...queued(166, -1900), priority: 'high' as const, promoted: true },
-    queued(167, -80),
+    { ...queued(167, -80), collected: 1 },
     { ...queued(168, -60), priority: 'low' as const },
     { ...queued(169, -40), priority: 'high' as const },
-    queued(170, -20),
+    { ...queued(170, -20), ahead: true, predicted_ms: 1800 },
     { ...queued(171, -5), priority: 'high' as const },
     { ...queued(172, -2), priority: 'urgent' as const },
   ];

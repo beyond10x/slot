@@ -52,7 +52,18 @@ slot grows a multi-tenant service surface.
 `task check` is the complete offline gate: `cargo fmt --check`, `cargo clippy -D warnings`,
 `cargo test`, the UI's typecheck, tests and build, the UX gates (`task ui-ux`), the docs site
 build and its UX gates (`task site`, `task site-ux`), and the drift checks of the generated CLI
-reference and UI types. CI runs it in `.github/workflows/gate.yml`.
+reference and UI types. It prints `rustc --version` first: `rust-toolchain.toml` pins the one
+rustc of the local gate and of every workflow, which install the version that file names.
+CI runs it in `.github/workflows/gate.yml`.
+
+A pull request whose changed files are all planning or prose files (everything under
+`.engineering/`, `*.md` outside `website/` and `ui/`) passes `gate` and `Build documentation`
+without building (`website/docs/getting-started.md` counts as code: `cargo test` reads it):
+the step after the checkout, `.github/scripts/pr-scope.sh`, prints the paths
+it saw and decides; its `case` block is the one path list. A pull request that changes only
+`website/` (and such files) runs the docs checks (`task site`, `task site-ux`, the
+documentation build) and not the code's build and tests. A push to `main` builds everything.
+Test: `sh .github/scripts/pr-scope.test.sh`, also run by `cargo test`.
 
 ## UX gates and rounds
 
@@ -64,6 +75,11 @@ and `ui/ux/findings.spec.ts` (the assertions of closed findings) at 1366x768 and
 the built `ui/dist` with every API answered from `ui/ux/scenarios.ts`; then `node ux/ratchet.ts`
 against `ui/ux/baseline.json`. Each run serves `ui/dist` on a free port (`ui/ux/port.ts`; `UX_PORT`
 sets one), so worktrees run the gates at the same time; `ui/ux/concurrent.e2e.ts` runs two at once.
+Both suites serve their built files with `ui/ux/serve.ts` (the rules of `vite preview` and
+`docusaurus serve`, no symlinks, exit 1 on a missing build directory) on a free port. The docs
+gates load each page once per theme and measure 1366x768, then 1280x720 after a resize, so a
+layout a script sets only when a page is first drawn at 1280x720 is not caught
+(`website/ux/gates-adversary.e2e.ts`, run by hand, shows it).
 Playwright's Chromium headless shell must be installed
 (`pnpm exec playwright install --only-shell chromium` in `ui/`), and the DejaVu Sans font: the
 harness renders every page in it, so the gates measure the same layout on every host.
@@ -261,53 +277,37 @@ Open, one line each, with where the design lives. A session starts with (e).
   in `server/mod.rs`), so a changed `ExecStart` option such as `--min-free-disk` takes effect only
   at a full restart. Options that should change on reload belong in `limits.json`, like the
   headroom, or in `priority.json`, like the promotion delay (`slot priority promote-after`).
-- (h) A reload under load can lose lines of a job's output: at a load of 98 to 123 on 20 CPUs,
-  `reloads_keep_running_and_queued_jobs_their_output_and_slots` failed in 1 of 6 runs on 0.21.1
-  and in 2 of 6 with the run-time limit, each time with a run of 14 to 40 lines missing in the
-  middle of one client's output. Not verified: on a handover `client_writer` answers the request
-  for unsent bytes with `pending` only, and frames still in its channel are dropped.
+- (h) A reload sent right after a handover can drop the queued jobs: the second handover carried
+  20 running and 0 queued jobs where the first carried 20 queued (1 of 10 runs beside 20 busy
+  loops). `resume` re-queues handed-over jobs in tasks through `run_job`, and a reload before
+  they run hands over their connections without the jobs; the clients resubmit them with a new
+  id at the back of the queue (inferred from `client.rs`):
+  `story:a-quick-second-reload-keeps-queued-jobs`.
 - (i) Jobs that use no CPU hold 29 % of the slot-hours while requests wait:
   `story:idle-slots-are-lent-to-the-queue`.
-- (j) Jobs that run under 5 s carry half of the queue wait:
-  `story:short-jobs-start-ahead-of-long-ones`.
-- (k) A job that asks for every slot (`--tokens` at the limit) collects each freed slot while it
-  is first in the queue, and every job behind it waits; `slot status` then reads "0 free" with
-  few jobs running, which is not the lost-token case:
-  `story:a-whole-pool-request-does-not-stall-the-queue`.
-- (l) `task ui-ux` and `task site-ux` stop themselves at 120 s. `ui-ux` (87 tests) went from
-  240 s and 251 s to 75 s and 102 s on a workstation at load 30 to 36; the forge took 145 s before
-  that change. `site-ux` (86 tests, 84 s on the forge before the
-  change) is still over 120 s on a workstation at load 32 and above: stopped at 123 s with 33
-  tests done while the load rose from 32 to 43. After the change the forge took 45.5 s and
-  54.5 s for `ui-ux` (87 and 89 tests) and 36.1 s and 46.1 s for `site-ux`; `ui-ux` with 89
-  tests was stopped at 123 s with 52 done on a workstation at load 41. Its tests no longer
-  wait fixed times and the
-  reader's Tab presses go out in batches; what is left is the work of the pages. One gates test
-  took 7.1 s at load 56 (page load 1.8 s, hydration 0.9 s, loading axe-core 1.0 s, its run 2.6 s)
-  and there are 48. Left: three forge runs of `ui-ux` under 100 s; `site-ux` under 120 s on a
-  loaded workstation, which needs fewer page loads or axe-core runs for the same checks, not
-  shorter waits: `story:ux-gate-step-ends-within-its-budget`.
-- (m) No `rust-toolchain.toml`: the local gate and CI each use the rustc they find.
-- (n) A pull request of planning files runs the full gate (307 s):
-  `story:planning-only-pull-requests-skip-the-gate`.
+- (l) `task ui-ux` and `task site-ux` stop themselves at 120 s and print their ten slowest
+  tests. On this workstation both still stop at 120 s at a load of 50 to 170: `site-ux` with 23
+  of 62 tests done at load 57, `ui-ux` with about 55 of 93 at load 57 to 78. The cause measured
+  is the pool's CPU weight (`slot serve --cpu-weight`, 20 by default, against 100 for
+  interactive work): the docs gate tests took 54 s in a cgroup of their own and 5.1 minutes in
+  the pool at load 98 to 140. The docs gates load each page once per theme (97 to 65
+  CPU-seconds). Left: three forge runs of `ui-ux` under 100 s, and a decision on the CPU weight
+  of gate steps: `story:ux-gate-step-ends-within-its-budget`.
 - (o) Which Rust units are compiled again, and how often, is recorded nowhere: on 2026-11-22
   sccache answered 26 % of rustc calls from the cache and refused 57 %, and 35 % of the units on
   disk repeat one built in another target directory:
   `story:jobs-record-what-the-compile-cache-did`.
-- (p) A job runs with the daemon's open-file limit (1,024 soft under systemd), not the
-  caller's; a test suite that opens more fails under `slot` and passes outside it:
-  `story:jobs-run-with-the-callers-open-file-limit`.
+- (p) A job runs in the daemon's cgroup (`slot.service`), not the caller's: a test that needs
+  its caller's delegated scope passes run directly and fails through the shim. `slot --local`
+  and `SLOT_SHIM_OFF=1` keep the caller's cgroup and leave the pool:
+  `story:a-job-can-run-in-the-callers-cgroup`.
 - (q) The round keys of `ui/ux/baseline.json` (`reading_load.*`, `layout_shift.total`) predate
   the header of 80 px: `node ux/ratchet.ts --round` fails until a round takes them in, and a
   `reading_load` made worse names a decision id.
 - (r) `cpu_s` of a cancelled job is read too low: of 22 cancelled jobs that ran over 5 minutes, 14
   show under 0.05 CPUs per second of run time (2026-11-22; 4 of 207 among jobs not cancelled). A
   cancelled run that computed looks like one that waited.
-- (s) Two tests of the daemon wait fixed times and failed once each in repeated runs on a
-  workstation at load 59: `memory_short_holds_a_job_only_while_another_runs` (expects a process
-  300 ms after the submit) and `client_disconnect_kills_job_and_returns_token` (expects the slot
-  back 300 ms after the process is gone), both in `crates/slot/src/server/tests.rs`. They should
-  wait on the condition. A build that waits for its target directory holds back only cargo jobs:
+- (s) A build that waits for its target directory holds back only cargo jobs:
   a script job (`task check`) records no target directory, so its inner cargo still blocks on
   the lock of a running build.
 - (t) The web view has no dark theme.
@@ -343,27 +343,13 @@ Open, one line each, with where the design lives. A session starts with (e).
   every tick and only shows it (`recommended_tokens`); (i) and (v) are cases of the same change.
   A job then asks for a share of the CPUs, not for a number of slots:
   `story:jobs-ask-for-a-share-of-the-cpus`.
-- (aa) The CPU limit for starts (`slot cpu-limit`) counts every process on the host, so work
-  that runs outside the pool holds the pool's jobs. Measured 2026-11-22 on a host of 20 CPUs
-  with the mark 17 and the floor 6: one hour with 6.7 to 10.0 CPUs busy passed with a queue wait
-  of 0 s at the median and 64 s at the 90th percentile (706 jobs, 278 held, none reached the
-  10-minute bound). Then 7.7 to 10.8 of 16 to 20 busy CPUs were processes outside the pool and
-  outside the compile cache server: for 11 minutes 31 to 41 jobs stood queued, 78 jobs waited
-  204 s at the median (311 s at the 90th percentile), the CPU pressure stayed at 58 to 77 %,
-  and the limit was switched off. Not built: a figure that counts only the pool's cgroup and
-  the compile cache server's, or a floor that follows the queue. Before switching the limit on,
-  read how many CPUs run outside both (`systemd-cgtop`, or the census `classes` against
-  `host_cores`). A watch that switches the limit off on the queue wait must count the ages of
-  the queued jobs: the waits of started jobs alone read 46 s while 39 queued jobs had a median
-  age of 200 s.
-- (ab) Between `--evict-below` and `--min-free-disk` the daemon holds every build for disk space
-  and deletes nothing. Measured 2026-11-22 with `--min-free-disk 50` and the default
-  `--evict-below 40`: free space fell from 77 GB to 44 GB in under 3 hours, and for about
-  12 minutes up to 38 jobs stood queued for disk while 2 ran; eviction did not start, and the
-  queue emptied when the sessions deleted their own build output (about 31 GB within minutes).
-  Both values are options of `slot serve`, so a change needs a full restart (g). Not built: a
-  refusal or a warning at start when `--min-free-disk` is above `--evict-below`, eviction that
-  starts at the hold's mark, or both values in `limits.json`.
+- (aa) The CPU limit for starts (`slot cpu-limit`) counts the pool and the compile cache server
+  only (unreleased). It ran once on the live host with the old figure, which counted work
+  outside the pool, and was switched off. A watch that switches it off on the queue wait must
+  count the ages of the queued jobs: the waits of started jobs alone read 46 s while 39 queued
+  jobs had a median age of 200 s (2026-11-22). Switching it on again is the operator's.
+- (ab) `--min-free-disk` and `--evict-below` are options of `slot serve`, so a change needs a
+  full restart (g); both belong in `limits.json`.
 
 ## Never
 

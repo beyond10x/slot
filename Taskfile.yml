@@ -25,7 +25,7 @@ tasks:
     cmds:
       - |
         node ux/deadline.ts 120 sh -exc '
-          pnpm exec playwright test
+          ./node_modules/.bin/playwright test
           node ux/ratchet.ts
           node --test --disable-warning=ExperimentalWarning ux/concurrent.e2e.ts'
 
@@ -57,6 +57,7 @@ tasks:
   check:
     desc: Run the complete offline repository gate.
     cmds:
+      - rustc --version
       - task: ui-check
       - task: ui
       - task: ui-ux
@@ -93,11 +94,11 @@ tasks:
     desc: Run the docs UX gates and the docs ratchet against the built site (website/ux); stopped and failed after 120 s.
     dir: website
     cmds:
+      - ./node_modules/.bin/tsc --noEmit -p ux/tsconfig.json
       - |
         node ../ui/ux/deadline.ts 120 sh -exc '
           node --test --disable-warning=ExperimentalWarning "ux/*.test.ts"
-          npx tsc --noEmit -p ux/tsconfig.json
-          npx playwright test
+          ./node_modules/.bin/playwright test
           node ux/ratchet.ts'
 
   site-ux-round:

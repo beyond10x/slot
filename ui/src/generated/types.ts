@@ -132,7 +132,34 @@ limit_s?: number,
  * Whether the daemon ended the job at `limit_s`; its exit code is then
  * 124.
  */
-timed_out?: boolean, };
+timed_out?: boolean, 
+/**
+ * The run time the daemon predicted when the job queued, ms: the 90th
+ * percentile of the last runs of the same command in the same
+ * repository (`admission::History::expected_runtime`). Absent without
+ * enough history and from a daemon that does not predict.
+ */
+predicted_ms?: number, 
+/**
+ * Slots a queued job has collected towards its `tokens` while it
+ * waits; 0 once it runs and from a daemon that does not say.
+ */
+collected?: number, 
+/**
+ * Whether the job was moved ahead of a job that priority, then arrival
+ * serves first: as a job predicted to run a few seconds, or as one
+ * that fits in slots a larger request collected and cannot use yet.
+ */
+ahead?: boolean, 
+/**
+ * Where a queued job stands inside its level in the pool's queue: 0
+ * may no longer be passed (it waited `--pass-for`), 1 predicted short,
+ * 2 the others. The pool serves by level, then this, then arrival; a
+ * view lists the queue in that order. Absent once the job runs, while
+ * it has not been in the pool's queue, and from a daemon that does
+ * not say: a view then takes `ahead` as 1 and anything else as 2.
+ */
+queue_class?: number, };
 
 export type Unit = { 
 /**
@@ -237,9 +264,14 @@ action: string, };
 
 export type Report = { 
 /**
- * Free bytes below which eviction starts; 0 = off.
+ * Free bytes below which eviction starts (the mark); 0 = off.
  */
 floor: number, 
+/**
+ * `--evict-below`, bytes, when `--min-free-disk` is larger and so
+ * raised the mark to the disk hold's value; 0 when it did not.
+ */
+raised_from: number, 
 /**
  * Only reporting, not deleting.
  */

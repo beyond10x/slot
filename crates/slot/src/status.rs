@@ -289,7 +289,9 @@ fn cpu_limit_text(mark: f64, floor: usize, cpus: u32) -> String {
         return format!("the CPU limit of {mark:.1} CPUs never holds a start: the host has {cpus}");
     }
     let run = if floor == 1 { "job runs" } else { "jobs run" };
-    format!("starts held while the host is busier than {mark:.1} CPUs and {floor} {run}")
+    format!(
+        "starts held while the pool and the compile cache use more than {mark:.1} CPUs and {floor} {run}"
+    )
 }
 
 /// `slot cpu-limit`: the values in force and the host's busy CPUs now.
@@ -304,11 +306,22 @@ pub fn render_cpu_limit(v: &CpuLimitView) -> String {
         out.push('\n');
         return out;
     }
-    match v.busy {
-        Some(busy) => {
+    match (v.pool, v.compile_cache, v.outside, v.busy) {
+        (Some(pool), Some(cache), outside, _) => {
+            let _ = write!(
+                out,
+                "; now pool {pool:.1} + compile cache {cache:.1} of {} CPUs",
+                v.cpus
+            );
+            if let Some(o) = outside {
+                let _ = write!(out, ", {o:.1} outside both");
+            }
+        }
+        // A daemon that predates the parts counts the whole host.
+        (_, _, _, Some(busy)) => {
             let _ = write!(out, "; now {busy:.1} of {} CPUs busy", v.cpus);
         }
-        None => out.push_str("; no sample of the host's CPUs yet"),
+        _ => out.push_str("; no sample of the host's CPUs yet"),
     }
     match v.held {
         0 => {}
@@ -485,6 +498,13 @@ fn line(j: &Job, now: i64) -> String {
         if j.promoted {
             s.push_str(" (waited)");
         }
+        if j.ahead {
+            s.push_str(", moved ahead");
+        }
+        if j.collected > 0 {
+            use std::fmt::Write as _;
+            let _ = write!(s, ", holds {} of {}", j.collected, j.tokens);
+        }
     }
     if !j.wait_reason.is_empty() {
         s.push_str("\n       waiting: ");
@@ -529,7 +549,8 @@ fn lost_line(s: &State) -> Option<String> {
 
 /// `disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB`, or in
 /// a dry run `disk: … eviction is off (dry run), would free 31.0 GB in 2 dir(s)`;
-/// nothing when eviction is off or never looked.
+/// nothing when eviction is off or never looked. A mark the disk hold raised
+/// reads `under 50.0 GB, raised from 40.0 GB to the disk hold's mark`.
 fn evict_line(r: &crate::evict::Report) -> Option<String> {
     if r.floor == 0 || r.checked_ms == 0 {
         return None;
@@ -547,35 +568,43 @@ fn evict_line(r: &crate::evict::Report) -> Option<String> {
         return Some(format!(
             "disk: {} free, eviction below {} ({mode}{} target dir(s) known){deleted}\n",
             crate::admission::gb(r.free),
-            crate::admission::gb(r.floor),
+            crate::evict::mark_text(r.floor, r.raised_from),
             r.known
         ));
     }
     if r.dry_run {
         return Some(format!(
             "{}{deleted}\n",
-            crate::evict::off_summary(r.free, r.floor, &r.last)
+            crate::evict::off_summary(r.free, r.floor, r.raised_from, &r.last)
         ));
     }
     let bytes: u64 = r.last.iter().map(|e| e.bytes).sum();
     Some(format!(
         "disk: {} free, under {}: deleted {} target dir(s), {}{deleted}\n",
         crate::admission::gb(r.free),
-        crate::admission::gb(r.floor),
+        crate::evict::mark_text(r.floor, r.raised_from),
         r.last.len(),
         crate::admission::gb(bytes)
     ))
 }
 
+/// Where a queued job stands inside its level: the pool's `queue_class`;
+/// from a daemon that does not send it, 1 for a job moved ahead and 2 for
+/// any other, which keeps the order of level, then arrival.
+fn served_class(j: &Job) -> u8 {
+    j.queue_class.unwrap_or(if j.ahead { 1 } else { 2 })
+}
+
 /// The pool line, then one line per queued or running job, queued first,
-/// in the order they get slots: by level, then by arrival.
+/// in the order they get slots: by level, then the job's place in its
+/// level, then arrival.
 pub fn render(s: &State) -> String {
     let mut queued: Vec<&Job> = s
         .active
         .iter()
         .filter(|j| j.state == JobState::Queued)
         .collect();
-    queued.sort_by_key(|j| (j.priority, j.id));
+    queued.sort_by_key(|j| (j.priority, served_class(j), j.id));
     let running: Vec<&Job> = s
         .active
         .iter()
@@ -589,8 +618,14 @@ pub fn render(s: &State) -> String {
     } else {
         format!("{} slots", s.tokens)
     };
+    let collected: u32 = queued.iter().map(|j| j.collected).sum();
+    let collected = if collected > 0 {
+        format!(", {collected} collected by queued jobs")
+    } else {
+        String::new()
+    };
     let mut out = format!(
-        "{pool}, {} free, {} running, {} queued\n",
+        "{pool}, {} free, {} running, {} queued{collected}\n",
         s.free,
         running.len(),
         queued.len()
@@ -666,6 +701,10 @@ mod tests {
             warnings: Vec::new(),
             limit_s: None,
             timed_out: false,
+            predicted_ms: None,
+            collected: 0,
+            ahead: false,
+            queue_class: None,
         }
     }
 
@@ -695,6 +734,7 @@ mod tests {
             checked_ms: 1,
             last: vec![e(20 * gb), e(11 * gb)],
             deleted_bytes: 0,
+            raised_from: 0,
         };
         assert_eq!(
             evict_line(&r).unwrap(),
@@ -708,6 +748,45 @@ mod tests {
             evict_line(&r).unwrap(),
             "disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB, \
              31.0 GB deleted since start\n"
+        );
+    }
+
+    #[test]
+    fn the_eviction_line_names_the_mark_and_says_when_the_disk_hold_raised_it() {
+        let gb = crate::admission::GB;
+        let mut r = crate::evict::Report {
+            floor: 50 * gb,
+            raised_from: 40 * gb,
+            known: 12,
+            free: 60 * gb,
+            checked_ms: 1,
+            ..crate::evict::Report::default()
+        };
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 60.0 GB free, eviction below 50.0 GB, raised from 40.0 GB to the disk \
+             hold's mark (12 target dir(s) known)\n"
+        );
+        r.free = 45 * gb;
+        r.last = vec![crate::evict::Eviction {
+            path: "/w/a/target".into(),
+            bytes: 21 * gb,
+            last_ms: 0,
+            action: "deleted".into(),
+        }];
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 45.0 GB free, under 50.0 GB, raised from 40.0 GB to the disk hold's mark: \
+             deleted 1 target dir(s), 21.0 GB\n"
+        );
+        r.raised_from = 0;
+        r.floor = 40 * gb;
+        r.free = 60 * gb;
+        r.last.clear();
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 60.0 GB free, eviction below 40.0 GB (12 target dir(s) known)\n",
+            "not raised: the mark alone"
         );
     }
 
@@ -1279,12 +1358,16 @@ mod tests {
         s.cpu_busy_floor = Some(4);
         assert_eq!(
             render(&s),
-            format!("{pool}starts held while the host is busier than 17.0 CPUs and 4 jobs run\n")
+            format!(
+                "{pool}starts held while the pool and the compile cache use more than 17.0 CPUs and 4 jobs run\n"
+            )
         );
         s.cpu_busy_floor = Some(1);
         assert_eq!(
             render(&s),
-            format!("{pool}starts held while the host is busier than 17.0 CPUs and 1 job runs\n")
+            format!(
+                "{pool}starts held while the pool and the compile cache use more than 17.0 CPUs and 1 job runs\n"
+            )
         );
         s.cpu_busy_max = Some(25.0);
         assert_eq!(
@@ -1296,7 +1379,7 @@ mod tests {
         assert!(
             render(&s).ends_with(
                 "outside the pool's slots\n\
-                 starts held while the host is busier than 17.5 CPUs and 1 job runs\n"
+                 starts held while the pool and the compile cache use more than 17.5 CPUs and 1 job runs\n"
             ),
             "{}",
             render(&s)
@@ -1338,24 +1421,25 @@ mod tests {
             cpus: 20,
             busy: Some(18.44),
             held: 3,
+            ..View::default()
         };
         assert_eq!(
             render_cpu_limit(&v),
-            "starts held while the host is busier than 17.0 CPUs and 4 jobs run; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 4 jobs run; \
              now 18.4 of 20 CPUs busy, 3 jobs held\n"
         );
         v.held = 1;
         v.cpu_busy_floor = Some(1);
         assert_eq!(
             render_cpu_limit(&v),
-            "starts held while the host is busier than 17.0 CPUs and 1 job runs; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 1 job runs; \
              now 18.4 of 20 CPUs busy, 1 job held\n"
         );
         v.held = 0;
         v.busy = None;
         assert_eq!(
             render_cpu_limit(&v),
-            "starts held while the host is busier than 17.0 CPUs and 1 job runs; \
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 1 job runs; \
              no sample of the host's CPUs yet\n"
         );
         v.cpu_busy_max = Some(25.0);
@@ -1375,6 +1459,30 @@ mod tests {
     }
 
     #[test]
+    fn slot_cpu_limit_prints_the_parts_and_the_cpus_outside_both() {
+        use crate::cpu_limit::{Limits, Parts};
+        let limits = Limits {
+            cpu_busy_max: Some(17.0),
+            cpu_busy_floor: Some(6),
+        };
+        let parts = Parts {
+            pool: 12.0,
+            compile_cache: 6.0,
+            outside: 1.5,
+        };
+        assert_eq!(
+            render_cpu_limit(&limits.view(20, Some(parts), 1)),
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; \
+             now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held\n"
+        );
+        assert_eq!(
+            render_cpu_limit(&limits.view(20, None, 0)),
+            "starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; \
+             no sample of the host's CPUs yet\n"
+        );
+    }
+
+    #[test]
     fn a_daemon_without_the_cpu_limit_says_so() {
         let addr = answer_once("HTTP/1.0 404 Not Found\r\n\r\nslot: no such API path\n");
         let e = cpu_limit(&addr, None).unwrap_err();
@@ -1382,5 +1490,98 @@ mod tests {
             format!("{e:#}").contains("older than this slot and has no CPU limit"),
             "{e:#}"
         );
+    }
+
+    /// A queued job names the slots it collected, and one moved ahead of
+    /// an earlier job says so; the pool line counts the collected slots.
+    #[test]
+    fn a_queued_job_names_the_slots_it_collected_and_whether_it_was_moved_ahead() {
+        let mut big = job(30036, JobState::Queued, 17);
+        big.collected = 11;
+        let mut short = job(30040, JobState::Queued, 1);
+        short.ahead = true;
+        short.predicted_ms = Some(800);
+        let s = State {
+            tokens: 20,
+            limit: 17,
+            headroom_percent: 15,
+            active: vec![job(7, JobState::Running, 6), big, short],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0],
+            "17 of 20 slots (15% headroom), 0 free, 1 running, 2 queued, 11 collected by queued jobs",
+            "{out}"
+        );
+        assert!(
+            lines[2].starts_with("#30036 queued")
+                && lines[2].ends_with("cargo test  normal, holds 11 of 17"),
+            "{out}"
+        );
+        assert!(
+            lines[1].starts_with("#30040 queued")
+                && lines[1].ends_with("cargo test  normal, moved ahead"),
+            "{out}"
+        );
+        let mut none = s.clone();
+        none.active.retain(|j| j.state == JobState::Running);
+        assert_eq!(
+            render(&none).lines().next(),
+            Some("17 of 20 slots (15% headroom), 0 free, 1 running, 0 queued")
+        );
+    }
+
+    // adversary u5
+
+    /// `render` lists queued jobs "in the order they get slots". A short
+    /// job moved ahead of an earlier job of its level gets the next slot
+    /// first, so it is listed first; it is listed second, under the job it
+    /// passes.
+    #[test]
+    fn adversary_u5_a_job_moved_ahead_is_listed_before_the_job_it_passes() {
+        let long = job(4, JobState::Queued, 1);
+        let mut short = job(9, JobState::Queued, 1);
+        short.ahead = true;
+        short.predicted_ms = Some(800);
+        let s = State {
+            tokens: 1,
+            limit: 1,
+            active: vec![job(2, JobState::Running, 1), long, short],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out.lines().skip(1).collect();
+        assert!(lines[0].starts_with("#9 "), "{out}");
+    }
+
+    /// The class the daemon sends wins over `ahead`: a job that waited the
+    /// bound (class 0) is listed before a short one that passed it earlier.
+    #[test]
+    fn a_job_that_waited_the_bound_is_listed_before_a_short_one() {
+        let mut fixed = job(4, JobState::Queued, 1);
+        fixed.queue_class = Some(0);
+        let mut short = job(9, JobState::Queued, 1);
+        short.ahead = true;
+        short.queue_class = Some(1);
+        let mut plain = job(6, JobState::Queued, 1);
+        plain.queue_class = Some(2);
+        let s = State {
+            tokens: 1,
+            limit: 1,
+            active: vec![plain, short, fixed],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let ids: Vec<&str> = out
+            .lines()
+            .skip(1)
+            .map(|l| l.split_whitespace().next().unwrap_or(""))
+            .collect();
+        assert_eq!(ids, ["#4", "#9", "#6"], "{out}");
     }
 }

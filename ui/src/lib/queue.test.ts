@@ -19,8 +19,8 @@ test('a queued job has a place in the served order, and its reason reads as a li
     'waits for memory: available memory is below what the job needs',
   );
   assert.equal(
-    waitReasonText(job({ wait_reason: 'host busy: 18.4 of 20 CPUs, mark 17.0' })),
-    "waits for the host's CPUs: host busy: 18.4 of 20 CPUs, mark 17.0",
+    waitReasonText(job({ wait_reason: 'host busy: pool 12.4 + compile cache 6.0 of 20 CPUs, mark 17.0' })),
+    'waits for the CPU limit: host busy: pool 12.4 + compile cache 6.0 of 20 CPUs, mark 17.0',
   );
   assert.equal(
     waitReasonText(job({ wait_reason: 'target directory in use by job 12' })),
@@ -154,8 +154,8 @@ test('no failed job in the window: nothing to count and nothing to open', () => 
 test('the queue heading names what the listed jobs wait for, slots last', () => {
   const disk = job({ id: 1, wait_reason: 'free space on the build filesystem is below 25 GB' });
   const memory = job({ id: 2, wait_reason: 'available memory is below what the job needs' });
-  const cpu = job({ id: 4, wait_reason: 'host busy: 18.4 of 20 CPUs, mark 17.0' });
-  assert.equal(queueHeading([cpu, memory]), "Queue: waiting for memory and the host's CPUs, by level, oldest first");
+  const cpu = job({ id: 4, wait_reason: 'host busy: pool 12.4 + compile cache 6.0 of 20 CPUs, mark 17.0' });
+  assert.equal(queueHeading([cpu, memory]), 'Queue: waiting for memory and the CPU limit, by level, oldest first');
   assert.equal(queueHeading([]), 'Queue: waiting for slots, by level, oldest first');
   assert.equal(queueHeading([job({ id: 3 })]), 'Queue: waiting for slots, by level, oldest first');
   assert.equal(queueHeading([memory, disk]), 'Queue: waiting for disk space and memory, by level, oldest first');
@@ -164,4 +164,23 @@ test('the queue heading names what the listed jobs wait for, slots last', () => 
   const target = job({ id: 4, wait_reason: 'target directory in use by job 12' });
   assert.equal(queueHeading([target]), 'Queue: waiting for a target directory, by level, oldest first');
   assert.equal(queueHeading([job({ id: 3 }), target, memory]), 'Queue: waiting for memory, a target directory and slots, by level, oldest first');
+});
+
+// adversary u5
+
+test('adversary u5: a job moved ahead has the place the pool serves it at', () => {
+  const long = job({ id: 4, enqueued_ms: 1000 });
+  const short = job({ id: 9, enqueued_ms: 3000, ahead: true, predicted_ms: 800 });
+  const q = servedQueue([long, short]);
+  assert.deepEqual(queuePlace(q, 9), { pos: 1, of: 2 }, 'the pool serves the short job first');
+});
+
+test('inside a level the queue is listed by the class the daemon sends: waited the bound, short, the others', () => {
+  const fixed = job({ id: 3, enqueued_ms: 1000, queue_class: 0 });
+  const plain = job({ id: 5, enqueued_ms: 2000, queue_class: 2 });
+  const short = job({ id: 8, enqueued_ms: 3000, queue_class: 1, ahead: true });
+  const high = job({ id: 9, enqueued_ms: 4000, priority: 'high', queue_class: 2 });
+  assert.deepEqual(servedQueue([plain, short, fixed, high]).map(jobId), [9, 3, 8, 5]);
+  const older = [job({ id: 6, enqueued_ms: 3000 }), job({ id: 7, enqueued_ms: 1000 })];
+  assert.deepEqual(servedQueue(older).map(jobId), [7, 6], 'a daemon without classes: by arrival');
 });

@@ -81,6 +81,11 @@ pub enum Cmd {
     /// the sandboxed client closes the FIFO. Started by the daemon only.
     #[command(hide = true)]
     Hold(HoldArgs),
+    /// The process the daemon starts for a job whose open-file limit is not
+    /// its own: sets the limit, then executes the job's program in its
+    /// place (same pid, same process group). Started by the daemon only.
+    #[command(name = "__exec", hide = true)]
+    Exec(ExecArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -98,7 +103,7 @@ pub enum Cmd {
     /// compilers run on a bound of the job's own, not on slots of the pool.
     JobParallel(JobParallelArgs),
     /// Show or set the CPU limit: the start of a queued job is held while
-    /// the whole host is busier than a mark.
+    /// the pool's jobs and the compile cache use more CPUs than a mark.
     CpuLimit(CpuLimitArgs),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
@@ -181,6 +186,7 @@ pub struct ServeArgs {
     pub sccache_watch: bool,
     /// A job waits while the filesystem of its directory or of
     /// `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off.
+    /// Above `--evict-below`, eviction starts here instead.
     #[arg(long, default_value_t = 25.0, value_name = "GB")]
     pub min_free_disk: f64,
     /// A job waits while available memory, less what jobs that started in
@@ -201,6 +207,14 @@ pub struct ServeArgs {
     /// default` removes it.
     #[arg(long, default_value_t = 1800, value_name = "SECONDS")]
     pub promote_after: u64,
+    /// A queued job may be passed by later jobs of its own level only until
+    /// it has waited this long: by a job predicted to run 5 s or less, and by
+    /// a job that fits in the slots a larger request collected and cannot use
+    /// yet. From then on it starts before every job that came after it. A
+    /// job of a lower level never passes it. 0: nobody passes; the queue is
+    /// served by level, then arrival.
+    #[arg(long, default_value_t = 300, value_name = "SECONDS")]
+    pub pass_for: u64,
     /// For remote clients: GB the target directories of synced workspaces
     /// may take together. Before a remote job starts, the least recently
     /// used target directories and their source copies are deleted while
@@ -211,9 +225,11 @@ pub struct ServeArgs {
     pub cache_budget: f64,
     /// When the filesystem of a local Cargo target directory has less free
     /// space than this, GB, delete target directories that jobs built into,
-    /// least recently built first, until it has 10 GB more. Directories of a
-    /// repository with a queued or running job, or built in the last 2 h,
-    /// are kept. 0 turns it off.
+    /// least recently built first, until it has 10 GB more. The mark is
+    /// `--min-free-disk` when that is larger, so eviction runs whenever jobs
+    /// wait for disk; a job that starts to wait makes it look at once.
+    /// Directories of a repository with a queued or running job, or built in
+    /// the last 2 h, are kept. 0 turns it off, whatever `--min-free-disk` is.
     #[arg(long, default_value_t = 40.0, value_name = "GB")]
     pub evict_below: f64,
     /// Only report in the journal and `slot status` which target
@@ -282,6 +298,20 @@ pub struct GateArgs {
 pub struct HoldArgs {
     /// The job's hold FIFO in a gate directory.
     pub fifo: PathBuf,
+}
+
+/// `slot __exec` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct ExecArgs {
+    /// The open-file limit, `SOFT:HARD`; `unlimited` for either.
+    #[arg(long, value_name = "SOFT:HARD", value_parser = crate::proto::FileLimit::parse)]
+    pub nofile: crate::proto::FileLimit,
+    /// The name the program sees as its own (`argv[0]`).
+    #[arg(long)]
+    pub arg0: OsString,
+    /// The program, a resolved path, and its arguments.
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    pub command: Vec<OsString>,
 }
 
 /// `slot run` arguments.
@@ -406,14 +436,17 @@ pub struct RunLimitArgs {
 /// `slot cpu-limit` arguments. Without any, prints the values in force.
 #[derive(Debug, Clone, Args)]
 pub struct CpuLimitArgs {
-    /// Busy CPUs of the host from which the start of a queued job is held,
-    /// from 1 (`17`, `17.5`); `off` for no limit, the default. The figure
-    /// is the CPU time of every process on the host over the last 10 s,
-    /// whoever started it, with what jobs that started in the last 30 s
-    /// are expected to add. A job held for 10 minutes starts whatever the
-    /// figure says. A mark above the host's CPU count never holds. The
-    /// mark reaches queued jobs within 2 seconds, is kept in `limits.json` in
-    /// the state directory and holds across reloads and restarts.
+    /// Busy CPUs from which the start of a queued job is held, from 1
+    /// (`17`, `17.5`); `off` for no limit, the default. The figure is the
+    /// CPU time over the last 10 s of the pool's jobs (with the compilers a
+    /// compile cache server runs for them) and of the rest of the compile
+    /// cache server, with what jobs that started in the last 30 s are
+    /// expected to add; work outside both is shown, not counted. Without
+    /// arguments it prints both parts and the CPUs outside them. A job
+    /// held for 10 minutes starts whatever the figure says. A mark above the
+    /// host's CPU count never holds. The mark reaches queued jobs within 2
+    /// seconds, is kept in `limits.json` in the state directory and holds
+    /// across reloads and restarts.
     #[arg(value_name = "CPUs|off")]
     pub mark: Option<crate::cpu_limit::Setting>,
     /// Jobs that may always run, whatever the host's CPUs do, from 1; 4
@@ -591,6 +624,7 @@ impl ServeArgs {
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             promote_after: std::time::Duration::from_secs(self.promote_after),
+            pass_for: std::time::Duration::from_secs(self.pass_for),
             clock: crate::server::now_ms,
             target_poll: crate::server::TARGET_POLL,
             target_settle: crate::server::TARGET_SETTLE,
@@ -606,6 +640,8 @@ impl ServeArgs {
                 min_idle: std::time::Duration::from_secs(2 * 3600),
                 dry_run: self.evict_dry_run,
             },
+            disk_free: None,
+            exec_shim: Some(PathBuf::from("/proc/self/exe")),
             handover: self.handover,
         })
     }
@@ -632,6 +668,39 @@ mod tests {
             panic!("not serve")
         };
         assert!(a.evict_dry_run);
+    }
+
+    #[test]
+    fn the_exec_shim_takes_the_jobs_argv_as_it_is() {
+        let cli = parse(&[
+            "__exec",
+            "--nofile",
+            "256:unlimited",
+            "--arg0",
+            "cc",
+            "--",
+            "/usr/bin/sh",
+            "-c",
+            "--nofile 1",
+            "--",
+        ])
+        .unwrap();
+        let Cmd::Exec(a) = cli.command else {
+            panic!("not __exec")
+        };
+        assert_eq!(
+            a.nofile,
+            crate::proto::FileLimit {
+                soft: 256,
+                hard: u64::MAX
+            }
+        );
+        assert_eq!(a.arg0, "cc");
+        assert_eq!(a.command, ["/usr/bin/sh", "-c", "--nofile 1", "--"]);
+        let help = <Cli as clap::CommandFactory>::command()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("__exec"), "hidden: {help}");
     }
 
     #[test]

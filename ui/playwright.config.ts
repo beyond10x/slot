@@ -16,7 +16,7 @@ export default defineConfig({
     launchOptions: process.env.UX_CHROME ? { executablePath: process.env.UX_CHROME } : {},
   },
   webServer: {
-    command: `pnpm exec vite preview --host 127.0.0.1 --port ${PORT} --strictPort`,
+    command: `node --disable-warning=ExperimentalWarning ux/serve.ts dist ${PORT}`,
     url: `http://127.0.0.1:${PORT}/`,
     reuseExistingServer: false,
   },

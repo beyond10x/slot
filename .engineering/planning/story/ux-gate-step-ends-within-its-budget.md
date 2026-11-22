@@ -2,11 +2,41 @@
 format: aep.planning-md/3
 id: story:ux-gate-step-ends-within-its-budget
 kind: story
-status: draft
+status: active
 title: The UX gate step of the web UI ends within 120 seconds and fails over it
 relations:
 - serves: vision:O6
-revision: 1
+scope:
+- confidence: inferred
+  path: AGENTS.md
+- confidence: cited
+  path: Taskfile.yml
+- confidence: cited
+  path: ui/playwright.config.ts
+- confidence: cited
+  path: ui/ux/concurrent.e2e.ts
+- confidence: inferred
+  path: ui/ux/deadline.ts
+- confidence: cited
+  path: ui/ux/gates.spec.ts
+- confidence: cited
+  path: website/playwright.config.ts
+- confidence: inferred
+  path: website/ux/budget.test.ts
+- confidence: inferred
+  path: website/ux/gates.spec.ts
+- confidence: inferred
+  path: website/ux/pages.ts
+- confidence: inferred
+  path: website/ux/probes.ts
+- confidence: inferred
+  path: website/ux/settle.ts
+- confidence: inferred
+  path: website/ux/viewports.ts
+revision: 16
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 3}
 ---
 ## Outcome
 

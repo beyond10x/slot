@@ -182,10 +182,29 @@ the delay in force. `PUT /api/priority` sets it with `{"promote_after_s": 300}`,
 value returns to the daemon's option; the body may name a rule as well, and a body with neither
 a `pattern` nor `promote_after_s` is refused (400).
 
-The first job in that order takes slots as they come free and keeps them until it has all it
-asked for: a job that needs 4 slots is not overtaken by later 1-slot jobs of its level or below,
-even while one of them would fit. A later job of a higher level does overtake it, and takes the
-slots it gathered; after 30 minutes the waiting job is `high` itself.
+A job that needs more slots than are free collects them as they come free. For its first 5
+minutes in the queue (`slot serve --pass-for`, seconds, 300 by default) it does not keep them from
+jobs of its own level that queue after it: a later job of its level that fits in the slots it
+collected takes them and starts. With 4 slots, one running job on 1 and a job queued for all 4,
+three 1-slot jobs of its level that queue behind it start at once. A job of a lower level never
+starts while it waits. Once it has waited 5 minutes, no job that came after it starts before it: it
+keeps every slot that comes free until it has all it asked for. A later job of a higher level still
+goes first; after 30 minutes the waiting job is `high` itself.
+
+Inside a level, a job that is predicted to run 5 seconds or less starts ahead of the others. The
+prediction is the 90th percentile of the last 20 runs of the same command in the same repository,
+with at least 3; a command with fewer runs has none. A job passed over this way also starts before
+every later job once it has waited 5 minutes, so a stream of short jobs cannot hold it longer.
+
+With `--pass-for 0` nobody passes: jobs start by level, then in the order they arrived, and a job
+that needs 4 slots is not overtaken by later 1-slot jobs of its level or below.
+
+`slot status` ends a queued line with `, holds 11 of 17` for the slots the job collected and
+`, moved ahead` for a job that passed an earlier one, and its first line counts the collected
+slots (`, 11 collected by queued jobs`). The web UI's queue shows `11/17` in its slots column
+and `ahead` beside the level. Both list the queue in the order it is served, a job moved ahead
+before the jobs it passes. The job log records the prediction (`predicted_ms`) and whether the
+job was moved ahead (`ahead`).
 
 When the client goes away (Ctrl-C, a killed agent, a closed ssh connection), the daemon cancels
 the job: it kills the job's process group and returns the job's slots. `slot cancel <id>` does the
@@ -376,16 +395,22 @@ With a mark set, a queued job that could start is held while both are true:
 
 - **The floor runs.** At least `--floor` jobs are running. The floor is 4 until one is named, so
   a host that is busy with other work still builds.
-- **The host is at the mark.** The busy CPUs of the whole host, plus what the jobs that just
-  started are expected to add, are at or above the mark.
+- **The pool's work is at the mark.** The CPUs the pool's jobs and the compile cache server use,
+  plus what the jobs that just started are expected to add, are at or above the mark.
 
 What is counted:
 
-- **The whole host.** The figure is the CPU time of every process in `/proc`, whoever started
-  it: the jobs of the pool, the compilers of a compile cache server, and everything outside the
-  pool. The daemon samples it once a second for the web view and the census log; the limit reads
-  the mean of the last 10 samples and scans nothing itself. A process that starts and ends between
-  two samples is not in it.
+- **The pool and the compile cache.** The figure is the CPU time of two parts: the processes of
+  the pool's running jobs, with the compilers a compile cache server (sccache) runs for them, and
+  the rest of the compile cache server's processes. Work outside both (editors, browsers, builds
+  that do not go through slot) is not counted: the pool cannot make room for it by holding its own
+  jobs. The daemon samples the parts once a second for the web view and the census log; the limit
+  reads the mean of the last 10 samples and scans nothing itself. A process that starts and ends
+  between two samples is not in it. `slot cpu-limit` prints both parts and the CPUs outside them:
+
+  ```text
+  starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held
+  ```
 - **Jobs that just started.** A job that started in the last 30 seconds counts with the CPUs it
   is expected to use, less what the figure already shows of it. Without this every held job would
   start in the second the figure dips under the mark. The expectation is the median of CPU seconds
@@ -398,11 +423,11 @@ A held job holds no slot. Its client prints the reason once, and `slot status` s
 the job:
 
 ```text
-slot: job 12 waiting: host busy: 18.4 of 20 CPUs, mark 17.0
-slot: job 13 waiting: host busy: 14.5 of 20 CPUs + 3.0 for jobs that just started, mark 17.0
+slot: job 12 waiting: host busy: pool 12.0 + compile cache 6.0 of 20 CPUs, mark 17.0
+slot: job 13 waiting: host busy: pool 9.5 + compile cache 5.0 of 20 CPUs + 3.0 for jobs that just started, mark 17.0
 ```
 
-While the limit is on, `slot status` has the line `starts held while the host is busier than 17.0
+While the limit is on, `slot status` has the line `starts held while the pool and the compile cache use more than 17.0
 CPUs and 4 jobs run`. The check runs every 2 seconds and once more when the job has its slots, so
 a change of the mark reaches the queued jobs within 2 seconds, without a reload.
 
@@ -417,20 +442,34 @@ every start past the floor, so a reload does not start every held job at once. A
 daemon whose last sample is older than 5 seconds holds nothing.
 
 What it costs: with the limit on, a queue forms while the host is saturated, also when slots are
-free, and a job can wait up to 10 minutes for work that is not the pool's.
+free. Work outside the pool and the compile cache does not hold a job, but it shares the CPUs
+with the jobs that start.
 
 The mark and the floor are kept in `limits.json` beside the headroom and hold across reloads and
 restarts. `GET` and `PUT /api/cpu-limit` read and change them (`{"cpu_busy_max": 17,
 "cpu_busy_floor": 4}`, either field alone; `"cpu_busy_max": null` switches the limit off; a mark
 under 1, a floor under 1, a floor without a mark and a body with neither field are refused with
-400). `/api/state` has `cpu_busy_max` and `cpu_busy_floor` while the limit is on.
+400). `GET` also answers the figure's parts, `pool`, `compile_cache` and `outside` in CPUs, and
+`busy`, the whole host. `/api/state` has `cpu_busy_max` and `cpu_busy_floor` while the limit is
+on.
 
 ## Freeing disk space
 
 The daemon also frees disk. Every minute it looks at the filesystems of the Cargo target
 directories jobs built into. When one has less than 40 GB free (`slot serve --evict-below`, in
 GB; 0 turns it off), it deletes target directories there, least recently built first, until the
-filesystem would have 50 GB free. It never deletes:
+filesystem would have 50 GB free.
+
+Eviction starts no later than the wait for disk above: its mark is the larger of `--evict-below`
+and `--min-free-disk`. With `--min-free-disk 50` it deletes below 50 GB, until 60 GB would be
+free, and `slot status` says the mark was raised:
+
+```text
+disk: 45.0 GB free, under 50.0 GB, raised from 40.0 GB to the disk hold's mark: deleted 2 target dir(s), 21.4 GB
+```
+
+A job that starts to wait for disk makes the daemon look at once instead of at the next minute.
+`--evict-below 0` still turns eviction off. It never deletes:
 
 - a target directory of a repository with a queued or running job;
 - one built in the last 2 hours;

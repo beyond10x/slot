@@ -200,6 +200,9 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         tokens: client.tokens,
         priority: client.priority,
         timeout_s: client.timeout_s,
+        // The command runs in the sandbox with the sandbox's limits; the hold
+        // process the daemon starts needs none.
+        nofile: None,
     }
 }
 
@@ -697,6 +700,10 @@ mod tests {
             env: vec!["A=1".into()],
             tokens: Some(3),
             timeout_s: Some(1800),
+            nofile: Some(crate::proto::FileLimit {
+                soft: 4096,
+                hard: 8192,
+            }),
             checkout: Some(crate::types::Checkout::Worktree {
                 name: "feature".into(),
             }),
@@ -715,6 +722,10 @@ mod tests {
             })
         );
         assert_eq!(r.env, vec!["A=1".to_string()]);
+        assert_eq!(
+            r.nofile, None,
+            "the hold process runs with the daemon's limit"
+        );
     }
 
     #[test]

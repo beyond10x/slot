@@ -18,8 +18,11 @@ const rows = computed(() => {
     cmd: cmdText(j),
     session: sessionName(j.session, sessionTitles),
     wait: fmtDur(waitS(j, t)),
-    level: levelText(j),
-    normal: level(j) === 'normal',
+    level: j.ahead ? `${levelText(j)} · ahead` : levelText(j),
+    levelTitle: j.ahead ? 'moved ahead of a job that came before it' : '',
+    normal: level(j) === 'normal' && !j.ahead,
+    slots: j.collected ? `${j.collected}/${j.tokens}` : String(j.tokens),
+    slotsTitle: j.collected ? `holds ${j.collected} of the ${j.tokens} slots it asked for` : '',
     why: waitReasonText(j),
   }));
 });
@@ -44,8 +47,8 @@ const rows = computed(() => {
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
           <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
-          <td class="c-state" :class="{ muted: r.normal }">{{ r.level }}</td>
-          <td class="num">{{ r.job.tokens }}</td>
+          <td class="c-state" :class="{ muted: r.normal }" :title="r.levelTitle || undefined">{{ r.level }}</td>
+          <td class="num" :title="r.slotsTitle || undefined">{{ r.slots }}</td>
           <td class="num">{{ r.wait }}</td>
           <td class="q-fill" colspan="4"></td>
         </tr>

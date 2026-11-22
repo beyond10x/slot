@@ -37,6 +37,7 @@ fn start_cfg(tokens: usize, change: impl FnOnce(&mut Config)) -> Fixture {
         if cfg.socket.exists() {
             break;
         }
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
     Fixture {
@@ -68,6 +69,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
         promote_after: Duration::from_secs(1800),
+        pass_for: Duration::from_secs(300),
         clock: now_ms,
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
@@ -83,6 +85,8 @@ fn config(root: &Path, tokens: usize) -> Config {
             min_idle: Duration::from_secs(7200),
             dry_run: true,
         },
+        disk_free: None,
+        exec_shim: None,
         handover: true,
     }
 }
@@ -323,25 +327,51 @@ fn the_bound_per_job_is_set_saved_and_read_back() {
     assert_eq!(restarted("s3").job_parallel_view().job_parallel, None);
 }
 
+/// A job that runs until the file `go` exists in the fixture's root, then
+/// makes the file `first-done`; returned once it runs.
+fn first_until_go(f: &Fixture) -> UnixStream {
+    // The job polls for the file `go` the test writes.
+    let (c, id) = submit(
+        f,
+        sh(
+            &f.root,
+            "while [ ! -e go ]; do sleep 0.02; done; : > first-done",
+        ),
+    );
+    wait_for("the first job to run", || {
+        state_of(f, id) == JobState::Running
+    });
+    c
+}
+
+/// A job that prints `after` when the file `first-done` exists as it runs,
+/// else `beside`.
+fn second_after_first(f: &Fixture) -> Request {
+    sh(&f.root, "test -e first-done && echo after || echo beside")
+}
+
 #[test]
 fn a_pending_upgrade_holds_admission() {
     let f = start(1);
-    let running = send(&f.socket, sh(&f.root, "sleep 1"));
-    std::thread::sleep(Duration::from_millis(150));
-    let queued_before = send(&f.socket, sh(&f.root, "echo before"));
-    std::thread::sleep(Duration::from_millis(100));
+    let running = first_until_go(&f);
+    let (queued_before, _) = submit(&f, sh(&f.root, "echo before"));
+    wait_for("the job to wait for the slot", || {
+        f.server.pool().waiting() == 1
+    });
     f.server.hold_admission();
-    let queued_after = send(&f.socket, sh(&f.root, "echo after"));
+    let (queued_after, _) = submit(&f, sh(&f.root, "echo after"));
+    std::fs::write(f.root.join("go"), "").unwrap();
     let r = collect(running);
     assert_eq!((r.code, r.started), (0, true), "the running job finishes");
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(f.server.nothing_running(), "the moment to re-execute");
+    wait_for("the moment to re-execute", || f.server.nothing_running());
     let states: Vec<JobState> = {
         let g = f.server.inner.lock().unwrap();
         g.active.values().map(|l| l.job.state).collect()
     };
     assert_eq!(states, [JobState::Queued, JobState::Queued]);
-    assert_eq!(f.server.pool().free(), 1, "the slot went back to the pool");
+    wait_for("the slot to go back to the pool", || {
+        f.server.pool().free() == 1
+    });
     for c in [queued_before, queued_after] {
         c.set_read_timeout(Some(Duration::from_millis(300)))
             .unwrap();
@@ -354,12 +384,11 @@ fn a_pending_upgrade_holds_admission() {
 #[test]
 fn a_hold_that_runs_out_admits_the_queued_jobs() {
     let f = start(1);
-    let running = send(&f.socket, sh(&f.root, "sleep 0.5"));
-    std::thread::sleep(Duration::from_millis(150));
+    let running = first_until_go(&f);
     f.server.hold_admission();
-    let queued = send(&f.socket, sh(&f.root, "echo after"));
-    std::thread::sleep(Duration::from_millis(100));
+    let (queued, _) = submit(&f, sh(&f.root, "echo after"));
     assert!(!f.server.upgrade_step(upgrade::Step::Release));
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(running).code, 0);
     let r = collect(queued);
     assert_eq!((r.code, r.started, r.out.as_str()), (0, true, "after\n"));
@@ -368,23 +397,23 @@ fn a_hold_that_runs_out_admits_the_queued_jobs() {
 #[test]
 fn second_job_waits_for_the_slot() {
     let f = start(1);
-    let first = send(&f.socket, sh(&f.root, "sleep 1"));
-    std::thread::sleep(Duration::from_millis(150));
-    let t0 = Instant::now();
-    let r = run(&f, sh(&f.root, "true"));
-    assert_eq!(r.code, 0);
-    assert!(
-        t0.elapsed() >= Duration::from_millis(700),
-        "{:?}",
-        t0.elapsed()
-    );
+    let first = first_until_go(&f);
+    let (second, id) = submit(&f, second_after_first(&f));
+    wait_for("the second job to wait for the slot", || {
+        f.server.pool().waiting() == 1
+    });
+    assert_eq!(state_of(&f, id), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+    let r = collect(second);
+    assert_eq!((r.code, r.out.as_str()), (0, "after\n"), "{r:?}");
 }
 
 #[test]
 fn client_disconnect_kills_job_and_returns_token() {
     let f = start(1);
     let marker = f.root.join("pid");
+    // `sleep 30` is the job's run; the client leaving ends it.
     let c = send(
         &f.socket,
         sh(
@@ -392,29 +421,23 @@ fn client_disconnect_kills_job_and_returns_token() {
             &format!("echo $$ > {}; sleep 30", marker.display()),
         ),
     );
-    let mut pid = 0;
-    for _ in 0..200 {
-        if let Ok(s) = std::fs::read_to_string(&marker)
-            && let Ok(p) = s.trim().parse::<i32>()
-        {
-            pid = p;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(pid > 0, "job did not start");
+    let pid = pid_in(&marker);
     drop(c);
-    let mut gone = false;
-    for _ in 0..200 {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
-            gone = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(gone, "job still running after client disconnect");
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(f.server.pool().free(), 1);
+    wait_for("the job to end after its client left", || {
+        !Path::new(&format!("/proc/{pid}")).exists()
+    });
+    wait_for("the slot to come back", || f.server.pool().free() == 1);
+}
+
+/// The process id a job wrote to `marker`, polled for up to [`WAIT`].
+fn pid_in(marker: &Path) -> i32 {
+    let read = || {
+        std::fs::read_to_string(marker)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+    };
+    wait_for("the job to start", || read().is_some());
+    read().unwrap()
 }
 
 fn cancel(f: &Fixture, id: i64) -> Res {
@@ -431,6 +454,7 @@ fn cancel(f: &Fixture, id: i64) -> Res {
 fn slot_cancel_stops_a_queued_and_a_running_job() {
     let f = start(1);
     let marker = f.root.join("pid");
+    // `sleep 30` is the job's run; the test cancels it.
     let running = send(
         &f.socket,
         sh(
@@ -438,19 +462,9 @@ fn slot_cancel_stops_a_queued_and_a_running_job() {
             &format!("echo $$ > {}; sleep 30", marker.display()),
         ),
     );
-    let mut pid = 0;
-    for _ in 0..200 {
-        if let Ok(s) = std::fs::read_to_string(&marker)
-            && let Ok(p) = s.trim().parse::<i32>()
-        {
-            pid = p;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert!(pid > 0, "job did not start");
-    let queued = send(&f.socket, sh(&f.root, "true"));
-    std::thread::sleep(Duration::from_millis(300));
+    let pid = pid_in(&marker);
+    let (queued, id) = submit(&f, sh(&f.root, "true"));
+    assert_eq!(id, 2);
 
     let r = cancel(&f, 2);
     assert_eq!(r.code, 0, "{r:?}");
@@ -463,8 +477,7 @@ fn slot_cancel_stops_a_queued_and_a_running_job() {
     assert_eq!(r.code, 0, "{r:?}");
     assert_eq!(collect(running).code, 130);
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(f.server.pool().free(), 1);
+    wait_for("the slot to come back", || f.server.pool().free() == 1);
 
     let r = cancel(&f, 99);
     assert_eq!(r.code, 1);
@@ -551,8 +564,7 @@ fn go_job_holds_at_most_the_pool() {
         return; // go not installed
     }
     assert!(r.out.contains("-p=2"), "{r:?}");
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(f.server.pool().free(), 2);
+    wait_for("every slot back", || f.server.pool().free() == 2);
 }
 
 #[test]
@@ -563,8 +575,7 @@ fn requested_tokens_replace_the_toolchains() {
     let r = run(&f, req);
     assert_eq!(r.code, 0, "{r:?}");
     assert_eq!(f.server.state().done[0].tokens, 3);
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(f.server.pool().free(), 4, "all slots back");
+    wait_for("all slots back", || f.server.pool().free() == 4);
 }
 
 #[test]
@@ -608,6 +619,7 @@ fn history_survives_restart() {
         admission: crate::admission::Limits::default(),
         upgrade_hold: Duration::from_secs(60),
         promote_after: Duration::from_secs(1800),
+        pass_for: Duration::from_secs(300),
         clock: now_ms,
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
@@ -623,6 +635,8 @@ fn history_survives_restart() {
             min_idle: Duration::from_secs(7200),
             dry_run: true,
         },
+        disk_free: None,
+        exec_shim: None,
         handover: true,
     })
     .unwrap();
@@ -640,17 +654,20 @@ fn headroom_lowers_the_limit_and_is_saved() {
     assert_eq!(v.headroom_percent, 50);
     assert_eq!(v.cpu_quota_percent, None, "cpu quota is off in tests");
     assert_eq!(f.server.state().limit, 1);
-    let first = send(&f.socket, sh(&f.root, "sleep 1"));
-    std::thread::sleep(Duration::from_millis(150));
-    let t0 = Instant::now();
-    let r = run(&f, sh(&f.root, "true"));
-    assert_eq!(r.code, 0);
-    assert!(
-        t0.elapsed() >= Duration::from_millis(700),
-        "second job ran beside the first with 1 of 2 tokens circulating: {:?}",
-        t0.elapsed()
-    );
+    let first = first_until_go(&f);
+    let (second, id) = submit(&f, second_after_first(&f));
+    wait_for("the second job to wait for the slot", || {
+        f.server.pool().waiting() == 1
+    });
+    assert_eq!(state_of(&f, id), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+    let r = collect(second);
+    assert_eq!(
+        (r.code, r.out.as_str()),
+        (0, "after\n"),
+        "second job ran beside the first with 1 of 2 tokens circulating"
+    );
     assert_eq!(limits::load(&f.root.join("state")).headroom_percent, 50);
     let v = rt.block_on(Arc::clone(&f.server).set_headroom(0));
     assert_eq!(v.effective_tokens, 2);
@@ -688,14 +705,10 @@ fn a_job_waits_while_the_disk_is_short_and_can_be_cancelled() {
     assert_eq!(st.active[0].state, JobState::Queued);
     assert!(st.active[0].wait_reason.contains("builds need"), "{st:?}");
     drop(c);
-    for _ in 0..100 {
-        if f.server.state().active.is_empty() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for("the job to leave the table", || {
+        f.server.state().active.is_empty()
+    });
     let st = f.server.state();
-    assert!(st.active.is_empty(), "{st:?}");
     assert_eq!(st.done.last().unwrap().state, JobState::Cancelled);
 }
 
@@ -714,18 +727,21 @@ fn memory_short_holds_a_job_only_while_another_runs() {
         (0, "alone\n"),
         "alone: runs"
     );
-    let first = send(&f.socket, sh(&f.root, "sleep 1.5"));
-    std::thread::sleep(Duration::from_millis(300));
-    let t0 = Instant::now();
-    let second = run(&f, sh(&f.root, "echo second"));
-    assert_eq!(second.code, 0);
-    assert!(second.info.contains("memory available"), "{}", second.info);
-    assert!(
-        t0.elapsed() >= Duration::from_millis(900),
-        "ran beside the first: {:?}",
-        t0.elapsed()
-    );
+    let first = first_until_go(&f);
+    let (second, b) = submit(&f, second_after_first(&f));
+    wait_for("the second job to wait for memory", || {
+        reason_of(&f, b).contains("memory available")
+    });
+    assert_eq!(state_of(&f, b), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+    let second = collect(second);
+    assert_eq!(
+        (second.code, second.out.as_str()),
+        (0, "after\n"),
+        "ran beside the first"
+    );
+    assert!(second.info.contains("memory available"), "{}", second.info);
 }
 
 #[test]
@@ -907,9 +923,14 @@ fn a_job_logs_the_project_of_its_directory() {
                 .success()
         );
     }
-    // git runs off the request path; a job that lasts a second has its project.
-    let r = run(&f, sh(&repo, "sleep 1"));
-    assert_eq!(r.code, 0);
+    // git runs off the request path: the job polls for the file `go`, which
+    // the test writes once the job has its project.
+    let (c, id) = submit(&f, sh(&repo, "while [ ! -e go ]; do sleep 0.02; done"));
+    wait_for("the job's project", || {
+        active_job(&f, id).is_some_and(|j| j.project == "team-a")
+    });
+    std::fs::write(repo.join("go"), "").unwrap();
+    assert_eq!(collect(c).code, 0);
     let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
     assert!(log.contains("\"project\":\"team-a\""), "{log}");
     let u = crate::usage::aggregate(
@@ -923,19 +944,22 @@ fn a_job_logs_the_project_of_its_directory() {
     assert_eq!(u.rows[0].key, "team-a");
 }
 
-/// Polls `cond` for up to 5 s.
+/// The bound of [`wait_for`] and [`wait_for_jobs`].
+const WAIT: Duration = Duration::from_secs(10);
+
+/// Polls `cond` for up to [`WAIT`].
 fn wait_for(what: &str, cond: impl Fn() -> bool) {
-    for _ in 0..500 {
-        if cond() {
-            return;
-        }
+    let deadline = Instant::now() + WAIT;
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for {what}");
 }
 
 /// A job that holds its slot until the file `go` exists in `cwd`.
 fn holder(f: &Fixture) -> UnixStream {
+    // The job polls for the file `go` the test writes.
     let c = send(
         &f.socket,
         sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done"),
@@ -1521,6 +1545,7 @@ fn fake_build(dir: &Path, target: &Path, script: &str) -> Request {
 
 /// A build into `target` that runs until the file `go` exists.
 fn building(f: &Fixture, target: &Path, go: &str) -> (UnixStream, i64) {
+    // The job polls for the file `go` the test writes.
     let script = format!("while [ ! -e {go} ]; do sleep 0.02; done");
     let (c, id) = submit(f, fake_build(&f.root, target, &script));
     wait_for("the build to run", || state_of(f, id) == JobState::Running);
@@ -1567,14 +1592,16 @@ fn in_use_by(id: i64) -> String {
     format!("target directory in use by job {id}")
 }
 
-/// Polls `cond` for up to 5 s like [`wait_for`]; a timeout names every
+/// Polls `cond` for up to [`WAIT`] like [`wait_for`]; a timeout names every
 /// active job with its state and reason, and the pool's free slots and
 /// queue.
 fn wait_for_jobs(f: &Fixture, what: &str, cond: impl Fn() -> bool) {
-    for _ in 0..500 {
+    let deadline = Instant::now() + WAIT;
+    while Instant::now() < deadline {
         if cond() {
             return;
         }
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
     let jobs: Vec<String> = {
@@ -1624,8 +1651,16 @@ fn a_cargo_build_waits_while_another_job_compiles_in_its_target_directory() {
     let (second, b) = submit(&f, fake_build(&f.root, &target, "echo built"));
     let info = read_info_until(&second, "waiting:");
     assert_eq!(info, format!("slot: job {b} waiting: {}", in_use_by(a)));
-    // Past the settle time of the first job only the lock holds it back.
-    std::thread::sleep(Duration::from_millis(400));
+    // Past the settle time of the first job, and two polls of the target
+    // directories after it, only the lock holds it back.
+    let started = active_job(&f, a).unwrap().started_ms;
+    let past = {
+        let c = &f.server.cfg;
+        i64::try_from((c.target_settle + 2 * c.target_poll).as_millis()).unwrap()
+    };
+    wait_for("the settle time of the first job to pass", || {
+        now_ms() > started + past
+    });
     let queued = active_job(&f, b).unwrap();
     assert_eq!(
         (queued.state, queued.wait_reason, queued.started_ms),
@@ -1699,6 +1734,8 @@ fn builds_that_wait_for_one_target_directory_start_by_level_then_age() {
     let _lock = compile_lock(&target);
     let (first, a) = building(&f, &target, "go");
     let wait = |name: &str, level: Option<Priority>| {
+        // `sleep 0.2` widens each run, so two that overlapped would show in
+        // `order`; nothing waits on it.
         let script = format!("echo {name}-starts >> order; sleep 0.2; echo {name}-ends >> order");
         let mut req = fake_build(&f.root, &target, &script);
         req.priority = level;
@@ -1736,6 +1773,7 @@ fn a_build_that_waited_for_its_target_directory_keeps_its_place_in_the_queue() {
     let target = f.root.join("target");
     let lock = compile_lock(&target);
     let (first, a) = building(&f, &target, "go");
+    // The job polls for the file `go-other` the test writes.
     let other = send(
         &f.socket,
         sh(&f.root, "while [ ! -e go-other ]; do sleep 0.02; done"),
@@ -1768,6 +1806,7 @@ fn a_queued_build_makes_way_for_one_of_its_target_directory_that_is_served_first
     let f = start(2);
     let target = f.root.join("target");
     let _lock = compile_lock(&target);
+    // The job polls for the file `go` the test writes.
     let mut all = sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done");
     all.tokens = Some(2);
     let holder = send(&f.socket, all);
@@ -1777,6 +1816,7 @@ fn a_queued_build_makes_way_for_one_of_its_target_directory_that_is_served_first
         f.server.pool().waiting() == 1
     });
     assert_eq!(reason_of(&f, n), "");
+    // The job polls for the file `go-high` the test writes.
     let mut req = fake_build(
         &f.root,
         &target,
@@ -1907,6 +1947,7 @@ fn a_job_past_the_run_time_limit_is_ended_with_124_and_logged_as_timed_out() {
     assert_eq!(set_run_limit(&f, Some(1), None).run_limit_s, Some(1));
     let marker = f.root.join("pid");
     let t0 = Instant::now();
+    // `sleep 30` runs past the limit of 1 s; the daemon ends it.
     let r = run_bounded(
         &f,
         sh(
@@ -1966,6 +2007,7 @@ fn a_job_past_the_run_time_limit_is_ended_with_124_and_logged_as_timed_out() {
 fn a_job_that_names_a_longer_time_is_not_ended_at_the_daemons_limit() {
     let f = start(1);
     set_run_limit(&f, Some(1), None);
+    // `sleep 2.5` runs past the daemon's limit of 1 s: that is the case tested.
     let mut own = sh(&f.root, "sleep 2.5; echo own");
     own.timeout_s = Some(60);
     let r = run_bounded(&f, own);
@@ -1975,6 +2017,7 @@ fn a_job_that_names_a_longer_time_is_not_ended_at_the_daemons_limit() {
     assert_eq!((job.timed_out, job.limit_s), (false, Some(60)), "{job:?}");
     assert!(job.ended_ms - job.started_ms >= 2000, "{job:?}");
     set_run_limit(&f, Some(30), None);
+    // `sleep 30` runs past the job's own 1 s; the daemon ends it.
     let mut short = sh(&f.root, "sleep 30");
     short.timeout_s = Some(1);
     let r = run_bounded(&f, short);
@@ -2047,6 +2090,7 @@ fn a_wrapped_timeout_does_not_extend_a_job_and_its_client_is_told_once() {
 
     set_run_limit(&f, Some(1), None);
     let t0 = Instant::now();
+    // `sleep 30` runs past the limit of 1 s; the daemon ends it.
     let r = run_bounded(&f, wrapped(sh(&f.root, "sleep 30"), "1800"));
     let ran = t0.elapsed();
     assert_eq!((r.code, told(&r)), (124, 1), "{r:?}");
@@ -2207,7 +2251,10 @@ fn a_limit_set_while_a_job_runs_applies_to_the_jobs_that_start_after_it() {
     let f = start(2);
     let h = holder(&f);
     set_run_limit(&f, Some(1), None);
-    std::thread::sleep(Duration::from_millis(2200));
+    let set = now_ms();
+    // The check is that nothing happens: let the new limit of 1 s pass
+    // twice over, then look.
+    wait_for("2.2 s after the limit was set", || now_ms() > set + 2200);
     let st = f.server.state();
     assert_eq!(st.active.len(), 1, "the job from before runs on");
     assert_eq!(
@@ -2254,6 +2301,7 @@ impl Client {
         Self::start(
             f,
             name,
+            // The children's `sleep 600` keeps them alive; `kill` ends them.
             &format!(
                 "exec 3<>\"$FIFO\"; i=0; \
                  while [ $i -lt {children} ]; do sleep 600 3>&- & i=$((i+1)); done; \
@@ -2267,6 +2315,7 @@ impl Client {
         Self::start(
             f,
             name,
+            // `sleep 600` keeps the client alive; `kill` ends it.
             &format!(
                 "exec 3<>\"$FIFO\"; dd bs=1 count={tokens} <&3 >/dev/null 2>&1; \
                  : > {name}.ready; exec sleep 600"
@@ -2289,6 +2338,7 @@ impl Drop for Client {
 
 /// A job that holds `tokens` slots until its connection closes, once it runs.
 fn holding_job(f: &Fixture, tokens: u32) -> (UnixStream, i64) {
+    // The job polls for the file `go` the test writes.
     let mut req = sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done");
     req.tokens = Some(tokens);
     let (c, id) = submit(f, req);
@@ -2299,6 +2349,7 @@ fn holding_job(f: &Fixture, tokens: u32) -> (UnixStream, i64) {
 /// A job that waits in the queue for one slot.
 fn waiting_job(f: &Fixture) -> (UnixStream, i64) {
     let before = f.server.pool().waiting();
+    // The job polls for the file `go` the test writes.
     let (c, id) = submit(f, sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done"));
     wait_for_jobs(f, "the job to wait for a slot", || {
         f.server.pool().waiting() == before + 1
@@ -2323,6 +2374,7 @@ fn wait_for_watch(f: &Fixture, what: &str, cond: impl Fn() -> bool) {
         if cond() {
             return;
         }
+        // The poll interval of a bounded wait.
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!(
@@ -2474,17 +2526,20 @@ fn the_state_counts_slots_no_job_and_no_live_process_holds_and_since_when() {
     );
 }
 
-/// Declares, inside one test, the figure its daemon reads as the host's busy
-/// CPUs, in tenths of a CPU (negative: no figure), and the function that
-/// reads it. [`Config::cpu_busy`] is a plain function and the tests of this
-/// file run side by side in one process, so each test has a figure of its
-/// own.
+/// Declares, inside one test, the CPUs its daemon reads as busy in the pool,
+/// in tenths of a CPU (negative: no figure), with nothing in the compile
+/// cache or outside, and the function that reads it. [`Config::cpu_busy`]
+/// is a plain function and the tests of this file run side by side in one
+/// process, so each test has a figure of its own.
 macro_rules! host_busy {
     ($cell:ident, $read:ident, $tenths:expr) => {
         static $cell: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($tenths);
-        fn $read() -> Option<f64> {
+        fn $read() -> Option<cpu_limit::Parts> {
             let v = $cell.load(std::sync::atomic::Ordering::SeqCst);
-            (v >= 0).then(|| v as f64 / 10.0)
+            (v >= 0).then(|| cpu_limit::Parts {
+                pool: v as f64 / 10.0,
+                ..cpu_limit::Parts::default()
+            })
         }
     };
 }
@@ -2493,7 +2548,7 @@ macro_rules! host_busy {
 /// held jobs look again every 20 ms.
 fn start_busy(
     tokens: usize,
-    busy: fn() -> Option<f64>,
+    busy: fn() -> Option<cpu_limit::Parts>,
     change: impl FnOnce(&mut Config),
 ) -> Fixture {
     start_cfg(tokens, |c| {
@@ -2515,6 +2570,7 @@ fn set_cpu_limit(f: &Fixture, mark: Option<f64>, floor: Option<usize>) -> cpu_li
 
 /// Submits a job that uses no CPU and runs until its client goes away.
 fn quiet(f: &Fixture) -> (UnixStream, i64) {
+    // `sleep 60` is the job's run; the test ends it.
     submit(f, sh(&f.root, "sleep 60"))
 }
 
@@ -2566,7 +2622,7 @@ fn a_start_is_held_while_the_host_is_busier_than_the_mark_and_let_go_when_it_fal
         state_of(&f, a) == JobState::Running
     });
     let (second, b) = submit(&f, sh(&f.root, "echo second"));
-    let held = "host busy: 18.4 of 20 CPUs + 1.0 for jobs that just started, mark 17.0";
+    let held = "host busy: pool 18.4 + compile cache 0.0 of 20 CPUs + 1.0 for jobs that just started, mark 17.0";
     wait_for_jobs(&f, "the second job to be held", || reason_of(&f, b) == held);
     assert_eq!(state_of(&f, b), JobState::Queued);
     let told = read_info_until(&second, "waiting");
@@ -2608,7 +2664,7 @@ fn nothing_is_held_under_the_floor_or_under_the_mark() {
     });
     let (c3, j3) = quiet(&f);
     wait_for_jobs(&f, "the third to be held: the floor runs", || {
-        reason_of(&f, j3).starts_with("host busy: 20.0 of 20 CPUs")
+        reason_of(&f, j3).starts_with("host busy: pool 20.0 + compile cache 0.0 of 20 CPUs")
     });
     assert_eq!(running(&f), [j1, j2]);
 
@@ -2651,8 +2707,9 @@ fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first()
         ids.push(id);
     }
     wait_for_jobs(&f, "ten jobs to be held", || {
-        ids.iter()
-            .all(|id| reason_of(&f, *id).starts_with("host busy: 18.4 of 20 CPUs"))
+        ids.iter().all(|id| {
+            reason_of(&f, *id).starts_with("host busy: pool 18.4 + compile cache 0.0 of 20 CPUs")
+        })
     });
     assert_eq!(running(&f), [a]);
     assert_eq!(f.server.cpu_limit_view().held, 10);
@@ -2667,7 +2724,7 @@ fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first()
         running(&f) == [a, ids[0], ids[1]]
             && held_at(
                 &ids[2..],
-                "host busy: 14.5 of 20 CPUs + 3.0 for jobs that just started",
+                "host busy: pool 14.5 + compile cache 0.0 of 20 CPUs + 3.0 for jobs that just started",
             )
     });
     assert_eq!(f.server.cpu_limit_view().held, 8);
@@ -2679,7 +2736,7 @@ fn a_burst_of_held_jobs_starts_only_as_many_as_fit_under_the_mark_oldest_first()
         running(&f) == [a, ids[0], ids[1], ids[2], ids[3]]
             && held_at(
                 &ids[4..],
-                "host busy: 12.5 of 20 CPUs + 5.0 for jobs that just started",
+                "host busy: pool 12.5 + compile cache 0.0 of 20 CPUs + 5.0 for jobs that just started",
             )
     });
     assert_eq!(f.server.cpu_limit_view().held, 6);
@@ -2708,7 +2765,7 @@ fn a_job_held_for_the_bound_starts_on_a_host_that_stays_busy() {
     );
     assert!(
         r.info.contains(&format!(
-            "slot: job {b} waiting: host busy: 18.4 of 20 CPUs"
+            "slot: job {b} waiting: host busy: pool 18.4 + compile cache 0.0 of 20 CPUs"
         )),
         "{}",
         r.info
@@ -2765,7 +2822,7 @@ fn without_a_mark_a_saturated_host_holds_nothing_and_the_file_is_unchanged() {
     });
     let (c5, j5) = quiet(&f);
     wait_for_jobs(&f, "the fifth to be held", || {
-        reason_of(&f, j5).starts_with("host busy: 20.0 of 20 CPUs")
+        reason_of(&f, j5).starts_with("host busy: pool 20.0 + compile cache 0.0 of 20 CPUs")
     });
     let view = set_cpu_limit(&f, None, None);
     assert_eq!((view.cpu_busy_max, view.cpu_busy_floor), (None, None));
@@ -2898,6 +2955,700 @@ fn the_cpu_limit_is_set_saved_and_read_back() {
     assert!(!saved().contains("cpu_busy"), "{}", saved());
     assert_eq!(f.server.state().cpu_busy_max, None);
     assert_eq!(restarted("s3"), (None, None, 25));
+}
+
+// wave w1 u5
+
+/// Waits until the job ends, then appends `$NAME` to the file `order`: a
+/// job predicted short once it has history. Jobs of this command share
+/// their history whatever their `NAME`.
+const SHORT_CMD: &str = "while [ ! -e go-$NAME ]; do sleep 0.02; done; echo $NAME >> order";
+
+/// Appends `$NAME` to the file `order`: a command without history.
+const LONG_CMD: &str = "echo $NAME >> order";
+
+/// A job of repository `repo` that runs `cmd` with `NAME=name` in its
+/// environment and asks for `tokens` slots.
+fn named(f: &Fixture, cmd: &str, repo: &str, name: &str, tokens: Option<u32>) -> Request {
+    let mut r = sh(&f.root, cmd);
+    r.repo = repo.into();
+    r.tokens = tokens;
+    r.env = std::env::vars()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain([format!("NAME={name}")])
+        .collect();
+    r
+}
+
+/// Lets the job named `name` of [`SHORT_CMD`] end.
+fn go(f: &Fixture, name: &str) {
+    std::fs::write(f.root.join(format!("go-{name}")), "").unwrap();
+}
+
+/// Sends `req` and waits until it waits for slots.
+fn queued_job(f: &Fixture, req: Request) -> (UnixStream, i64) {
+    let before = f.server.pool().waiting();
+    let (c, id) = submit(f, req);
+    wait_for_jobs(f, "the job to wait for slots", || {
+        f.server.pool().waiting() == before + 1
+    });
+    (c, id)
+}
+
+/// Runs [`SHORT_CMD`] three times in `repo`, so the daemon predicts its run
+/// time, and empties the file `order`.
+fn give_history(f: &Fixture, repo: &str) {
+    go(f, "history");
+    for _ in 0..3 {
+        let r = run(f, named(f, SHORT_CMD, repo, "history", None));
+        assert_eq!(r.code, 0, "{r:?}");
+    }
+    std::fs::remove_file(f.root.join("order")).unwrap();
+}
+
+/// Slots job `id` has collected while it waits, as `slot status` reads it.
+fn collected(f: &Fixture, id: i64) -> u32 {
+    active_job(f, id).map_or(0, |j| j.collected)
+}
+
+/// Whether job `id` has its slots (it claimed them, or it already ended)
+/// within `within`. Measured at the claim, not at the start of its
+/// process: on a loaded host starting `sh` alone took over 500 ms.
+fn has_slots_within(f: &Fixture, id: i64, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    loop {
+        let has = {
+            let g = f.server.inner.lock().unwrap();
+            g.active.get(&id).is_none_or(|l| l.held > 0)
+        };
+        if has {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A job that asks for every slot does not keep freed slots idle: with 4
+/// slots, one job running on 1 and a 4-slot job queued, three 1-slot jobs
+/// that queue behind it each get their slot within 1 s and run, each
+/// logged as moved ahead. The
+/// 4-slot job shows the slots it collected, and the token count books
+/// them: none is missing. Then it starts once the running job ends.
+#[test]
+fn one_slot_jobs_start_while_a_job_that_asks_for_every_slot_waits() {
+    let f = start(4);
+    let (h, _) = holding_job(&f, 1);
+    let (big, big_id) = queued_job(&f, named(&f, LONG_CMD, "big", "big", Some(4)));
+    wait_for_jobs(&f, "the 4-slot job to collect 3", || {
+        collected(&f, big_id) == 3
+    });
+    assert_eq!(
+        f.server.token_count(),
+        (1, 0, 0),
+        "granted, missing, surplus"
+    );
+    let mut small = Vec::new();
+    for i in 0..3 {
+        let (c, id) = submit(&f, named(&f, LONG_CMD, "small", &format!("s{i}"), None));
+        assert!(
+            has_slots_within(&f, id, Duration::from_secs(1)),
+            "1-slot job {i} did not get its slot within 1 s"
+        );
+        small.push((c, id));
+    }
+    let mut ids = Vec::new();
+    for (c, id) in small {
+        let r = collect(c);
+        assert_eq!((r.code, r.started), (0, true), "{r:?}");
+        ids.push(id);
+    }
+    for id in ids {
+        assert!(
+            done_job(&f, id).ahead,
+            "job {id} is not logged as moved ahead"
+        );
+    }
+    wait_for_jobs(&f, "the 4-slot job to collect 3 again", || {
+        collected(&f, big_id) == 3
+    });
+    assert_eq!(f.server.token_count(), (1, 0, 0));
+    assert_eq!(state_of(&f, big_id), JobState::Queued);
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    assert_eq!(collect(big).code, 0);
+    let ran = order(&f);
+    assert_eq!(
+        (ran.len(), ran.last().map(String::as_str)),
+        (4, Some("big"))
+    );
+    assert!(!done_job(&f, big_id).ahead);
+}
+
+/// The bound of passing: a 1-slot job passes a 2-slot job that waits, but
+/// once the 2-slot job has waited `--pass-for` (300 s, on a clock the test
+/// moves) a 1-slot job that queues after it waits, and the 2-slot job
+/// starts first.
+#[test]
+fn once_a_job_that_asks_for_every_slot_has_waited_the_bound_it_starts_first() {
+    static SKEW_MS: AtomicI64 = AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(2, |c| c.clock = clock);
+    let (h, _) = holding_job(&f, 1);
+    let (big, big_id) = queued_job(&f, named(&f, LONG_CMD, "big", "big", Some(2)));
+    wait_for_jobs(&f, "the 2-slot job to collect 1", || {
+        collected(&f, big_id) == 1
+    });
+    let s1 = run(&f, named(&f, LONG_CMD, "small", "s1", None));
+    assert_eq!((s1.code, s1.started), (0, true), "passed it: {s1:?}");
+    SKEW_MS.store(301_000, Ordering::SeqCst);
+    f.server.rerank();
+    let (s2, s2_id) = queued_job(&f, named(&f, LONG_CMD, "small", "s2", None));
+    wait_for_jobs(&f, "the 2-slot job to collect 1 again", || {
+        collected(&f, big_id) == 1
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        state_of(&f, s2_id),
+        JobState::Queued,
+        "started ahead of a job that waited the bound"
+    );
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    assert_eq!(collect(big).code, 0);
+    assert_eq!(collect(s2).code, 0);
+    assert_eq!(order(&f), ["s1", "big", "s2"]);
+}
+
+/// Short jobs first. A pool of 1 slot, one level: a job without history
+/// queues, then one whose last runs predict 5 s or less. When the slot
+/// frees, the short job starts first. Its record carries the prediction
+/// and says it was moved ahead, also in the job log; the other job has
+/// neither.
+#[test]
+fn a_job_predicted_short_starts_ahead_of_a_longer_one_of_its_level() {
+    let f = start(1);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let (long, long_id) = queued_job(&f, named(&f, LONG_CMD, "app", "long", None));
+    go(&f, "short");
+    let (short, short_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "short", None));
+    let waiting = active_job(&f, short_id).unwrap();
+    assert!(
+        waiting
+            .predicted_ms
+            .is_some_and(|ms| ms <= priority::SHORT_MS),
+        "{waiting:?}"
+    );
+    wait_for_jobs(&f, "the short job to show as moved ahead", || {
+        active_job(&f, short_id).is_some_and(|j| j.ahead)
+    });
+    assert_eq!(run_all(&f, h, vec![long, short]), ["short", "long"]);
+    let (short_job, long_job) = (done_job(&f, short_id), done_job(&f, long_id));
+    assert!(
+        short_job.ahead && short_job.predicted_ms.is_some(),
+        "{short_job:?}"
+    );
+    assert_eq!(
+        (long_job.ahead, long_job.predicted_ms),
+        (false, None),
+        "{long_job:?}"
+    );
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let line = |id: i64| {
+        log.lines()
+            .find(|row| row.contains(&format!("\"id\":{id},")))
+            .unwrap()
+            .to_string()
+    };
+    assert!(line(short_id).contains("\"predicted_ms\":"), "{log}");
+    assert!(line(short_id).contains("\"ahead\":true"), "{log}");
+    assert!(!line(long_id).contains("predicted_ms"), "{log}");
+    assert!(!line(long_id).contains("ahead"), "{log}");
+}
+
+/// A stream of short jobs passes a longer one only until it has waited
+/// `--pass-for` (300 s, on a clock the test moves): two short jobs start
+/// ahead of it one after the other, the third, queued after the bound,
+/// starts after it.
+#[test]
+fn a_stream_of_short_jobs_does_not_hold_a_longer_job_past_the_bound() {
+    static SKEW_MS: AtomicI64 = AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(1, |c| c.clock = clock);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let (long, long_id) = queued_job(&f, named(&f, LONG_CMD, "app", "long", None));
+    let (s0, s0_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "s0", None));
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    wait_for_jobs(&f, "s0 to run", || state_of(&f, s0_id) == JobState::Running);
+    let (s1, s1_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "s1", None));
+    go(&f, "s0");
+    wait_for_jobs(&f, "s1 to run", || state_of(&f, s1_id) == JobState::Running);
+    assert_eq!(state_of(&f, long_id), JobState::Queued);
+    SKEW_MS.store(301_000, Ordering::SeqCst);
+    f.server.rerank();
+    go(&f, "s2");
+    let (s2, _) = queued_job(&f, named(&f, SHORT_CMD, "app", "s2", None));
+    go(&f, "s1");
+    for c in [s0, s1, long, s2] {
+        assert_eq!(collect(c).code, 0);
+    }
+    assert_eq!(order(&f), ["s0", "s1", "long", "s2"]);
+}
+
+/// The order between levels is unchanged: a short `normal` job does not
+/// pass a `high` job without history.
+#[test]
+fn a_short_job_does_not_pass_a_job_of_a_higher_level() {
+    let f = start(1);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let mut high = named(&f, LONG_CMD, "app", "high", None);
+    high.priority = Some(Priority::High);
+    let (high, _) = queued_job(&f, high);
+    go(&f, "short");
+    let (short, short_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "short", None));
+    assert_eq!(run_all(&f, h, vec![high, short]), ["high", "short"]);
+    assert!(!done_job(&f, short_id).ahead);
+}
+
+/// With `--pass-for 0` the queue is served by level, then arrival: a job
+/// predicted short waits behind an earlier one without history, and is
+/// not moved ahead. The prediction is still recorded.
+#[test]
+fn with_passing_off_a_short_job_waits_its_turn() {
+    let f = start_cfg(1, |c| c.pass_for = Duration::ZERO);
+    give_history(&f, "app");
+    let h = holder(&f);
+    let (long, _) = queued_job(&f, named(&f, LONG_CMD, "app", "long", None));
+    go(&f, "short");
+    let (short, short_id) = queued_job(&f, named(&f, SHORT_CMD, "app", "short", None));
+    assert_eq!(run_all(&f, h, vec![long, short]), ["long", "short"]);
+    let s = done_job(&f, short_id);
+    assert_eq!((s.ahead, s.predicted_ms.is_some()), (false, true), "{s:?}");
+}
+
+// adversary u5
+
+/// Design § 25: once a job has waited `--pass-for`, "from then on it
+/// starts before every job that came after it". The daemon's clock steps
+/// back an hour (an NTP step, a manual `date`) after the 2-slot job became
+/// unpassable: the wait reads as 0 again, the job is passable again, and a
+/// 1-slot job that queues after it starts ahead of it.
+#[test]
+fn adversary_u5_a_job_that_waited_the_bound_stays_unpassable_when_the_clock_steps_back() {
+    static SKEW_MS: AtomicI64 = AtomicI64::new(0);
+    fn clock() -> i64 {
+        now_ms() + SKEW_MS.load(Ordering::SeqCst)
+    }
+    let f = start_cfg(2, |c| c.clock = clock);
+    let (h, _) = holding_job(&f, 1);
+    let (big, big_id) = queued_job(&f, named(&f, LONG_CMD, "big", "big", Some(2)));
+    wait_for_jobs(&f, "the 2-slot job to collect 1", || {
+        collected(&f, big_id) == 1
+    });
+    SKEW_MS.store(301_000, Ordering::SeqCst);
+    f.server.rerank();
+    SKEW_MS.store(-3_600_000, Ordering::SeqCst);
+    f.server.rerank();
+    let (s2, s2_id) = submit(&f, named(&f, LONG_CMD, "small", "s2", None));
+    let passed = has_slots_within(&f, s2_id, Duration::from_millis(500));
+    std::fs::write(f.root.join("go"), "").unwrap();
+    assert_eq!(collect(h).code, 0);
+    assert_eq!(collect(big).code, 0);
+    assert_eq!(collect(s2).code, 0);
+    assert!(
+        !passed,
+        "started ahead of a job that had waited the bound; order {:?}",
+        order(&f)
+    );
+}
+
+// wave w1 u4
+
+/// A Cargo target directory under `root` with a tag and a little content,
+/// that a job of repository `repo` built into long ago.
+fn old_target(f: &Fixture, repo: &str) -> PathBuf {
+    let t = f.root.join("w").join(repo).join("target");
+    std::fs::create_dir_all(&t).unwrap();
+    std::fs::write(
+        t.join("CACHEDIR.TAG"),
+        format!("{}\n", crate::evict::CACHEDIR_SIGNATURE),
+    )
+    .unwrap();
+    std::fs::write(t.join("blob"), vec![0u8; 4096]).unwrap();
+    f.server
+        .inner
+        .lock()
+        .unwrap()
+        .targets
+        .insert(t.clone(), (repo.to_string(), 1));
+    t
+}
+
+/// With `--min-free-disk 50` and `--evict-below 40`, a filesystem at 45 GB
+/// free holds a job for disk; eviction runs at the larger mark, 50 GB, as
+/// soon as the job is held, and the job starts once the pass freed enough.
+#[test]
+fn eviction_starts_at_the_disk_holds_mark_and_the_held_job_starts() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const GB: u64 = crate::admission::GB;
+    static FREE: AtomicU64 = AtomicU64::new(60 * GB);
+    static TARGET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    /// `FREE`, and 20 GB more once the target directory is gone.
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        let gone = TARGET.get().is_some_and(|t| !t.exists());
+        Some(FREE.load(SeqCst) + if gone { 20 * GB } else { 0 })
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 50 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 40 * GB,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+        c.resource_poll = Duration::from_millis(20);
+    });
+    let target = old_target(&f, "old");
+    TARGET.set(target.clone()).unwrap();
+    wait_for_jobs(&f, "the watch's first look", || {
+        f.server.state().evict.checked_ms > 0
+    });
+    assert!(target.exists(), "60 GB free: nothing to delete");
+
+    FREE.store(45 * GB, SeqCst);
+    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let r = collect(c);
+    assert!(
+        r.info.contains(&format!(
+            "slot: job {id} waiting: 45.0 GB free on the filesystem of"
+        )),
+        "held for disk first: {r:?}"
+    );
+    assert!(r.info.contains("builds need 50.0 GB"), "{r:?}");
+    assert_eq!((r.code, r.out.as_str()), (0, "ran\n"), "{r:?}");
+    assert!(!target.exists(), "evicted at 45 GB, under the mark of 50");
+    let e = f.server.state().evict;
+    assert_eq!(e.floor, 50 * GB, "the mark is the larger value");
+    assert_eq!(e.raised_from, 40 * GB, "and it says it was raised");
+    assert_eq!(e.last.len(), 1, "{e:?}");
+    assert_eq!(e.last[0].action, "deleted", "{e:?}");
+}
+
+/// `--evict-below 0` keeps eviction off, whatever `--min-free-disk` is: a
+/// job held for disk deletes nothing.
+#[test]
+fn evict_below_0_stays_off_whatever_the_disk_hold_is() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(45 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 50 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 0,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+        c.resource_poll = Duration::from_millis(20);
+    });
+    let target = old_target(&f, "old");
+    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    wait_for_jobs(&f, "the job to be held for disk", || {
+        reason_of(&f, id).contains("builds need 50.0 GB")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(target.exists(), "eviction is off");
+    let e = f.server.state().evict;
+    assert_eq!((e.floor, e.checked_ms), (0, 0), "{e:?}");
+    drop(c);
+}
+
+/// Declares, inside one test, the three parts of the CPUs its daemon reads
+/// as busy, each in tenths of a CPU, and the function that reads them.
+macro_rules! cpu_parts {
+    ($pool:ident, $cache:ident, $outside:ident, $read:ident, $p:expr, $c:expr, $o:expr) => {
+        static $pool: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($p);
+        static $cache: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($c);
+        static $outside: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($o);
+        fn $read() -> Option<cpu_limit::Parts> {
+            let tenths = |c: &std::sync::atomic::AtomicI64| {
+                c.load(std::sync::atomic::Ordering::SeqCst) as f64 / 10.0
+            };
+            Some(cpu_limit::Parts {
+                pool: tenths(&$pool),
+                compile_cache: tenths(&$cache),
+                outside: tenths(&$outside),
+            })
+        }
+    };
+}
+
+/// With the mark 17 and the floor 6 on a host of 20 CPUs, 10 CPUs busy
+/// outside the pool and the compile cache and 5 inside them do not hold a
+/// queued job; 12 in the pool and 6 in the compile cache do. The wait
+/// reason names the two parts, and `GET /api/cpu-limit` answers the parts
+/// and the CPUs outside both.
+#[test]
+fn the_cpu_limit_counts_the_pool_and_the_compile_cache_not_work_outside_them() {
+    use std::sync::atomic::Ordering::SeqCst;
+    cpu_parts!(POOL, CACHE, OUTSIDE, busy, 30, 20, 100);
+    let f = start_busy(16, busy, |_| {});
+    set_cpu_limit(&f, Some(17.0), Some(6));
+    let mut clients = Vec::new();
+    for _ in 0..6 {
+        clients.push(quiet(&f).0);
+    }
+    wait_for_jobs(&f, "the floor of 6 to run", || running(&f).len() == 6);
+
+    // 3 + 2 inside, 6.0 for the six that just started: 11 of 17. The whole
+    // host, 15 + 6, would be over the mark.
+    let (c, seventh) = quiet(&f);
+    clients.push(c);
+    wait_for_jobs(
+        &f,
+        "the seventh to start: work outside is not counted",
+        || state_of(&f, seventh) == JobState::Running,
+    );
+    assert_eq!(census_events(&f, "cpu_hold").len(), 0);
+
+    POOL.store(120, SeqCst);
+    CACHE.store(60, SeqCst);
+    OUTSIDE.store(15, SeqCst);
+    let (c, eighth) = quiet(&f);
+    clients.push(c);
+    wait_for_jobs(&f, "the eighth to be held for the pool's 18 CPUs", || {
+        reason_of(&f, eighth).starts_with("host busy: pool 12.0 + compile cache 6.0 of 20 CPUs")
+    });
+    let reason = reason_of(&f, eighth);
+    assert!(reason.ends_with(", mark 17.0"), "{reason}");
+    assert_eq!(state_of(&f, eighth), JobState::Queued);
+
+    let v = f.server.cpu_limit_view();
+    assert_eq!(
+        (v.pool, v.compile_cache, v.outside, v.busy, v.held),
+        (Some(12.0), Some(6.0), Some(1.5), Some(19.5), 1)
+    );
+    let (status, text) = get_cpu_limit(&f);
+    assert_eq!(status, 200, "{text}");
+    assert!(
+        text.contains(r#""pool":12.0,"compile_cache":6.0,"outside":1.5"#),
+        "{text}"
+    );
+    end_all(&f, clients);
+}
+
+/// A stand-in for `slot __exec` in `dir`: the lib tests run in the test
+/// harness, not in the slot binary. It takes the same arguments
+/// (`__exec --nofile S:H --arg0 A -- program args`), sets the limit and
+/// execs the program; each call appends its arguments to `dir/calls`.
+/// `slot-cli/tests/handover.rs` runs the real one.
+fn exec_shim(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let calls = dir.join("calls");
+    let script = dir.join("exec-shim");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{}'\n\
+             soft=${{3%%:*}}; hard=${{3##*:}}\n\
+             ulimit -S -n \"$soft\" 2>/dev/null\n\
+             ulimit -H -n \"$hard\" && ulimit -S -n \"$soft\" || exit 126\n\
+             shift 6\n\
+             exec \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// What `ulimit -Sn; ulimit -Hn` prints in a job of a client whose
+/// open-file limit is `nofile`.
+fn job_nofile(f: &Fixture, nofile: Option<crate::proto::FileLimit>) -> Res {
+    let mut req = sh(&f.root, "ulimit -Sn; ulimit -Hn");
+    req.nofile = nofile;
+    run(f, req)
+}
+
+fn limit_line(v: u64) -> String {
+    if v == u64::MAX {
+        "unlimited".into()
+    } else {
+        v.to_string()
+    }
+}
+
+/// A job runs with the open-file limit its client sends, not with the
+/// daemon's, from its first instruction; above the daemon's hard limit it
+/// gets that, and its client is warned once. A request without a limit, or
+/// with the daemon's own, runs with the daemon's and without the shim. The
+/// job record keeps the job's own argv.
+#[test]
+fn a_job_runs_with_the_open_file_limit_of_its_client() {
+    use crate::proto::FileLimit;
+    let shim_dir = tempfile::tempdir().unwrap();
+    let shim = exec_shim(shim_dir.path());
+    let f = start_cfg(2, |c| c.exec_shim = Some(shim));
+    let calls = || std::fs::read_to_string(shim_dir.path().join("calls")).unwrap_or_default();
+    let daemon = FileLimit::of_this_process();
+    for soft in [
+        daemon.soft / 2,
+        daemon.soft.saturating_mul(2).min(daemon.hard),
+    ] {
+        if soft == daemon.soft {
+            continue;
+        }
+        let r = job_nofile(
+            &f,
+            Some(FileLimit {
+                soft,
+                hard: daemon.hard,
+            }),
+        );
+        assert_eq!(r.code, 0, "{r:?}");
+        assert_eq!(
+            r.out,
+            format!("{}\n{}\n", limit_line(soft), limit_line(daemon.hard)),
+            "{r:?}"
+        );
+        assert!(!r.info.contains("open files"), "{r:?}");
+    }
+    assert!(
+        calls().contains(&format!(
+            "__exec --nofile {}:{} --arg0 sh -- ",
+            limit_line(daemon.soft / 2),
+            limit_line(daemon.hard)
+        )),
+        "{}",
+        calls()
+    );
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    for line in log.lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            v["argv"],
+            serde_json::json!(["sh", "-c", "ulimit -Sn; ulimit -Hn"]),
+            "{line}"
+        );
+    }
+
+    let before = calls();
+    for nofile in [None, Some(daemon)] {
+        let r = job_nofile(&f, nofile);
+        assert_eq!(
+            r.out,
+            format!("{}\n{}\n", limit_line(daemon.soft), limit_line(daemon.hard)),
+            "the daemon's limit: {r:?}"
+        );
+    }
+    assert_eq!(calls(), before, "no shim when nothing changes");
+
+    if daemon.hard < u64::MAX {
+        let r = job_nofile(
+            &f,
+            Some(FileLimit {
+                soft: daemon.hard + 1,
+                hard: u64::MAX,
+            }),
+        );
+        let hard = limit_line(daemon.hard);
+        assert_eq!(r.out, format!("{hard}\n{hard}\n"), "{r:?}");
+        assert_eq!(
+            r.info.matches("slot: warning: open files:").count(),
+            1,
+            "{r:?}"
+        );
+        assert!(
+            r.info.contains(&format!(
+                "the caller's limit is {}, the daemon's hard limit is {hard}: the job gets {hard}",
+                daemon.hard + 1
+            )),
+            "{r:?}"
+        );
+    }
+}
+
+// wave w1 u3
+
+/// A handover asks each client writer for its unsent bytes after the output
+/// pumps stopped. Frames a pump put into the writer's channel just before
+/// that are unsent too: the bytes the client read plus the bytes handed on
+/// hold every frame once, in order.
+#[test]
+fn a_handover_passes_on_the_frames_still_in_a_writers_channel() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (read, handed_on) = rt.block_on(async {
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let (_rd, wr) = ours.into_split();
+        let (frames, rx) = mpsc::unbounded_channel();
+        let (ctl, ctl_rx) = mpsc::unbounded_channel();
+        let mut unsent = serde_json::to_vec(&Frame::Out {
+            b: "unsent-before\n".into(),
+        })
+        .unwrap();
+        unsent.push(b'\n');
+        for i in 0..100 {
+            frames
+                .send(Frame::Out {
+                    b: format!("line{i}\n"),
+                })
+                .unwrap();
+        }
+        let (reply, answer) = oneshot::channel();
+        ctl.send(reply).unwrap();
+        let writer = tokio::spawn(client_writer(wr, rx, ctl_rx, unsent));
+        let handed_on = tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .expect("the writer answers within 10 s")
+            .expect("the writer answers");
+        writer.abort();
+        let mut read = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match theirs.try_read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => read.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("read: {e}"),
+            }
+        }
+        (read, handed_on)
+    });
+    let mut out = String::new();
+    for line in [read, handed_on].concat().split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<Frame>(line).unwrap() {
+            Frame::Out { b } => out += &b,
+            other => panic!("unexpected frame {other:?}"),
+        }
+    }
+    let want: String = std::iter::once("unsent-before\n".to_string())
+        .chain((0..100).map(|i| format!("line{i}\n")))
+        .collect();
+    assert_eq!(out, want, "a frame was lost or doubled");
 }
 
 #[test]

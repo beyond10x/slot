@@ -14,28 +14,38 @@ export function levelText(j: Job): string {
 }
 
 /**
- * Queued jobs in the order the pool serves them: urgent, high, normal, then low,
- * oldest request first inside a level, id breaks ties.
+ * Where a queued job stands inside its level: the daemon's `queue_class` (0 may no longer be passed,
+ * 1 predicted short, 2 the others). From a daemon that does not send it, 1 for a job moved ahead and 2
+ * for any other, which keeps the order of level, then arrival.
+ */
+export function servedClass(j: Job): number {
+  return j.queue_class ?? (j.ahead ? 1 : 2);
+}
+
+/**
+ * Queued jobs in the order the pool serves them: urgent, high, normal, then low; inside a level by
+ * {@link servedClass}, then oldest request first; id breaks ties.
  */
 export function servedQueue(list: Iterable<Job>): Job[] {
   const q: Job[] = [];
   for (const j of list) if (j.state === 'queued') q.push(j);
   return q.sort(
-    (a, b) => RANK[level(a)] - RANK[level(b)] || times(a).queued - times(b).queued || jobId(a) - jobId(b),
+    (a, b) =>
+      RANK[level(a)] - RANK[level(b)] || servedClass(a) - servedClass(b) || times(a).queued - times(b).queued || jobId(a) - jobId(b),
   );
 }
 
 /** How the daemon starts the reason of a cargo build that waits for another job of its target directory. */
 const TARGET = 'target directory ';
 
-/** How the daemon starts the reason of a job held while the host's CPUs are busier than the CPU limit. */
+/** How the daemon starts the reason of a job held while the pool and the compile cache use more CPUs than the CPU limit. */
 const HOST_BUSY = 'host busy';
 
 /** What a queued job waits for: a slot, or what the daemon's admission names in `wait_reason`. */
-export function waitsFor(j: Job): 'disk space' | 'memory' | "the host's CPUs" | 'a target directory' | 'slots' {
+export function waitsFor(j: Job): 'disk space' | 'memory' | 'the CPU limit' | 'a target directory' | 'slots' {
   if (!j.wait_reason) return 'slots';
   if (j.wait_reason.startsWith(TARGET)) return 'a target directory';
-  if (j.wait_reason.startsWith(HOST_BUSY)) return "the host's CPUs";
+  if (j.wait_reason.startsWith(HOST_BUSY)) return 'the CPU limit';
   return j.wait_reason.includes('filesystem') ? 'disk space' : 'memory';
 }
 
@@ -60,7 +70,7 @@ export function queuePlace(queue: readonly Job[], id: number): { pos: number; of
  * "waiting for slots" only when no listed job waits for disk space, memory or a target directory.
  */
 export function queueHeading(queue: readonly Job[]): string {
-  const kinds = (['disk space', 'memory', "the host's CPUs", 'a target directory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
+  const kinds = (['disk space', 'memory', 'the CPU limit', 'a target directory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
   const what = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : (kinds[0] ?? 'slots');
   return `Queue: waiting for ${what}, by level, oldest first`;
 }
