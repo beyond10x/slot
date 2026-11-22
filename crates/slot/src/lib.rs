@@ -14,6 +14,7 @@ pub mod client;
 pub mod evict;
 pub mod gate;
 pub mod hook;
+pub mod job_parallel;
 pub mod jobserver;
 pub mod paths;
 pub mod policy;

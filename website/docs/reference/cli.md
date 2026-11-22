@@ -189,6 +189,17 @@ slot run-limit [OPTIONS] [DURATION|off]
 - `--max`: The most a job may name with `slot --timeout`; 1 h until it is set
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
+### `slot job-parallel`
+
+Show or set the limit on build processes per job: with it a job's compilers run on a bound of the job's own, not on slots of the pool
+
+```text
+slot job-parallel [OPTIONS] [N|off]
+```
+
+- `<LIMIT>`: Build processes one job may run at once, from 1; `off` for no limit, the default. With a limit N the daemon starts a job without the pool's jobserver and with `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` set to N, or to the slots the job holds if that is more (`slot --tokens`): `cargo` and `make` in the job then bound themselves and take no slots of the pool, so the pool limits how many jobs run, not how many compilers. It applies to the jobs that start after the change, is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
 ### `slot cancel`
 
 Cancel a queued or running job you submitted; a running job's processes get SIGTERM, then SIGKILL after 5 s

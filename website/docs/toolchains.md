@@ -122,6 +122,10 @@ the job never waits for slots that do not exist. In remote mode the same value g
 server's daemon; with `--local` it is ignored. A daemon older than the client ignores it, and the
 job holds the toolchain's count.
 
+While [`slot job-parallel`](how-it-works.md#build-processes-per-job) is on, a job that holds more
+slots than that setting may run as many build processes as it holds slots:
+`slot --tokens 8 cargo build` gets `CARGO_BUILD_JOBS=8`.
+
 All toolchains also pass `TERM`, `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TZ`, `LANG` and
 `LC_ALL` to a remote server. A name that looks like a credential (`CARGO_REGISTRY_TOKEN`) is
 held back even when it matches a toolchain's prefix. `SLOT_ENV` adds more names; see

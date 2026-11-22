@@ -40,6 +40,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::admission;
 use crate::call;
 use crate::census;
+use crate::job_parallel;
 use crate::jobserver::{self, Pool, WaiterHandle};
 use crate::policy;
 use crate::procstat::{self, Proc, Snapshot, Tracker};
@@ -433,6 +434,10 @@ pub struct Server {
     /// The run-time limit and the most a job may name, as saved in
     /// `limits.json`.
     run_limit: Mutex<run_limit::Limits>,
+    /// Build processes one job may run at once (`slot job-parallel`), as
+    /// saved in `limits.json`; `None` = no limit, jobs get the pool's
+    /// jobserver.
+    job_parallel: Mutex<Option<usize>>,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -666,6 +671,7 @@ impl Server {
                 run_limit_s: saved.run_limit_s,
                 run_limit_max_s: saved.run_limit_max_s,
             }),
+            job_parallel: Mutex::new(saved.job_parallel),
         }))
     }
 
@@ -1812,6 +1818,14 @@ impl Server {
                 .unwrap_or_default(),
         };
         let mut env = tc.env(&ctx, base);
+        // The bound in force at the start is the job's, like its run-time
+        // limit: a later `slot job-parallel` changes the jobs that start
+        // after it. With a bound the job gets no pool jobserver.
+        let own =
+            job_parallel::for_job(*self.job_parallel.lock().expect("job parallel lock"), held);
+        if let Some(p) = own {
+            env = toolchain::own_jobserver(env, p);
+        }
         env.push(format!("{JOB_ENV}={id}"));
 
         let mut argv = req.argv.clone();
@@ -2673,6 +2687,7 @@ impl Server {
 
     fn save_limits(&self) {
         let run_limit = *self.run_limit.lock().expect("run limit lock");
+        let job_parallel = *self.job_parallel.lock().expect("job parallel lock");
         let saved = {
             let h = self.headroom.lock().expect("headroom lock");
             limits::Saved {
@@ -2681,6 +2696,7 @@ impl Server {
                 base: h.base,
                 run_limit_s: run_limit.run_limit_s,
                 run_limit_max_s: run_limit.run_limit_max_s,
+                job_parallel,
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -2811,6 +2827,27 @@ impl Server {
         };
         self.save_limits();
         Ok(view)
+    }
+
+    /// The limit on build processes per job, as `GET /api/job-parallel`
+    /// answers.
+    pub fn job_parallel_view(&self) -> job_parallel::View {
+        job_parallel::View {
+            job_parallel: *self.job_parallel.lock().expect("job parallel lock"),
+        }
+    }
+
+    /// Sets or clears the limit on build processes per job (`slot
+    /// job-parallel`) and saves it. Jobs that start afterwards get the new
+    /// environment; a running job keeps the one it started with.
+    pub fn set_job_parallel(
+        &self,
+        req: &job_parallel::Request,
+    ) -> Result<job_parallel::View, String> {
+        let to = req.setting()?;
+        *self.job_parallel.lock().expect("job parallel lock") = to;
+        self.save_limits();
+        Ok(self.job_parallel_view())
     }
 
     /// Marks every running job that ran past its limit as timed out and
@@ -3390,9 +3427,11 @@ impl Server {
         // and the calls below lock the headroom again.
         let base = self.headroom.lock().expect("headroom lock").base;
         let run_limit = self.run_limit_view();
+        let job_parallel = self.job_parallel_view().job_parallel;
         State {
             run_limit_s: run_limit.run_limit_s,
             run_limit_max_s: Some(run_limit.run_limit_max_s),
+            job_parallel,
             headroom_base: base,
             busy_cores: m.busy,
             target_cores: m.target,

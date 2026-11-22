@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-22",
-  "source": "CHANGELOG.md 0.1.0 to 0.22.0 and docs/design.md sections 10 to 22",
+  "source": "CHANGELOG.md 0.1.0 to 0.23.0 and docs/design.md sections 10 to 23",
   "items": [
     {
       "area": "Pool",
@@ -30,6 +30,13 @@
       "status": "shipped",
       "detail": "slot run-limit 10m ends a job that runs longer, with exit 124; a job names its own time with slot --timeout or SLOT_TIMEOUT, up to 1 hour unless slot run-limit --max changes it. No limit until one is set. (0.22.0)",
       "href": "/docs/how-it-works#run-time-limit"
+    },
+    {
+      "area": "Pool",
+      "label": "Build processes per job",
+      "status": "shipped",
+      "detail": "slot job-parallel 4 starts every job with a bound of its own (CARGO_BUILD_JOBS and MAKEFLAGS=-j) in place of the pool's jobserver: compilers take no slots, a freed slot goes to the queue, and the pool limits jobs, not compilers (up to slots x 4 of them). Off until it is set. (0.23.0)",
+      "href": "/docs/how-it-works#build-processes-per-job"
     },
     {
       "area": "Pool",

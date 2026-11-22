@@ -87,6 +87,10 @@ test`, or `SLOT_TIMEOUT=30m` in front of a command the shim wraps, up to the mos
 A `timeout` wrapped around the command extends nothing. Do not start a job that was ended at its
 limit again unchanged: make it shorter, split it, or name its time.
 
+A pool may give every job a bound of its own on build processes (`slot status` shows `at most N
+build processes per job` in its header). The job then has `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j`
+set by the daemon. Do not override them, and do not pass `-j` yourself.
+
 ## A refused command
 
 In Claude Code the plugin's `PreToolUse` hook refuses a Bash command that compiles or runs tests

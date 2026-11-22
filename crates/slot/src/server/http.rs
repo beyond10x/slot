@@ -42,6 +42,10 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/usage", get(usage))
         .route("/api/priority", get(priority_get).put(priority_put))
         .route("/api/run-limit", get(run_limit_get).put(run_limit_put))
+        .route(
+            "/api/job-parallel",
+            get(job_parallel_get).put(job_parallel_put),
+        )
         .fallback(get(asset))
         .with_state(s);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -182,6 +186,29 @@ pub(super) async fn run_limit_put(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
     };
     match s.set_run_limit(&req) {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e}\n")).into_response(),
+    }
+}
+
+pub(super) async fn job_parallel_get(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    axum::Json(s.job_parallel_view())
+}
+
+pub(super) async fn job_parallel_put(
+    State(s): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let port = s.cfg.http.map_or(0, |a| a.port());
+    if let Some(r) = refuse_change(&headers, port) {
+        return r.into_response();
+    }
+    let req: crate::job_parallel::Request = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
+    };
+    match s.set_job_parallel(&req) {
         Ok(v) => axum::Json(v).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, format!("{e}\n")).into_response(),
     }

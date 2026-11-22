@@ -369,6 +369,13 @@ run_limit_s?: number,
  */
 run_limit_max_s?: number, 
 /**
+ * Build processes one job may run at once (`slot job-parallel`): jobs
+ * then get a bound of their own in place of the pool's jobserver, and
+ * their compilers take no slots. Absent with no limit and from a
+ * daemon without the setting.
+ */
+job_parallel?: number, 
+/**
  * Tokens that neither a job nor a live process with the pool open
  * accounts for, as the daemon counted them last: lost, and written back
  * once two counts in a row agree. 0 from a daemon that predates it.

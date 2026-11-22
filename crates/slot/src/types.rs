@@ -333,6 +333,13 @@ pub struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub run_limit_max_s: Option<u64>,
+    /// Build processes one job may run at once (`slot job-parallel`): jobs
+    /// then get a bound of their own in place of the pool's jobserver, and
+    /// their compilers take no slots. Absent with no limit and from a
+    /// daemon without the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub job_parallel: Option<usize>,
     /// Tokens that neither a job nor a live process with the pool open
     /// accounts for, as the daemon counted them last: lost, and written back
     /// once two counts in a row agree. 0 from a daemon that predates it.

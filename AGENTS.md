@@ -33,8 +33,9 @@ what is specific to slot.
   replace a build system.
 - Adding a toolchain is one type implementing `Toolchain` plus one line in `toolchain::registry`;
   checklist in `docs/design.md` § 8.4.
-- The daemon never forwards client values of `MAKEFLAGS`, `MFLAGS`, `CARGO_MAKEFLAGS` or
-  `CARGO_BUILD_JOBS`: they would bypass the pool.
+- The daemon never forwards the client's values of `MAKEFLAGS`, `MFLAGS`, `CARGO_MAKEFLAGS` or
+  `CARGO_BUILD_JOBS`: they would bypass the pool. With `slot job-parallel` on it sets
+  `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` itself and leaves the pool's jobserver out of the job.
 - Remote mode forwards only variables a toolchain's `client_env` admits, plus names listed in
   `SLOT_ENV`. Credentials never cross.
 - After a normal exit the daemon does not kill the job's process group: a sccache server started
@@ -236,7 +237,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.22.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.23.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 admission by disk and memory, headroom and call mode, headroom of the machine, slots named by the
 job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, the gate for builds in a sandbox, handover on reload, lost-token
 recovery, and eviction of local target directories (deletes by default, `evict.json` sets a dry run).

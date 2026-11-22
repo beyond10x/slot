@@ -34,6 +34,9 @@ slots. Twelve `cargo test` runs on a 20-slot pool share 20 slots; they do not ge
 The daemon drops the caller's `MAKEFLAGS`, `MFLAGS`, `CARGO_MAKEFLAGS` and `CARGO_BUILD_JOBS`
 before it starts a job. Any of them would let a job bypass the pool.
 
+One setting changes this: with [`slot job-parallel`](#build-processes-per-job) on, a job gets a
+bound of its own instead of the pool's FIFO.
+
 ## Slots per job
 
 Before a job starts, the daemon takes the slots the job's [toolchain](toolchains.md) asks for and
@@ -51,6 +54,74 @@ A job never holds more slots than the pool has: a go job on a pool of 2 holds 2 
 For `rust` jobs the daemon also sets `RUST_TEST_THREADS` and `NEXTEST_TEST_THREADS` to the number
 of free slots when the job starts, at least 2, unless the caller set them. The jobserver does not
 limit the threads of a test binary; this does.
+
+## Build processes per job
+
+A `rust` or `other` job holds one slot, and its `cargo` reads one more token from the FIFO for
+every compiler it starts. A freed token goes to whoever reads the FIFO first, and the `cargo`
+processes of the running jobs read it against the one daemon that reads for the waiting jobs. On
+a busy pool the running jobs grow wider while the queue stands: on one pool of 50 slots, 7 `cargo`
+processes read against the daemon, one of them ran 19 compilers, and 10 jobs ran while 49 waited.
+
+`slot job-parallel` takes the compilers out of the pool. It is off on a fresh install, and off is
+the behaviour described above, unchanged.
+
+```sh
+slot job-parallel        # print the value in force
+slot job-parallel 4      # a job runs at most 4 build processes, on a bound of its own
+slot job-parallel off    # back: every build process takes a slot of the pool
+```
+
+With the setting at N the daemon starts a job without the pool's jobserver. In place of
+`MAKEFLAGS` and `CARGO_MAKEFLAGS` with `--jobserver-auth`, every job gets
+
+```text
+CARGO_BUILD_JOBS=<P>
+MAKEFLAGS=-j<P>
+```
+
+P is N, or the slots the job holds when those are more: `slot --tokens 8 cargo build` gets 8, a
+go job that holds 6 slots gets 6. cargo finds no jobserver in its environment, makes one of its
+own with P tokens and hands that to rustc and to build scripts; GNU make runs P recipes at once.
+The job still waits in the queue and holds its slots as before. Only its compilers stop reading
+the pool's FIFO, so the daemon is the FIFO's only reader and a freed slot goes to the head of
+the queue.
+
+The bound needs the pool's jobserver gone: cargo ignores `CARGO_BUILD_JOBS` and `-j`
+while it inherits a jobserver, so a bound per job cannot be had inside the pool.
+
+What it costs:
+
+- **The pool bounds jobs, not compilers.** A pool of S slots runs up to S jobs of one slot, and
+  each runs up to N build processes: up to S × N at once. 50 slots at N = 4 allow 200 compilers
+  where the pool alone allowed 50. Size `--tokens` or the headroom for that; the `CPUQuota` of
+  the [headroom](headroom.md) still caps the CPU time of all jobs together.
+- **A job no longer yields to the others.** With the pool's jobserver a `cargo` gets fewer tokens
+  when the pool is full. With its own it runs P wide whatever else runs.
+- **The bound is per `cargo` and per `make`, not per job.** A script that runs two `cargo`
+  commands at once runs 2 × P compilers. A build script that uses the `cc` or `cmake` crate stays
+  inside its cargo's jobserver; one that starts `make` itself and passes no jobserver on gets
+  `-j<P>` from the job's environment, beside its cargo's P.
+- **rustc inside the bound.** rustc takes tokens of its cargo's jobserver for its code generation
+  threads, as it took the pool's before.
+
+What it gives besides the queue order: a `cargo` that is killed takes no slots of the pool with
+it, because it never held any. Lost slots (the end of [Priority](#priority) describes them) then
+come only from jobs that started before the switch.
+
+The setting applies to the jobs that start after the change; a running job keeps the environment
+it started with. It is kept in `limits.json` in the state directory, beside the headroom, and
+holds across reloads and restarts. `GET` and `PUT /api/job-parallel` read and change it
+(`{"job_parallel": 4}`; `null` switches it off; a value under 1 or a body without the field is
+refused with 400). `slot status` shows it in a header line when it is on:
+
+```text
+at most 4 build processes per job, outside the pool's slots
+```
+
+sccache from 0.12.0 leaves `CARGO_BUILD_JOBS` out of its cache key, so the setting changes
+nothing the compile cache answers. An older sccache hashes it: there each bound has cache entries
+of its own.
 
 ## The queue
 
