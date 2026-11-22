@@ -883,9 +883,20 @@ Need: the workstation's `/` fills with target directories of worktrees nobody bu
   `CARGO_BUILD_TARGET_DIR`, else `target/` beside the workspace root found from
   `--manifest-path` or the working directory) and stores it in the job's `target_dir`. At start
   the map of directory to last build time comes from `jobs.jsonl`.
-- **When.** Every 60 s, per filesystem (device id): when free space is under `--evict-below`
-  (GB, default 40, 0 off), directories go least recently built first until free space plus their
-  sizes reaches the floor plus 10 GB. Sizes are measured only until that goal is met.
+- **When.** Every 60 s, per filesystem (device id): when free space is under the eviction mark,
+  directories go least recently built first until free space plus their sizes reaches the mark
+  plus 10 GB. Sizes are measured only until that goal is met.
+- **The mark.** The larger of `--evict-below` (GB, default 40) and `--min-free-disk` (§ 14,
+  default 25); `--evict-below 0` turns eviction off whatever `--min-free-disk` is. Up to 0.24
+  the mark was `--evict-below` alone: with `--min-free-disk 50` and the default 40, a filesystem
+  between 40 and 50 GB free held every build for disk and nothing was deleted (up to 38 jobs
+  queued for about 12 minutes, measured 2026-11-22). `slot status` prints the mark in force and,
+  when `--min-free-disk` raised it, says so in the same line (`under 50.0 GB, raised from 40.0 GB
+  to the disk hold's mark`).
+- **At the hold.** A job held for disk wakes the watch. It looks at once, instead of at the next
+  minute, when its last look found free space at or above the mark (or there was none yet). A
+  look that already found it under the mark is not repeated before the minute: sizing
+  directories costs a walk of each, and a dry run would size the same ones every 2 s.
 - **Kept.** A directory whose repository has a queued or running job, a directory a queued or
   running job builds into, and one built in the last 2 h. Before each deletion the check repeats
   under the server lock.
@@ -1269,7 +1280,9 @@ does not see it. The host-wide figure does.
 absent: off, and the file is then byte for byte what a daemon without the setting writes) and
 `cpu_busy_floor` (jobs that may always run; absent: 4). `GET` and `PUT /api/cpu-limit`, `slot
 cpu-limit [<CPUs>|off] [--floor <N>]`, `State.cpu_busy_max` and `State.cpu_busy_floor`, one header
-line in `slot status`. A mark under 1 or not finite, a floor under 1 and a floor without a mark
+line in `slot status`. `GET /api/cpu-limit` answers the parts of the figure as `pool`,
+`compile_cache` and `outside` (CPUs, `null` before the first sample) beside `busy`, the host's
+total; `slot cpu-limit` prints them. A mark under 1 or not finite, a floor under 1 and a floor without a mark
 are refused. A mark above the host's CPU count is taken and holds nothing. Released switched off.
 
 **The hold** (`cpu_limit::verdict`, `Server::cpu_verdict`). The third check of
@@ -1279,14 +1292,27 @@ while both are true:
 1. at least `floor` jobs run (a job counts from the claim of its slots);
 2. busy + starting + ahead ≥ mark.
 
-- **busy.** `Sample::host_cores` of the census sampler (§ 11): the CPU ticks of every process in
-  `/proc` over one interval, so the compilers of a compile cache server and everything outside
-  the pool count. The sampler runs once a second; the hold reads the mean of its last 10 samples
-  (`cpu_limit::Recent`, the span of one census log line) and scans nothing itself. One sample
-  swings with every process that starts or ends; the mean of 10 moves at most a tenth of that a
-  second. The sampler's first sample has no earlier reading and is left out. A mean whose last
-  sample is older than 5 s is no figure. A process that starts and ends inside one interval is in
-  no sample; the share of `/proc/stat` that the daemon also reads (`sys_cpu`) counts it.
+- **busy.** The CPU of the pool's own work: `pool + compile cache` of the census sampler (§ 11),
+  from the CPU ticks of each process in `/proc` over one interval (`census::Sample::parts`).
+  - *pool*: every process in the tree of a running job, and the compilers of a compile cache
+    server that carry a job's `SLOT_JOB` (`compile_server_work`), so the CPU a job's compiles
+    use inside the cache server counts once, here.
+  - *compile cache*: the rest of each compile cache server's tree (`sccache` outside every
+    job tree, `census::compile_cache_pids`): the server itself and the compilers it runs for
+    builds outside the pool.
+  - *outside*: every other process; shown, not counted.
+
+  The three parts do not overlap and add up to `Sample::host_cores`. The sampler runs once a
+  second; the hold reads the mean of its last 10 samples (`cpu_limit::Recent`, the span of one
+  census log line) and scans nothing itself. One sample swings with every process that starts or
+  ends; the mean of 10 moves at most a tenth of that a second. The sampler's first sample has no
+  earlier reading and is left out. A mean whose last sample is older than 5 s is no figure. A
+  process that starts and ends inside one interval is in no sample.
+
+  Up to 0.24 the figure was `host_cores`, every process of the host. Measured 2026-11-22 with the
+  mark 17 and the floor 6: 7.7 to 10.8 of 16 to 20 busy CPUs were outside the pool and outside
+  the compile cache server, and for 11 minutes 78 jobs waited 204 s at the median for that work;
+  the limit was switched off. The pool's work alone is what the pool can make room for.
 - **starting.** The memory hold's device (§ 14): a job that claimed its slots, or started under
   30 s ago, counts with `expected − shown`, at least 0. `expected` is the median of `cpu_s ÷ run
   time` over the last 20 runs of the same repository and argv that ended on their own and ran a
@@ -1330,3 +1356,7 @@ is not attributed at the start), so `starting` is low for such a job until the m
 - *One sample as the figure.* One second under the mark would start a job.
 - *A second scan of `/proc` per admission check.* The sampler's scan is the one walk a second;
   a queue of held jobs that each look every 2 s would multiply it.
+- *The CPU of the `slot.service` and `sccache.service` cgroups as the parts.* It would count
+  processes that live under a second, but it reads a layout only systemd gives, it counts the
+  daemon's sccache children that serve pool jobs under the compile cache instead of the job, and
+  `shown` of a starting job would no longer come from the same ticks as the figure.

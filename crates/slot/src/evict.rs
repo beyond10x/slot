@@ -57,15 +57,41 @@ pub fn dry_run(state_dir: &Path, flag: bool) -> bool {
         .unwrap_or(flag)
 }
 
+/// The free space below which eviction starts: the larger of
+/// `--evict-below` and `--min-free-disk`, so eviction runs whenever the disk
+/// hold stops builds from starting. `--evict-below 0` keeps it off.
+pub fn mark(evict_below: u64, min_free_disk: u64) -> u64 {
+    if evict_below == 0 {
+        0
+    } else {
+        evict_below.max(min_free_disk)
+    }
+}
+
+/// The mark as `slot status` and the journal name it: `40.0 GB`, or
+/// `50.0 GB, raised from 40.0 GB to the disk hold's mark` when
+/// `--min-free-disk` raised it from `--evict-below` (`raised_from`, 0 when
+/// it did not).
+pub fn mark_text(floor: u64, raised_from: u64) -> String {
+    if raised_from == 0 {
+        return crate::admission::gb(floor);
+    }
+    format!(
+        "{}, raised from {} to the disk hold's mark",
+        crate::admission::gb(floor),
+        crate::admission::gb(raised_from)
+    )
+}
+
 /// `disk: 32.0 GB free, under 40.0 GB: eviction is off (dry run), would
 /// free 31.0 GB in 2 dir(s)`: what a dry run under the floor says in the
-/// journal and in `slot status`.
-pub fn off_summary(free: u64, floor: u64, done: &[Eviction]) -> String {
+/// journal and in `slot status`. `raised_from` as in [`mark_text`].
+pub fn off_summary(free: u64, floor: u64, raised_from: u64, done: &[Eviction]) -> String {
     let bytes: u64 = done.iter().map(|e| e.bytes).sum();
     format!(
         "disk: {} free, under {}: eviction is off (dry run), would free {} in {} dir(s)",
         crate::admission::gb(free),
-        crate::admission::gb(floor),
+        mark_text(floor, raised_from),
         crate::admission::gb(bytes),
         done.len()
     )
@@ -74,10 +100,15 @@ pub fn off_summary(free: u64, floor: u64, done: &[Eviction]) -> String {
 /// What `slot status` and the web UI show about eviction.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 pub struct Report {
-    /// Free bytes below which eviction starts; 0 = off.
+    /// Free bytes below which eviction starts (the mark); 0 = off.
     #[ts(type = "number")]
     #[serde(default)]
     pub floor: u64,
+    /// `--evict-below`, bytes, when `--min-free-disk` is larger and so
+    /// raised the mark to the disk hold's value; 0 when it did not.
+    #[ts(type = "number")]
+    #[serde(default)]
+    pub raised_from: u64,
     /// Only reporting, not deleting.
     #[serde(default)]
     pub dry_run: bool,
@@ -392,14 +423,33 @@ mod tests {
         };
         let done = [e("/w/a/target", 20 * GB), e("/w/b/target", 11 * GB)];
         assert_eq!(
-            off_summary(32 * GB, 40 * GB, &done),
+            off_summary(32 * GB, 40 * GB, 0, &done),
             "disk: 32.0 GB free, under 40.0 GB: eviction is off (dry run), \
              would free 31.0 GB in 2 dir(s)"
         );
         assert_eq!(
-            off_summary(39 * GB, 40 * GB, &[]),
+            off_summary(39 * GB, 40 * GB, 0, &[]),
             "disk: 39.0 GB free, under 40.0 GB: eviction is off (dry run), \
              would free 0.0 GB in 0 dir(s)"
+        );
+        assert_eq!(
+            off_summary(45 * GB, 50 * GB, 40 * GB, &done),
+            "disk: 45.0 GB free, under 50.0 GB, raised from 40.0 GB to the disk hold's mark: \
+             eviction is off (dry run), would free 31.0 GB in 2 dir(s)"
+        );
+    }
+
+    #[test]
+    fn the_mark_is_the_larger_of_evict_below_and_the_disk_hold_and_0_stays_off() {
+        assert_eq!(mark(40 * GB, 50 * GB), 50 * GB, "the disk hold raises it");
+        assert_eq!(mark(40 * GB, 25 * GB), 40 * GB);
+        assert_eq!(mark(40 * GB, 0), 40 * GB, "no disk hold");
+        assert_eq!(mark(0, 50 * GB), 0, "--evict-below 0 is off");
+        assert_eq!(mark(0, 0), 0);
+        assert_eq!(mark_text(40 * GB, 0), "40.0 GB");
+        assert_eq!(
+            mark_text(50 * GB, 40 * GB),
+            "50.0 GB, raised from 40.0 GB to the disk hold's mark"
         );
     }
 

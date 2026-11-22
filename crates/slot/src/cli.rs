@@ -98,7 +98,7 @@ pub enum Cmd {
     /// compilers run on a bound of the job's own, not on slots of the pool.
     JobParallel(JobParallelArgs),
     /// Show or set the CPU limit: the start of a queued job is held while
-    /// the whole host is busier than a mark.
+    /// the pool's jobs and the compile cache use more CPUs than a mark.
     CpuLimit(CpuLimitArgs),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
@@ -181,6 +181,7 @@ pub struct ServeArgs {
     pub sccache_watch: bool,
     /// A job waits while the filesystem of its directory or of
     /// `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off.
+    /// Above `--evict-below`, eviction starts here instead.
     #[arg(long, default_value_t = 25.0, value_name = "GB")]
     pub min_free_disk: f64,
     /// A job waits while available memory, less what jobs that started in
@@ -211,9 +212,11 @@ pub struct ServeArgs {
     pub cache_budget: f64,
     /// When the filesystem of a local Cargo target directory has less free
     /// space than this, GB, delete target directories that jobs built into,
-    /// least recently built first, until it has 10 GB more. Directories of a
-    /// repository with a queued or running job, or built in the last 2 h,
-    /// are kept. 0 turns it off.
+    /// least recently built first, until it has 10 GB more. The mark is
+    /// `--min-free-disk` when that is larger, so eviction runs whenever jobs
+    /// wait for disk; a job that starts to wait makes it look at once.
+    /// Directories of a repository with a queued or running job, or built in
+    /// the last 2 h, are kept. 0 turns it off, whatever `--min-free-disk` is.
     #[arg(long, default_value_t = 40.0, value_name = "GB")]
     pub evict_below: f64,
     /// Only report in the journal and `slot status` which target
@@ -406,14 +409,17 @@ pub struct RunLimitArgs {
 /// `slot cpu-limit` arguments. Without any, prints the values in force.
 #[derive(Debug, Clone, Args)]
 pub struct CpuLimitArgs {
-    /// Busy CPUs of the host from which the start of a queued job is held,
-    /// from 1 (`17`, `17.5`); `off` for no limit, the default. The figure
-    /// is the CPU time of every process on the host over the last 10 s,
-    /// whoever started it, with what jobs that started in the last 30 s
-    /// are expected to add. A job held for 10 minutes starts whatever the
-    /// figure says. A mark above the host's CPU count never holds. The
-    /// mark reaches queued jobs within 2 seconds, is kept in `limits.json` in
-    /// the state directory and holds across reloads and restarts.
+    /// Busy CPUs from which the start of a queued job is held, from 1
+    /// (`17`, `17.5`); `off` for no limit, the default. The figure is the
+    /// CPU time over the last 10 s of the pool's jobs (with the compilers a
+    /// compile cache server runs for them) and of the rest of the compile
+    /// cache server, with what jobs that started in the last 30 s are
+    /// expected to add; work outside both is shown, not counted. Without
+    /// arguments it prints both parts and the CPUs outside them. A job
+    /// held for 10 minutes starts whatever the figure says. A mark above the
+    /// host's CPU count never holds. The mark reaches queued jobs within 2
+    /// seconds, is kept in `limits.json` in the state directory and holds
+    /// across reloads and restarts.
     #[arg(value_name = "CPUs|off")]
     pub mark: Option<crate::cpu_limit::Setting>,
     /// Jobs that may always run, whatever the host's CPUs do, from 1; 4
@@ -606,6 +612,7 @@ impl ServeArgs {
                 min_idle: std::time::Duration::from_secs(2 * 3600),
                 dry_run: self.evict_dry_run,
             },
+            disk_free: None,
             handover: self.handover,
         })
     }

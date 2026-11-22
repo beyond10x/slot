@@ -304,11 +304,22 @@ pub fn render_cpu_limit(v: &CpuLimitView) -> String {
         out.push('\n');
         return out;
     }
-    match v.busy {
-        Some(busy) => {
+    match (v.pool, v.compile_cache, v.outside, v.busy) {
+        (Some(pool), Some(cache), outside, _) => {
+            let _ = write!(
+                out,
+                "; now pool {pool:.1} + compile cache {cache:.1} of {} CPUs",
+                v.cpus
+            );
+            if let Some(o) = outside {
+                let _ = write!(out, ", {o:.1} outside both");
+            }
+        }
+        // A daemon that predates the parts counts the whole host.
+        (_, _, _, Some(busy)) => {
             let _ = write!(out, "; now {busy:.1} of {} CPUs busy", v.cpus);
         }
-        None => out.push_str("; no sample of the host's CPUs yet"),
+        _ => out.push_str("; no sample of the host's CPUs yet"),
     }
     match v.held {
         0 => {}
@@ -529,7 +540,8 @@ fn lost_line(s: &State) -> Option<String> {
 
 /// `disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB`, or in
 /// a dry run `disk: … eviction is off (dry run), would free 31.0 GB in 2 dir(s)`;
-/// nothing when eviction is off or never looked.
+/// nothing when eviction is off or never looked. A mark the disk hold raised
+/// reads `under 50.0 GB, raised from 40.0 GB to the disk hold's mark`.
 fn evict_line(r: &crate::evict::Report) -> Option<String> {
     if r.floor == 0 || r.checked_ms == 0 {
         return None;
@@ -547,21 +559,21 @@ fn evict_line(r: &crate::evict::Report) -> Option<String> {
         return Some(format!(
             "disk: {} free, eviction below {} ({mode}{} target dir(s) known){deleted}\n",
             crate::admission::gb(r.free),
-            crate::admission::gb(r.floor),
+            crate::evict::mark_text(r.floor, r.raised_from),
             r.known
         ));
     }
     if r.dry_run {
         return Some(format!(
             "{}{deleted}\n",
-            crate::evict::off_summary(r.free, r.floor, &r.last)
+            crate::evict::off_summary(r.free, r.floor, r.raised_from, &r.last)
         ));
     }
     let bytes: u64 = r.last.iter().map(|e| e.bytes).sum();
     Some(format!(
         "disk: {} free, under {}: deleted {} target dir(s), {}{deleted}\n",
         crate::admission::gb(r.free),
-        crate::admission::gb(r.floor),
+        crate::evict::mark_text(r.floor, r.raised_from),
         r.last.len(),
         crate::admission::gb(bytes)
     ))
@@ -695,6 +707,7 @@ mod tests {
             checked_ms: 1,
             last: vec![e(20 * gb), e(11 * gb)],
             deleted_bytes: 0,
+            raised_from: 0,
         };
         assert_eq!(
             evict_line(&r).unwrap(),
@@ -708,6 +721,45 @@ mod tests {
             evict_line(&r).unwrap(),
             "disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB, \
              31.0 GB deleted since start\n"
+        );
+    }
+
+    #[test]
+    fn the_eviction_line_names_the_mark_and_says_when_the_disk_hold_raised_it() {
+        let gb = crate::admission::GB;
+        let mut r = crate::evict::Report {
+            floor: 50 * gb,
+            raised_from: 40 * gb,
+            known: 12,
+            free: 60 * gb,
+            checked_ms: 1,
+            ..crate::evict::Report::default()
+        };
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 60.0 GB free, eviction below 50.0 GB, raised from 40.0 GB to the disk \
+             hold's mark (12 target dir(s) known)\n"
+        );
+        r.free = 45 * gb;
+        r.last = vec![crate::evict::Eviction {
+            path: "/w/a/target".into(),
+            bytes: 21 * gb,
+            last_ms: 0,
+            action: "deleted".into(),
+        }];
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 45.0 GB free, under 50.0 GB, raised from 40.0 GB to the disk hold's mark: \
+             deleted 1 target dir(s), 21.0 GB\n"
+        );
+        r.raised_from = 0;
+        r.floor = 40 * gb;
+        r.free = 60 * gb;
+        r.last.clear();
+        assert_eq!(
+            evict_line(&r).unwrap(),
+            "disk: 60.0 GB free, eviction below 40.0 GB (12 target dir(s) known)\n",
+            "not raised: the mark alone"
         );
     }
 
@@ -1338,6 +1390,7 @@ mod tests {
             cpus: 20,
             busy: Some(18.44),
             held: 3,
+            ..View::default()
         };
         assert_eq!(
             render_cpu_limit(&v),
@@ -1371,6 +1424,30 @@ mod tests {
                 ..View::default()
             }),
             "no CPU limit: a queued job starts whatever the host's CPUs do\n"
+        );
+    }
+
+    #[test]
+    fn slot_cpu_limit_prints_the_parts_and_the_cpus_outside_both() {
+        use crate::cpu_limit::{Limits, Parts};
+        let limits = Limits {
+            cpu_busy_max: Some(17.0),
+            cpu_busy_floor: Some(6),
+        };
+        let parts = Parts {
+            pool: 12.0,
+            compile_cache: 6.0,
+            outside: 1.5,
+        };
+        assert_eq!(
+            render_cpu_limit(&limits.view(20, Some(parts), 1)),
+            "starts held while the host is busier than 17.0 CPUs and 6 jobs run; \
+             now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held\n"
+        );
+        assert_eq!(
+            render_cpu_limit(&limits.view(20, None, 0)),
+            "starts held while the host is busier than 17.0 CPUs and 6 jobs run; \
+             no sample of the host's CPUs yet\n"
         );
     }
 

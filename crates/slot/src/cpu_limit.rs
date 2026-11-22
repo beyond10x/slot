@@ -1,13 +1,15 @@
 //! Admission by the host's busy CPUs (`slot cpu-limit`).
 //!
-//! Slots bound what the pool starts, not what the host runs: a compile
-//! cache server compiles in a cgroup of its own, other sessions build
-//! outside the pool, and a job may use more CPUs than it holds slots. With a
-//! mark set, a queued job that could start is held while the host is busier
-//! than the mark and at least `floor` jobs of the pool run.
+//! Slots bound what the pool starts, not what its work uses: a compile cache
+//! server compiles in a cgroup of its own, and a job may use more CPUs than
+//! it holds slots. With a mark set, a queued job that could start is held
+//! while the pool and the compile cache use more CPUs than the mark and at
+//! least `floor` jobs of the pool run. Work outside both does not hold it:
+//! the pool cannot make room for that by holding its own jobs.
 //!
-//! The figure is the census sampler's: the CPU time of every process on the
-//! host, averaged over its last [`WINDOW`] samples ([`Recent`]). A job that
+//! The figure is the census sampler's: the CPU time of the pool's processes
+//! and of the compile cache servers', not of work outside both ([`Parts`]),
+//! averaged over its last [`WINDOW`] samples ([`RecentParts`]). A job that
 //! started moments ago is not in that average yet, so it counts with the
 //! CPUs it is expected to use, less what it already shows ([`Load::starting`]):
 //! without that every held job would start in the moment the figure dips
@@ -110,14 +112,17 @@ impl Limits {
     }
 
     /// The limits as `GET /api/cpu-limit` answers, on a host of `cpus` CPUs
-    /// that is `busy` now, with `held` jobs held.
-    pub fn view(&self, cpus: u32, busy: Option<f64>, held: usize) -> View {
+    /// that is as busy as `parts` now, with `held` jobs held.
+    pub fn view(&self, cpus: u32, parts: Option<Parts>, held: usize) -> View {
         View {
             cpu_busy_max: self.cpu_busy_max,
             cpu_busy_floor: self.cpu_busy_max.map(|_| self.floor()),
             cpus,
-            busy,
+            busy: parts.map(|p| p.host()),
             held,
+            pool: parts.map(|p| p.pool),
+            compile_cache: parts.map(|p| p.compile_cache),
+            outside: parts.map(|p| p.outside),
         }
     }
 }
@@ -162,6 +167,18 @@ pub struct View {
     /// Queued jobs held for the host's CPUs now.
     #[serde(default)]
     pub held: usize,
+    /// Busy CPUs of the pool's jobs, with the compilers a compile cache
+    /// server runs for them: counted against the mark. `None` before the
+    /// first sample and from a daemon that predates the parts.
+    #[serde(default)]
+    pub pool: Option<f64>,
+    /// Busy CPUs of the rest of the compile cache servers: counted against
+    /// the mark.
+    #[serde(default)]
+    pub compile_cache: Option<f64>,
+    /// Busy CPUs outside the pool and the compile cache: not counted.
+    #[serde(default)]
+    pub outside: Option<f64>,
 }
 
 /// The argument of `slot cpu-limit`: a number of CPUs, or `off`.
@@ -245,11 +262,72 @@ impl Recent {
     }
 }
 
+/// Busy CPUs of the host in three parts that do not overlap
+/// ([`crate::census::Sample::parts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Parts {
+    /// The processes of the pool's running jobs, with the compilers a
+    /// compile cache server runs for them.
+    pub pool: f64,
+    /// The rest of the compile cache servers' processes.
+    pub compile_cache: f64,
+    /// Everything else on the host.
+    pub outside: f64,
+}
+
+impl Parts {
+    /// What the limit counts: the pool and the compile cache.
+    pub fn counted(&self) -> f64 {
+        self.pool + self.compile_cache
+    }
+
+    /// Busy CPUs of the whole host.
+    pub fn host(&self) -> f64 {
+        self.pool + self.compile_cache + self.outside
+    }
+}
+
+/// The last samples of each part, one a second.
+#[derive(Debug, Clone, Default)]
+pub struct RecentParts {
+    pool: Recent,
+    compile_cache: Recent,
+    outside: Recent,
+}
+
+impl RecentParts {
+    /// Adds the sample taken at `now_ms`; keeps the last [`WINDOW`].
+    pub fn push(&mut self, p: Parts, now_ms: i64) {
+        self.pool.push(p.pool, now_ms);
+        self.compile_cache.push(p.compile_cache, now_ms);
+        self.outside.push(p.outside, now_ms);
+    }
+
+    /// Samples kept.
+    pub fn len(&self) -> usize {
+        self.pool.len()
+    }
+
+    /// Whether no sample was taken yet.
+    pub fn is_empty(&self) -> bool {
+        self.pool.is_empty()
+    }
+
+    /// The mean of each part, as [`Recent::mean`].
+    pub fn mean(&self, now_ms: i64) -> Option<Parts> {
+        Some(Parts {
+            pool: self.pool.mean(now_ms)?,
+            compile_cache: self.compile_cache.mean(now_ms)?,
+            outside: self.outside.mean(now_ms)?,
+        })
+    }
+}
+
 /// What the daemon knows of the host's busy CPUs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Figure {
-    /// Busy CPUs of the host.
-    Busy(f64),
+    /// Busy CPUs of the host, in parts.
+    Busy(Parts),
     /// The daemon started moments ago ([`GRACE_MS`]) and has no sample yet.
     Pending,
     /// No sample: the hold does not apply.
@@ -287,8 +365,9 @@ pub enum Verdict {
 }
 
 /// Weighs one queued job: held while at least `floor` jobs run and the
-/// host's busy CPUs, with what is expected of jobs that just started and of
-/// held jobs ahead of it, reach the mark.
+/// busy CPUs of the pool and the compile cache ([`Parts::counted`]), with
+/// what is expected of jobs that just started and of held jobs ahead of it,
+/// reach the mark. CPUs outside both are not counted.
 pub fn verdict(limits: Limits, load: &Load, hold_max: Duration) -> Verdict {
     let Some(mark) = limits.cpu_busy_max else {
         return Verdict::Free;
@@ -299,11 +378,15 @@ pub fn verdict(limits: Limits, load: &Load, hold_max: Duration) -> Verdict {
     let text = match load.figure {
         Figure::Unknown => return Verdict::Free,
         Figure::Pending => "host busy: no sample of its CPUs yet".to_string(),
-        Figure::Busy(busy) => {
-            if busy + load.starting + load.ahead < mark {
+        Figure::Busy(parts) => {
+            if parts.counted() + load.starting + load.ahead < mark {
                 return Verdict::Free;
             }
-            let mut text = format!("host busy: {busy:.1} of {} CPUs", load.cpus);
+            // The `host busy` prefix is what the web view and status read.
+            let mut text = format!(
+                "host busy: pool {:.1} + compile cache {:.1} of {} CPUs",
+                parts.pool, parts.compile_cache, load.cpus
+            );
             if load.starting >= 0.05 {
                 let _ = write!(text, " + {:.1} for jobs that just started", load.starting);
             }
@@ -335,7 +418,10 @@ mod tests {
 
     fn load(busy: f64, running: usize) -> Load {
         Load {
-            figure: Figure::Busy(busy),
+            figure: Figure::Busy(Parts {
+                pool: busy,
+                ..Parts::default()
+            }),
             cpus: 20,
             running,
             starting: 0.0,
@@ -349,16 +435,68 @@ mod tests {
     }
 
     #[test]
+    fn the_pool_and_the_compile_cache_count_and_work_outside_them_does_not() {
+        let l = at(17.0, Some(6));
+        let mut d = load(0.0, 6);
+        d.figure = Figure::Busy(Parts {
+            pool: 3.0,
+            compile_cache: 2.0,
+            outside: 10.0,
+        });
+        assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Free, "5 of 17");
+        d.figure = Figure::Busy(Parts {
+            pool: 4.0,
+            compile_cache: 2.0,
+            outside: 14.0,
+        });
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            Verdict::Free,
+            "a saturated host, 6 of it the pool's"
+        );
+        d.figure = Figure::Busy(Parts {
+            pool: 12.0,
+            compile_cache: 6.0,
+            outside: 0.0,
+        });
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            held("host busy: pool 12.0 + compile cache 6.0 of 20 CPUs, mark 17.0")
+        );
+        d.running = 5;
+        assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Free, "under the floor");
+    }
+
+    #[test]
+    fn the_parts_window_is_the_mean_of_each_part_and_goes_stale() {
+        let mut r = RecentParts::default();
+        assert!(r.is_empty());
+        assert_eq!(r.mean(0), None);
+        let p = |pool, compile_cache, outside| Parts {
+            pool,
+            compile_cache,
+            outside,
+        };
+        r.push(p(4.0, 2.0, 1.0), 1_000);
+        r.push(p(8.0, 4.0, 3.0), 2_000);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.mean(2_000), Some(p(6.0, 3.0, 2.0)));
+        assert_eq!(r.mean(2_001 + STALE_MS), None);
+        assert_eq!(p(6.0, 3.0, 2.0).counted(), 9.0);
+        assert_eq!(p(6.0, 3.0, 2.0).host(), 11.0);
+    }
+
+    #[test]
     fn a_start_is_held_above_the_mark_once_the_floor_runs() {
         let l = at(17.0, None);
         assert_eq!(l.floor(), 4, "the floor nobody named");
         assert_eq!(
             verdict(l, &load(18.4, 4), HOLD_MAX),
-            held("host busy: 18.4 of 20 CPUs, mark 17.0")
+            held("host busy: pool 18.4 + compile cache 0.0 of 20 CPUs, mark 17.0")
         );
         assert_eq!(
             verdict(l, &load(17.0, 9), HOLD_MAX),
-            held("host busy: 17.0 of 20 CPUs, mark 17.0"),
+            held("host busy: pool 17.0 + compile cache 0.0 of 20 CPUs, mark 17.0"),
             "at the mark"
         );
         assert_eq!(
@@ -373,7 +511,7 @@ mod tests {
         );
         assert_eq!(
             verdict(at(17.0, Some(1)), &load(18.4, 1), HOLD_MAX),
-            held("host busy: 18.4 of 20 CPUs, mark 17.0"),
+            held("host busy: pool 18.4 + compile cache 0.0 of 20 CPUs, mark 17.0"),
             "a floor of 1"
         );
         assert_eq!(
@@ -393,14 +531,16 @@ mod tests {
         d.starting = 3.0;
         assert_eq!(
             verdict(l, &d, HOLD_MAX),
-            held("host busy: 14.5 of 20 CPUs + 3.0 for jobs that just started, mark 17.0")
+            held(
+                "host busy: pool 14.5 + compile cache 0.0 of 20 CPUs + 3.0 for jobs that just started, mark 17.0"
+            )
         );
         d.starting = 1.0;
         d.ahead = 2.0;
         assert_eq!(
             verdict(l, &d, HOLD_MAX),
             held(
-                "host busy: 14.5 of 20 CPUs + 1.0 for jobs that just started + 2.0 for held jobs ahead, mark 17.0"
+                "host busy: pool 14.5 + compile cache 0.0 of 20 CPUs + 1.0 for jobs that just started + 2.0 for held jobs ahead, mark 17.0"
             )
         );
     }
@@ -414,7 +554,7 @@ mod tests {
         );
         assert_eq!(
             verdict(at(20.0, Some(1)), &load(20.0, 9), HOLD_MAX),
-            held("host busy: 20.0 of 20 CPUs, mark 20.0"),
+            held("host busy: pool 20.0 + compile cache 0.0 of 20 CPUs, mark 20.0"),
             "the CPU count itself can be reached"
         );
         let mut d = load(0.0, 9);
@@ -442,7 +582,10 @@ mod tests {
         assert!(matches!(verdict(l, &d, HOLD_MAX), Verdict::Held(_)));
         d.held_ms = Some(600_000);
         assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Overdue);
-        d.figure = Figure::Busy(3.0);
+        d.figure = Figure::Busy(Parts {
+            pool: 3.0,
+            ..Parts::default()
+        });
         assert_eq!(
             verdict(l, &d, HOLD_MAX),
             Verdict::Free,
@@ -561,10 +704,19 @@ mod tests {
         assert_eq!(Limits::loaded(Some(0.5), Some(6)), Limits::default());
         assert_eq!(Limits::loaded(None, Some(6)), Limits::default());
         assert_eq!(Limits::loaded(Some(17.0), Some(0)), at(17.0, None));
-        let v = at(17.0, None).view(20, Some(18.4), 3);
+        let parts = Parts {
+            pool: 12.0,
+            compile_cache: 6.5,
+            outside: 1.5,
+        };
+        let v = at(17.0, None).view(20, Some(parts), 3);
         assert_eq!(
             (v.cpu_busy_max, v.cpu_busy_floor, v.cpus, v.busy, v.held),
-            (Some(17.0), Some(4), 20, Some(18.4), 3)
+            (Some(17.0), Some(4), 20, Some(20.0), 3)
+        );
+        assert_eq!(
+            (v.pool, v.compile_cache, v.outside),
+            (Some(12.0), Some(6.5), Some(1.5))
         );
         assert_eq!(Limits::default().view(20, None, 0).cpu_busy_floor, None);
         let old: View = serde_json::from_str("{}").unwrap();

@@ -125,9 +125,10 @@ pub struct Config {
     /// How often a job held for disk, memory or the host's CPUs looks
     /// again: [`RESOURCE_POLL`] outside tests.
     pub resource_poll: Duration,
-    /// The host's busy CPUs for the CPU limit (`slot cpu-limit`). `None`
-    /// reads the census sampler's figure, as everywhere outside tests.
-    pub cpu_busy: Option<fn() -> Option<f64>>,
+    /// The host's busy CPUs, in parts, for the CPU limit (`slot
+    /// cpu-limit`). `None` reads the census sampler's figure, as everywhere
+    /// outside tests.
+    pub cpu_busy: Option<fn() -> Option<cpu_limit::Parts>>,
     /// CPUs of the host; `None` counts them, as everywhere outside tests.
     pub host_cpus: Option<u32>,
     /// The longest a job is held for the host's CPUs:
@@ -139,6 +140,9 @@ pub struct Config {
     pub cache_budget: u64,
     /// Eviction of local target directories under a disk floor.
     pub evict: crate::evict::Settings,
+    /// Free bytes on the filesystem of a path, for the disk hold and
+    /// eviction. `None` asks the filesystem, as everywhere outside tests.
+    pub disk_free: Option<fn(&Path) -> Option<u64>>,
     /// On reload, hand running and queued jobs to the new binary instead of
     /// waiting for an idle pool (`handover`); the bounded hold is the fallback.
     pub handover: bool,
@@ -393,8 +397,9 @@ struct Inner {
     titles: HashMap<String, String>,
     title_pending: HashSet<String>,
     last_census: HostCensus,
-    /// The host's busy CPUs over the last seconds, for the CPU limit.
-    host_busy: cpu_limit::Recent,
+    /// The host's busy CPUs over the last seconds, in parts, for the CPU
+    /// limit.
+    host_busy: cpu_limit::RecentParts,
     controller: policy::Controller,
     /// Peak memory of finished jobs, for admission.
     memory: admission::History,
@@ -447,6 +452,9 @@ pub struct Server {
     evict: Mutex<crate::evict::Report>,
     /// Target directories being deleted now: their jobs wait.
     evicting: Mutex<HashSet<PathBuf>>,
+    /// Woken by a job held for disk, so eviction looks at once
+    /// ([`Server::evict_watch`]).
+    evict_wake: tokio::sync::Notify,
     /// The daemon's cgroup v2 path, from `/proc/self/cgroup`.
     own_cgroup: Option<String>,
     /// The daemon's user id, which names its login sessions' cgroups.
@@ -647,7 +655,7 @@ impl Server {
                 titles: HashMap::new(),
                 title_pending: HashSet::new(),
                 last_census: HostCensus::default(),
-                host_busy: cpu_limit::Recent::default(),
+                host_busy: cpu_limit::RecentParts::default(),
                 controller: policy::Controller::new(policy::Settings::new(
                     cores as usize,
                     pool_size,
@@ -694,6 +702,7 @@ impl Server {
                 ..crate::evict::Report::default()
             }),
             evicting: Mutex::new(HashSet::new()),
+            evict_wake: tokio::sync::Notify::new(),
             own_cgroup: std::fs::read_to_string("/proc/self/cgroup")
                 .ok()
                 .and_then(|s| machine::own_cgroup(&s)),
@@ -1941,6 +1950,7 @@ impl Server {
                 msg: format!("slot: warning: {w}"),
             });
         }
+        let nofile = job_file_limit(&req, &tx);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -1950,6 +1960,9 @@ impl Server {
             }
         };
         let pid = child.id() as i32;
+        // A limit lower than the daemon's own soft one, or a lower hard
+        // limit, takes effect only now, on the running job.
+        let _ = nofile.set_for(pid);
         let pipes = [
             child.stdout.take().map(OwnedFd::from),
             child.stderr.take().map(OwnedFd::from),
@@ -2198,11 +2211,15 @@ impl Server {
     /// busier than the mark of `slot cpu-limit`. `(kind, text)`.
     fn short_of(&self, id: i64, disks: &[PathBuf]) -> Option<(&'static str, String)> {
         let limits = self.cfg.admission;
+        let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
         let free: Vec<(String, u64)> = disks
             .iter()
-            .filter_map(|p| admission::disk_free(p).map(|f| (p.display().to_string(), f)))
+            .filter_map(|p| disk_free(p).map(|f| (p.display().to_string(), f)))
             .collect();
         if let Some(r) = admission::disk_wait(&free, limits) {
+            // Eviction starts where the disk hold starts: its mark is at
+            // least `--min-free-disk`.
+            self.evict_wake.notify_one();
             return Some(("disk", r));
         }
         if let Some(r) = self.short_of_memory(id) {
@@ -2599,9 +2616,13 @@ impl Server {
                 for procs in extra.values() {
                     managed.extend(procs.iter().map(|p| p.pid));
                 }
-                let sample = g.census.sample(&snap, &managed, dt);
+                // The compile cache servers outside every job; their
+                // compilers that carry a job's tag are in `managed` and
+                // count for the pool, not twice.
+                let cache = census::compile_cache_pids(&snap, COMPILE_SERVERS, &managed);
+                let sample = g.census.sample(&snap, &managed, &cache, dt);
                 if primed {
-                    g.host_busy.push(sample.host_cores, now_ms());
+                    g.host_busy.push(sample.parts(), now_ms());
                 }
                 primed = true;
                 let used = self.pool.limit().saturating_sub(self.pool.free());
@@ -2969,8 +2990,8 @@ impl Server {
     pub fn cpu_limit_view(&self) -> cpu_limit::View {
         let limits = self.cpu_limits();
         let g = self.inner.lock().expect("server lock");
-        let busy = match self.cpu_figure(&g, now_ms()) {
-            cpu_limit::Figure::Busy(b) => Some(b),
+        let parts = match self.cpu_figure(&g, now_ms()) {
+            cpu_limit::Figure::Busy(p) => Some(p),
             cpu_limit::Figure::Pending | cpu_limit::Figure::Unknown => None,
         };
         let held = g
@@ -2978,7 +2999,7 @@ impl Server {
             .values()
             .filter(|l| l.cpu_wait && !l.job.wait_reason.is_empty())
             .count();
-        limits.view(self.cores, busy, held)
+        limits.view(self.cores, parts, held)
     }
 
     /// Sets the mark, the floor or both, or switches the CPU limit off
@@ -3003,14 +3024,14 @@ impl Server {
     }
 
     /// The host's busy CPUs as the CPU limit reads them: the mean of the
-    /// census sampler's last samples, which count every process of the
-    /// host. No scan of its own.
+    /// census sampler's last samples, in the parts pool, compile cache and
+    /// outside ([`census::Sample::parts`]). No scan of its own.
     fn cpu_figure(&self, g: &Inner, now: i64) -> cpu_limit::Figure {
         if let Some(read) = self.cfg.cpu_busy {
             return read().map_or(cpu_limit::Figure::Unknown, cpu_limit::Figure::Busy);
         }
         match g.host_busy.mean(now) {
-            Some(busy) => cpu_limit::Figure::Busy(busy),
+            Some(parts) => cpu_limit::Figure::Busy(parts),
             None if now - self.born_ms < cpu_limit::GRACE_MS => cpu_limit::Figure::Pending,
             None => cpu_limit::Figure::Unknown,
         }
@@ -3383,17 +3404,31 @@ impl Server {
     }
 
     /// Every 60 s, when the filesystem of a target directory jobs built into
-    /// has less free space than the floor, deletes the least recently built
-    /// ones until it has the floor plus the margin; in a dry run it only
-    /// says which. See [`crate::evict`].
+    /// has less free space than the mark, deletes the least recently built
+    /// ones until it has the mark plus the margin; in a dry run it only
+    /// says which. The mark is the larger of `--evict-below` and
+    /// `--min-free-disk` ([`crate::evict::mark`]), so eviction runs whenever
+    /// the disk hold holds builds. A job held for disk wakes the watch at
+    /// once when its last look found enough free space or deleted something;
+    /// a look that found too little and could delete nothing waits for the
+    /// minute. See [`crate::evict`].
     async fn evict_watch(self: Arc<Self>) {
         let flag = self.cfg.evict.dry_run;
+        let below = self.cfg.evict.floor;
+        let floor = crate::evict::mark(below, self.cfg.admission.min_free_disk);
+        let raised_from = if floor > below { below } else { 0 };
+        let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_said = Vec::new();
+        let mut wake = true;
         loop {
-            tick.tick().await;
+            tokio::select! {
+                _ = tick.tick() => {}
+                () = self.evict_wake.notified(), if wake => {}
+            }
             let s = crate::evict::Settings {
+                floor,
                 dry_run: crate::evict::dry_run(&self.cfg.state_dir, flag),
                 ..self.cfg.evict
             };
@@ -3414,13 +3449,14 @@ impl Server {
                 (g.targets.clone(), repos, dirs)
             };
             let known = seen.len() as u32;
-            let Ok((free, planned)) = tokio::task::spawn_blocking(move || {
-                evict_pass(&seen, &busy_repos, &busy_dirs, now_ms(), s)
+            let Ok((lowest, planned)) = tokio::task::spawn_blocking(move || {
+                evict_pass_with(&seen, &busy_repos, &busy_dirs, now_ms(), s, disk_free)
             })
             .await
             else {
                 continue;
             };
+            let free = lowest.unwrap_or(0);
             let mut done = Vec::new();
             for (c, bytes) in planned {
                 let action = if s.dry_run {
@@ -3441,13 +3477,16 @@ impl Server {
                 .collect();
             if !done.is_empty() && (said != last_said || !s.dry_run) {
                 if s.dry_run {
-                    eprintln!("slot: {}", crate::evict::off_summary(free, s.floor, &done));
+                    eprintln!(
+                        "slot: {}",
+                        crate::evict::off_summary(free, s.floor, raised_from, &done)
+                    );
                 }
                 for e in &done {
                     eprintln!(
                         "slot: disk: {} free, under {}: {} {} ({}, last built {} ago)",
                         admission::gb(free),
-                        admission::gb(s.floor),
+                        crate::evict::mark_text(s.floor, raised_from),
                         e.action,
                         e.path,
                         admission::gb(e.bytes),
@@ -3456,17 +3495,21 @@ impl Server {
                 }
             }
             last_said = said;
+            let freed: u64 = done
+                .iter()
+                .filter(|e| e.action == "deleted" || e.action == "discard-cache")
+                .map(|e| e.bytes)
+                .sum();
+            wake = lowest.is_none_or(|f| f >= s.floor) || freed > 0;
             let mut r = self.evict.lock().expect("evict lock");
+            r.floor = s.floor;
+            r.raised_from = raised_from;
             r.known = known;
             r.dry_run = s.dry_run;
             r.free = free;
             r.checked_ms = now_ms();
             if !done.is_empty() || free >= s.floor {
-                r.deleted_bytes += done
-                    .iter()
-                    .filter(|e| e.action == "deleted" || e.action == "discard-cache")
-                    .map(|e| e.bytes)
-                    .sum::<u64>();
+                r.deleted_bytes += freed;
                 r.last = done;
             }
         }
@@ -3933,20 +3976,34 @@ impl Attached {
 /// filesystems of known target directories, and per filesystem under the
 /// floor the candidates to delete with their sizes. Sizes are measured
 /// oldest first and only until enough would be freed.
+#[cfg(test)]
 fn evict_pass(
     seen: &HashMap<PathBuf, (String, i64)>,
     busy_repos: &HashSet<String>,
     busy_dirs: &HashSet<PathBuf>,
     now: i64,
     s: crate::evict::Settings,
-) -> (u64, Vec<(crate::evict::Candidate, u64)>) {
+) -> (Option<u64>, Vec<(crate::evict::Candidate, u64)>) {
+    evict_pass_with(seen, busy_repos, busy_dirs, now, s, admission::disk_free)
+}
+
+/// [`evict_pass`] with the free space read by `disk_free`
+/// ([`Config::disk_free`]). The lowest free space is `None` when no known
+/// target directory exists.
+fn evict_pass_with(
+    seen: &HashMap<PathBuf, (String, i64)>,
+    busy_repos: &HashSet<String>,
+    busy_dirs: &HashSet<PathBuf>,
+    now: i64,
+    s: crate::evict::Settings,
+    disk_free: fn(&Path) -> Option<u64>,
+) -> (Option<u64>, Vec<(crate::evict::Candidate, u64)>) {
     use crate::evict;
     let free = seen
         .keys()
         .filter(|p| p.exists())
-        .filter_map(|p| admission::disk_free(p))
-        .min()
-        .unwrap_or(0);
+        .filter_map(|p| disk_free(p))
+        .min();
     let cands: Vec<evict::Candidate> =
         evict::candidates(seen, busy_repos, busy_dirs, now, s.min_idle)
             .into_iter()
@@ -3954,7 +4011,7 @@ fn evict_pass(
             .collect();
     let mut out = Vec::new();
     for group in evict::by_device(cands).into_values() {
-        let Some(fs_free) = group.first().and_then(|c| admission::disk_free(&c.path)) else {
+        let Some(fs_free) = group.first().and_then(|c| disk_free(&c.path)) else {
             continue;
         };
         if fs_free >= s.floor {
@@ -3974,6 +4031,48 @@ fn evict_pass(
         out.extend(evict::plan(fs_free, s, &sized).into_iter().cloned());
     }
     (free, out)
+}
+
+/// The daemon's open-file limit before it raised its own for a job: what a
+/// job whose client sent none runs with.
+static START_NOFILE: std::sync::OnceLock<crate::proto::FileLimit> = std::sync::OnceLock::new();
+
+/// Held while the daemon reads and raises its own open-file limit, so two
+/// jobs that start at once do not lower each other's.
+static NOFILE_RAISE: Mutex<()> = Mutex::new(());
+
+/// The open-file limit job `req` runs with: its client's, capped at the
+/// daemon's hard limit (one `slot: warning:` on `tx` when it is capped), or
+/// for a request without one (a remote request, an older client) the
+/// daemon's limit before any raise. When the job's soft limit is above the
+/// daemon's own, the daemon raises its own first, so the job inherits it
+/// from its first instruction; a lower limit is set on the job after it
+/// started ([`crate::proto::FileLimit::set_for`]). No `unsafe`: nothing
+/// runs between fork and exec.
+fn job_file_limit(req: &Request, tx: &mpsc::UnboundedSender<Frame>) -> crate::proto::FileLimit {
+    use crate::proto::FileLimit;
+    let start = *START_NOFILE.get_or_init(FileLimit::of_this_process);
+    let Some(want) = req.job_nofile() else {
+        return start;
+    };
+    let _raising = NOFILE_RAISE.lock().expect("nofile lock");
+    let own = FileLimit::of_this_process();
+    let (job, warning) = want.for_job(own.hard);
+    if let Some(w) = warning {
+        let _ = tx.send(Frame::Info {
+            msg: format!("slot: warning: {w}"),
+        });
+    }
+    if job.soft > own.soft {
+        let raised = FileLimit {
+            soft: job.soft,
+            hard: own.hard,
+        };
+        if let Err(e) = raised.set_for_this_process() {
+            eprintln!("slot: open-file limit not raised to {}: {e}", job.soft);
+        }
+    }
+    job
 }
 
 /// Notes that `job` built into its target directory.
