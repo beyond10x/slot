@@ -47,6 +47,13 @@
     },
     {
       "area": "Pool",
+      "label": "Waits for the host's CPUs",
+      "status": "shipped",
+      "detail": "slot cpu-limit 17 holds the start of a queued job while the whole host, with everything outside the pool, is 17 or more CPUs busy and 4 jobs run; a held job starts after 10 minutes at the latest. Off until it is set.",
+      "href": "/docs/how-it-works#waiting-for-the-hosts-cpus"
+    },
+    {
+      "area": "Pool",
       "label": "Waits for its target directory",
       "status": "shipped",
       "detail": "A cargo build takes no slot while another job of the pool compiles in its target directory; it stays queued with the reason and starts when that job has compiled or ended (0.21.0).",

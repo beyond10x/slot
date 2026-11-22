@@ -629,3 +629,112 @@ fn the_bound_per_job_holds_across_a_reload() {
         d.free_tokens() == 2
     });
 }
+
+/// `slot cpu-limit` prints, sets and switches off the CPU limit of a live
+/// daemon, refuses what is no mark and no floor, and the values hold across
+/// a reload: they are in `limits.json`, which the new image reads. The mark
+/// used is above any host's CPU count, so it holds no start here and the
+/// test does not depend on what else the machine runs.
+#[test]
+fn the_cpu_limit_holds_across_a_reload() {
+    let bind = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = bind.local_addr().unwrap();
+    drop(bind);
+    let d = Daemon::start_with_http(2, &[], &addr.to_string());
+    let slot = |args: &[&str]| {
+        let o = Command::new(SLOT)
+            .args(args)
+            .args(["--http", &addr.to_string()])
+            .env_remove("SLOT_JOB")
+            .env_remove("SLOT_HOST")
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let limits = || std::fs::read_to_string(d.state().join("limits.json")).unwrap_or_default();
+    let off = "no CPU limit: a queued job starts whatever the host's CPUs do\n";
+    let on = "the CPU limit of 4096.0 CPUs never holds a start: the host has ";
+    d.wait_until("the web address", Duration::from_secs(10), |_| {
+        http_get(addr, "/api/state").is_some()
+    });
+    let (code, out, err) = slot(&["cpu-limit"]);
+    assert_eq!((code, out.as_str()), (Some(0), off), "{err}");
+
+    for (args, exit, says) in [
+        (&["cpu-limit", "0.5"][..], 2, "from 1"),
+        (&["cpu-limit", "many"][..], 2, "is not a number of CPUs"),
+        (&["cpu-limit", "4096", "--floor", "0"][..], 2, "at least 1"),
+        (
+            &["cpu-limit", "off", "--floor", "3"][..],
+            1,
+            "takes no --floor",
+        ),
+        (&["cpu-limit", "--floor", "3"][..], 1, "needs cpu_busy_max"),
+    ] {
+        let (code, out, err) = slot(args);
+        assert_eq!(code, Some(exit), "{args:?}: {out}{err}");
+        assert!(err.contains(says), "{args:?}: {err}");
+        assert!(!limits().contains("cpu_busy"), "{args:?}: {}", limits());
+    }
+
+    let before = d.client(
+        "echo started; i=0; while [ ! -e release ] && [ $i -lt 600 ]; do sleep 0.05; \
+         i=$((i+1)); done; test -e release",
+    );
+    d.wait_until("the first job's output", Duration::from_secs(30), |_| {
+        dashboard_output_contains(addr, 1, "started")
+    });
+    let (code, out, err) = slot(&["cpu-limit", "4096", "--floor", "2"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.starts_with(on) && out.ends_with('\n'), "{out}");
+    assert!(
+        limits().contains(r#""cpu_busy_max":4096.0,"cpu_busy_floor":2"#),
+        "{}",
+        limits()
+    );
+
+    d.reload();
+    d.wait_until("the job handed over", Duration::from_secs(10), |d| {
+        d.log().contains("took over 1 running") && http_get(addr, "/api/state").is_some()
+    });
+    let (code, again, err) = slot(&["cpu-limit"]);
+    assert_eq!(
+        (code, again.as_str()),
+        (Some(0), out.as_str()),
+        "after the reload: {err}"
+    );
+    let (_, status, err) = slot(&["status"]);
+    assert!(status.contains(on), "{status}{err}");
+    let state = http_get(addr, "/api/state").map(|mut r| {
+        let mut body = String::new();
+        let _ = r.read_to_string(&mut body);
+        body
+    });
+    let state = state.unwrap_or_default();
+    assert!(
+        state.contains(r#""cpu_busy_max":4096.0,"cpu_busy_floor":2"#),
+        "{state}"
+    );
+    let after = d.client("echo after");
+    let done = wait_all(vec![("after".into(), after)], Duration::from_secs(20));
+    assert_eq!(
+        (done[0].1, done[0].2.as_str()),
+        (0, "after\n"),
+        "{}",
+        done[0].3
+    );
+
+    let (code, out, err) = slot(&["cpu-limit", "off"]);
+    assert_eq!((code, out.as_str()), (Some(0), off), "{err}");
+    assert!(!limits().contains("cpu_busy"), "{}", limits());
+    let (_, status, _) = slot(&["status"]);
+    assert!(!status.contains("CPU limit"), "{status}");
+
+    std::fs::write(d.dir.path().join("release"), "").unwrap();
+    let done = wait_all(vec![("before".into(), before)], Duration::from_secs(20));
+    assert_eq!(done[0].1, 0, "{}", done[0].3);
+}

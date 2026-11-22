@@ -97,6 +97,9 @@ pub enum Cmd {
     /// Show or set the limit on build processes per job: with it a job's
     /// compilers run on a bound of the job's own, not on slots of the pool.
     JobParallel(JobParallelArgs),
+    /// Show or set the CPU limit: the start of a queued job is held while
+    /// the whole host is busier than a mark.
+    CpuLimit(CpuLimitArgs),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
@@ -400,6 +403,54 @@ pub struct RunLimitArgs {
     pub http: String,
 }
 
+/// `slot cpu-limit` arguments. Without any, prints the values in force.
+#[derive(Debug, Clone, Args)]
+pub struct CpuLimitArgs {
+    /// Busy CPUs of the host from which the start of a queued job is held,
+    /// from 1 (`17`, `17.5`); `off` for no limit, the default. The figure
+    /// is the CPU time of every process on the host over the last 10 s,
+    /// whoever started it, with what jobs that started in the last 30 s
+    /// are expected to add. A job held for 10 minutes starts whatever the
+    /// figure says. A mark above the host's CPU count never holds. The
+    /// mark reaches queued jobs within 2 seconds, is kept in `limits.json` in
+    /// the state directory and holds across reloads and restarts.
+    #[arg(value_name = "CPUs|off")]
+    pub mark: Option<crate::cpu_limit::Setting>,
+    /// Jobs that may always run, whatever the host's CPUs do, from 1; 4
+    /// until one is named. `off` forgets it.
+    #[arg(long, value_name = "N", value_parser = cpu_floor)]
+    pub floor: Option<usize>,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+/// The value of `slot cpu-limit --floor`.
+fn cpu_floor(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(0) => Err("at least 1 job may always run".into()),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("`{s}` is not a count of jobs")),
+    }
+}
+
+impl CpuLimitArgs {
+    /// The change the arguments name; `None` to print the values in force.
+    pub fn request(&self) -> Result<Option<crate::cpu_limit::Request>, String> {
+        use crate::cpu_limit::{Request, Setting};
+        if self.mark == Some(Setting::Off) && self.floor.is_some() {
+            return Err("`off` takes no --floor: without a mark there is no floor".into());
+        }
+        if self.mark.is_none() && self.floor.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Request {
+            cpu_busy_max: self.mark.map(Setting::value),
+            cpu_busy_floor: self.floor,
+        }))
+    }
+}
+
 /// `slot job-parallel` arguments. Without any, prints the value in force.
 #[derive(Debug, Clone, Args)]
 pub struct JobParallelArgs {
@@ -544,6 +595,10 @@ impl ServeArgs {
             target_poll: crate::server::TARGET_POLL,
             target_settle: crate::server::TARGET_SETTLE,
             token_watch: crate::server::TOKEN_WATCH,
+            resource_poll: crate::server::RESOURCE_POLL,
+            cpu_busy: None,
+            host_cpus: None,
+            cpu_hold_max: crate::cpu_limit::HOLD_MAX,
             cache_budget: gb_bytes(self.cache_budget),
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
@@ -723,5 +778,59 @@ mod tests {
             panic!("not serve")
         };
         assert_eq!(s.tokens, Some(8));
+    }
+
+    #[test]
+    fn cpu_limit_takes_a_mark_or_off_and_a_floor() {
+        use crate::cpu_limit::{Request, Setting};
+        let args = |args: &[&str]| {
+            let mut argv = vec!["cpu-limit"];
+            argv.extend(args);
+            parse(&argv).map(|cli| {
+                let Cmd::CpuLimit(a) = cli.command else {
+                    panic!("not cpu-limit")
+                };
+                a
+            })
+        };
+        let change = |mark: Option<Option<f64>>, floor: Option<usize>| {
+            Ok(Some(Request {
+                cpu_busy_max: mark,
+                cpu_busy_floor: floor,
+            }))
+        };
+        let a = args(&[]).unwrap();
+        assert_eq!((a.mark, a.floor), (None, None));
+        assert_eq!(a.request(), Ok(None), "prints the values in force");
+        let a = args(&["17"]).unwrap();
+        assert_eq!(a.mark, Some(Setting::At(17.0)));
+        assert_eq!(a.request(), change(Some(Some(17.0)), None));
+        let a = args(&["17.5", "--floor", "6"]).unwrap();
+        assert_eq!(a.request(), change(Some(Some(17.5)), Some(6)));
+        let a = args(&["--floor", "6"]).unwrap();
+        assert_eq!(a.request(), change(None, Some(6)), "the floor alone");
+        let a = args(&["off"]).unwrap();
+        assert_eq!(a.mark, Some(Setting::Off));
+        assert_eq!(a.request(), change(Some(None), None));
+        let e = args(&["off", "--floor", "3"])
+            .unwrap()
+            .request()
+            .unwrap_err();
+        assert!(e.contains("takes no --floor"), "{e}");
+        for bad in [
+            &["0"][..],
+            &["0.5"],
+            &["nan"],
+            &["inf"],
+            &["many"],
+            &["17", "18"],
+            &["17", "--floor", "0"],
+            &["17", "--floor", "some"],
+            &["17", "--floor"],
+        ] {
+            assert!(args(bad).is_err(), "{bad:?}");
+        }
+        let cli = parse(&["cpu-limit", "8", "--http", "127.0.0.1:9"]).unwrap();
+        assert!(matches!(cli.command, Cmd::CpuLimit(ref a) if a.http == "127.0.0.1:9"));
     }
 }

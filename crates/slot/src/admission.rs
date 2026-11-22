@@ -39,6 +39,8 @@ pub struct History {
     by_toolchain: HashMap<String, VecDeque<u64>>,
     /// Run times of jobs that ended on their own (ok or failed), ms.
     runtime: HashMap<(String, Vec<String>), VecDeque<u64>>,
+    /// CPUs those jobs used over their run: CPU seconds over run time.
+    cores: HashMap<(String, Vec<String>), VecDeque<f64>>,
 }
 
 fn p90(v: &VecDeque<u64>) -> u64 {
@@ -65,6 +67,18 @@ impl History {
             r.push_back((j.ended_ms - j.started_ms) as u64);
             if r.len() > KEEP_PER_COMMAND {
                 r.pop_front();
+            }
+            // A run under a second says little about the CPUs a job takes.
+            let ms = j.ended_ms - j.started_ms;
+            if ms >= 1000 {
+                let c = self
+                    .cores
+                    .entry((j.repo.clone(), j.argv.clone()))
+                    .or_default();
+                c.push_back(j.cpu_s * 1000.0 / ms as f64);
+                if c.len() > KEEP_PER_COMMAND {
+                    c.pop_front();
+                }
             }
         }
         if j.peak_rss == 0 || j.started_ms == 0 {
@@ -95,6 +109,19 @@ impl History {
             .get(&(repo.to_string(), argv.to_vec()))
             .filter(|v| v.len() >= 3)
             .map(p90)
+    }
+
+    /// CPUs a command is expected to use while it runs: the median of CPU
+    /// seconds over run time of its last 20 runs in this repository that
+    /// ended on their own and ran a second or longer, with at least 3.
+    pub fn expected_cores(&self, repo: &str, argv: &[String]) -> Option<f64> {
+        let v = self
+            .cores
+            .get(&(repo.to_string(), argv.to_vec()))
+            .filter(|v| v.len() >= 3)?;
+        let mut s: Vec<f64> = v.iter().copied().collect();
+        s.sort_by(f64::total_cmp);
+        Some(s[s.len() / 2])
     }
 
     /// Expected peak memory of a job, bytes.
@@ -351,5 +378,46 @@ mod tests {
     fn disk_free_finds_the_nearest_existing_directory() {
         let d = tempfile::tempdir().unwrap();
         assert!(disk_free(&d.path().join("not/yet/there")).is_some_and(|b| b > 0));
+    }
+
+    #[test]
+    fn expected_cores_are_the_median_of_three_runs_of_a_second_or_longer() {
+        let mut h = History::default();
+        let argv = vec!["cargo".to_string(), "test".to_string()];
+        let mut j = job("a", "cargo test", "rust", 0);
+        assert_eq!(h.expected_cores("a", &argv), None);
+        for (cpu_s, ms) in [(8.0, 2_000), (30.0, 10_000)] {
+            j.cpu_s = cpu_s;
+            j.ended_ms = j.started_ms + ms;
+            h.record(&j);
+        }
+        assert_eq!(h.expected_cores("a", &argv), None, "two runs");
+        j.cpu_s = 50.0;
+        j.ended_ms = j.started_ms + 500;
+        h.record(&j);
+        assert_eq!(
+            h.expected_cores("a", &argv),
+            None,
+            "a run under a second says nothing"
+        );
+        j.state = JobState::Cancelled;
+        j.cpu_s = 9.0;
+        j.ended_ms = j.started_ms + 3_000;
+        h.record(&j);
+        assert_eq!(
+            h.expected_cores("a", &argv),
+            None,
+            "a cancelled run says nothing"
+        );
+        j.state = JobState::Failed;
+        j.cpu_s = 2.0;
+        j.ended_ms = j.started_ms + 4_000;
+        h.record(&j);
+        assert_eq!(
+            h.expected_cores("a", &argv),
+            Some(3.0),
+            "the median of 4.0, 3.0 and 0.5 CPUs"
+        );
+        assert_eq!(h.expected_cores("b", &argv), None, "another repository");
     }
 }

@@ -40,6 +40,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use crate::admission;
 use crate::call;
 use crate::census;
+use crate::cpu_limit;
 use crate::job_parallel;
 use crate::jobserver::{self, Pool, WaiterHandle};
 use crate::policy;
@@ -121,6 +122,17 @@ pub struct Config {
     /// How often the token watch looks for lost and surplus jobserver
     /// tokens: [`TOKEN_WATCH`] outside tests.
     pub token_watch: Duration,
+    /// How often a job held for disk, memory or the host's CPUs looks
+    /// again: [`RESOURCE_POLL`] outside tests.
+    pub resource_poll: Duration,
+    /// The host's busy CPUs for the CPU limit (`slot cpu-limit`). `None`
+    /// reads the census sampler's figure, as everywhere outside tests.
+    pub cpu_busy: Option<fn() -> Option<f64>>,
+    /// CPUs of the host; `None` counts them, as everywhere outside tests.
+    pub host_cpus: Option<u32>,
+    /// The longest a job is held for the host's CPUs:
+    /// [`cpu_limit::HOLD_MAX`] outside tests.
+    pub cpu_hold_max: Duration,
     /// Bytes the target directories of synced workspaces may take together
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
@@ -137,7 +149,7 @@ pub struct Config {
 pub const JOB_SLICE: &str = "slot.slice";
 
 /// How often a job that waits for disk or memory looks again.
-const RESOURCE_POLL: Duration = Duration::from_secs(2);
+pub const RESOURCE_POLL: Duration = Duration::from_secs(2);
 
 /// How often a job that waits for its cargo target directory looks at the
 /// directory's lock again, at the gate and in the queue for slots.
@@ -233,6 +245,17 @@ struct Live {
     procs: usize,
     /// Peak memory the job is expected to reach, from earlier runs.
     expect_rss: u64,
+    /// CPUs the job is expected to use while it runs, from earlier runs.
+    expect_cores: f64,
+    /// The job's CPUs over the last seconds, as the sampler saw them.
+    recent: cpu_limit::Recent,
+    /// Queued and weighed against the CPU limit: held for the host's CPUs
+    /// ([`Server::resources_ready`]), or let through after such a hold and
+    /// not started yet. The held jobs behind it count it, so they start in
+    /// the queue's order.
+    cpu_wait: bool,
+    /// When the job was first held for the host's CPUs, Unix ms.
+    cpu_wait_since: Option<i64>,
     /// How `slot cancel` stops the job.
     stop: Option<Stop>,
     /// The request, while queued: a handover queues it again.
@@ -370,6 +393,8 @@ struct Inner {
     titles: HashMap<String, String>,
     title_pending: HashSet<String>,
     last_census: HostCensus,
+    /// The host's busy CPUs over the last seconds, for the CPU limit.
+    host_busy: cpu_limit::Recent,
     controller: policy::Controller,
     /// Peak memory of finished jobs, for admission.
     memory: admission::History,
@@ -438,6 +463,11 @@ pub struct Server {
     /// saved in `limits.json`; `None` = no limit, jobs get the pool's
     /// jobserver.
     job_parallel: Mutex<Option<usize>>,
+    /// The mark and the floor of the CPU limit (`slot cpu-limit`), as saved
+    /// in `limits.json`.
+    cpu_limit: Mutex<cpu_limit::Limits>,
+    /// When this process started, Unix ms.
+    born_ms: i64,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -590,7 +620,9 @@ impl Server {
             }
             h.state.done_output.clear();
         }
-        let cores = procstat::host_cpus() as u32;
+        let cores = cfg
+            .host_cpus
+            .unwrap_or_else(|| procstat::host_cpus() as u32);
         let pool_size = cfg.tokens;
         let call_headroom = cfg.call_headroom;
         let sccache_watch = cfg.sccache_watch;
@@ -615,6 +647,7 @@ impl Server {
                 titles: HashMap::new(),
                 title_pending: HashSet::new(),
                 last_census: HostCensus::default(),
+                host_busy: cpu_limit::Recent::default(),
                 controller: policy::Controller::new(policy::Settings::new(
                     cores as usize,
                     pool_size,
@@ -672,6 +705,11 @@ impl Server {
                 run_limit_max_s: saved.run_limit_max_s,
             }),
             job_parallel: Mutex::new(saved.job_parallel),
+            cpu_limit: Mutex::new(cpu_limit::Limits::loaded(
+                saved.cpu_busy_max,
+                saved.cpu_busy_floor,
+            )),
+            born_ms: now_ms(),
         }))
     }
 
@@ -1226,6 +1264,7 @@ impl Server {
             let expect_rss = g
                 .memory
                 .expected(&r.job.repo, &r.job.argv, &r.job.toolchain);
+            let expect_cores = self.expected_cores(&g.memory, &r.job.repo, &r.job.argv);
             let mut tracker = Tracker::default();
             tracker.sample(snap, r.pid, &[], 0.0);
             g.active.insert(
@@ -1240,6 +1279,10 @@ impl Server {
                     rss: 0,
                     procs: 0,
                     expect_rss,
+                    expect_cores,
+                    recent: cpu_limit::Recent::default(),
+                    cpu_wait: false,
+                    cpu_wait_since: None,
                     stop,
                     req: None,
                     waiter: None,
@@ -1596,6 +1639,7 @@ impl Server {
                 (g.next_id, now_ms())
             };
             let expect_rss = g.memory.expected(&req.repo, &shown, tc.name());
+            let expect_cores = self.expected_cores(&g.memory, &req.repo, &shown);
             let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
             let job = Job {
                 id,
@@ -1641,6 +1685,10 @@ impl Server {
                     rss: 0,
                     procs: 0,
                     expect_rss,
+                    expect_cores,
+                    recent: cpu_limit::Recent::default(),
+                    cpu_wait: false,
+                    cpu_wait_since: None,
                     stop,
                     req: Some(req.clone()),
                     waiter: None,
@@ -1774,12 +1822,18 @@ impl Server {
             // job of its target directory, and one served before it that
             // has its slots and no claim yet: of two that got slots at the
             // same moment the first in the queue starts and the other waits.
+            // The CPU limit is weighed under that lock too: of the jobs
+            // held for the host's CPUs only as many claim as the figure
+            // admits, each counting the ones that claimed before it.
+            let cpu_limits = self.cpu_limits();
             let claimed = {
                 let mut g = self.inner.lock().expect("server lock");
                 let settle = self.cfg.target_settle.as_millis() as i64;
                 let taken = target_use(&g.active, id, now_ms(), settle)
                     .is_some_and(|u| u.starting.is_some() || u.ahead.is_some());
-                if *self.upgrading.borrow() || g.handing_over || taken {
+                let cpu = self.cpu_verdict(&g, cpu_limits, id, now_ms());
+                let cpu_held = matches!(cpu, cpu_limit::Verdict::Held(_));
+                if *self.upgrading.borrow() || g.handing_over || taken || cpu_held {
                     if let Some(l) = g.active.get_mut(&id) {
                         l.waiter = None;
                     }
@@ -1789,12 +1843,18 @@ impl Server {
                     g.active.get_mut(&id).map(|l| {
                         l.held = n;
                         l.waiter = None;
-                        n
+                        l.cpu_wait = false;
+                        (n, cpu == cpu_limit::Verdict::Overdue)
                     })
                 }
             };
             match claimed {
-                Some(n) => break n,
+                Some((n, overdue)) => {
+                    if overdue {
+                        self.cpu_hold_ran_out(id, &tx);
+                    }
+                    break n;
+                }
                 None => {
                     self.pool.release(waiter.take_held());
                 }
@@ -2134,7 +2194,8 @@ impl Server {
     }
 
     /// Why job `id` may not start now: its filesystems (`disks`) are short
-    /// of space, or memory is short and another job runs. `(kind, text)`.
+    /// of space, memory is short and another job runs, or the host is
+    /// busier than the mark of `slot cpu-limit`. `(kind, text)`.
     fn short_of(&self, id: i64, disks: &[PathBuf]) -> Option<(&'static str, String)> {
         let limits = self.cfg.admission;
         let free: Vec<(String, u64)> = disks
@@ -2144,6 +2205,22 @@ impl Server {
         if let Some(r) = admission::disk_wait(&free, limits) {
             return Some(("disk", r));
         }
+        if let Some(r) = self.short_of_memory(id) {
+            return Some(("memory", r));
+        }
+        let cpu = self.cpu_limits();
+        cpu.cpu_busy_max?;
+        let g = self.inner.lock().expect("server lock");
+        match self.cpu_verdict(&g, cpu, id, now_ms()) {
+            cpu_limit::Verdict::Held(text) => Some(("cpu", text)),
+            cpu_limit::Verdict::Free | cpu_limit::Verdict::Overdue => None,
+        }
+    }
+
+    /// Why job `id` may not start now as far as memory goes: it is short
+    /// and another job runs.
+    fn short_of_memory(&self, id: i64) -> Option<String> {
+        let limits = self.cfg.admission;
         if limits.min_free_memory == 0 {
             return None;
         }
@@ -2165,10 +2242,11 @@ impl Server {
             }
             (expected, reserved, others)
         };
-        admission::memory_wait(available, reserved, expected, limits, others).map(|r| ("memory", r))
+        admission::memory_wait(available, reserved, expected, limits, others)
     }
 
-    /// Waits until job `id` may start as far as disk and memory go, telling
+    /// Waits until job `id` may start as far as disk, memory and the host's
+    /// CPUs go ([`Server::short_of`]), telling
     /// the client why it waits; false when the client went away first.
     async fn resources_ready(
         &self,
@@ -2181,16 +2259,33 @@ impl Server {
         loop {
             let short = self.short_of(id, disks);
             let reason = short.as_ref().map(|(_, r)| r.clone()).unwrap_or_default();
-            let changed = {
+            let cpu = short.as_ref().is_some_and(|(kind, _)| *kind == "cpu");
+            let now = now_ms();
+            let (changed, first_cpu) = {
                 let mut g = self.inner.lock().expect("server lock");
-                g.active.get_mut(&id).is_some_and(|l| {
+                g.active.get_mut(&id).map_or((false, false), |l| {
                     let c = l.job.wait_reason != reason;
                     l.job.wait_reason.clone_from(&reason);
-                    c
+                    // Let through after a hold, it stays weighed until it
+                    // claims its slots; held for something else, it is not.
+                    l.cpu_wait = cpu || (l.cpu_wait && short.is_none());
+                    let first = cpu && l.cpu_wait_since.is_none();
+                    if first {
+                        l.cpu_wait_since = Some(now);
+                    }
+                    (c, first)
                 })
             };
             if changed {
                 self.publish(id);
+            }
+            if first_cpu {
+                self.census_event(&serde_json::json!({
+                    "t": now,
+                    "event": "cpu_hold",
+                    "job": id,
+                    "reason": reason,
+                }));
             }
             let Some((kind, text)) = short else {
                 return true;
@@ -2203,7 +2298,7 @@ impl Server {
                 told = kind;
             }
             tokio::select! {
-                () = tokio::time::sleep(RESOURCE_POLL) => {}
+                () = tokio::time::sleep(self.cfg.resource_poll) => {}
                 () = client_gone(gone.clone()) => return false,
             }
         }
@@ -2268,6 +2363,9 @@ impl Server {
                 g.active.get_mut(&id).is_some_and(|l| {
                     let c = l.job.wait_reason != reason;
                     l.job.wait_reason.clone_from(&reason);
+                    // It waits outside the queue: the jobs held for the
+                    // host's CPUs behind it do not wait for it.
+                    l.cpu_wait &= wait.is_none();
                     c
                 })
             };
@@ -2411,6 +2509,9 @@ impl Server {
     async fn sampler(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut last = Instant::now();
+        // The census counts no CPU time in its first sample: it has no
+        // earlier reading to compare with.
+        let mut primed = false;
         loop {
             tick.tick().await;
             let dt = last.elapsed().as_secs_f64();
@@ -2463,6 +2564,7 @@ impl Server {
                         l.tracker
                             .sample(&snap, pid, extra.get(id).map_or(&[], Vec::as_slice), dt);
                     l.cores = s.cores;
+                    l.recent.push(s.cores, now_ms());
                     l.rss = s.rss;
                     l.procs = s.procs;
                     l.job.peak_rss = l.job.peak_rss.max(s.rss);
@@ -2498,6 +2600,10 @@ impl Server {
                     managed.extend(procs.iter().map(|p| p.pid));
                 }
                 let sample = g.census.sample(&snap, &managed, dt);
+                if primed {
+                    g.host_busy.push(sample.host_cores, now_ms());
+                }
+                primed = true;
                 let used = self.pool.limit().saturating_sub(self.pool.free());
                 let waiting = self.pool.waiting();
                 g.window.add(now_ms(), &sample, used, waiting);
@@ -2688,6 +2794,7 @@ impl Server {
     fn save_limits(&self) {
         let run_limit = *self.run_limit.lock().expect("run limit lock");
         let job_parallel = *self.job_parallel.lock().expect("job parallel lock");
+        let cpu = self.cpu_limits();
         let saved = {
             let h = self.headroom.lock().expect("headroom lock");
             limits::Saved {
@@ -2697,6 +2804,8 @@ impl Server {
                 run_limit_s: run_limit.run_limit_s,
                 run_limit_max_s: run_limit.run_limit_max_s,
                 job_parallel,
+                cpu_busy_max: cpu.cpu_busy_max,
+                cpu_busy_floor: cpu.cpu_busy_floor,
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -2848,6 +2957,130 @@ impl Server {
         *self.job_parallel.lock().expect("job parallel lock") = to;
         self.save_limits();
         Ok(self.job_parallel_view())
+    }
+
+    /// The mark and the floor of the CPU limit in force.
+    fn cpu_limits(&self) -> cpu_limit::Limits {
+        *self.cpu_limit.lock().expect("cpu limit lock")
+    }
+
+    /// The CPU limit, the host's busy CPUs and the jobs held for them, as
+    /// `GET /api/cpu-limit` answers.
+    pub fn cpu_limit_view(&self) -> cpu_limit::View {
+        let limits = self.cpu_limits();
+        let g = self.inner.lock().expect("server lock");
+        let busy = match self.cpu_figure(&g, now_ms()) {
+            cpu_limit::Figure::Busy(b) => Some(b),
+            cpu_limit::Figure::Pending | cpu_limit::Figure::Unknown => None,
+        };
+        let held = g
+            .active
+            .values()
+            .filter(|l| l.cpu_wait && !l.job.wait_reason.is_empty())
+            .count();
+        limits.view(self.cores, busy, held)
+    }
+
+    /// Sets the mark, the floor or both, or switches the CPU limit off
+    /// (`slot cpu-limit`), and saves them. A queued job is weighed against
+    /// the new values the next time it looks ([`Config::resource_poll`]).
+    pub fn set_cpu_limit(&self, req: &cpu_limit::Request) -> Result<cpu_limit::View, String> {
+        {
+            let mut limits = self.cpu_limit.lock().expect("cpu limit lock");
+            *limits = limits.changed(req)?;
+        }
+        self.save_limits();
+        Ok(self.cpu_limit_view())
+    }
+
+    /// CPUs a job of `repo` that runs `argv` is expected to use: what its
+    /// earlier runs used, at most the host's CPUs; 1 without history.
+    fn expected_cores(&self, history: &admission::History, repo: &str, argv: &[String]) -> f64 {
+        history
+            .expected_cores(repo, argv)
+            .unwrap_or(cpu_limit::DEFAULT_CORES)
+            .min(f64::from(self.cores))
+    }
+
+    /// The host's busy CPUs as the CPU limit reads them: the mean of the
+    /// census sampler's last samples, which count every process of the
+    /// host. No scan of its own.
+    fn cpu_figure(&self, g: &Inner, now: i64) -> cpu_limit::Figure {
+        if let Some(read) = self.cfg.cpu_busy {
+            return read().map_or(cpu_limit::Figure::Unknown, cpu_limit::Figure::Busy);
+        }
+        match g.host_busy.mean(now) {
+            Some(busy) => cpu_limit::Figure::Busy(busy),
+            None if now - self.born_ms < cpu_limit::GRACE_MS => cpu_limit::Figure::Pending,
+            None => cpu_limit::Figure::Unknown,
+        }
+    }
+
+    /// Whether the CPU limit holds queued job `id` now. Called under the
+    /// server lock (`g`), so the jobs that claimed their slots a moment ago
+    /// are counted.
+    fn cpu_verdict(
+        &self,
+        g: &Inner,
+        limits: cpu_limit::Limits,
+        id: i64,
+        now: i64,
+    ) -> cpu_limit::Verdict {
+        if limits.cpu_busy_max.is_none() {
+            return cpu_limit::Verdict::Free;
+        }
+        let Some(me) = g.active.get(&id) else {
+            return cpu_limit::Verdict::Free;
+        };
+        let mut load = cpu_limit::Load {
+            figure: self.cpu_figure(g, now),
+            cpus: self.cores,
+            running: 0,
+            starting: 0.0,
+            ahead: 0.0,
+            held_ms: me.cpu_wait_since.map(|since| now - since),
+        };
+        let window = g.host_busy.len();
+        let mine = (me.job.priority, id);
+        for (other, l) in &g.active {
+            if *other == id {
+                continue;
+            }
+            if l.pid.is_some() || l.held > 0 {
+                load.running += 1;
+                if l.pid.is_none() || now - l.job.started_ms < cpu_limit::STARTING_MS {
+                    load.starting += (l.expect_cores - l.recent.share(window)).max(0.0);
+                }
+            } else if l.cpu_wait && (l.job.priority, *other) < mine {
+                load.ahead += l.expect_cores;
+            }
+        }
+        cpu_limit::verdict(limits, &load, self.cfg.cpu_hold_max)
+    }
+
+    /// Job `id` starts although the host is busier than the mark: it was
+    /// held for the host's CPUs as long as a job is ([`Config::cpu_hold_max`]).
+    fn cpu_hold_ran_out(&self, id: i64, tx: &mpsc::UnboundedSender<Frame>) {
+        let now = now_ms();
+        let held_ms = {
+            let g = self.inner.lock().expect("server lock");
+            g.active
+                .get(&id)
+                .and_then(|l| l.cpu_wait_since)
+                .map_or(0, |since| now - since)
+        };
+        let msg = format!(
+            "slot: job {id} was held {} for the host's CPUs, as long as a job is: it starts",
+            run_limit::text(u64::try_from(held_ms / 1000).unwrap_or(0))
+        );
+        eprintln!("{msg}");
+        let _ = tx.send(Frame::Info { msg });
+        self.census_event(&serde_json::json!({
+            "t": now,
+            "event": "cpu_hold_bound",
+            "job": id,
+            "held_ms": held_ms,
+        }));
     }
 
     /// Marks every running job that ran past its limit as timed out and
@@ -3428,10 +3661,13 @@ impl Server {
         let base = self.headroom.lock().expect("headroom lock").base;
         let run_limit = self.run_limit_view();
         let job_parallel = self.job_parallel_view().job_parallel;
+        let cpu = self.cpu_limits();
         State {
             run_limit_s: run_limit.run_limit_s,
             run_limit_max_s: Some(run_limit.run_limit_max_s),
             job_parallel,
+            cpu_busy_max: cpu.cpu_busy_max,
+            cpu_busy_floor: cpu.cpu_busy_max.map(|_| cpu.floor()),
             headroom_base: base,
             busy_cores: m.busy,
             target_cores: m.target,

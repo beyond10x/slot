@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+pub use crate::cpu_limit::View as CpuLimitView;
 pub use crate::job_parallel::View as JobParallelView;
 pub use crate::run_limit::View as RunLimitView;
 pub use crate::server::limits::View as LimitsView;
@@ -262,6 +263,69 @@ fn job_parallel_line(s: &State) -> Option<String> {
     Some(format!(
         "at most {n} build {processes} per job, outside the pool's slots\n"
     ))
+}
+
+/// Reads the CPU limit (`slot cpu-limit`), or first changes it.
+pub fn cpu_limit(addr: &str, change: Option<&crate::cpu_limit::Request>) -> Result<CpuLimitView> {
+    let path = "/api/cpu-limit";
+    let answer = match change {
+        None => request(addr, "GET", path, None),
+        Some(c) => request(addr, "PUT", path, Some(&serde_json::to_string(c)?)),
+    };
+    let answer = answer.map_err(|e| {
+        if e.to_string().contains(" 404") {
+            e.context("the daemon is older than this slot and has no CPU limit")
+        } else {
+            e
+        }
+    })?;
+    serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
+}
+
+/// What a CPU limit of `mark` CPUs with a floor of `floor` jobs does on a
+/// host of `cpus` CPUs (0 when the daemon did not say).
+fn cpu_limit_text(mark: f64, floor: usize, cpus: u32) -> String {
+    if cpus > 0 && mark > f64::from(cpus) {
+        return format!("the CPU limit of {mark:.1} CPUs never holds a start: the host has {cpus}");
+    }
+    let run = if floor == 1 { "job runs" } else { "jobs run" };
+    format!("starts held while the host is busier than {mark:.1} CPUs and {floor} {run}")
+}
+
+/// `slot cpu-limit`: the values in force and the host's busy CPUs now.
+pub fn render_cpu_limit(v: &CpuLimitView) -> String {
+    use std::fmt::Write as _;
+    let Some(mark) = v.cpu_busy_max else {
+        return "no CPU limit: a queued job starts whatever the host's CPUs do\n".into();
+    };
+    let floor = v.cpu_busy_floor.unwrap_or(crate::cpu_limit::DEFAULT_FLOOR);
+    let mut out = cpu_limit_text(mark, floor, v.cpus);
+    if v.cpus > 0 && mark > f64::from(v.cpus) {
+        out.push('\n');
+        return out;
+    }
+    match v.busy {
+        Some(busy) => {
+            let _ = write!(out, "; now {busy:.1} of {} CPUs busy", v.cpus);
+        }
+        None => out.push_str("; no sample of the host's CPUs yet"),
+    }
+    match v.held {
+        0 => {}
+        1 => out.push_str(", 1 job held"),
+        n => {
+            let _ = write!(out, ", {n} jobs held");
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// The CPU limit line of `slot status`; `None` with no limit.
+fn cpu_limit_line(s: &State) -> Option<String> {
+    let mark = s.cpu_busy_max?;
+    let floor = s.cpu_busy_floor.unwrap_or(crate::cpu_limit::DEFAULT_FLOOR);
+    Some(cpu_limit_text(mark, floor, s.cores) + "\n")
 }
 
 /// `slot priority list`: one line per rule, then the promotion limit.
@@ -543,6 +607,9 @@ pub fn render(s: &State) -> String {
         out.push_str(&l);
     }
     if let Some(l) = job_parallel_line(s) {
+        out.push_str(&l);
+    }
+    if let Some(l) = cpu_limit_line(s) {
         out.push_str(&l);
     }
     if !s.upgrade.is_empty() {
@@ -1194,6 +1261,126 @@ mod tests {
                 .lines()
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn the_cpu_limit_is_a_header_line_when_it_is_on_and_a_held_job_says_why() {
+        let pool = "4 slots, 4 free, 0 running, 0 queued\n";
+        let mut s = State {
+            cores: 20,
+            tokens: 4,
+            limit: 4,
+            free: 4,
+            ..State::default()
+        };
+        assert_eq!(render(&s), pool, "off: no line");
+        s.cpu_busy_max = Some(17.0);
+        s.cpu_busy_floor = Some(4);
+        assert_eq!(
+            render(&s),
+            format!("{pool}starts held while the host is busier than 17.0 CPUs and 4 jobs run\n")
+        );
+        s.cpu_busy_floor = Some(1);
+        assert_eq!(
+            render(&s),
+            format!("{pool}starts held while the host is busier than 17.0 CPUs and 1 job runs\n")
+        );
+        s.cpu_busy_max = Some(25.0);
+        assert_eq!(
+            render(&s),
+            format!("{pool}the CPU limit of 25.0 CPUs never holds a start: the host has 20\n")
+        );
+        s.cpu_busy_max = Some(17.5);
+        s.job_parallel = Some(4);
+        assert!(
+            render(&s).ends_with(
+                "outside the pool's slots\n\
+                 starts held while the host is busier than 17.5 CPUs and 1 job runs\n"
+            ),
+            "{}",
+            render(&s)
+        );
+        let reason = "host busy: 18.4 of 20 CPUs, mark 17.0";
+        let mut held = job(8, JobState::Queued, 1);
+        held.wait_reason = reason.into();
+        s.active = vec![held];
+        let out = render(&s);
+        let under = out.lines().skip_while(|l| !l.starts_with("#8")).nth(1);
+        assert_eq!(
+            under.map(str::trim_start),
+            Some(format!("waiting: {reason}").as_str()),
+            "{out}"
+        );
+
+        let old: State = serde_json::from_str(
+            r#"{"host":"h","cores":4,"tokens":4,"free":4,"active":[],"done":[],"now_ms":0,"toolchains":[]}"#,
+        )
+        .unwrap();
+        assert_eq!((old.cpu_busy_max, old.cpu_busy_floor), (None, None));
+        let line = serde_json::to_string(&old).unwrap();
+        assert!(!line.contains("cpu_busy"), "{line}");
+        let on: State = serde_json::from_str(&line.replacen(
+            '{',
+            r#"{"cpu_busy_max":17.5,"cpu_busy_floor":4,"#,
+            1,
+        ))
+        .unwrap();
+        assert_eq!((on.cpu_busy_max, on.cpu_busy_floor), (Some(17.5), Some(4)));
+    }
+
+    #[test]
+    fn slot_cpu_limit_in_one_line() {
+        use crate::cpu_limit::View;
+        let mut v = View {
+            cpu_busy_max: Some(17.0),
+            cpu_busy_floor: Some(4),
+            cpus: 20,
+            busy: Some(18.44),
+            held: 3,
+        };
+        assert_eq!(
+            render_cpu_limit(&v),
+            "starts held while the host is busier than 17.0 CPUs and 4 jobs run; \
+             now 18.4 of 20 CPUs busy, 3 jobs held\n"
+        );
+        v.held = 1;
+        v.cpu_busy_floor = Some(1);
+        assert_eq!(
+            render_cpu_limit(&v),
+            "starts held while the host is busier than 17.0 CPUs and 1 job runs; \
+             now 18.4 of 20 CPUs busy, 1 job held\n"
+        );
+        v.held = 0;
+        v.busy = None;
+        assert_eq!(
+            render_cpu_limit(&v),
+            "starts held while the host is busier than 17.0 CPUs and 1 job runs; \
+             no sample of the host's CPUs yet\n"
+        );
+        v.cpu_busy_max = Some(25.0);
+        v.busy = Some(3.0);
+        assert_eq!(
+            render_cpu_limit(&v),
+            "the CPU limit of 25.0 CPUs never holds a start: the host has 20\n"
+        );
+        assert_eq!(
+            render_cpu_limit(&View {
+                cpus: 20,
+                busy: Some(3.0),
+                ..View::default()
+            }),
+            "no CPU limit: a queued job starts whatever the host's CPUs do\n"
+        );
+    }
+
+    #[test]
+    fn a_daemon_without_the_cpu_limit_says_so() {
+        let addr = answer_once("HTTP/1.0 404 Not Found\r\n\r\nslot: no such API path\n");
+        let e = cpu_limit(&addr, None).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("older than this slot and has no CPU limit"),
+            "{e:#}"
         );
     }
 }

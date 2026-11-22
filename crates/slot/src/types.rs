@@ -340,6 +340,17 @@ pub struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub job_parallel: Option<usize>,
+    /// Busy CPUs of the host from which the start of a queued job is held
+    /// (`slot cpu-limit`). Absent with no limit and from a daemon without
+    /// the setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub cpu_busy_max: Option<f64>,
+    /// Jobs that may always run under that limit, whatever the host's CPUs
+    /// do. Absent with no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub cpu_busy_floor: Option<usize>,
     /// Tokens that neither a job nor a live process with the pool open
     /// accounts for, as the daemon counted them last: lost, and written back
     /// once two counts in a row agree. 0 from a daemon that predates it.

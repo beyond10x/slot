@@ -22,7 +22,7 @@ pub const MAX_HEADROOM: u8 = 50;
 pub const FILE: &str = "limits.json";
 
 /// What is saved in [`FILE`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Saved {
     /// Headroom, percent.
     pub headroom_percent: u8,
@@ -46,6 +46,14 @@ pub struct Saved {
     /// jobserver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_parallel: Option<usize>,
+    /// Busy CPUs of the host from which the start of a queued job is held
+    /// (`slot cpu-limit`); `None`, and absent from the file: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_busy_max: Option<f64>,
+    /// Jobs that may always run under that limit; `None`, and absent from
+    /// the file: [`crate::cpu_limit::DEFAULT_FLOOR`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_busy_floor: Option<usize>,
 }
 
 /// Reads the saved headroom; 0 when the file is missing or unreadable.
@@ -53,13 +61,18 @@ pub fn load(dir: &Path) -> Saved {
     std::fs::read_to_string(dir.join(FILE))
         .ok()
         .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
-        .map(|s| Saved {
-            headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
-            call_headroom_percent: s.call_headroom_percent.map(|c| c.min(MAX_HEADROOM)),
-            base: s.base,
-            run_limit_s: s.run_limit_s.filter(|&l| l > 0),
-            run_limit_max_s: s.run_limit_max_s.filter(|&m| m > 0),
-            job_parallel: s.job_parallel.filter(|&n| n > 0),
+        .map(|s| {
+            let cpu = crate::cpu_limit::Limits::loaded(s.cpu_busy_max, s.cpu_busy_floor);
+            Saved {
+                headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
+                call_headroom_percent: s.call_headroom_percent.map(|c| c.min(MAX_HEADROOM)),
+                base: s.base,
+                run_limit_s: s.run_limit_s.filter(|&l| l > 0),
+                run_limit_max_s: s.run_limit_max_s.filter(|&m| m > 0),
+                job_parallel: s.job_parallel.filter(|&n| n > 0),
+                cpu_busy_max: cpu.cpu_busy_max,
+                cpu_busy_floor: cpu.cpu_busy_floor,
+            }
         })
         .unwrap_or_default()
 }
@@ -349,5 +362,84 @@ mod tests {
         assert!(!origin_allowed(Some("http://127.0.0.1:8080"), 7411));
         assert!(!origin_allowed(Some("https://example.com"), 7411));
         assert!(!origin_allowed(Some("null"), 7411));
+    }
+
+    #[test]
+    fn the_cpu_limit_is_kept_beside_the_headroom_and_absent_when_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let before =
+            r#"{"headroom_percent":30,"base":"machine","run_limit_s":600,"job_parallel":4}"#;
+        std::fs::write(&file, before).unwrap();
+        let old = load(dir.path());
+        assert_eq!(
+            (old.cpu_busy_max, old.cpu_busy_floor),
+            (None, None),
+            "a file from before the setting"
+        );
+        save(dir.path(), old).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            before,
+            "off: the file is what a daemon without the setting writes"
+        );
+        save(
+            dir.path(),
+            Saved {
+                cpu_busy_max: Some(17.0),
+                cpu_busy_floor: Some(6),
+                ..old
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.ends_with(r#","cpu_busy_max":17.0,"cpu_busy_floor":6}"#),
+            "{text}"
+        );
+        let s = load(dir.path());
+        assert_eq!((s.cpu_busy_max, s.cpu_busy_floor), (Some(17.0), Some(6)));
+        assert_eq!(
+            (s.headroom_percent, s.base, s.run_limit_s, s.job_parallel),
+            (30, HeadroomBase::Machine, Some(600), Some(4))
+        );
+        save(
+            dir.path(),
+            Saved {
+                cpu_busy_floor: None,
+                ..s
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.ends_with(r#","cpu_busy_max":17.0}"#), "{text}");
+        save(
+            dir.path(),
+            Saved {
+                cpu_busy_max: None,
+                cpu_busy_floor: None,
+                ..s
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        std::fs::write(
+            &file,
+            r#"{"headroom_percent":0,"cpu_busy_max":0.5,"cpu_busy_floor":3}"#,
+        )
+        .unwrap();
+        let s = load(dir.path());
+        assert_eq!(
+            (s.cpu_busy_max, s.cpu_busy_floor),
+            (None, None),
+            "a mark under 1 written by hand is no limit, and no floor stays without a mark"
+        );
+        std::fs::write(
+            &file,
+            r#"{"headroom_percent":0,"cpu_busy_max":8,"cpu_busy_floor":0}"#,
+        )
+        .unwrap();
+        let s = load(dir.path());
+        assert_eq!((s.cpu_busy_max, s.cpu_busy_floor), (Some(8.0), None));
     }
 }

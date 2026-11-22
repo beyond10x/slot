@@ -28,10 +28,14 @@ export function servedQueue(list: Iterable<Job>): Job[] {
 /** How the daemon starts the reason of a cargo build that waits for another job of its target directory. */
 const TARGET = 'target directory ';
 
+/** How the daemon starts the reason of a job held while the host's CPUs are busier than the CPU limit. */
+const HOST_BUSY = 'host busy';
+
 /** What a queued job waits for: a slot, or what the daemon's admission names in `wait_reason`. */
-export function waitsFor(j: Job): 'disk space' | 'memory' | 'a target directory' | 'slots' {
+export function waitsFor(j: Job): 'disk space' | 'memory' | "the host's CPUs" | 'a target directory' | 'slots' {
   if (!j.wait_reason) return 'slots';
   if (j.wait_reason.startsWith(TARGET)) return 'a target directory';
+  if (j.wait_reason.startsWith(HOST_BUSY)) return "the host's CPUs";
   return j.wait_reason.includes('filesystem') ? 'disk space' : 'memory';
 }
 
@@ -56,7 +60,7 @@ export function queuePlace(queue: readonly Job[], id: number): { pos: number; of
  * "waiting for slots" only when no listed job waits for disk space, memory or a target directory.
  */
 export function queueHeading(queue: readonly Job[]): string {
-  const kinds = (['disk space', 'memory', 'a target directory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
+  const kinds = (['disk space', 'memory', "the host's CPUs", 'a target directory', 'slots'] as const).filter((k) => queue.some((j) => waitsFor(j) === k));
   const what = kinds.length > 1 ? `${kinds.slice(0, -1).join(', ')} and ${kinds[kinds.length - 1]}` : (kinds[0] ?? 'slots');
   return `Queue: waiting for ${what}, by level, oldest first`;
 }

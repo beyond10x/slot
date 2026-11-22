@@ -376,6 +376,17 @@ run_limit_max_s?: number,
  */
 job_parallel?: number, 
 /**
+ * Busy CPUs of the host from which the start of a queued job is held
+ * (`slot cpu-limit`). Absent with no limit and from a daemon without
+ * the setting.
+ */
+cpu_busy_max?: number, 
+/**
+ * Jobs that may always run under that limit, whatever the host's CPUs
+ * do. Absent with no limit.
+ */
+cpu_busy_floor?: number, 
+/**
  * Tokens that neither a job nor a live process with the pool open
  * accounts for, as the daemon counted them last: lost, and written back
  * once two counts in a row agree. 0 from a daemon that predates it.

@@ -200,6 +200,18 @@ slot job-parallel [OPTIONS] [N|off]
 - `<LIMIT>`: Build processes one job may run at once, from 1; `off` for no limit, the default. With a limit N the daemon starts a job without the pool's jobserver and with `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` set to N, or to the slots the job holds if that is more (`slot --tokens`): `cargo` and `make` in the job then bound themselves and take no slots of the pool, so the pool limits how many jobs run, not how many compilers. It applies to the jobs that start after the change, is kept in `limits.json` in the state directory and holds across reloads and restarts
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
+### `slot cpu-limit`
+
+Show or set the CPU limit: the start of a queued job is held while the whole host is busier than a mark
+
+```text
+slot cpu-limit [OPTIONS] [CPUs|off]
+```
+
+- `<MARK>`: Busy CPUs of the host from which the start of a queued job is held, from 1 (`17`, `17.5`); `off` for no limit, the default. The figure is the CPU time of every process on the host over the last 10 s, whoever started it, with what jobs that started in the last 30 s are expected to add. A job held for 10 minutes starts whatever the figure says. A mark above the host's CPU count never holds. The mark reaches queued jobs within 2 seconds, is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `--floor`: Jobs that may always run, whatever the host's CPUs do, from 1; 4 until one is named. `off` forgets it
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
 ### `slot cancel`
 
 Cancel a queued or running job you submitted; a running job's processes get SIGTERM, then SIGKILL after 5 s
