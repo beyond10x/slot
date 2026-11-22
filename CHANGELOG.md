@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.24.0 — 2026-11-22
 
 - A CPU limit for starts: `slot cpu-limit <CPUs>` holds the start of a queued job while the whole
   host is that many CPUs busy or more and at least `--floor` jobs run (4 until one is named).

@@ -1255,7 +1255,7 @@ holds a pool slot" and still bound a job, and one job's `cargo` and `make` proce
 one bound. It needs a FIFO and a feeder per job, the daemon cannot see how many tokens a job
 wants, and each FIFO has to cross a handover. Open if S × N turns out too wide.
 
-## 24. A hold on the host's busy CPUs (unreleased)
+## 24. A hold on the host's busy CPUs (0.24.0)
 
 **The problem.** Slots bound what the pool starts. They do not bound what the host runs.
 Measured on one host of 20 CPUs with a pool of 50 slots: the host was 16.7 to 18.5 CPUs busy for

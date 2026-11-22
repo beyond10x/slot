@@ -91,6 +91,12 @@ A pool may give every job a bound of its own on build processes (`slot status` s
 build processes per job` in its header). The job then has `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j`
 set by the daemon. Do not override them, and do not pass `-j` yourself.
 
+A pool may hold the start of a queued job while the whole host's CPUs are busy (`slot status`
+shows `starts held while the host is busier than N CPUs` in its header, and the job's line says
+`host busy: … of … CPUs, mark …`). The job starts when the host has room, after 10 minutes at the
+latest. It is waiting, not hung: do not cancel it and start it again, and do not run it outside
+the pool.
+
 ## A refused command
 
 In Claude Code the plugin's `PreToolUse` hook refuses a Bash command that compiles or runs tests
