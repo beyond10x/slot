@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, useTemplateRef } from 'vue';
-import { AXIS, FONT, animate, drawAxis, sizeCanvas } from '../canvas.ts';
+import { AXIS, FONT, animate, drawAxis, drawExact, sizeCanvas } from '../canvas.ts';
 import type { HostSample } from '../lib/host.ts';
-import { hostSeries, now, store } from '../store.ts';
+import { chartWindow, now, store } from '../store.ts';
 
 export interface Line {
   label: string;
@@ -34,7 +34,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   ctx.clearRect(0, 0, w, H);
   drawAxis(ctx, w, H, t0, t1);
   const X = (t: number) => Math.max(0, ((t - t0) / win) * w);
-  const pts = hostSeries.filter((p) => p.t >= t0 - 2000);
+  const pts = chartWindow.value.host;
   let top = props.minTop;
   for (const p of pts) for (const l of props.lines) top = Math.max(top, l.value(p));
   top = Math.ceil(Math.min(top, props.maxTop ?? Infinity));
@@ -44,19 +44,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
   for (const l of props.lines) {
     ctx.strokeStyle = l.color;
     ctx.setLineDash(l.dashed ? [5, 4] : []);
-    ctx.beginPath();
-    let prevY = 0;
-    pts.forEach((p, i) => {
-      const x = X(p.t);
-      const y = Y(l.value(p));
-      if (!i) ctx.moveTo(x, y);
-      else {
-        if (l.step) ctx.lineTo(x, prevY);
-        ctx.lineTo(x, y);
-      }
-      prevY = y;
-    });
-    ctx.stroke();
+    drawExact(ctx, pts, X, (p) => Y(l.value(p)), l.step);
   }
   ctx.setLineDash([]);
   ctx.font = FONT;

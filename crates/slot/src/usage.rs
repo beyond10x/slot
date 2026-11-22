@@ -51,6 +51,9 @@ pub struct UsageRow {
     /// Jobs that started in the window.
     #[serde(default)]
     pub jobs: u32,
+    /// Starts grouped by a repository label the client did not verify.
+    #[serde(default)]
+    pub unverified_repo_jobs: u32,
     /// Run seconds × slots held, inside the window.
     #[serde(default)]
     pub slot_s: f64,
@@ -99,14 +102,22 @@ pub struct Usage {
 /// The group key of `job`. `project` resolves the project of a job logged
 /// before jobs carried one (from its directory, which may be gone).
 pub fn key_of(job: &Job, by: By, project: &mut dyn FnMut(&str) -> String) -> String {
+    group(job, by, project).0
+}
+
+fn group(job: &Job, by: By, project: &mut dyn FnMut(&str) -> String) -> (String, bool) {
     match by {
-        By::Repo => job.repo.clone(),
-        By::Session => job.session.clone(),
-        By::Project if !job.project.is_empty() => job.project.clone(),
-        By::Project => Some(project(&job.cwd))
-            .filter(|p| !p.is_empty())
-            .unwrap_or_else(|| job.repo.clone()),
+        By::Session => return (job.session.clone(), false),
+        By::Project if !job.project.is_empty() => return (job.project.clone(), false),
+        By::Project => {
+            let resolved = project(&job.cwd);
+            if !resolved.is_empty() {
+                return (resolved, false);
+            }
+        }
+        By::Repo => {}
     }
+    (job.repo.clone(), job.checkout.is_none())
 }
 
 #[derive(Default)]
@@ -159,12 +170,13 @@ pub fn aggregate(
             continue;
         }
         let slot_s = run_ms as f64 / 1000.0 * f64::from(job.tokens.max(1));
-        let key = key_of(&job, by, project);
+        let (key, unverified) = group(&job, by, project);
         for acc in [groups.entry(key.clone()).or_default(), &mut total] {
             acc.row.slot_s += slot_s;
             if started_in {
                 let wait = (job.started_ms - job.enqueued_ms).max(0) as f64 / 1000.0;
                 acc.row.jobs += 1;
+                acc.row.unverified_repo_jobs += u32::from(unverified);
                 acc.row.cpu_s += job.cpu_s;
                 acc.row.wait_s += wait;
                 acc.row.wait_max_s = acc.row.wait_max_s.max(wait);
@@ -312,6 +324,7 @@ mod tests {
             argv: vec!["make".into()],
             cwd: format!("/src/{repo}"),
             repo: repo.into(),
+            checkout: Some(crate::types::Checkout::Repository),
             project: project.into(),
             session: session.into(),
             client: String::new(),
@@ -389,6 +402,24 @@ mod tests {
         let log = job(1, "api", "p", "s", 2, (0, 10_000, 0), 0.0);
         let u = aggregate(log.as_bytes(), 0, 20_000, By::Repo, &mut none);
         assert!((u.rows[0].slot_s - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unverified_groups_preserve_legacy_keys_and_counts() {
+        let current = job(1, "sample", "", "session", 1, (0, 1, 2), 0.0);
+        let mut legacy: serde_json::Value = serde_json::from_str(&current).unwrap();
+        legacy.as_object_mut().unwrap().remove("checkout");
+        let log = format!("{legacy}\n{current}");
+        for by in [By::Repo, By::Project] {
+            let usage = aggregate(log.as_bytes(), 0, 3, by, &mut none);
+            let row = &usage.rows[0];
+            assert_eq!(row.key, "sample");
+            assert_eq!((row.jobs, row.unverified_repo_jobs), (2, 1));
+        }
+        let resolved = aggregate(log.as_bytes(), 0, 3, By::Project, &mut |_| "sample".into());
+        assert_eq!(resolved.rows[0].unverified_repo_jobs, 0);
+        let sessions = aggregate(log.as_bytes(), 0, 3, By::Session, &mut none);
+        assert_eq!(sessions.rows[0].unverified_repo_jobs, 0);
     }
 
     #[test]

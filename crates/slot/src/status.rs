@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 pub use crate::server::limits::View as LimitsView;
 pub use crate::server::priority::View as PriorityView;
-use crate::types::{HeadroomBase, Job, JobState, Priority, State};
+use crate::types::{Checkout, HeadroomBase, Job, JobState, Priority, State};
 
 /// One HTTP/1.0 request to the daemon's web address; the body of a 200
 /// answer. A daemon older than the client answers an API path it does not
@@ -255,6 +255,13 @@ fn line(j: &Job, now: i64) -> String {
     if cmd.chars().count() > 60 {
         cmd = cmd.chars().take(59).collect::<String>() + "…";
     }
+    let identity = match &j.checkout {
+        Some(Checkout::Repository) => j.repo.clone(),
+        Some(Checkout::Worktree { name }) => format!("{} (worktree {name})", j.repo),
+        Some(Checkout::Directory) => "no repository".into(),
+        None if !j.repo.is_empty() => format!("unverified · {}", j.repo),
+        None => "repository unknown".into(),
+    };
     let mut s = format!(
         "#{:<5} {:<7} {:<9} {:>2} slot(s) {:>7}  {}  {}",
         j.id,
@@ -262,7 +269,7 @@ fn line(j: &Job, now: i64) -> String {
         j.toolchain,
         j.tokens,
         secs(now - since),
-        j.repo,
+        identity,
         cmd
     );
     if j.state == JobState::Queued {
@@ -399,6 +406,7 @@ mod tests {
             argv: vec!["cargo".into(), "test".into()],
             cwd: "/w".into(),
             repo: "demo".into(),
+            checkout: Some(crate::types::Checkout::Repository),
             project: String::new(),
             session: String::new(),
             client: String::new(),
@@ -418,6 +426,15 @@ mod tests {
             priority: crate::types::Priority::Normal,
             promoted: false,
         }
+    }
+
+    #[test]
+    fn status_preserves_the_unverified_label_of_an_old_job() {
+        let mut old = job(2, JobState::Queued, 1);
+        old.checkout = None;
+        assert!(line(&old, 1000).contains("unverified · demo"));
+        old.repo.clear();
+        assert!(line(&old, 1000).contains("repository unknown"));
     }
 
     #[test]

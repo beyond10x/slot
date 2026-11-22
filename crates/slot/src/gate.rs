@@ -194,6 +194,7 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         workspace: None,
         session: client.session,
         repo: client.repo,
+        checkout: client.checkout,
         client: client.client,
         cancel: None,
         tokens: client.tokens,
@@ -686,6 +687,9 @@ mod tests {
             cwd: "/does/not/exist/on/the/host".into(),
             env: vec!["A=1".into()],
             tokens: Some(3),
+            checkout: Some(crate::types::Checkout::Worktree {
+                name: "feature".into(),
+            }),
             ..Request::default()
         };
         let r = daemon_request(Path::new("/g"), "c1-2", client, Path::new("/bin/slot"));
@@ -693,6 +697,12 @@ mod tests {
         assert_eq!(r.hold_for, Some(vec!["cargo".into(), "build".into()]));
         assert_eq!(r.cwd, "/g");
         assert_eq!(r.tokens, Some(3));
+        assert_eq!(
+            r.checkout,
+            Some(crate::types::Checkout::Worktree {
+                name: "feature".into()
+            })
+        );
         assert_eq!(r.env, vec!["A=1".to_string()]);
     }
 

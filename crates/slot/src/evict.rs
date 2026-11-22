@@ -249,8 +249,8 @@ pub struct Candidate {
 }
 
 /// Target directories eligible now, least recently built first: not
-/// built within `min_idle` of `now_ms`, not of a repository in `busy_repos`
-/// and not in `busy_dirs`.
+/// built within `min_idle` of `now_ms`, not of a named repository in
+/// `busy_repos` and not in `busy_dirs`.
 #[allow(clippy::implicit_hasher)]
 pub fn candidates(
     seen: &HashMap<PathBuf, (String, i64)>,
@@ -263,7 +263,9 @@ pub fn candidates(
     let mut v: Vec<Candidate> = seen
         .iter()
         .filter(|(p, (repo, last))| {
-            now_ms - *last >= idle_ms && !busy_repos.contains(repo) && !busy_dirs.contains(*p)
+            now_ms - *last >= idle_ms
+                && (repo.is_empty() || !busy_repos.contains(repo))
+                && !busy_dirs.contains(*p)
         })
         .map(|(p, (repo, last))| Candidate {
             path: p.clone(),
@@ -475,6 +477,22 @@ mod tests {
         let c = candidates(&seen, &busy, &dirs, now, Duration::from_secs(7200));
         let names: Vec<&str> = c.iter().map(|c| c.repo.as_str()).collect();
         assert_eq!(names, ["old", "mid"]);
+    }
+
+    #[test]
+    fn unnamed_repositories_are_protected_by_their_active_target_directory() {
+        let active = PathBuf::from("/w/active/target");
+        let idle = PathBuf::from("/w/idle/target");
+        let seen = HashMap::from([
+            (active.clone(), (String::new(), 1)),
+            (idle.clone(), (String::new(), 1)),
+        ]);
+        let busy_repos = HashSet::from([String::new()]);
+        let busy_dirs = HashSet::from([active]);
+
+        let candidates = candidates(&seen, &busy_repos, &busy_dirs, 2, Duration::ZERO);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, idle);
     }
 
     #[test]

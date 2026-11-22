@@ -6,7 +6,9 @@
 //! cannot be reached the command runs locally and slot says so on stderr.
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
 use crate::toolchain;
+use crate::types::Checkout;
 
 /// How long a queued job waits for an upgrading daemon to come back.
 pub const UPGRADE_WAIT: Duration = Duration::from_secs(600);
@@ -148,16 +151,17 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         return run_local(argv);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let (top, repo) = git_info(&cwd);
+    let CheckoutInfo {
+        top,
+        repo,
+        checkout,
+    } = checkout_info(&cwd);
     let mut req = Request {
         argv: argv.to_vec(),
         session: std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),
         client: client_id(),
-        repo: repo.unwrap_or_else(|| {
-            cwd.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        }),
+        repo: repo.unwrap_or_default(),
+        checkout,
         tokens: s.tokens,
         priority: s.priority,
         ..Request::default()
@@ -402,34 +406,73 @@ fn client_id() -> String {
 /// Repository root and name of the git checkout containing `cwd`. A linked
 /// worktree reports its main repository's name.
 pub fn git_info(cwd: &Path) -> (Option<PathBuf>, Option<String>) {
-    let out = Command::new("git")
+    let info = checkout_info(cwd);
+    (info.top, info.repo)
+}
+
+#[derive(Default)]
+struct CheckoutInfo {
+    top: Option<PathBuf>,
+    repo: Option<String>,
+    checkout: Option<Checkout>,
+}
+
+fn checkout_info(cwd: &Path) -> CheckoutInfo {
+    let Ok(out) = Command::new("git")
+        .env("LC_ALL", "C")
         .arg("-C")
         .arg(cwd)
         .args([
             "rev-parse",
-            "--show-toplevel",
             "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
             "--git-common-dir",
         ])
-        .stderr(Stdio::null())
-        .output();
-    let Ok(out) = out else { return (None, None) };
-    if !out.status.success() {
-        return (None, None);
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = text.lines();
-    let (Some(top), Some(common)) = (lines.next(), lines.next()) else {
-        return (None, None);
+        .output()
+    else {
+        return CheckoutInfo::default();
     };
-    let common = Path::new(common.trim_end_matches('/'));
+    if !out.status.success() {
+        // Git also exits 128 for a broken checkout or permission problem.
+        let outside = out
+            .stderr
+            .starts_with(b"fatal: not a git repository (or any of the parent directories)")
+            || out
+                .stderr
+                .starts_with(b"fatal: not a git repository (or any parent up to mount point ");
+        return CheckoutInfo {
+            checkout: outside.then_some(Checkout::Directory),
+            ..CheckoutInfo::default()
+        };
+    }
+    let mut paths = out
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .map(OsStr::from_bytes)
+        .map(Path::new);
+    let (Some(top), Some(git_dir), Some(common)) = (paths.next(), paths.next(), paths.next())
+    else {
+        return CheckoutInfo::default();
+    };
     let name = if common.file_name().is_some_and(|n| n == ".git") {
         common.parent().and_then(Path::file_name)
     } else {
         common.file_name()
     };
     let repo = name.map(|n| n.to_string_lossy().trim_end_matches(".git").to_string());
-    (Some(PathBuf::from(top)), repo)
+    let checkout = if git_dir == common {
+        Some(Checkout::Repository)
+    } else {
+        top.file_name().map(|name| Checkout::Worktree {
+            name: name.to_string_lossy().into_owned(),
+        })
+    };
+    CheckoutInfo {
+        top: Some(top.to_path_buf()),
+        repo,
+        checkout,
+    }
 }
 
 /// Workspace id for a repository root on this host.
@@ -683,6 +726,123 @@ mod tests {
             cwd: "/w".into(),
             ..Request::default()
         }
+    }
+
+    fn git_setup(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "user.name=Slot Test",
+                "-c",
+                "user.email=slot@example.invalid",
+                "-c",
+                "protocol.file.allow=always",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn checkout_identity_follows_git_from_inside_a_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap().join("main-repo");
+        let outside = dir.path().join("scratch/.sdc/impl-gate");
+        let inside = repo.join(".sdc/impl-gate");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&inside).unwrap();
+        git_setup(&repo, &["init", "-q"]);
+
+        let info = checkout_info(&outside);
+        assert!(matches!(info.checkout, Some(Checkout::Directory)));
+        assert_eq!(git_info(&outside), (None, None));
+
+        assert!(matches!(
+            checkout_info(&inside).checkout,
+            Some(Checkout::Repository)
+        ));
+        assert_eq!(git_info(&inside), (Some(repo), Some("main-repo".into())));
+    }
+
+    #[test]
+    fn detached_linked_checkout_keeps_the_common_repository_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = root.join("main-repo");
+        let linked = root.join("linked-checkout");
+        std::fs::create_dir(&repo).unwrap();
+        git_setup(&repo, &["init", "-q"]);
+        git_setup(&repo, &["commit", "--allow-empty", "-qm", "initial"]);
+        git_setup(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let cwd = linked.join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+
+        assert!(matches!(
+            checkout_info(&cwd).checkout,
+            Some(Checkout::Worktree { name }) if name == "linked-checkout"
+        ));
+        assert_eq!(git_info(&cwd), (Some(linked), Some("main-repo".into())));
+    }
+
+    #[test]
+    fn a_submodule_is_a_repository_with_its_own_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let repo = root.join("main-repo");
+        let source = root.join("component-repo");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&source).unwrap();
+        git_setup(&source, &["init", "-q"]);
+        git_setup(&source, &["commit", "--allow-empty", "-qm", "initial"]);
+        git_setup(&repo, &["init", "-q"]);
+        git_setup(
+            &repo,
+            &[
+                "submodule",
+                "add",
+                "-q",
+                source.to_str().unwrap(),
+                "vendor/component",
+            ],
+        );
+        let submodule = repo.join("vendor/component");
+        let cwd = submodule.join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+
+        assert!(matches!(
+            checkout_info(&cwd).checkout,
+            Some(Checkout::Repository)
+        ));
+        assert_eq!(git_info(&cwd), (Some(submodule), Some("component".into())));
+    }
+
+    #[test]
+    fn a_broken_git_directory_has_unknown_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".git"), "gitdir: missing\n").unwrap();
+
+        assert!(checkout_info(dir.path()).checkout.is_none());
+        assert_eq!(git_info(dir.path()), (None, None));
     }
 
     #[test]

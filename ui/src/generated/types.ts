@@ -4,6 +4,12 @@ export type JobState = "queued" | "running" | "ok" | "failed" | "cancelled";
 
 export type Priority = "urgent" | "high" | "normal" | "low";
 
+export type Checkout = { "kind": "repository" } | { "kind": "worktree", 
+/**
+ * Name of the linked working directory.
+ */
+name: string, } | { "kind": "directory" };
+
 export type Job = { 
 /**
  * Job id, increasing.
@@ -21,6 +27,10 @@ cwd: string,
  * Repository name.
  */
 repo: string, 
+/**
+ * How the client identified its checkout. Absent for unverified jobs.
+ */
+checkout?: Checkout, 
 /**
  * Project: the namespace of the repository's remote, or `.slot.toml`'s
  * `project`; empty when unknown (`crate::project`).
@@ -337,6 +347,10 @@ title: string,
  * Jobs that started in the window.
  */
 jobs: number, 
+/**
+ * Starts grouped by a repository label the client did not verify.
+ */
+unverified_repo_jobs: number, 
 /**
  * Run seconds × slots held, inside the window.
  */

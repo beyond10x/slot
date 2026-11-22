@@ -56,7 +56,7 @@ watch([win, by], () => void load());
     </thead>
     <tbody>
       <tr v-for="r in rows" :key="r.key" class="static">
-        <td class="label" :title="r.key">{{ r.label }}</td>
+        <td class="label" :title="by === 'session' && r.key ? `${r.label}\n${r.key}` : r.label">{{ r.label }}</td>
         <td class="bar"><span class="track"><span class="fill" :style="{ width: `${r.width}%` }"></span></span> {{ r.share }}</td>
         <td class="num">{{ r.slotHours }}</td>
         <td class="num">{{ r.cpuShare }}</td>

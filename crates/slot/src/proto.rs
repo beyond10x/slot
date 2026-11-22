@@ -23,6 +23,9 @@ pub struct Request {
     /// Repository name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub repo: String,
+    /// Git checkout identified by the client at submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<crate::types::Checkout>,
     /// `host:pid` of the client's parent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub client: String,
@@ -109,6 +112,7 @@ mod tests {
     fn a_request_from_an_older_client_has_no_job_tokens() {
         let r: Request = serde_json::from_str(r#"{"argv":["sh","build.sh"],"env":[]}"#).unwrap();
         assert_eq!(r.tokens, None);
+        assert_eq!(r.checkout, None);
         let line = serde_json::to_string(&r).unwrap();
         assert!(!line.contains("tokens"), "{line}");
         let r = Request {
