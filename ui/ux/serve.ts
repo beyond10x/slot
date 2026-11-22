@@ -4,7 +4,8 @@
 // trailing slash, `<path>/index.html` then `<path>.html`, else 404.html). Both of those load their
 // tool's configuration and plugins before they listen: on a loaded host `docusaurus serve` was not
 // listening after 60 s, Playwright's limit for a web server. This one only reads files.
-import { readFile, stat } from 'node:fs/promises';
+import { realpathSync, statSync } from 'node:fs';
+import { lstat, readFile, realpath } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { extname, join, resolve, sep } from 'node:path';
@@ -40,12 +41,18 @@ const TYPES: Record<string, string> = {
   '.wasm': 'application/wasm',
 };
 
-/** The file at `rel` under `dir`; undefined when there is none or `rel` leads out of `dir`. */
+/**
+ * The file at `rel` under `dir` (a real path); undefined when there is none, when it is a symlink
+ * (`docusaurus serve` answers those 404), or when `rel` or a linked directory leads out of `dir`.
+ */
 async function file(dir: string, rel: string): Promise<string | undefined> {
+  const inside = (p: string): boolean => p === dir || p.startsWith(dir + sep);
   const path = resolve(dir, `.${sep}${rel}`);
-  if (path !== dir && !path.startsWith(dir + sep)) return undefined;
+  if (!inside(path)) return undefined;
   try {
-    return (await stat(path)).isFile() ? path : undefined;
+    const st = await lstat(path);
+    if (!st.isFile()) return undefined;
+    return inside(await realpath(path)) ? path : undefined;
   } catch {
     return undefined;
   }
@@ -71,7 +78,12 @@ async function notFound(res: ServerResponse, dir: string, mode: ServeOptions['mo
 
 /** Answers one request as `docusaurus serve` (trailingSlash: false) or `vite preview` does. */
 export function handler(opts: ServeOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const dir = resolve(opts.dir);
+  let dir = resolve(opts.dir);
+  try {
+    dir = realpathSync(dir);
+  } catch {
+    /* missing: every request is 404 */
+  }
   return async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
@@ -91,7 +103,12 @@ export function handler(opts: ServeOptions): (req: IncomingMessage, res: ServerR
     }
     const asset = /\.[a-zA-Z\d]{1,4}$/.test(path);
     if (!asset && path !== opts.base && path.endsWith('/')) return redirect(res, 302, `${path.slice(0, -1)}${url.search}`);
-    if (/(\.html|\/index)$/.test(rel)) return redirect(res, 301, `${opts.base}${rel.replace(/(\.html|\/index)$/, '')}`);
+    // `x.html` and `x/index` lead to `x`, both at once: `index.html` leads to the base itself.
+    if (/(\.html|\/index)$/.test(`/${rel}`)) {
+      let clean = `/${rel}`;
+      for (let next = clean.replace(/(\.html|\/index)$/, ''); next !== clean; next = clean.replace(/(\.html|\/index)$/, '')) clean = next;
+      return redirect(res, 301, `${opts.base}${clean.slice(1)}`);
+    }
     const candidates = extname(rel) !== '' ? [rel] : [];
     candidates.push(join(rel, 'index.html'), ...(rel === '' ? [] : [`${rel.replace(/\/$/, '')}.html`]), rel);
     for (const c of candidates) {
@@ -125,7 +142,19 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.error('usage: node ux/serve.ts <dir> <port> [--base /path/] [--docs]');
     process.exit(2);
   }
-  const server = await serve({ dir, base, mode: rest.includes('--docs') ? 'docs' : 'spa' }, Number(port));
+  const mode = rest.includes('--docs') ? 'docs' : 'spa';
+  // Playwright waits 60 s for a server that answers 404 everywhere, then names no cause.
+  let isDir = false;
+  try {
+    isDir = statSync(dir).isDirectory();
+  } catch {
+    /* missing */
+  }
+  if (!isDir) {
+    console.error(`serve: ${resolve(dir)} is not a directory; build it first with \`${mode === 'docs' ? 'task site' : 'task ui'}\``);
+    process.exit(1);
+  }
+  const server = await serve({ dir, base, mode }, Number(port));
   const { port: bound } = server.address() as { port: number };
   console.log(`serve: ${dir} listening on http://127.0.0.1:${bound}${base}`);
   for (const s of ['SIGINT', 'SIGTERM'] as const) process.on(s, () => process.exit(0));
