@@ -345,7 +345,18 @@ quota_floor: boolean,
  * Machine base: the pool is at its floor and the host is still busier
  * than the target.
  */
-over_target: boolean, };
+over_target: boolean, 
+/**
+ * Tokens that neither a job nor a live process with the pool open
+ * accounts for, as the daemon counted them last: lost, and written back
+ * once two counts in a row agree. 0 from a daemon that predates it.
+ */
+tokens_unaccounted: number, 
+/**
+ * Since when tokens are unaccounted for, Unix milliseconds; 0 while
+ * there are none.
+ */
+tokens_unaccounted_since_ms: number, };
 
 export type By = "project" | "repo" | "session";
 

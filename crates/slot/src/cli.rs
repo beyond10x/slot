@@ -485,6 +485,7 @@ impl ServeArgs {
             clock: crate::server::now_ms,
             target_poll: crate::server::TARGET_POLL,
             target_settle: crate::server::TARGET_SETTLE,
+            token_watch: crate::server::TOKEN_WATCH,
             cache_budget: gb_bytes(self.cache_budget),
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),

@@ -12,7 +12,7 @@
 //! it, the old head's tokens move to the new one. An `urgent` head with no
 //! token free borrows the tokens the headroom holds back.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
@@ -30,25 +30,95 @@ use crate::types::Priority;
 
 /// How long the reader waits for a token before it looks at its flags again.
 const READ_POLL_MS: u16 = 100;
+
+/// A live process that has the pool's FIFO open, as [`holders`] read it
+/// from `/proc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Holder {
+    /// Process id.
+    pub pid: u32,
+    /// Command name (`comm`).
+    pub comm: String,
+    /// Direct children it has not reaped: running ones and zombies.
+    pub children: usize,
+    /// Threads.
+    pub threads: usize,
+}
+
+impl Holder {
+    /// The most jobserver tokens the process can hold besides the one it was
+    /// started with. The token watch counts this for every live holder, so
+    /// it never writes back a token a live process has (`docs/design.md`
+    /// § 21).
+    ///
+    /// A jobserver client holds one token for each unit of work it runs
+    /// beyond the first; the first runs on the token the client was started
+    /// with. What a unit is depends on the client:
+    ///
+    /// - A build driver (`cargo`, `make`, `ninja`) runs each unit as a
+    ///   direct child, whatever the child is: a compiler, or a client of a
+    ///   compile server with no compiler below it. Its threads are not
+    ///   counted, because they mirror its children (`cargo` has 4, 5 and 7
+    ///   threads with 1, 2 and 4 children).
+    /// - Any other holder may run its units as threads: a `rustc` has no
+    ///   child and holds a token for each codegen thread after its first.
+    ///   The larger of its children and its threads counts.
+    /// - A holder with more than one thread reads tokens on a helper
+    ///   thread, and a token it has read is not a child or a worker yet for
+    ///   a moment, so it counts one more. A holder with one thread starts
+    ///   the child in the thread that read the token.
+    pub fn may_hold(&self) -> usize {
+        let units = if self.driver() {
+            self.children
+        } else {
+            self.children.max(self.threads)
+        };
+        units.saturating_sub(1) + usize::from(self.threads > 1)
+    }
+
+    /// Whether the process runs every unit of its work as a child process.
+    fn driver(&self) -> bool {
+        matches!(self.comm.as_str(), "cargo" | "make" | "gmake" | "ninja")
+    }
+}
+
+/// Command name, parent and thread count of one `/proc/<pid>/stat` line.
+fn stat_fields(s: &str) -> Option<(String, u32, usize)> {
+    let open = s.find('(')?;
+    let close = s.rfind(')')?;
+    let comm = s.get(open + 1..close)?.to_string();
+    // After the name: state, ppid (field 4), …, num_threads (field 20).
+    let mut rest = s.get(close + 1..)?.split_whitespace();
+    let ppid = rest.nth(1)?.parse().ok()?;
+    let threads = rest.nth(15)?.parse().ok()?;
+    Some((comm, ppid, threads))
+}
+
 /// Processes other than `own` that have the FIFO at `path` open, from
-/// `/proc/<pid>/fd`. Processes of other users are not readable and not
-/// counted; the FIFO is mode 0600, so they cannot open it either. A
-/// descriptor counts by the FIFO's device and inode, not its path: a
-/// sandboxed build opens it through a hard link `slot gate` made (§ 19),
-/// and its `/proc` link names that path as the sandbox sees it.
-pub fn holders(path: &Path, own: u32) -> Vec<u32> {
+/// `/proc/<pid>/fd`, each with its children and threads from
+/// `/proc/<pid>/stat` of every process. `None` when the FIFO or `/proc`
+/// cannot be read: then nothing is known about who holds tokens. Processes
+/// of other users are not readable and not counted; the FIFO is mode 0600,
+/// so they cannot open it either. A descriptor counts by the FIFO's device
+/// and inode, not its path: a sandboxed build opens it through a hard link
+/// `slot gate` made (§ 19), and its `/proc` link names that path as the
+/// sandbox sees it.
+pub fn holders(path: &Path, own: u32) -> Option<Vec<Holder>> {
     use std::os::unix::fs::MetadataExt;
-    let mut out = Vec::new();
-    let Ok(want) = std::fs::metadata(path).map(|m| (m.dev(), m.ino())) else {
-        return out;
-    };
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return out;
-    };
+    let want = std::fs::metadata(path).map(|m| (m.dev(), m.ino())).ok()?;
+    let procs = std::fs::read_dir("/proc").ok()?;
+    let mut out: Vec<Holder> = Vec::new();
+    let mut children: HashMap<u32, usize> = HashMap::new();
     for p in procs.flatten() {
         let Some(pid) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
+        let stat = std::fs::read_to_string(p.path().join("stat"))
+            .ok()
+            .and_then(|s| stat_fields(&s));
+        if let Some((_, ppid, _)) = &stat {
+            *children.entry(*ppid).or_default() += 1;
+        }
         if pid == own {
             continue;
         }
@@ -59,10 +129,20 @@ pub fn holders(path: &Path, own: u32) -> Vec<u32> {
             .flatten()
             .any(|fd| std::fs::metadata(fd.path()).is_ok_and(|m| (m.dev(), m.ino()) == want))
         {
-            out.push(pid);
+            // A process whose `stat` is gone is exiting.
+            let (comm, _, threads) = stat.unwrap_or_else(|| (String::new(), 0, 1));
+            out.push(Holder {
+                pid,
+                comm,
+                children: 0,
+                threads,
+            });
         }
     }
-    out
+    for h in &mut out {
+        h.children = children.get(&h.pid).copied().unwrap_or(0);
+    }
+    Some(out)
 }
 
 /// The token pool.
@@ -88,6 +168,9 @@ struct Inner {
     reader_parked: bool,
     /// Arrival number of the next request: first in, first out inside a level.
     next_seq: u64,
+    /// Surplus tokens still to take out: the reader keeps the next that come
+    /// back (see [`Pool::remove`]).
+    debt: usize,
 }
 
 /// What a handover passes on about the pool besides the FIFO itself.
@@ -559,44 +642,41 @@ impl Pool {
     /// killed process took tokens with it; a surplus means a double release.
     /// Returns tokens added (positive) or removed (negative).
     pub fn reconcile(&self) -> i64 {
-        let inner = self.inner.lock().expect("jobserver lock");
+        let mut inner = self.inner.lock().expect("jobserver lock");
         if !inner.queue.is_empty() {
             return 0;
         }
+        // The FIFO is set to its size here, so nothing is left to take out.
+        inner.debt = 0;
         let diff = (self.size - inner.held_back) as i64 - self.free() as i64;
         if diff > 0 {
             self.write(diff as usize);
             return diff;
         }
         if diff < 0 {
-            // Non-blocking: take what is there, at most the surplus.
-            let mut buf = vec![0u8; (-diff) as usize];
-            let mut taken = 0;
-            while taken < buf.len() {
-                match (&self.file).read(&mut buf[taken..]) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => taken += n,
-                }
-            }
-            return -(taken as i64);
+            return -(self.take((-diff) as usize) as i64);
         }
         diff
     }
 
-    /// Tokens missing from the pool while jobs run. Valid only when no
-    /// process but the daemon has the FIFO open: then every token is in the
-    /// FIFO, held back, granted to a running job (`granted`), or taken by a
-    /// queued request. Anything short of that was read by a process that
-    /// exited without writing it back. In-flight tokens (read by the reader
-    /// thread, not yet booked) also show up here for a moment, so the caller
-    /// acts only on a shortfall seen twice in a row. 0 while the pool is
-    /// paused for a handover: tokens taken from queued requests are then in
-    /// the daemon's hands and counted nowhere here.
-    pub fn missing(&self, granted: usize) -> usize {
-        let inner = self.inner.lock().expect("jobserver lock");
-        if inner.pause {
-            return 0;
+    /// Takes up to `n` tokens out of the FIFO without blocking: what is
+    /// there now.
+    fn take(&self, n: usize) -> usize {
+        let mut buf = vec![0u8; n];
+        let mut taken = 0;
+        while taken < buf.len() {
+            match (&self.file).read(&mut buf[taken..]) {
+                Ok(0) | Err(_) => break,
+                Ok(k) => taken += k,
+            }
         }
+        taken
+    }
+
+    /// Tokens the daemon has booked, and those in the FIFO: held back,
+    /// granted to running jobs (`granted`), gathered by a queued request,
+    /// or free.
+    fn placed(&self, inner: &Inner, granted: usize) -> usize {
         let queued: usize = inner
             .queue
             .iter()
@@ -604,14 +684,56 @@ impl Pool {
             .filter(|w| !w.cancelled && !w.granted)
             .map(|w| w.got)
             .sum();
-        let booked = inner.held_back + granted + queued;
-        self.size.saturating_sub(booked + self.free())
+        inner.held_back + granted + queued + self.free()
+    }
+
+    /// Tokens that are neither in the FIFO nor booked by the daemon while
+    /// jobs run: not held back, not granted to a running job (`granted`),
+    /// not gathered by a queued request. A live process with the FIFO open
+    /// has them, or a process that exited without writing them back; the
+    /// caller tells the two apart ([`Holder::may_hold`]). In-flight tokens
+    /// (read by the reader thread, not yet booked) also show up here for a
+    /// moment, so the caller acts only on a shortfall seen twice in a row.
+    /// 0 while the pool is paused for a handover: tokens taken from queued
+    /// requests are then in the daemon's hands and counted nowhere here.
+    pub fn missing(&self, granted: usize) -> usize {
+        let inner = self.inner.lock().expect("jobserver lock");
+        if inner.pause {
+            return 0;
+        }
+        (self.size + inner.debt).saturating_sub(self.placed(&inner, granted))
+    }
+
+    /// Tokens in circulation beyond the pool size while jobs run: a slot
+    /// released twice, or a token written back that a live process still
+    /// held. What live processes hold only adds to it, so the count is a
+    /// lower bound and needs no look at them. Tokens [`Pool::remove`] still
+    /// has to take out are not counted again. 0 while the pool is paused.
+    pub fn surplus(&self, granted: usize) -> usize {
+        let inner = self.inner.lock().expect("jobserver lock");
+        if inner.pause {
+            return 0;
+        }
+        self.placed(&inner, granted)
+            .saturating_sub(self.size + inner.debt)
     }
 
     /// Writes `n` lost tokens back.
     pub fn restore(&self, n: usize) {
         let _inner = self.inner.lock().expect("jobserver lock");
         self.write(n);
+    }
+
+    /// Takes `n` surplus tokens out of circulation: those in the FIFO at
+    /// once, and for the rest the next that come back, before the headroom
+    /// or a queued request gets them. Returns how many it took at once.
+    pub fn remove(&self, n: usize) -> usize {
+        let mut inner = self.inner.lock().expect("jobserver lock");
+        let taken = self.take(n);
+        inner.debt += n - taken;
+        drop(inner);
+        self.wake.notify_all();
+        taken
     }
 
     fn head(inner: &mut Inner) -> Option<Arc<Mutex<WaiterState>>> {
@@ -638,7 +760,10 @@ impl Pool {
                         }
                     } else {
                         inner.reader_parked = false;
-                        if Self::head(&mut inner).is_some() || inner.held_back < inner.reserve {
+                        if Self::head(&mut inner).is_some()
+                            || inner.held_back < inner.reserve
+                            || inner.debt > 0
+                        {
                             break;
                         }
                     }
@@ -659,6 +784,11 @@ impl Pool {
                 Ok(_) | Err(_) => return,
             }
             let mut inner = self.inner.lock().expect("jobserver lock");
+            // A surplus token goes nowhere.
+            if inner.debt > 0 {
+                inner.debt -= 1;
+                continue;
+            }
             // An urgent head gets the token before the held-back set does.
             if inner.held_back < inner.reserve && !Self::urgent_head(&mut inner) {
                 inner.held_back += 1;
@@ -1133,5 +1263,140 @@ mod tests {
         p.release(a.take_held());
         assert!(ready_within(&mut urgent, 1000).await);
         assert!(!ready_within(&mut high, 200).await);
+    }
+    /// Polls `cond` for up to 5 s.
+    async fn reaches(mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..500 {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    fn holder(comm: &str, children: usize, threads: usize) -> Holder {
+        Holder {
+            pid: 1,
+            comm: comm.into(),
+            children,
+            threads,
+        }
+    }
+
+    #[test]
+    fn a_holder_counts_for_the_most_tokens_it_can_hold() {
+        for (comm, children, threads, most, why) in [
+            ("cargo", 4, 7, 4, "holds 3 for 4 children, 1 on its way"),
+            (
+                "cargo",
+                2,
+                5,
+                2,
+                "children that are clients of a compile server count",
+            ),
+            ("cargo", 1, 1, 0, "waits on one child, reads no token"),
+            ("cargo", 0, 3, 1, "a token read before the first child"),
+            ("rustc", 0, 9, 9, "a token for each codegen thread"),
+            ("make", 3, 1, 2, "one thread: no token on its way"),
+            ("sh", 2, 1, 1, "any client with one thread"),
+            ("sh", 0, 1, 0, "no work, no token"),
+            ("build-script-bu", 2, 6, 6, "units may be threads"),
+        ] {
+            assert_eq!(
+                holder(comm, children, threads).may_hold(),
+                most,
+                "{comm} with {children} children and {threads} threads: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn stat_fields_reads_name_parent_and_threads() {
+        let line = "4242 (a b) c) S 77 4242 4242 0 -1 4194304 1 2 3 4 5 6 7 8 20 0 9 0 100 0 0";
+        assert_eq!(stat_fields(line), Some(("a b) c".into(), 77, 9)));
+        assert_eq!(stat_fields("4242 (short) S 77"), None);
+    }
+
+    #[tokio::test]
+    async fn holders_lists_a_process_with_its_children_and_threads() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fifo");
+        let _p = Pool::new(&path, 2).unwrap();
+        let own = std::process::id();
+        assert_eq!(holders(&dir.path().join("none"), own), None);
+        let ready = dir.path().join("ready");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exec 3<>\"$FIFO\"; sleep 600 3>&- & sleep 600 3>&- & : > \"$READY\"; wait")
+            .env("FIFO", &path)
+            .env("READY", &ready)
+            .stdin(std::process::Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // A child that has not started its command yet still has the FIFO
+        // open, so the list is read until only the client is on it.
+        let mut found = None;
+        let started = reaches(|| {
+            found = ready.exists().then(|| holders(&path, own)).flatten();
+            found
+                .as_ref()
+                .is_some_and(|f| f.len() == 1 && f[0].children == 2)
+        })
+        .await;
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = child.wait();
+        assert!(
+            started,
+            "the client and its two children were not listed: {found:?}"
+        );
+        let found = found.expect("the FIFO is there");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(
+            (found[0].pid, found[0].children, found[0].threads),
+            (child.id(), 2, 1),
+            "{found:?}"
+        );
+        assert_eq!(found[0].may_hold(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_takes_free_tokens_and_then_the_next_that_come_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 2).unwrap();
+        let mut a = p.acquire(2);
+        assert!(ready_within(&mut a, 1000).await);
+        assert_eq!((p.surplus(2), p.missing(2)), (0, 0));
+        // A slot released twice: the third token is free.
+        p.release(1);
+        assert_eq!((p.surplus(2), p.missing(2)), (1, 0));
+        assert_eq!(p.remove(1), 1, "taken out of the FIFO");
+        assert_eq!((p.free(), p.surplus(2)), (0, 0));
+        // Again, and this time a queued request takes it.
+        let mut b = p.acquire(2);
+        p.release(1);
+        assert!(reaches(|| b.held() == 1).await);
+        assert_eq!((p.free(), p.surplus(2)), (0, 1));
+        assert_eq!(p.remove(1), 0, "none is free");
+        assert_eq!(
+            (p.surplus(2), p.missing(2)),
+            (0, 0),
+            "a token still to take out is not counted again"
+        );
+        p.release(a.take_held());
+        assert!(ready_within(&mut b, 1000).await);
+        assert_eq!(
+            (p.free(), p.surplus(2), p.missing(2)),
+            (0, 0, 0),
+            "one of the two went to the request, the other out"
+        );
+        p.release(b.take_held());
+        assert!(reaches(|| p.free() == 2).await);
+        assert_eq!(p.reconcile(), 0);
     }
 }

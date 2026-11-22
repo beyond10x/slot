@@ -86,6 +86,8 @@ pub struct Gauges {
     pub waiting: usize,
     /// Lost tokens written back since the daemon started.
     pub restored: u64,
+    /// Tokens that neither a job nor a live holder accounts for now.
+    pub unaccounted: u64,
     pub queued: BTreeMap<String, usize>,
     pub running: BTreeMap<String, usize>,
     pub job_cores: f64,
@@ -151,6 +153,12 @@ impl Metrics {
             "# HELP slot_tokens_restored_total Lost slots written back to the pool.\n\
              # TYPE slot_tokens_restored_total counter\nslot_tokens_restored_total {}",
             g.restored
+        );
+        gauge(
+            &mut s,
+            "slot_tokens_unaccounted",
+            "Slots that no job and no live process with the pool open accounts for.",
+            g.unaccounted as f64,
         );
         gauge(
             &mut s,

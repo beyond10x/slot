@@ -312,6 +312,16 @@ pub struct State {
     /// than the target.
     #[serde(default)]
     pub over_target: bool,
+    /// Tokens that neither a job nor a live process with the pool open
+    /// accounts for, as the daemon counted them last: lost, and written back
+    /// once two counts in a row agree. 0 from a daemon that predates it.
+    #[serde(default)]
+    pub tokens_unaccounted: u32,
+    /// Since when tokens are unaccounted for, Unix milliseconds; 0 while
+    /// there are none.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub tokens_unaccounted_since_ms: i64,
 }
 
 /// One message on `GET /api/events`.

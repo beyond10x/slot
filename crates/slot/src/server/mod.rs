@@ -20,7 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -116,6 +116,9 @@ pub struct Config {
     /// How long after its start a job counts as about to take cargo's lock
     /// on its target directory: [`TARGET_SETTLE`] outside tests.
     pub target_settle: Duration,
+    /// How often the token watch looks for lost and surplus jobserver
+    /// tokens: [`TOKEN_WATCH`] outside tests.
+    pub token_watch: Duration,
     /// Bytes the target directories of synced workspaces may take together
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
@@ -204,8 +207,18 @@ const MAX_UNITS: usize = 12;
 const OUTPUT_KEEP: usize = 256 << 10;
 const DONE_OUTPUT_KEEP: usize = 50;
 
-/// How often [`Server::token_watch`] looks for lost jobserver tokens.
-const TOKEN_WATCH: Duration = Duration::from_secs(15);
+/// How often [`Server::token_watch`] looks for lost and surplus jobserver
+/// tokens.
+pub const TOKEN_WATCH: Duration = Duration::from_secs(15);
+
+/// What the token watch keeps from its last pass.
+#[derive(Debug, Default)]
+struct TokenMemo {
+    /// The shortfall of the last pass, when it saw one and wrote nothing back.
+    short: Option<usize>,
+    /// The surplus of the last pass, when it saw one and took nothing out.
+    surplus: Option<usize>,
+}
 
 struct Live {
     job: Job,
@@ -391,6 +404,15 @@ pub struct Server {
     inherited: Mutex<Option<handover::Inherited>>,
     /// Lost jobserver tokens written back since start.
     restored: AtomicU64,
+    /// Passes of the token watch since start.
+    watch_passes: AtomicU64,
+    /// Surplus jobserver tokens taken out since start.
+    removed: AtomicU64,
+    /// Tokens that neither a job nor a live holder of the FIFO accounts
+    /// for, as the token watch saw them last, and since when (Unix
+    /// milliseconds; 0 while there are none).
+    unaccounted: AtomicU64,
+    unaccounted_since: AtomicI64,
     /// What eviction of target directories did last.
     evict: Mutex<crate::evict::Report>,
     /// Target directories being deleted now: their jobs wait.
@@ -617,6 +639,10 @@ impl Server {
             pause_pumps: Arc::new(AtomicBool::new(false)),
             inherited: Mutex::new(inherited),
             restored: AtomicU64::new(0),
+            watch_passes: AtomicU64::new(0),
+            removed: AtomicU64::new(0),
+            unaccounted: AtomicU64::new(0),
+            unaccounted_since: AtomicI64::new(0),
             evict: Mutex::new(crate::evict::Report {
                 floor: evict_settings.floor,
                 dry_run: evict_settings.dry_run,
@@ -2466,6 +2492,7 @@ impl Server {
             free: self.pool.free(),
             waiting: self.pool.waiting(),
             restored: self.restored.load(Ordering::Relaxed),
+            unaccounted: self.unaccounted.load(Ordering::Relaxed),
             job_cores: g.job_cores,
             sys_cpu: g.sys_cpu,
             census: g.last_census.clone(),
@@ -2694,64 +2721,136 @@ impl Server {
         Ok(self.priority_view())
     }
 
-    /// Every 15 s while requests wait, writes back jobserver tokens that a
-    /// process took and never returned (a compiler killed by a cancel or a
-    /// `timeout`). The idle-time reconcile cannot do it on a pool that is
-    /// never idle. It counts only while no process but the daemon has the
-    /// FIFO open, so no token can be in a live process, and acts on the
-    /// smaller of two shortfalls 15 s apart, so a token the reader thread
-    /// is booking at that moment is not counted as lost.
+    /// Every 15 s, writes back jobserver tokens that a process took and
+    /// never returned (a compiler killed by a cancel or a `timeout`), and
+    /// takes out tokens beyond the pool size. The idle-time reconcile
+    /// cannot do either on a pool that is never idle.
+    ///
+    /// The rule (`docs/design.md` § 21): never write back a token a live
+    /// process may hold. See [`Server::token_pass`].
     async fn token_watch(self: Arc<Self>) {
-        let mut tick = tokio::time::interval(TOKEN_WATCH);
+        let mut tick = tokio::time::interval(self.cfg.token_watch);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last: Option<usize> = None;
+        let mut memo = TokenMemo::default();
         loop {
             tick.tick().await;
-            if self.pool.waiting() == 0 || self.pool.free() > 0 {
-                last = None;
-                continue;
-            }
-            let path = self.pool.path().to_path_buf();
-            let Ok(others) =
-                tokio::task::spawn_blocking(move || jobserver::holders(&path, std::process::id()))
-                    .await
-            else {
-                continue;
-            };
-            if !others.is_empty() {
-                last = None;
-                continue;
-            }
-            let granted: usize = {
-                let g = self.inner.lock().expect("server lock");
-                g.active.values().map(|l| l.held).sum()
-            };
-            let missing = self.pool.missing(granted);
-            let n = last.map_or(0, |prev| prev.min(missing));
-            last = (missing > 0).then_some(missing);
-            if n == 0 {
-                continue;
-            }
-            self.pool.restore(n);
-            self.restored.fetch_add(n as u64, Ordering::Relaxed);
-            last = None;
-            eprintln!(
-                "slot: {n} jobserver token(s) were lost (no process holds the FIFO, \
-                 {granted} granted to jobs, {} waiting): wrote them back",
-                self.pool.waiting()
-            );
-            let line = serde_json::json!({
-                "t": now_ms(),
-                "event": "tokens_restored",
-                "tokens": n,
-                "granted": granted,
-            });
-            let mut g = self.inner.lock().expect("server lock");
-            if let Ok(mut b) = serde_json::to_vec(&line) {
-                b.push(b'\n');
-                let _ = g.census_log.write_all(&b);
-            }
+            self.token_pass(&mut memo).await;
+            self.watch_passes.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Slots granted to running jobs, and with them the tokens the pool
+    /// cannot place and those beyond its size. Read under the server lock,
+    /// so a job that ends is counted either with its slots or without.
+    fn token_count(&self) -> (usize, usize, usize) {
+        let g = self.inner.lock().expect("server lock");
+        let granted: usize = g.active.values().map(|l| l.held).sum();
+        (
+            granted,
+            self.pool.missing(granted),
+            self.pool.surplus(granted),
+        )
+    }
+
+    /// Records the tokens that neither a job nor a live holder accounts
+    /// for, and since when there are any.
+    fn set_unaccounted(&self, n: usize) {
+        self.unaccounted.store(n as u64, Ordering::Relaxed);
+        if n == 0 {
+            self.unaccounted_since.store(0, Ordering::Relaxed);
+        } else {
+            let _ = self.unaccounted_since.compare_exchange(
+                0,
+                now_ms(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    fn census_event(&self, line: &serde_json::Value) {
+        let mut g = self.inner.lock().expect("server lock");
+        if let Ok(mut b) = serde_json::to_vec(line) {
+            b.push(b'\n');
+            let _ = g.census_log.write_all(&b);
+        }
+    }
+
+    /// One pass of [`Server::token_watch`].
+    ///
+    /// Lost tokens: the tokens the pool cannot place (not in the FIFO, not
+    /// held back, not granted to a job, not gathered by a queued request)
+    /// are with live processes that have the FIFO open, or lost. Each live
+    /// holder counts for the most it can hold ([`jobserver::Holder::may_hold`]:
+    /// an upper bound, so a slow holder and a holder whose children are
+    /// clients of a compile server keep theirs); what is missing beyond
+    /// that sum is the shortfall. The unplaced count is read before and
+    /// after the walk over `/proc` and the smaller one counts, so a token
+    /// given back meanwhile is not missing. The pass writes back the
+    /// smaller of two shortfalls of passes in a row, so a token the reader
+    /// thread is booking at that moment is not taken for lost.
+    ///
+    /// Surplus tokens: more tokens placed than the pool has, whatever live
+    /// holders hold besides. The pass takes out the smaller of two such
+    /// counts in a row.
+    async fn token_pass(&self, memo: &mut TokenMemo) {
+        let (granted, missing, surplus) = self.token_count();
+        let take = memo.surplus.map_or(0, |prev| prev.min(surplus));
+        memo.surplus = (surplus > 0 && take == 0).then_some(surplus);
+        if take > 0 {
+            self.pool.remove(take);
+            self.removed.fetch_add(take as u64, Ordering::Relaxed);
+            eprintln!(
+                "slot: {take} jobserver token(s) more than the pool's {} were in circulation \
+                 ({granted} granted to jobs): took them out",
+                self.cfg.tokens
+            );
+            self.census_event(&serde_json::json!({
+                "t": now_ms(),
+                "event": "tokens_removed",
+                "tokens": take,
+                "granted": granted,
+            }));
+        }
+        if missing == 0 {
+            memo.short = None;
+            self.set_unaccounted(0);
+            return;
+        }
+        let path = self.pool.path().to_path_buf();
+        let Ok(Some(holders)) =
+            tokio::task::spawn_blocking(move || jobserver::holders(&path, std::process::id()))
+                .await
+        else {
+            // Nothing is known about who holds tokens: no count, no action.
+            memo.short = None;
+            return;
+        };
+        let bound: usize = holders.iter().map(jobserver::Holder::may_hold).sum();
+        let (granted, after, _) = self.token_count();
+        let short = missing.min(after).saturating_sub(bound);
+        let n = memo.short.map_or(0, |prev| prev.min(short));
+        memo.short = (short > 0 && n == 0).then_some(short);
+        self.set_unaccounted(short - n);
+        if n == 0 {
+            return;
+        }
+        self.pool.restore(n);
+        self.restored.fetch_add(n as u64, Ordering::Relaxed);
+        eprintln!(
+            "slot: {n} jobserver token(s) were lost ({granted} granted to jobs, {} live \
+             process(es) with the FIFO open hold at most {bound}, {} waiting): wrote them back",
+            holders.len(),
+            self.pool.waiting()
+        );
+        self.census_event(&serde_json::json!({
+            "t": now_ms(),
+            "event": "tokens_restored",
+            "tokens": n,
+            "granted": granted,
+            "holders": holders.len(),
+            "bound": bound,
+        }));
     }
 
     /// Every 5 s, gives back the jobserver tokens an sccache server lost
@@ -3175,6 +3274,8 @@ impl Server {
             headroom_percent: u32::from(self.headroom_percent()),
             call_apps: self.call_apps(),
             cpu_quota_percent: self.headroom.lock().expect("headroom lock").quota,
+            tokens_unaccounted: self.unaccounted.load(Ordering::Relaxed) as u32,
+            tokens_unaccounted_since_ms: self.unaccounted_since.load(Ordering::Relaxed),
             free: self.pool.free() as u32,
             active: g.active.values().map(|l| l.job.clone()).collect(),
             done: g.done.iter().map(|d| d.job.clone()).collect(),

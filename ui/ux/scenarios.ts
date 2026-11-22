@@ -156,6 +156,7 @@ function state(active: Job[], doneJobs: Job[], tokens: number, headroom: number,
     done: doneJobs, now_ms: T0, toolchains: ['rust', 'go', 'node-test', 'generic'], call_apps: callApps,
     sccache: { enabled: true, servers: 1, short: 0, refills: 0, tokens: 0, last_refill_ms: 0 }, upgrade: '',
     evict: { floor: 0, dry_run: true, known: 0, free: 0, checked_ms: 0, last: [], deleted_bytes: 0 }, ...POOL_BASE,
+    tokens_unaccounted: 0, tokens_unaccounted_since_ms: 0,
   };
 }
 

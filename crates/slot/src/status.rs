@@ -346,6 +346,20 @@ fn sccache_line(w: &crate::types::SccacheWatch, now: i64) -> String {
     )
 }
 
+/// `lost slots: 3 that no job and no live process holds, oldest for 12s`: the
+/// tokens the daemon's last count found with no job and no live process
+/// that has the pool open, and since when. The daemon writes them back when
+/// two counts in a row find them. Nothing while there are none.
+fn lost_line(s: &State) -> Option<String> {
+    (s.tokens_unaccounted > 0).then(|| {
+        format!(
+            "lost slots: {} that no job and no live process holds, oldest for {}\n",
+            s.tokens_unaccounted,
+            secs(s.now_ms - s.tokens_unaccounted_since_ms)
+        )
+    })
+}
+
 /// `disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB`, or in
 /// a dry run `disk: … eviction is off (dry run), would free 31.0 GB in 2 dir(s)`;
 /// nothing when eviction is off or never looked.
@@ -425,6 +439,9 @@ pub fn render(s: &State) -> String {
     if !s.upgrade.is_empty() {
         out.push_str(&s.upgrade);
         out.push('\n');
+    }
+    if let Some(l) = lost_line(s) {
+        out.push_str(&l);
     }
     let w = &s.sccache;
     if w.enabled && (w.servers > 0 || w.refills > 0) {
@@ -737,6 +754,26 @@ mod tests {
             "4 slots, 4 free, 0 running, 0 queued\n\
              upgrade pending: re-executing at the first moment no job runs\n"
         );
+    }
+
+    #[test]
+    fn slots_no_job_and_no_live_process_holds_are_shown_with_their_age() {
+        let mut s = State {
+            tokens: 6,
+            free: 0,
+            tokens_unaccounted: 3,
+            tokens_unaccounted_since_ms: 100_000,
+            now_ms: 250_000,
+            ..State::default()
+        };
+        assert_eq!(
+            render(&s),
+            "6 slots, 0 free, 0 running, 0 queued\n\
+             lost slots: 3 that no job and no live process holds, oldest for 2m30s\n"
+        );
+        s.tokens_unaccounted = 0;
+        s.tokens_unaccounted_since_ms = 0;
+        assert_eq!(render(&s), "6 slots, 0 free, 0 running, 0 queued\n");
     }
 
     #[test]

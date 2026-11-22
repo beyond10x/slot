@@ -941,7 +941,8 @@ jobserver: a cargo in the sandbox draws and returns the same tokens as every oth
   outright closes the hold FIFO with it, so the hold process ends and the slots go back.
 - **Lost tokens**: a compiler in the sandbox holds the FIFO through the link, and its `/proc` fd
   link names the sandbox's path. `jobserver::holders` therefore compares device and inode, not
-  the path, so the 15 s lost-token watch does not write back tokens a sandboxed compiler holds.
+  the path, so the 15 s lost-token watch (§ 21) does not write back tokens a sandboxed compiler
+  holds.
 
 Not covered: CPU and memory of the sandboxed command are not sampled into the job (the hold
 process is idle); the sandbox's own cgroup limits apply. The gate does not authenticate clients:
@@ -972,3 +973,120 @@ job.
 - **Versions.** The file's reader ignores fields it does not know, so a daemon without the
   setting reads a file that has it and orders by its own option. When that older daemon saves a
   rule it writes the file without the field: a downgrade loses the delay, not the rules.
+
+## 21. Lost and surplus tokens while the pool is busy (unreleased)
+
+A process killed while it holds jobserver tokens (a cancel, a `timeout`, a watcher that kills by
+run time) takes them with it. Two repairs existed. The idle reconcile sets the FIFO back when no
+job runs and none waits. The token watch of 0.12.0 wrote a shortfall back only while no process
+but the daemon had the FIFO open, so that no token could be in a live process.
+
+A busy pool reaches neither state. Measured on one 20-CPU host over 27.9 h: 49 of 49 samples
+had 3 to 8 other processes with the FIFO open (a `cargo` waiting on a test binary, a `cargo` whose
+children are sccache clients, `rustc`), and four losses of 7, 2, 7 and 8 tokens stayed lost for
+16 to 173 minutes; in the longest, 8 of 14 circulating tokens were gone. Later, after a watcher
+killed 12 running jobs on a pool of 50, five counts over 8 minutes each found at least 19 to 23
+tokens that no live process held while 30 or more jobs waited.
+
+### 21.1 The rule
+
+**The watch never writes back a token a live process may hold.** It counts an upper bound of the
+tokens in live processes and writes back only what is missing beyond it.
+
+Every 15 s (`server::TOKEN_WATCH`; `Config::token_watch` in tests) one pass of
+`Server::token_pass` reads:
+
+- **unbooked**: the pool size, less the tokens in the FIFO, the tokens held back for the headroom,
+  the slots granted to running jobs and the tokens the head of the queue has gathered
+  (`Pool::missing`). It is read under the server lock, so a job that ends is counted once, and it
+  is read before and after the walk over `/proc`; the smaller value counts, so a token given back
+  during the walk is not missing.
+- **bound**: the sum, over every live process with the FIFO open (`jobserver::holders`, by device
+  and inode, § 19), of the most tokens that process can hold (`Holder::may_hold`, below).
+- **shortfall**: unbooked less bound, when positive. These are the tokens that neither a job nor a
+  live holder accounts for.
+
+The watch writes back the smaller of the shortfalls of two passes in a row, so a token the
+daemon's reader thread is booking at one of them is not taken for lost. A lost token is therefore
+back after at most two passes and one walk: under 45 s. The walk runs in `spawn_blocking`, and
+only when something is unbooked.
+
+### 21.2 What a live holder can hold
+
+A jobserver client holds one token for each unit of work it runs beyond the first. The first
+runs on the token the client was started with: for the first process of a job, a slot the daemon
+granted to the job. `Holder::may_hold` counts from `/proc/<pid>/stat` of the holder and of every
+process whose parent it is:
+
+| holder | units of work | bound |
+|---|---|---|
+| a build driver (`comm` is `cargo`, `make`, `gmake` or `ninja`) | its direct children that it has not reaped, running or zombie, whatever they are | children − 1 |
+| any other process | the larger of its children and its threads | that − 1 |
+| either, with more than one thread | | one more |
+
+The reasons, each from a measurement:
+
+- **Children, not compilers.** In 40 samples the unbooked tokens equalled the sum over holders of
+  (children − 1) 38 times and were 1 above it twice. A `cargo` whose 2 children were sccache
+  clients held 1 token with no compiler anywhere in its subtree (15 observations): the compilers
+  run under the compile server. So the bound counts a driver's children whatever they are, and
+  "has a live compiler below it" is not the test.
+- **Threads for everything but a driver.** A `rustc` with the FIFO open has no child and holds a
+  token for each codegen thread after its first. A driver's threads are not counted, because they
+  mirror its children: `cargo` processes had 4, 5 and 7 threads with 1, 2 and 4 children.
+- **One more for a holder with several threads.** Such a holder reads tokens on a helper thread,
+  and a token it has read is not a child or a worker thread yet for a moment; that is the "1
+  above" of the 40 samples. A holder with one thread starts the child in the thread that read
+  the token.
+
+With that a compiling `cargo` with `n` children counts for `n` tokens and holds `n − 1`; a
+`rustc` counts for its thread count; a single-threaded client with `n` children counts for
+`n − 1`.
+
+### 21.3 Two cases that are not a loss
+
+1. **A slow live holder.** A process that has held its tokens for minutes and uses no CPU (a
+   long compile, a `cargo` blocked on a lock, a build waiting on a test binary) still holds them.
+   Neither the age of a holder nor its CPU use enters the count; only the death of the process
+   removes its share from the bound.
+2. **A holder whose children are compile-server clients.** Its subtree has no compiler, and it
+   holds tokens all the same (§ 21.2). The bound comes from the number of children.
+
+### 21.4 Surplus
+
+More tokens than the pool has can be in circulation: a slot released twice, or a token written
+back that a live process still held. Whatever live holders hold only adds to the count, so
+`Pool::surplus` needs no bound: tokens in the FIFO, held back, granted and gathered, less the
+pool size. The same pass takes out the smaller of two such counts in a row (`Pool::remove`): the
+tokens in the FIFO at once and, for the rest, the next ones that come back, which the reader
+thread keeps (`debt`). Before, only the idle reconcile removed a surplus.
+
+### 21.5 What is shown
+
+- `slot status`: `lost slots: 3 that no job and no live process holds, oldest for 12s`, only while
+  the last pass found a shortfall. `State` carries `tokens_unaccounted` and
+  `tokens_unaccounted_since_ms`.
+- `/metrics`: the gauge `slot_tokens_unaccounted` beside the counter `slot_tokens_restored_total`.
+- The journal: `slot: <n> jobserver token(s) were lost (…): wrote them back` and
+  `slot: <n> jobserver token(s) more than the pool's <size> …: took them out`.
+- The census log: `tokens_restored` with `tokens`, `granted`, `holders` and `bound`;
+  `tokens_removed` with `tokens` and `granted`.
+
+### 21.6 Limits
+
+- The bound is above what the holders hold, by one for each holder with several threads. Lost
+  tokens within that margin stay out until such a holder exits; the two passes after that write
+  them back.
+- A process that is not a build driver counts for its threads for as long as it has the FIFO
+  open. A long-lived one with many threads (a compile server started inside a job, if it
+  keeps the job's jobserver open; not measured) hides that many lost tokens until it exits. A driver is known by its `comm`
+  only: a driver under another name counts as any other process, which is the larger bound.
+- One walk reads `stat` and every descriptor of every process. Reading the same with `cat` and
+  `stat` took 0.19 s for 1,300 processes with 9,700 descriptors on a workstation at load 84. The
+  walk runs only while something is unbooked.
+- `/proc` is not read in one instant. A holder that takes a token and starts a child while the
+  walk is past it is covered by the two readings of the unbooked count, by the one token more
+  for a holder with threads, and by the second pass; a client that held more tokens than units of
+  work at two passes in a row would get one written back. The surplus rule then takes it out
+  once the holders give their tokens back.
+- A handover (§ 15.2) does not pass on the tokens still to take out; the new image counts again.
