@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:a-reload-keeps-every-line-of-output
 kind: story
-status: active
+status: implemented
 title: A reload loses no line of a running job's output, also under load
 relations:
 - serves: vision:O2
@@ -21,10 +21,11 @@ scope:
   path: crates/slot/src/server/tests.rs
 - confidence: inferred
   path: docs/design.md
-revision: 10
+revision: 11
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:27Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

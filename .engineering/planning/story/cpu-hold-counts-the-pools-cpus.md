@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:cpu-hold-counts-the-pools-cpus
 kind: story
-status: active
+status: implemented
 title: The CPU limit for starts counts the CPU of the pool and the compile cache, not work outside them
 relations:
 - serves: vision:O2
@@ -39,10 +39,11 @@ scope:
   path: website/docs/how-it-works.md
 - confidence: cited
   path: website/docs/reference/cli.md
-revision: 19
+revision: 20
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:27Z", actor: "human:timo", revision: 20, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

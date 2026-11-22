@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:rustc-is-pinned
 kind: story
-status: active
+status: implemented
 title: The local gate and CI compile with one rustc named in the repository
 relations:
 - serves: vision:O2
@@ -23,10 +23,11 @@ scope:
   path: crates/slot-docs/tests/docs_version.rs
 - confidence: cited
   path: rust-toolchain.toml
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:41Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:26Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:short-jobs-start-ahead-of-long-ones
 kind: story
-status: active
+status: implemented
 title: A job predicted to run a few seconds starts ahead of longer jobs of its level
 relations:
 - serves: vision:O2
@@ -37,10 +37,11 @@ scope:
   path: website/docs/how-it-works.md
 - confidence: inferred
   path: website/docs/reference/cli.md
-revision: 18
+revision: 19
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:44Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:44Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:28Z", actor: "human:timo", revision: 19, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 
