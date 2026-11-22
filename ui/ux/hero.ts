@@ -52,11 +52,12 @@ try {
   }, 'ui-host-census.png');
   await shot(await ctx(), 'queue-position', async (p) => {
     for (let i = 0; i < 2; i++) await p.getByRole('button', { name: /^show units of job/ }).first().click();
-    await p.getByRole('heading', { name: /^Queue/ }).evaluate((h) => window.scrollTo(0, h.getBoundingClientRect().top + window.scrollY - 140));
+    // The page starts with the charts, Running and the Queue: the shot is the first screen.
+    await p.evaluate(() => window.scrollTo(0, 0));
   }, 'ui-queue-live-units.png');
   await shot(await ctx(), 'busy-failed', async (p) => {
     await p.getByRole('button', { name: 'output of job 42', exact: true }).click();
-    await p.getByRole('heading', { name: /^Running/ }).evaluate((h) => window.scrollTo(0, h.getBoundingClientRect().top + window.scrollY - 140));
+    await p.evaluate(() => window.scrollTo(0, 0));
   }, 'ui-job-output.png');
   await browser.close();
 } finally {
