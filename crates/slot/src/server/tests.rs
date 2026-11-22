@@ -71,6 +71,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         clock: now_ms,
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
+        token_watch: TOKEN_WATCH,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -452,6 +453,7 @@ fn history_survives_restart() {
         clock: now_ms,
         target_poll: Duration::from_millis(40),
         target_settle: Duration::from_millis(250),
+        token_watch: TOKEN_WATCH,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -1713,4 +1715,259 @@ fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
     assert_eq!(dirs, ["", there.as_str(), here.as_str(), ""]);
     std::fs::write(f.root.join("go"), "").unwrap();
     assert_eq!(collect(first).code, 0);
+}
+
+/// The interval of the token watch in the tests of it: the daemon's is
+/// 15 s, so "within 45 s" is three of these.
+const WATCH: Duration = Duration::from_millis(200);
+
+/// A process outside the pool's jobs that has the pool's FIFO open as
+/// descriptor 3, as a jobserver client has. It runs in its own process
+/// group and is killed with its children when dropped.
+struct Client(std::process::Child);
+
+impl Client {
+    /// Starts `sh -c script` with the FIFO's path in `$FIFO` and waits
+    /// until the script made the file `<name>.ready`.
+    fn start(f: &Fixture, name: &str, script: &str) -> Self {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .env("FIFO", f.server.pool().path())
+            .current_dir(&f.root)
+            .stdin(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let ready = f.root.join(format!("{name}.ready"));
+        wait_for(&format!("the client {name}"), || ready.exists());
+        Self(child)
+    }
+
+    /// A live client with `children` children that holds `tokens` tokens:
+    /// it starts the children, which do not have the FIFO open, and then
+    /// takes the tokens, as a build driver takes a token for each child
+    /// after its first.
+    fn holding(f: &Fixture, name: &str, tokens: usize, children: usize) -> Self {
+        Self::start(
+            f,
+            name,
+            &format!(
+                "exec 3<>\"$FIFO\"; i=0; \
+                 while [ $i -lt {children} ]; do sleep 600 3>&- & i=$((i+1)); done; \
+                 dd bs=1 count={tokens} <&3 >/dev/null 2>&1; : > {name}.ready; wait"
+            ),
+        )
+    }
+
+    /// A client that took `tokens` tokens and has no child.
+    fn took(f: &Fixture, name: &str, tokens: usize) -> Self {
+        Self::start(
+            f,
+            name,
+            &format!(
+                "exec 3<>\"$FIFO\"; dd bs=1 count={tokens} <&3 >/dev/null 2>&1; \
+                 : > {name}.ready; exec sleep 600"
+            ),
+        )
+    }
+
+    /// SIGKILL to the client and its children; the tokens it took are gone.
+    fn kill(&mut self) {
+        let _ = killpg(Pid::from_raw(self.0.id() as i32), Signal::SIGKILL);
+        let _ = self.0.wait();
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// A job that holds `tokens` slots until its connection closes, once it runs.
+fn holding_job(f: &Fixture, tokens: u32) -> (UnixStream, i64) {
+    let mut req = sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done");
+    req.tokens = Some(tokens);
+    let (c, id) = submit(f, req);
+    wait_for_jobs(f, "the job to run", || state_of(f, id) == JobState::Running);
+    (c, id)
+}
+
+/// A job that waits in the queue for one slot.
+fn waiting_job(f: &Fixture) -> (UnixStream, i64) {
+    let before = f.server.pool().waiting();
+    let (c, id) = submit(f, sh(&f.root, "while [ ! -e go ]; do sleep 0.02; done"));
+    wait_for_jobs(f, "the job to wait for a slot", || {
+        f.server.pool().waiting() == before + 1
+    });
+    (c, id)
+}
+
+fn restored(f: &Fixture) -> u64 {
+    f.server.restored.load(Ordering::Relaxed)
+}
+
+fn passes(f: &Fixture) -> u64 {
+    f.server.watch_passes.load(Ordering::Relaxed)
+}
+
+/// Polls `cond` for up to 45 s: a pass of the token watch reads `/proc`,
+/// which takes over a second on a loaded host. A timeout names what the
+/// watch did.
+fn wait_for_watch(f: &Fixture, what: &str, cond: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "timed out waiting for {what}: {} pass(es), {} restored, {} removed, {} slot(s) free, \
+         {} in the queue",
+        passes(f),
+        restored(f),
+        f.server.removed.load(Ordering::Relaxed),
+        f.server.pool().free(),
+        f.server.pool().waiting()
+    );
+}
+
+/// Waits until the token watch ran `n` whole passes after this moment: one
+/// may be under way, so it waits for one more. 4 are a minute of the
+/// daemon's.
+fn after_passes(f: &Fixture, n: u64) {
+    let until = passes(f) + n + 1;
+    wait_for_watch(f, "passes of the token watch", || passes(f) >= until);
+}
+
+/// The lines of the census log with the event `event`.
+fn census_events(f: &Fixture, event: &str) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(f.root.join("state/census.jsonl"))
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["event"] == event)
+        .collect()
+}
+
+#[test]
+fn lost_tokens_come_back_while_another_process_holds_the_pool_open() {
+    let f = start_cfg(6, |c| c.token_watch = WATCH);
+    let _live = Client::holding(&f, "live", 1, 2);
+    let (_a, a) = holding_job(&f, 2);
+    // Until it is killed it counts for its 3 tokens, like the live client.
+    let mut lost = Client::holding(&f, "lost", 3, 4);
+    assert_eq!(f.server.pool().free(), 0);
+    let (_b, b) = waiting_job(&f);
+    lost.kill();
+    wait_for_watch(&f, "the lost slots to come back", || restored(&f) > 0);
+    assert_eq!(restored(&f), 3, "3 were lost; the live client holds 1");
+    wait_for_jobs(&f, "the waiting job to run", || {
+        state_of(&f, b) == JobState::Running
+    });
+    // Two more passes would write back what the watch still took for lost.
+    after_passes(&f, 2);
+    assert_eq!(restored(&f), 3, "the live client's slot was written back");
+    assert_eq!(state_of(&f, a), JobState::Running);
+    assert_eq!(
+        f.server.pool().free(),
+        2,
+        "6 slots: 2 and 1 with the jobs, 1 with the live client"
+    );
+    let events = census_events(&f, "tokens_restored");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["tokens"], 3, "{events:?}");
+}
+
+#[test]
+fn slots_that_live_processes_hold_are_not_written_back() {
+    let f = start_cfg(6, |c| c.token_watch = WATCH);
+    let _one = Client::holding(&f, "one", 1, 2);
+    let _two = Client::holding(&f, "two", 2, 3);
+    let (_a, _) = holding_job(&f, 3);
+    assert_eq!(f.server.pool().free(), 0);
+    let (_b, b) = waiting_job(&f);
+    after_passes(&f, 4);
+    assert_eq!(restored(&f), 0);
+    assert_eq!(f.server.pool().free(), 0);
+    assert_eq!(state_of(&f, b), JobState::Queued);
+    assert_eq!(
+        census_events(&f, "tokens_restored"),
+        Vec::<serde_json::Value>::new()
+    );
+    assert_eq!(f.server.state().tokens_unaccounted, 0);
+}
+
+#[test]
+fn a_surplus_token_is_taken_out_while_jobs_run() {
+    let f = start_cfg(6, |c| c.token_watch = WATCH);
+    let (_a, a) = holding_job(&f, 1);
+    assert_eq!(f.server.pool().free(), 5);
+    // A slot released twice: 7 tokens for a pool of 6.
+    f.server.pool().release(1);
+    wait_for_watch(&f, "the surplus to be taken out", || {
+        f.server.pool().free() == 5
+    });
+    assert_eq!(state_of(&f, a), JobState::Running);
+    after_passes(&f, 4);
+    assert_eq!(f.server.pool().free(), 5, "more than the surplus taken out");
+    assert_eq!(f.server.removed.load(Ordering::Relaxed), 1);
+    assert_eq!(restored(&f), 0);
+    let events = census_events(&f, "tokens_removed");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["tokens"], 1, "{events:?}");
+}
+
+#[test]
+fn the_state_counts_slots_no_job_and_no_live_process_holds_and_since_when() {
+    // The watch of this daemon runs once at its start; the test runs the
+    // passes itself.
+    let f = start_cfg(6, |c| c.token_watch = Duration::from_secs(3600));
+    wait_for_watch(&f, "the first pass", || passes(&f) >= 1);
+    let (_a, _) = holding_job(&f, 3);
+    let mut lost = Client::took(&f, "lost", 3);
+    lost.kill();
+    let before = now_ms();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut memo = TokenMemo::default();
+    rt.block_on(f.server.token_pass(&mut memo));
+    let st = f.server.state();
+    assert_eq!(st.tokens_unaccounted, 3);
+    assert!(
+        (before..=now_ms()).contains(&st.tokens_unaccounted_since_ms),
+        "{st:?}"
+    );
+    assert_eq!(restored(&f), 0, "one count is not acted on");
+    assert!(
+        f.server
+            .metrics_text()
+            .contains("slot_tokens_unaccounted 3\n"),
+        "{}",
+        f.server.metrics_text()
+    );
+    let shown = crate::status::render(&State {
+        now_ms: st.tokens_unaccounted_since_ms + 20_000,
+        ..st.clone()
+    });
+    assert!(
+        shown.contains("lost slots: 3 that no job and no live process holds, oldest for 20s\n"),
+        "{shown}"
+    );
+    rt.block_on(f.server.token_pass(&mut memo));
+    assert_eq!(restored(&f), 3);
+    let st = f.server.state();
+    assert_eq!(
+        (st.tokens_unaccounted, st.tokens_unaccounted_since_ms),
+        (0, 0)
+    );
+    assert!(!crate::status::render(&st).contains("lost slots"));
+    assert!(
+        f.server
+            .metrics_text()
+            .contains("slot_tokens_unaccounted 0\n"),
+        "{}",
+        f.server.metrics_text()
+    );
 }
