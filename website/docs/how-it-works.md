@@ -160,6 +160,64 @@ The daemon takes out the smaller of two surpluses 15 seconds apart, from the FIF
 tokens come back, and logs
 `slot: <n> jobserver token(s) more than the pool's <size> … took them out`.
 
+## Run-time limit
+
+A job that hangs holds its slots until somebody cancels it. The run-time limit ends it instead:
+the daemon stops a job that has run longer than the limit. The time counts from the job's start;
+the wait in the queue is not part of it. A fresh install has no limit. Set one while the daemon
+runs:
+
+```sh
+slot run-limit              # print the limit in force
+slot run-limit 10m          # end a job that runs longer than 10 minutes
+slot run-limit 10m --max 2h # and let a job name up to 2 hours for itself
+slot run-limit off          # no limit
+```
+
+A duration is a number of seconds, or a number with `s`, `m` or `h`: `90s`, `10m`, `1h`. The limit
+and the maximum are kept in `limits.json` in the state directory, beside the headroom, and hold
+across reloads and restarts. `GET` and `PUT /api/run-limit` read and change them
+(`{"run_limit_s": 600, "run_limit_max_s": 3600}`; a field left out keeps its value, and
+`"run_limit_s": 0` turns the limit off). A limit longer than the maximum is refused (400). `slot
+status` shows the limit in its header lines when one is set.
+
+A job that needs longer names its own time, up to the maximum (1 hour until `--max` changes it):
+
+```sh
+slot --timeout 30m cargo test --workspace
+SLOT_TIMEOUT=30m slot cargo test --workspace
+slot run --timeout 30m cargo test --workspace
+```
+
+The flag wins over the variable. The time a job gets is its `--timeout` or `SLOT_TIMEOUT`, capped
+at the maximum, else the limit. The client is told when the daemon caps it: `slot: --timeout 2h
+capped at 1h, the most a job may name`. A job's own time applies with no limit set too, and may be
+shorter than the limit. With no limit set and no `--timeout`, a job runs as long as it takes.
+
+A `timeout` command in front of the job's command extends nothing: `slot timeout 1800 cargo test`
+ends at the limit like any other job. When the command starts with `timeout` (as its first or
+second word, as in `slot nice timeout 30m make`) and names more than the job's limit, the client
+prints one line when the job is submitted:
+
+```text
+slot: this job ends after 10m; a wrapped `timeout` does not extend it, name the time with `slot --timeout 30m` (at most 1h)
+```
+
+The limit a job starts with stays its limit: `slot run-limit` changes the jobs that start
+afterwards, never one that runs. A reload hands a running job to the new binary with its limit and
+its start time.
+
+When a job passes its limit, the daemon ends it the way `slot cancel` does: SIGTERM to the job's
+process group, SIGKILL 5 seconds later, and the slots go back to the pool. The client exits with
+124, the code `timeout` uses, after one line:
+
+```text
+slot: job 12 ended after 10m01s: over its run-time limit of 10m; name a longer one with `slot --timeout <DURATION>`, at most 1h
+```
+
+The job's record in the [job log](#job-log) has `"timed_out":true` and its limit as `limit_s`,
+and the web UI lists it as failed with exit code 124.
+
 ## sccache watchdog
 
 An sccache server limits its own compiles with a private jobserver: a pipe that starts with one

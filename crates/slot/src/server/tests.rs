@@ -1717,6 +1717,346 @@ fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
     assert_eq!(collect(first).code, 0);
 }
 
+/// Sets the run-time limit and the most a job may name, as `slot
+/// run-limit` does; 0 turns the limit off.
+fn set_run_limit(f: &Fixture, limit_s: Option<u64>, max_s: Option<u64>) -> run_limit::View {
+    f.server
+        .set_run_limit(&run_limit::Request {
+            run_limit_s: limit_s,
+            run_limit_max_s: max_s,
+        })
+        .unwrap()
+}
+
+/// Sends `req` and collects its frames, giving up after 20 s: a job that
+/// nothing ends fails its test instead of holding it.
+fn run_bounded(f: &Fixture, req: Request) -> Res {
+    let c = send(&f.socket, req);
+    c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    collect(c)
+}
+
+/// A `sleep 30` under a limit of 1 s: the daemon ends it, the client exits
+/// 124 and is told why, the record says `timed_out`, the process is gone
+/// and the slot is back. A job inside the limit is not marked.
+#[test]
+fn a_job_past_the_run_time_limit_is_ended_with_124_and_logged_as_timed_out() {
+    let f = start(1);
+    assert_eq!(set_run_limit(&f, Some(1), None).run_limit_s, Some(1));
+    let marker = f.root.join("pid");
+    let t0 = Instant::now();
+    let r = run_bounded(
+        &f,
+        sh(
+            &f.root,
+            &format!("echo $$ > {}; sleep 30", marker.display()),
+        ),
+    );
+    let ran = t0.elapsed();
+    assert_eq!((r.code, r.started), (124, true), "{r:?}");
+    assert!(
+        ran >= Duration::from_secs(1) && ran < Duration::from_secs(15),
+        "ended after {ran:?}"
+    );
+    assert!(r.info.contains("slot: job 1 ended after "), "{}", r.info);
+    assert!(
+        r.info.contains("over its run-time limit of 1s"),
+        "{}",
+        r.info
+    );
+    assert!(
+        r.info.contains("`slot --timeout <DURATION>`, at most 1h"),
+        "{}",
+        r.info
+    );
+    let pid: i32 = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    let job = last_logged(&f);
+    assert_eq!(
+        (job.state, job.exit, job.timed_out, job.limit_s),
+        (JobState::Failed, 124, true, Some(1))
+    );
+    assert!(job.ended_ms - job.started_ms >= 1000, "{job:?}");
+    let shown = done_job(&f, 1);
+    assert_eq!(
+        (shown.state, shown.exit, shown.timed_out, shown.limit_s),
+        (JobState::Failed, 124, true, Some(1)),
+        "the web view gets the same record"
+    );
+    wait_for("the slot to come back", || f.server.pool().free() == 1);
+
+    let r = run_bounded(&f, sh(&f.root, "echo quick"));
+    assert_eq!((r.code, r.out.as_str()), (0, "quick\n"), "{r:?}");
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let line = log.lines().last().unwrap();
+    assert!(line.contains(r#""limit_s":1"#), "{line}");
+    assert!(!line.contains("timed_out"), "{line}");
+}
+
+/// Under a limit of 1 s a job that names 60 s with `--timeout` runs for
+/// 2.5 s and ends by itself; a job that names less than the limit is ended
+/// at its own time.
+#[test]
+fn a_job_that_names_a_longer_time_is_not_ended_at_the_daemons_limit() {
+    let f = start(1);
+    set_run_limit(&f, Some(1), None);
+    let mut own = sh(&f.root, "sleep 2.5; echo own");
+    own.timeout_s = Some(60);
+    let r = run_bounded(&f, own);
+    assert_eq!((r.code, r.out.as_str()), (0, "own\n"), "{r:?}");
+    assert!(!r.info.contains("run-time limit"), "{}", r.info);
+    let job = last_logged(&f);
+    assert_eq!((job.timed_out, job.limit_s), (false, Some(60)), "{job:?}");
+    assert!(job.ended_ms - job.started_ms >= 2000, "{job:?}");
+    set_run_limit(&f, Some(30), None);
+    let mut short = sh(&f.root, "sleep 30");
+    short.timeout_s = Some(1);
+    let r = run_bounded(&f, short);
+    assert_eq!(r.code, 124, "{r:?}");
+    assert!(
+        r.info.contains("over its run-time limit of 1s"),
+        "{}",
+        r.info
+    );
+}
+
+/// A `--timeout` over the most a job may name is capped, and the client is
+/// told once; with no daemon limit a job has none unless it names one.
+#[test]
+fn a_timeout_is_capped_at_the_most_a_job_may_name() {
+    let f = start(1);
+    assert_eq!(
+        f.server.run_limit_view(),
+        run_limit::View {
+            run_limit_s: None,
+            run_limit_max_s: 3600
+        },
+        "a fresh daemon has no limit"
+    );
+    let r = run_bounded(&f, sh(&f.root, "true"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(last_logged(&f).limit_s, None);
+
+    let mut long = sh(&f.root, "true");
+    long.timeout_s = Some(7200);
+    let r = run_bounded(&f, long.clone());
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(r.info.matches("capped").count(), 1, "told once: {}", r.info);
+    assert!(
+        r.info.contains("slot: --timeout 2h capped at 1h"),
+        "{}",
+        r.info
+    );
+    assert_eq!(last_logged(&f).limit_s, Some(3600));
+
+    set_run_limit(&f, None, Some(120));
+    let r = run_bounded(&f, long);
+    assert!(
+        r.info.contains("slot: --timeout 2h capped at 2m"),
+        "{}",
+        r.info
+    );
+    assert_eq!(last_logged(&f).limit_s, Some(120));
+}
+
+/// `req` with `timeout <time>` in front of its command.
+fn wrapped(req: Request, time: &str) -> Request {
+    Request {
+        argv: [vec!["timeout".into(), time.into()], req.argv].concat(),
+        ..req
+    }
+}
+
+/// A `timeout` in front of the command extends nothing: under a limit of
+/// 1 s a `timeout 1800 sleep 30` is ended after 1 s, and its client is told
+/// once, when the job is submitted, how to name the time. No line with no
+/// limit, nor for a `timeout` inside the job's limit.
+#[test]
+fn a_wrapped_timeout_does_not_extend_a_job_and_its_client_is_told_once() {
+    let f = start(1);
+    let told = |r: &Res| r.info.matches("a wrapped `timeout`").count();
+    let r = run_bounded(&f, wrapped(sh(&f.root, "true"), "1800"));
+    assert_eq!((r.code, told(&r)), (0, 0), "no limit is set: {r:?}");
+    assert_eq!(last_logged(&f).limit_s, None);
+
+    set_run_limit(&f, Some(1), None);
+    let t0 = Instant::now();
+    let r = run_bounded(&f, wrapped(sh(&f.root, "sleep 30"), "1800"));
+    let ran = t0.elapsed();
+    assert_eq!((r.code, told(&r)), (124, 1), "{r:?}");
+    assert!(ran < Duration::from_secs(15), "ended after {ran:?}");
+    assert!(
+        r.info.contains(
+            "slot: this job ends after 1s; a wrapped `timeout` does not extend it, name the \
+             time with `slot --timeout 30m` (at most 1h)"
+        ),
+        "{}",
+        r.info
+    );
+    let before_start = r.info.find("a wrapped `timeout`").unwrap();
+    let ended = r.info.find("ended after").unwrap();
+    assert!(before_start < ended, "told at submit: {}", r.info);
+    let job = last_logged(&f);
+    assert_eq!(
+        (job.exit, job.timed_out, job.limit_s),
+        (124, true, Some(1)),
+        "the daemon's limit, not the 1800 s of the `timeout`"
+    );
+
+    set_run_limit(&f, Some(30), Some(120));
+    let r = run_bounded(&f, wrapped(sh(&f.root, "true"), "20"));
+    assert_eq!((r.code, told(&r)), (0, 0), "inside the limit: {r:?}");
+    let r = run_bounded(&f, wrapped(sh(&f.root, "true"), "1h"));
+    assert_eq!((r.code, told(&r)), (0, 1), "{r:?}");
+    assert!(
+        r.info.contains("`slot --timeout 2m` (at most 2m)"),
+        "the most it may name: {}",
+        r.info
+    );
+    assert!(!r.info.contains("capped"), "it named nothing: {}", r.info);
+    assert_eq!(last_logged(&f).limit_s, Some(30));
+    let mut own = wrapped(sh(&f.root, "true"), "1h");
+    own.timeout_s = Some(60);
+    let r = run_bounded(&f, own);
+    assert_eq!((r.code, told(&r)), (0, 1), "{r:?}");
+    assert!(
+        r.info.contains("slot: this job ends after 1m; "),
+        "{}",
+        r.info
+    );
+    assert_eq!(last_logged(&f).limit_s, Some(60));
+}
+
+/// Status and text of the answer to `PUT /api/run-limit` with `body`.
+fn put_run_limit(f: &Fixture, content_type: &str, body: &str) -> (u16, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    let state = axum::extract::State(Arc::clone(&f.server));
+    let body = axum::body::Bytes::from(body.to_owned());
+    answer(http::run_limit_put(state, headers, body))
+}
+
+/// Status and text of the answer to `GET /api/run-limit`.
+fn get_run_limit(f: &Fixture) -> (u16, String) {
+    use axum::response::IntoResponse;
+    let state = axum::extract::State(Arc::clone(&f.server));
+    answer(async move { http::run_limit_get(state).await.into_response() })
+}
+
+/// The limit set through `PUT /api/run-limit`, the call `slot run-limit`
+/// makes, is saved beside the headroom, read back by `GET`, shown in the
+/// state `slot status` reads and in force in the daemon that starts next.
+#[test]
+fn the_run_time_limit_is_set_saved_and_read_back() {
+    let f = start(2);
+    let json = "application/json";
+    let view = |(status, text): (u16, String)| {
+        assert_eq!(status, 200, "{text}");
+        let v: run_limit::View = serde_json::from_str(&text).unwrap();
+        (v.run_limit_s, v.run_limit_max_s)
+    };
+    let saved = || std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    let restarted = |socket: &str| {
+        Server::new(Config {
+            socket: f.root.join(socket),
+            ..config(&f.root, 2)
+        })
+        .unwrap()
+    };
+    assert_eq!(view(get_run_limit(&f)), (None, 3600));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(Arc::clone(&f.server).set_headroom(50));
+    assert!(!saved().contains("run_limit"), "{}", saved());
+
+    assert_eq!(
+        view(put_run_limit(&f, json, r#"{"run_limit_s":600}"#)),
+        (Some(600), 3600)
+    );
+    assert_eq!(view(get_run_limit(&f)), (Some(600), 3600));
+    assert!(saved().contains(r#""run_limit_s":600"#), "{}", saved());
+    assert!(saved().contains(r#""headroom_percent":50"#), "{}", saved());
+    let st = f.server.state();
+    assert_eq!(
+        (st.run_limit_s, st.run_limit_max_s),
+        (Some(600), Some(3600))
+    );
+    assert_eq!(
+        view(put_run_limit(&f, json, r#"{"run_limit_max_s":7200}"#)),
+        (Some(600), 7200),
+        "the maximum alone keeps the limit"
+    );
+    rt.block_on(Arc::clone(&f.server).set_headroom(25));
+    assert!(
+        saved().contains(r#""run_limit_s":600"#),
+        "a headroom change keeps the limit: {}",
+        saved()
+    );
+    let next = restarted("s2");
+    assert_eq!(
+        next.run_limit_view(),
+        run_limit::View {
+            run_limit_s: Some(600),
+            run_limit_max_s: 7200
+        }
+    );
+    assert_eq!(next.limits().headroom_percent, 25);
+
+    let before = f.server.run_limit_view();
+    for bad in [
+        "{}",
+        r#"{"run_limit_s":7201}"#,
+        r#"{"run_limit_max_s":0}"#,
+        r#"{"run_limit_max_s":300}"#,
+        r#"{"run_limit_s":-5}"#,
+        r#"{"run_limit_s":"10m"}"#,
+        r#"{"run_limit_s":1.5}"#,
+        "not json",
+        "",
+    ] {
+        let (status, text) = put_run_limit(&f, json, bad);
+        assert_eq!(status, 400, "{bad}: {text}");
+        assert!(text.starts_with("slot: "), "{bad}: {text}");
+        assert_eq!(f.server.run_limit_view(), before, "{bad} changed nothing");
+    }
+    let (status, _) = put_run_limit(&f, "text/plain", r#"{"run_limit_s":60}"#);
+    assert_eq!(status, 415, "a body a page can post without a preflight");
+    assert_eq!(f.server.run_limit_view(), before);
+
+    assert_eq!(
+        view(put_run_limit(&f, json, r#"{"run_limit_s":0}"#)),
+        (None, 7200),
+        "0 turns the limit off"
+    );
+    assert!(!saved().contains("run_limit_s"), "{}", saved());
+    assert_eq!(restarted("s3").run_limit_view().run_limit_s, None);
+}
+
+/// A limit set while a job runs does not reach back: the job keeps the
+/// limit it started with, here none.
+#[test]
+fn a_limit_set_while_a_job_runs_applies_to_the_jobs_that_start_after_it() {
+    let f = start(2);
+    let h = holder(&f);
+    set_run_limit(&f, Some(1), None);
+    std::thread::sleep(Duration::from_millis(2200));
+    let st = f.server.state();
+    assert_eq!(st.active.len(), 1, "the job from before runs on");
+    assert_eq!(
+        (st.active[0].limit_s, st.active[0].timed_out),
+        (None, false)
+    );
+    std::fs::write(f.root.join("go"), "").unwrap();
+    h.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    assert_eq!(collect(h).code, 0);
+}
+
 /// The interval of the token watch in the tests of it: the daemon's is
 /// 15 s, so "within 45 s" is three of these.
 const WATCH: Duration = Duration::from_millis(200);

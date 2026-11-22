@@ -345,6 +345,8 @@ mod tests {
             promoted: false,
             cache_env: None,
             warnings: Vec::new(),
+            limit_s: None,
+            timed_out: false,
         };
         serde_json::to_string(&j).unwrap()
     }

@@ -45,6 +45,7 @@ use crate::policy;
 use crate::procstat::{self, Proc, Snapshot, Tracker};
 use crate::proto::{Frame, Request};
 use crate::rewrite::Rewriter;
+use crate::run_limit;
 use crate::toolchain::{self, Context};
 use crate::types::{
     Event, HeadroomBase, HostCensus, Job, JobState, LiveJob, Priority, SccacheWatch, State, Unit,
@@ -249,6 +250,9 @@ struct Live {
     /// ([`Server::target_ready`]): from its first look until it stands in
     /// the queue for slots.
     target_wait: bool,
+    /// Set to `true` when the job ran past its run-time limit
+    /// ([`Server::end_overdue`]); [`Server::supervise`] then ends it.
+    overdue: watch::Sender<bool>,
 }
 
 /// What stands between a queued cargo job and its target directory: the
@@ -426,6 +430,9 @@ pub struct Server {
     /// The priority rules and the promotion delay set at run time, as
     /// saved in `priority.json`.
     priority: Mutex<priority::Table>,
+    /// The run-time limit and the most a job may name, as saved in
+    /// `limits.json`.
+    run_limit: Mutex<run_limit::Limits>,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -655,6 +662,10 @@ impl Server {
             uid: nix::unistd::getuid().as_raw(),
             quota_lock: tokio::sync::Mutex::new(()),
             priority: Mutex::new(priority_table),
+            run_limit: Mutex::new(run_limit::Limits {
+                run_limit_s: saved.run_limit_s,
+                run_limit_max_s: saved.run_limit_max_s,
+            }),
         }))
     }
 
@@ -784,6 +795,7 @@ impl Server {
         tokio::spawn(Arc::clone(&self).call_watch());
         tokio::spawn(Arc::clone(&self).token_watch());
         tokio::spawn(Arc::clone(&self).priority_watch());
+        tokio::spawn(Arc::clone(&self).run_limit_watch());
         if self.cfg.evict.floor > 0 {
             tokio::spawn(Arc::clone(&self).evict_watch());
         }
@@ -1230,6 +1242,9 @@ impl Server {
                     exited: r.exited,
                     conn: conn.map(|a| a.id),
                     target_wait: false,
+                    // The job record carries its limit and its start: the
+                    // watch counts on from there.
+                    overdue: watch::Sender::new(false),
                 },
             );
         }
@@ -1538,6 +1553,21 @@ impl Server {
                 msg: format!("slot: --tokens {n} capped at {limit}, the slots in circulation"),
             });
         }
+        // Said once: a job a handover queues again was told by the old image.
+        if resume.is_none() {
+            let limits = *self.run_limit.lock().expect("run limit lock");
+            let max = limits.max_s();
+            if let Some(asked) = req.timeout_s.filter(|&t| t > max) {
+                let _ = tx.send(Frame::Info {
+                    msg: run_limit::capped_message(asked, max),
+                });
+            }
+            // The limit as of now; the job's own is fixed when it starts.
+            let limit = run_limit::job_limit(req.timeout_s, limits.run_limit_s, max);
+            if let Some(msg) = run_limit::wrapped_message(limit, &shown, max) {
+                let _ = tx.send(Frame::Info { msg });
+            }
+        }
         let target_dir = (tc.name() == "rust" && req.workspace.is_none())
             .then(|| crate::evict::target_dir(&shown, &req.env, &cwd))
             .flatten();
@@ -1590,6 +1620,8 @@ impl Server {
                 promoted,
                 cache_env,
                 warnings: warnings.clone(),
+                limit_s: None,
+                timed_out: false,
             };
             g.active.insert(
                 id,
@@ -1611,6 +1643,7 @@ impl Server {
                     exited: None,
                     conn,
                     target_wait: false,
+                    overdue: watch::Sender::new(false),
                 },
             );
             id
@@ -1858,11 +1891,18 @@ impl Server {
                 .into_owned()
         });
         let pumps = self.start_pumps(pipes, &tx, &out, &(from, to));
+        // The limit in force at the start is the job's: a later `slot
+        // run-limit` changes the jobs that start after it.
+        let limit_s = {
+            let limits = self.run_limit.lock().expect("run limit lock");
+            run_limit::job_limit(req.timeout_s, limits.run_limit_s, limits.max_s())
+        };
         {
             let mut g = self.inner.lock().expect("server lock");
             if let Some(l) = g.active.get_mut(&id) {
                 l.pid = Some(pid);
                 l.job.started_ms = now_ms();
+                l.job.limit_s = limit_s;
                 l.job.state = JobState::Running;
                 l.tracker.sample(&Snapshot::scan(), pid, &[], 0.0);
                 l.req = None;
@@ -1895,18 +1935,29 @@ impl Server {
         let s = Arc::clone(self);
         let wait = tokio::task::spawn_blocking(move || s.reap(id, pid));
         tokio::pin!(wait);
+        let overdue = {
+            let g = self.inner.lock().expect("server lock");
+            g.active.get(&id).map(|l| l.overdue.subscribe())
+        };
         let mut cancelled = false;
-        let result = tokio::select! {
-            r = &mut wait => r,
+        // A job past its run-time limit ends the way a cancelled one does.
+        let stopped = tokio::select! {
+            r = &mut wait => Some(r),
             () = client_gone(gone.clone()) => {
                 cancelled = true;
-                let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
-                if let Ok(r) = tokio::time::timeout(Duration::from_secs(5), &mut wait).await {
-                    r
-                } else {
-                    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
-                    wait.await
-                }
+                None
+            }
+            () = past_limit(overdue) => None,
+        };
+        let result = if let Some(r) = stopped {
+            r
+        } else {
+            let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
+            if let Ok(r) = tokio::time::timeout(Duration::from_secs(5), &mut wait).await {
+                r
+            } else {
+                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+                wait.await
             }
         };
         let exited = result.ok().flatten()?;
@@ -1925,7 +1976,26 @@ impl Server {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let end = if cancelled {
+        // Read from the job record, not from the branch taken above: an
+        // image that took the job over reaps what the old one signalled.
+        let timed_out = {
+            let g = self.inner.lock().expect("server lock");
+            g.active
+                .get(&id)
+                .filter(|l| l.job.timed_out)
+                .map(|l| (now_ms() - l.job.started_ms, l.job.limit_s.unwrap_or(0)))
+        };
+        let end = if let Some((ran_ms, limit)) = timed_out {
+            let max = self.run_limit.lock().expect("run limit lock").max_s();
+            End {
+                state: JobState::Failed,
+                code: run_limit::EXIT,
+                cpu: exited.cpu,
+                client_code: run_limit::EXIT,
+                msg: Some(run_limit::ended_message(id, ran_ms, limit, max)),
+                note_wait: false,
+            }
+        } else if cancelled {
             End {
                 state: JobState::Cancelled,
                 code: -1,
@@ -2602,12 +2672,15 @@ impl Server {
     }
 
     fn save_limits(&self) {
+        let run_limit = *self.run_limit.lock().expect("run limit lock");
         let saved = {
             let h = self.headroom.lock().expect("headroom lock");
             limits::Saved {
                 headroom_percent: h.saved_percent,
                 call_headroom_percent: h.call_saved,
                 base: h.base,
+                run_limit_s: run_limit.run_limit_s,
+                run_limit_max_s: run_limit.run_limit_max_s,
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -2719,6 +2792,63 @@ impl Server {
             self.rerank();
         }
         Ok(self.priority_view())
+    }
+
+    /// The run-time limit and the most a job may name, as
+    /// `GET /api/run-limit` answers.
+    pub fn run_limit_view(&self) -> run_limit::View {
+        self.run_limit.lock().expect("run limit lock").view()
+    }
+
+    /// Sets the run-time limit, the most a job may name, or both (`slot
+    /// run-limit`) and saves them. Jobs that start afterwards get the new
+    /// limit; a running job keeps the one it started with.
+    pub fn set_run_limit(&self, req: &run_limit::Request) -> Result<run_limit::View, String> {
+        let view = {
+            let mut limits = self.run_limit.lock().expect("run limit lock");
+            *limits = limits.changed(req)?;
+            limits.view()
+        };
+        self.save_limits();
+        Ok(view)
+    }
+
+    /// Marks every running job that ran past its limit as timed out and
+    /// tells its supervisor, which ends it as `slot cancel` would: SIGTERM
+    /// to the process group, SIGKILL 5 s later.
+    fn end_overdue(&self) {
+        let now = now_ms();
+        let mut g = self.inner.lock().expect("server lock");
+        if g.handing_over {
+            return;
+        }
+        for l in g.active.values_mut() {
+            let Some(limit) = l.job.limit_s else { continue };
+            // Not a job that ended or is being cancelled already.
+            if l.pid.is_none()
+                || l.exited.is_some()
+                || *l.overdue.borrow()
+                || l.stop.as_ref().is_some_and(|s| *s.gone.borrow())
+            {
+                continue;
+            }
+            let limit_ms = i64::try_from(limit.saturating_mul(1000)).unwrap_or(i64::MAX);
+            if now - l.job.started_ms >= limit_ms {
+                l.job.timed_out = true;
+                l.overdue.send_replace(true);
+            }
+        }
+    }
+
+    /// Every second: ends the running jobs that ran past their run-time
+    /// limit.
+    async fn run_limit_watch(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            self.end_overdue();
+        }
     }
 
     /// Every 15 s, writes back jobserver tokens that a process took and
@@ -3259,7 +3389,10 @@ impl Server {
         // A guard taken inside the struct literal would live until its end,
         // and the calls below lock the headroom again.
         let base = self.headroom.lock().expect("headroom lock").base;
+        let run_limit = self.run_limit_view();
         State {
+            run_limit_s: run_limit.run_limit_s,
+            run_limit_max_s: Some(run_limit.run_limit_max_s),
             headroom_base: base,
             busy_cores: m.busy,
             target_cores: m.target,
@@ -3311,6 +3444,17 @@ impl Server {
 /// Resolves when the client has gone away.
 async fn client_gone(mut rx: watch::Receiver<bool>) {
     let _ = rx.wait_for(|g| *g).await.map(|_| ());
+}
+
+/// Resolves when the job ran past its run-time limit; never for a job that
+/// left the table.
+async fn past_limit(rx: Option<watch::Receiver<bool>>) {
+    if let Some(mut rx) = rx
+        && rx.wait_for(|o| *o).await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
 }
 
 fn compile_server_work(g: &mut Inner, snap: &Snapshot) -> HashMap<i64, Vec<Proc>> {

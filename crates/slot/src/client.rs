@@ -97,6 +97,9 @@ pub struct Settings {
     /// `--priority <level>` or `SLOT_PRIORITY`: the job's own queue level;
     /// a rule of the daemon's table for the repository wins over it.
     pub priority: Option<crate::types::Priority>,
+    /// `--timeout <duration>` or `SLOT_TIMEOUT`: seconds the job may run in
+    /// place of the daemon's run-time limit; the daemon caps it.
+    pub timeout: Option<u64>,
 }
 
 impl Settings {
@@ -141,6 +144,7 @@ impl Settings {
             fetch: Vec::new(),
             tokens: None,
             priority: None,
+            timeout: None,
         }
     }
 }
@@ -164,6 +168,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         checkout,
         tokens: s.tokens,
         priority: s.priority,
+        timeout_s: s.timeout,
         ..Request::default()
     };
     if let Some(dir) = crate::gate::dir_from_env() {

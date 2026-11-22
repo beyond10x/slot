@@ -39,6 +39,17 @@ pub struct Cli {
     #[arg(long, env = "SLOT_PRIORITY", value_name = "LEVEL", value_enum)]
     pub priority: Option<crate::types::Priority>,
 
+    /// How long the job may run, counted from its start, in place of the
+    /// daemon's run-time limit (`slot run-limit`): seconds, or a number
+    /// with `s`, `m` or `h`, such as `90s`, `30m` or `1h`. The daemon ends
+    /// a job that runs longer (SIGTERM, SIGKILL 5 s later) and the job
+    /// exits 124. It is capped at the most a job may name, 1 h unless
+    /// `slot run-limit --max` changed it. A `timeout` command in
+    /// front of the job's command does not extend it. Ignored with
+    /// `--local`.
+    #[arg(long, env = "SLOT_TIMEOUT", value_name = "DURATION", value_parser = crate::run_limit::parse_duration)]
+    pub timeout: Option<u64>,
+
     /// With `SLOT_HOST` set: after the job exits 0, copy PATH back from
     /// the build server into the checkout. PATH is relative to the
     /// repository root; `target/…` is read from the job's target directory
@@ -80,6 +91,9 @@ pub enum Cmd {
     /// repository.
     #[command(subcommand)]
     Priority(PriorityCmd),
+    /// Show or set the run-time limit: how long a job may run before the
+    /// daemon ends it.
+    RunLimit(RunLimitArgs),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
@@ -274,6 +288,9 @@ pub struct RunArgs {
     /// The job's queue level, as `slot --priority LEVEL`.
     #[arg(long, value_name = "LEVEL", value_enum)]
     pub priority: Option<crate::types::Priority>,
+    /// How long the job may run, as `slot --timeout DURATION`.
+    #[arg(long, value_name = "DURATION", value_parser = crate::run_limit::parse_duration)]
+    pub timeout: Option<u64>,
     /// The command and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -356,6 +373,25 @@ pub struct PriorityPromoteAfterArgs {
     /// removes it.
     #[arg(value_name = "SECONDS")]
     pub seconds: crate::server::priority::PromoteAfter,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+/// `slot run-limit` arguments. Without any, prints the limit in force.
+#[derive(Debug, Clone, Args)]
+pub struct RunLimitArgs {
+    /// How long a job may run, counted from its start: seconds, or a
+    /// number with `s`, `m` or `h` (`90s`, `10m`, `1h`); `off` for no limit.
+    /// The daemon ends a job that runs longer (SIGTERM to its processes,
+    /// SIGKILL 5 s later) and the job exits 124. The limit applies to the
+    /// jobs that start after the change, is kept in `limits.json` in the
+    /// state directory and holds across reloads and restarts.
+    #[arg(value_name = "DURATION|off")]
+    pub limit: Option<crate::run_limit::Setting>,
+    /// The most a job may name with `slot --timeout`; 1 h until it is set.
+    #[arg(long, value_name = "DURATION", value_parser = crate::run_limit::parse_duration)]
+    pub max: Option<u64>,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -581,6 +617,57 @@ mod tests {
         assert!(seconds(&["soon"]).is_err());
         assert!(seconds(&["-1"]).is_err());
         assert!(seconds(&["5m"]).is_err());
+    }
+
+    #[test]
+    fn a_jobs_timeout_parses_before_a_command_and_on_run() {
+        let cli = parse(&["--timeout", "30m", "sh", "build.sh"]).unwrap();
+        assert_eq!(cli.timeout, Some(1800));
+        assert!(matches!(cli.command, Cmd::External(ref a) if a == &["sh", "build.sh"]));
+        let cli = parse(&["--timeout", "90", "true"]).unwrap();
+        assert_eq!(cli.timeout, Some(90));
+        let cli = parse(&["run", "--timeout", "1h", "sh", "--timeout", "9"]).unwrap();
+        let Cmd::Run(run) = cli.command else {
+            panic!("not run")
+        };
+        assert_eq!(run.timeout, Some(3600));
+        assert_eq!(run.command, ["sh", "--timeout", "9"]);
+        let cli = parse(&["timeout", "1800", "cargo", "test"]).unwrap();
+        assert_eq!(cli.timeout, None, "a `timeout` command is the job");
+        assert!(
+            matches!(cli.command, Cmd::External(ref a) if a == &["timeout", "1800", "cargo", "test"])
+        );
+        assert!(parse(&["--timeout", "0", "sh"]).is_err());
+        assert!(parse(&["--timeout", "soon", "sh"]).is_err());
+        assert!(parse(&["run", "--timeout", "off", "sh"]).is_err());
+    }
+
+    #[test]
+    fn run_limit_takes_a_duration_or_off_and_a_maximum() {
+        use crate::run_limit::Setting;
+        let args = |args: &[&str]| {
+            let mut argv = vec!["run-limit"];
+            argv.extend(args);
+            parse(&argv).map(|cli| {
+                let Cmd::RunLimit(a) = cli.command else {
+                    panic!("not run-limit")
+                };
+                (a.limit, a.max)
+            })
+        };
+        assert_eq!(args(&[]).unwrap(), (None, None), "prints the limit");
+        assert_eq!(args(&["10m"]).unwrap(), (Some(Setting::Seconds(600)), None));
+        assert_eq!(args(&["600"]).unwrap(), (Some(Setting::Seconds(600)), None));
+        assert_eq!(args(&["off"]).unwrap(), (Some(Setting::Off), None));
+        assert_eq!(
+            args(&["10m", "--max", "1h"]).unwrap(),
+            (Some(Setting::Seconds(600)), Some(3600))
+        );
+        assert_eq!(args(&["--max", "2h"]).unwrap(), (None, Some(7200)));
+        assert!(args(&["0"]).is_err());
+        assert!(args(&["soon"]).is_err());
+        assert!(args(&["10m", "--max", "off"]).is_err());
+        assert!(args(&["10m", "--max", "0"]).is_err());
     }
 
     #[test]

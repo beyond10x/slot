@@ -484,3 +484,56 @@ fn a_burst_of_reloads_never_ends_the_daemon() {
         d.free_tokens() == 4
     });
 }
+
+/// A job handed over keeps its run-time limit and its start. It names 5 s
+/// with `SLOT_TIMEOUT`, the daemon reloads 3 s into its run, and the image
+/// that took it over ends it 5 s after the job started, not 5 s after the
+/// reload.
+#[test]
+fn a_handed_over_job_keeps_its_run_time_limit_and_its_start() {
+    let d = Daemon::start(2, &[]);
+    let client = Command::new(SLOT)
+        .args(["sh", "-c", "echo limited; sleep 30"])
+        .env("SLOT_SOCKET", d.socket())
+        .env("SLOT_TIMEOUT", "5")
+        .env_remove("SLOT_JOB")
+        .env_remove("SLOT_HOST")
+        .current_dir(d.dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    d.wait_until("the job to run", Duration::from_secs(30), |d| {
+        d.children() == 1
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    let reload_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    d.reload();
+    let done = wait_all(vec![("limited".into(), client)], Duration::from_secs(40));
+    let log = d.log();
+    assert!(log.contains("took over 1 running"), "{log}");
+    let (_, code, out, err) = &done[0];
+    assert_eq!(*code, 124, "{err}\n{log}");
+    assert_eq!(out, "limited\n");
+    assert!(err.contains("over its run-time limit of 5s"), "{err}");
+    let jobs = std::fs::read_to_string(d.state().join("jobs.jsonl")).unwrap();
+    let line = jobs.lines().last().unwrap();
+    assert!(line.contains(r#""timed_out":true"#), "{line}");
+    assert_eq!(field(line, "\"limit_s\":"), 5, "{line}");
+    assert_eq!(field(line, "\"exit\":"), 124, "{line}");
+    let (started, ended) = (field(line, "\"started_ms\":"), field(line, "\"ended_ms\":"));
+    assert!(ended - started >= 5000, "ended early: {line}");
+    assert!(
+        ended < reload_ms + 5000,
+        "the limit started again at the reload ({reload_ms}): {line}"
+    );
+    d.wait_until("every slot back", Duration::from_secs(10), |d| {
+        d.free_tokens() == 2
+    });
+}

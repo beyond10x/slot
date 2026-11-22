@@ -26,6 +26,13 @@
     },
     {
       "area": "Pool",
+      "label": "Run-time limit",
+      "status": "shipped",
+      "detail": "slot run-limit 10m ends a job that runs longer, with exit 124; a job names its own time with slot --timeout or SLOT_TIMEOUT, up to 1 hour unless slot run-limit --max changes it. No limit until one is set.",
+      "href": "/docs/how-it-works#run-time-limit"
+    },
+    {
+      "area": "Pool",
       "label": "Waits for disk and memory",
       "status": "shipped",
       "detail": "A job queues while its filesystem has under 25 GB free or available memory is below its expected peak (0.5.0).",

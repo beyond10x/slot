@@ -125,6 +125,17 @@ pub struct Job {
     /// each (`crate::sccache::cache_warnings`); the job runs unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Seconds the job may run from its start before the daemon ends it:
+    /// its own `--timeout`, else the daemon's limit (`crate::run_limit`).
+    /// Absent while the job is queued, for a job without a limit and from a
+    /// daemon without the run-time limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub limit_s: Option<u64>,
+    /// Whether the daemon ended the job at `limit_s`; its exit code is then
+    /// 124.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 /// Live numbers of one running job.
@@ -312,6 +323,16 @@ pub struct State {
     /// than the target.
     #[serde(default)]
     pub over_target: bool,
+    /// Seconds a job may run before the daemon ends it (`slot run-limit`);
+    /// absent with no limit and from a daemon without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub run_limit_s: Option<u64>,
+    /// The most a job may name with `slot --timeout`, seconds; absent from a
+    /// daemon without the run-time limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub run_limit_max_s: Option<u64>,
     /// Tokens that neither a job nor a live process with the pool open
     /// accounts for, as the daemon counted them last: lost, and written back
     /// once two counts in a row agree. 0 from a daemon that predates it.

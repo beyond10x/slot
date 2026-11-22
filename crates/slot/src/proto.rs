@@ -44,6 +44,12 @@ pub struct Request {
     /// it ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<crate::types::Priority>,
+    /// `slot --timeout <duration>`: seconds the job may run before the
+    /// daemon ends it, in place of the daemon's run-time limit; capped at
+    /// the most a job may name (`slot run-limit`). Daemons that predate it
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_s: Option<u64>,
     /// Set by `slot gate` for a client in a sandbox: the command the
     /// client runs there. `argv` is then `slot hold <fifo>`, which keeps
     /// the job's slots while the sandboxed command runs. The daemon shows,
@@ -138,5 +144,21 @@ mod tests {
         assert!(line.contains(r#""priority":"low""#), "{line}");
         let back: Request = serde_json::from_str(&line).unwrap();
         assert_eq!(back.priority, Some(Priority::Low));
+    }
+
+    #[test]
+    fn a_request_from_an_older_client_names_no_time() {
+        let r: Request = serde_json::from_str(r#"{"argv":["sh","build.sh"],"env":[]}"#).unwrap();
+        assert_eq!(r.timeout_s, None);
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(!line.contains("timeout_s"), "{line}");
+        let r = Request {
+            timeout_s: Some(1800),
+            ..r
+        };
+        let line = serde_json::to_string(&r).unwrap();
+        assert!(line.contains(r#""timeout_s":1800"#), "{line}");
+        let back: Request = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.timeout_s, Some(1800));
     }
 }
