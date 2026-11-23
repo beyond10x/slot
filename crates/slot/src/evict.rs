@@ -521,6 +521,16 @@ mod tests {
         let bin = target.join("debug/pause");
         std::fs::copy("/bin/sleep", &bin).unwrap();
         let mut child = Command::new(&bin).arg("30").spawn().unwrap();
+        // Until the child has called exec, its executable is this test's.
+        let exe = PathBuf::from(format!("/proc/{}/exe", child.id()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_link(&exe).ok().as_deref() != Some(bin.as_path()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never ran {bin:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let used = InUse::scan_from(Path::new("/proc"), &[]);
         let why = used.why(&target).map(String::from);
         child.kill().unwrap();
@@ -549,6 +559,16 @@ mod tests {
             .current_dir(&cwd_target)
             .spawn()
             .unwrap();
+        // Until the child has changed directory, its directory is this test's.
+        let cwd = PathBuf::from(format!("/proc/{}/cwd", child.id()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_link(&cwd).ok().as_deref() != Some(cwd_target.as_path()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never worked in {cwd_target:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let file = std::fs::File::open(open_target.join("f")).unwrap();
         let used = InUse::scan_from(Path::new("/proc"), &[]);
         child.kill().unwrap();
