@@ -436,6 +436,12 @@ starts, whatever the figure says. Its client prints `slot: job 12 was held 10m f
 CPUs, as long as a job is: it starts`, and the census log gets a `cpu_hold_bound` line beside the
 `cpu_hold` line of the job's first hold. The 10 minutes start again when the daemon reloads.
 
+A job whose command is predicted to run 30 seconds or less (the 90th percentile of its last runs
+in the same repository, with at least 3) is not held by this check: it adds little load for a
+short time. Its client prints `slot: job 12 is predicted to run 4 s: it is not held for the
+host's CPUs`, and the census log gets a `cpu_hold_short` line. A command without history is held
+as any other.
+
 A mark above the host's CPU count never holds a start, and `slot cpu-limit` says so. A mark under
 1 is refused. For the first 5 seconds after its start the daemon has no figure yet and holds
 every start past the floor, so a reload does not start every held job at once. After that, a
@@ -555,7 +561,15 @@ A job that starts to wait for disk makes the daemon look at once instead of at t
 
 - a target directory of a repository with a queued or running job;
 - one built in the last 2 hours;
-- a directory no job built into, or one without the `CACHEDIR.TAG` Cargo writes.
+- a directory no job built into, or one without the `CACHEDIR.TAG` Cargo writes;
+- a directory a process uses: its executable, its working directory, or a file it has open or
+  mapped is inside it;
+- a directory a systemd user unit starts from: an `ExecStart` line of a unit file or drop-in in
+  `~/.config/systemd/user` (or the runtime directory's `systemd/user` and `systemd/transient`)
+  names a path inside it, whether or not the unit runs.
+
+A directory kept for a process or a unit gets a journal line, `slot: disk: kept <path>: process
+1234 runs it`.
 
 A target directory inside a managed worktree is deleted with `worktree discard-cache`.
 

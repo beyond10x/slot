@@ -4509,3 +4509,34 @@ fn held_jobs_that_reach_the_bound_together_start_one_by_one() {
     wait_for_jobs(&f, "all three to run", || running(&f) == [a, b, c]);
     end_all(&f, vec![first, second, third]);
 }
+
+/// A job predicted to run at most `cpu_limit::PASS_MS` is not held for the
+/// host's CPUs: on a busy host it starts while a job of a command without
+/// history stays held, and the census records why it passed.
+#[test]
+fn a_job_predicted_short_is_not_held_for_the_hosts_cpus() {
+    host_busy!(BUSY, busy, 184);
+    let f = start_busy(4, busy, |_| {});
+    give_history(&f, "app");
+    set_cpu_limit(&f, Some(17.0), Some(1));
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run", || running(&f) == [a]);
+    let (long, l) = submit(&f, named(&f, LONG_CMD, "app", "long", None));
+    wait_for_jobs(&f, "the job without history to be held for CPU", || {
+        reason_of(&f, l).contains("host busy")
+    });
+    go(&f, "short");
+    let (short, _) = submit(&f, named(&f, SHORT_CMD, "app", "short", None));
+    wait_for_jobs(&f, "the short job to pass the CPU hold", || {
+        !census_events(&f, "cpu_hold_short").is_empty()
+    });
+    assert_eq!(collect(short).code, 0);
+    let passed = census_events(&f, "cpu_hold_short");
+    assert_eq!(passed.len(), 1, "{passed:?}");
+    assert!(passed[0]["predicted_ms"].as_u64().is_some(), "{passed:?}");
+    assert!(
+        reason_of(&f, l).contains("host busy"),
+        "the long job started"
+    );
+    end_all(&f, vec![first, long]);
+}
