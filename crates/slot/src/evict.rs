@@ -531,15 +531,25 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let used = InUse::scan_from(Path::new("/proc"), &[]);
+        let mut used = InUse::scan_from(Path::new("/proc"), &[]);
+        while used.why(&target).is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            used = InUse::scan_from(Path::new("/proc"), &[]);
+        }
         let why = used.why(&target).map(String::from);
+        let pid = format!("process {} ", child.id());
+        let seen: Vec<_> = used
+            .paths
+            .iter()
+            .filter(|(_, w)| w.starts_with(&pid))
+            .collect();
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(
             why,
             Some(format!("process {} runs it", child.id())),
-            "{:?}",
-            used.why(&target)
+            "the scan saw for the child: {seen:?}; exe now {:?}",
+            std::fs::read_link(&exe)
         );
         assert_eq!(InUse::scan_from(Path::new("/proc"), &[]).why(&target), None);
     }
