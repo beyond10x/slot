@@ -56,6 +56,20 @@ export function percentOrDash(v: number | undefined): string {
   return v === undefined || !Number.isFinite(v) ? '–' : `${v.toFixed(0)} %`;
 }
 
+/** An `api/cache-day` answer: the calls of the last 24 hours summed into one element; undefined when it is not one. */
+export function parseCacheDay(data: unknown): CacheMinute | undefined {
+  if (Array.isArray(data)) return undefined;
+  return parseCacheHistory([data])[0];
+}
+
+/**
+ * A value in the legend: the newest minute's share, then the share of the last 24 hours after "24 h:". A minute swings
+ * from 0 to 70 % while over a day the cache answers a steady share. Each is a dash where there was no call or no answer.
+ */
+export function minuteAndDay(minute: number | undefined, day: number | undefined): string {
+  return `${percentOrDash(minute)} · 24 h: ${percentOrDash(day)}`;
+}
+
 /** What stands in place of the lines: nothing was recorded, or nothing was compiled in the window shown. */
 export function emptyText(recorded: number, inWindow: number): string {
   if (recorded === 0) return 'no cache data yet';

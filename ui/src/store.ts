@@ -1,6 +1,6 @@
 import { computed, reactive, shallowReactive, shallowRef, triggerRef } from 'vue';
 import type { CacheMinute, Event, HostCensus, Job, LiveJob, SharesView, State } from './generated/types.ts';
-import { MINUTE_MS, cachePoint, cacheWindow, latestMinute, parseCacheHistory } from './lib/cache.ts';
+import { MINUTE_MS, cachePoint, cacheWindow, latestMinute, parseCacheDay, parseCacheHistory } from './lib/cache.ts';
 import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './lib/history.ts';
 import type { RecordedBucket, Sample, Tick } from './lib/history.ts';
 import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
@@ -111,6 +111,9 @@ export const cacheChart = computed(() => {
   const points = cacheWindow(all, to - store.windowS * 1000, to).map(cachePoint);
   return { points, latest: latestMinute(all, to), recorded: all.length };
 });
+
+/** The compiler calls of the last 24 hours as `api/cache-day` answered last; undefined from a daemon that has no such path. */
+export const cacheDay = shallowRef<CacheMinute | undefined>(undefined);
 
 /** Server time estimate, ms. */
 export const now = (): number => Date.now() + skew;
@@ -239,8 +242,23 @@ async function loadCacheHistory(): Promise<void> {
   cacheMinutes.value = parseCacheHistory(await res.json());
 }
 
+/** A daemon older than the page answers 404: the legend then has no 24-hour figure, and that is no error. */
+async function loadCacheDay(): Promise<void> {
+  const res = await fetch('api/cache-day');
+  if (!res.ok) {
+    cacheDay.value = undefined;
+    return;
+  }
+  cacheDay.value = parseCacheDay(await res.json());
+}
+
+/** The compile cache chart's minutes and its 24-hour sum, asked for side by side. */
+async function loadCache(): Promise<void> {
+  await Promise.allSettled([loadCacheHistory(), loadCacheDay()]);
+}
+
 async function loadHistory(): Promise<void> {
-  await Promise.allSettled([loadExactHistory(), loadRecordedHistory(), loadCacheHistory()]);
+  await Promise.allSettled([loadExactHistory(), loadRecordedHistory(), loadCache()]);
   store.historyLoaded = true;
 }
 
@@ -291,7 +309,7 @@ export async function start(): Promise<void> {
   await loadHistory().catch(() => undefined);
   store.ready = true;
   // The daemon adds a minute of compiler calls each minute, and no event says so.
-  setInterval(() => void loadCacheHistory().catch(() => undefined), MINUTE_MS);
+  setInterval(() => void loadCache(), MINUTE_MS);
 }
 
 /**

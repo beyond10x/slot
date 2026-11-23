@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CacheMinute } from '../generated/types.ts';
-import { FRESH_MS, MINUTE_MS, cachePoint, cacheWindow, describeMinute, emptyText, latestMinute, parseCacheHistory, percentOrDash } from './cache.ts';
+import { FRESH_MS, MINUTE_MS, cachePoint, cacheWindow, describeMinute, emptyText, latestMinute, minuteAndDay, parseCacheDay, parseCacheHistory, percentOrDash } from './cache.ts';
 
 const minute = (t: number, hits: number, misses: number, reasons: Record<string, number> = {}): CacheMinute => ({
   t, hits, misses, not_cached: Object.values(reasons).reduce((a, n) => a + n, 0), reasons,
@@ -78,4 +78,24 @@ test('the newest minute in words names the three most frequent reasons a call wa
     'last minute: 91 compiler calls, 30 from the cache, 12 compiled after a miss, 49 not cacheable (crate-type 40, - 4, incremental 4)',
   );
   assert.equal(describeMinute(minute(1, 2, 1)), 'last minute: 3 compiler calls, 2 from the cache, 1 compiled after a miss, 0 not cacheable');
+});
+
+test('the legend gives the newest minute and the last 24 hours, each a dash without calls or without an answer', () => {
+  const day = cachePoint(minute(1, 350, 300, { incremental: 350 }));
+  assert.equal(minuteAndDay(0, day.all), '0 % · 24 h: 35 %', 'a minute of misses beside the day the cache answered');
+  assert.equal(minuteAndDay(68.4, day.cacheable), '68 % · 24 h: 54 %');
+  assert.equal(minuteAndDay(undefined, day.all), '– · 24 h: 35 %', 'no fresh minute');
+  assert.equal(minuteAndDay(26, undefined), '26 % · 24 h: –', 'a daemon without api/cache-day');
+  const none = cachePoint(minute(1, 0, 0));
+  assert.equal(minuteAndDay(none.all, none.all), '– · 24 h: –', 'no call in the day');
+  const refused = cachePoint(minute(1, 0, 0, { incremental: 3 }));
+  assert.deepEqual([minuteAndDay(1, refused.all), minuteAndDay(1, refused.cacheable)], ['1 % · 24 h: 0 %', '1 % · 24 h: –']);
+});
+
+test('an api/cache-day answer is one element; anything else is no figure', () => {
+  assert.deepEqual(parseCacheDay({ t: 5, hits: 4, misses: 1, not_cached: 2, reasons: { incremental: 2 } }), minute(5, 4, 1, { incremental: 2 }));
+  assert.deepEqual(parseCacheDay({ t: 5, hits: 4, later_field: true }), minute(5, 4, 0));
+  for (const bad of [undefined, null, '<!doctype html>', [], [{ t: 5, hits: 4 }], { hits: 4 }, { t: 0 }]) {
+    assert.equal(parseCacheDay(bad), undefined, JSON.stringify(bad));
+  }
 });

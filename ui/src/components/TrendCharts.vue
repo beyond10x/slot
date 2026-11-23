@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { MINUTE_MS, cachePoint, describeMinute, emptyText, percentOrDash } from '../lib/cache.ts';
+import { MINUTE_MS, cachePoint, describeMinute, emptyText, minuteAndDay } from '../lib/cache.ts';
 import type { CachePoint } from '../lib/cache.ts';
 import type { HostSample } from '../lib/host.ts';
-import { cacheChart, census, chartWindow, store } from '../store.ts';
+import { cacheChart, cacheDay, census, chartWindow, store } from '../store.ts';
 import LinesChart from './LinesChart.vue';
 import type { Line } from './LinesChart.vue';
 import SectionHead from './SectionHead.vue';
@@ -36,12 +36,16 @@ const POOL: readonly Line[] = [
 ];
 
 // The compile cache: what share of the compiler calls of a minute it answered. A value in the legend is the newest
-// minute's; a minute without a call has no share, so it reads as a dash and not as 0 %.
+// minute's, then the last 24 hours' ("24 h:"); without a call there is no share, so it reads as a dash and not as 0 %.
 const cachePoints = (): readonly CachePoint[] => cacheChart.value.points;
 const newest = computed(() => (cacheChart.value.latest ? cachePoint(cacheChart.value.latest) : undefined));
+const day = computed(() => (cacheDay.value ? cachePoint(cacheDay.value) : undefined));
 const CACHE: readonly Line<CachePoint>[] = [
-  { label: 'of all calls', color: '#0072B2', value: (p) => p.all, now: () => percentOrDash(newest.value?.all) },
-  { label: 'of cacheable calls', color: '#8c6d31', value: (p) => p.cacheable, dashed: true, now: () => percentOrDash(newest.value?.cacheable) },
+  { label: 'of all calls', color: '#0072B2', value: (p) => p.all, now: () => minuteAndDay(newest.value?.all, day.value?.all) },
+  {
+    label: 'of cacheable calls', color: '#8c6d31', value: (p) => p.cacheable, dashed: true,
+    now: () => minuteAndDay(newest.value?.cacheable, day.value?.cacheable),
+  },
 ];
 const cacheEmpty = computed(() => emptyText(cacheChart.value.recorded, cacheChart.value.points.filter((p) => Number.isFinite(p.all)).length));
 const cacheNote = computed(() => describeMinute(cacheChart.value.latest));
@@ -77,11 +81,12 @@ const cacheNote = computed(() => describeMinute(cacheChart.value.latest));
 .trend :deep(h2) { margin-top: 12px; }
 /*
  * The legend's height is kept, so the tables below do not move while the first reading has not arrived or when a number
- * gets one more digit: two lines where a chart is narrower than the 385 px of the widest legend, one line where it is wider.
+ * gets one more digit: two lines where a chart is narrower than the 540 px of the widest legend (the compile cache's, its
+ * minute and 24 hours at 100 %), one line where it is wider.
  */
 .trend :deep(.legend) { min-height: 40px; align-content: flex-start; }
 /* Four in a row: the plots give the second legend line its 20 px, so the tables start where they do beside one line. */
-@container (min-width: 1240px) and (max-width: 1639px) { .trend { --plot-h: 60px; } }
-@container (min-width: 822px) and (max-width: 1239px) { .trend :deep(.legend) { min-height: 20px; } }
-@container (min-width: 1640px) { .trend :deep(.legend) { min-height: 20px; } }
+@container (min-width: 1240px) and (max-width: 2259px) { .trend { --plot-h: 60px; } }
+@container (min-width: 1132px) and (max-width: 1239px) { .trend :deep(.legend) { min-height: 20px; } }
+@container (min-width: 2260px) { .trend :deep(.legend) { min-height: 20px; } }
 </style>

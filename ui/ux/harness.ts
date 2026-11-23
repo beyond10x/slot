@@ -129,6 +129,8 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
     ? r.fulfill({ json: sc.chartHistory }) : r.fulfill({ status: 404, body: '' }));
   await page.route('**/api/cache-history', (r) => sc.cacheHistory
     ? r.fulfill({ json: sc.cacheHistory }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
+  await page.route('**/api/cache-day', (r) => sc.cacheDay
+    ? r.fulfill({ json: sc.cacheDay }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/usage**', (r) => r.fulfill({ json: sc.usage ?? EMPTY_USAGE }));
   await page.route('**/api/limits', async (r) => {
     const body = r.request().postDataJSON() as { headroom_percent: number };

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.28.0 — 2026-11-23
+
+- The compile cache chart's legend gives the share of the last 24 hours beside the newest minute's
+  (`26 % · 24 h: 41 %`): a minute swings from 0 to 70 %. The daemon serves the sum at `GET /api/cache-day`.
+
 ## 0.27.0 — 2026-11-23
 
 - The CPU limit for starts also holds on CPU pressure: `slot cpu-limit 17 --pressure 80` holds a

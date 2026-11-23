@@ -26,6 +26,7 @@ use crate::sccache::{CacheMinute, Counters, cache_minutes};
 static UI: Dir<'_> = include_dir!("$OUT_DIR/ui");
 
 const CHART_WINDOW_MS: i64 = 6 * 60 * 60 * 1_000;
+const CACHE_DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 const CHART_TAIL_START: u64 = 1 << 20;
 const CHART_TAIL_LIMIT: u64 = 32 << 20;
 
@@ -38,6 +39,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/history", get(history))
         .route("/api/chart-history", get(chart_history))
         .route("/api/cache-history", get(cache_history))
+        .route("/api/cache-day", get(cache_day))
         .route("/api/limits", get(limits_get).put(limits_put))
         .route("/api/usage", get(usage))
         .route("/api/priority", get(priority_get).put(priority_put))
@@ -373,12 +375,54 @@ async fn cache_history(
     Ok(axum::Json(minutes))
 }
 
+async fn cache_day(State(s): State<Arc<Server>>) -> Result<axum::Json<CacheMinute>, StatusCode> {
+    let path = s.cfg.state_dir.join("cache.jsonl");
+    let day = tokio::task::spawn_blocking(move || {
+        read_cache_day(&path, super::now_ms(), CHART_TAIL_START)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(axum::Json(day))
+}
+
 /// The compiler calls per minute of the chart window, from the counters at
-/// the end of `cache.jsonl` ([`cache_minutes`]). The reading before the
+/// the end of `cache.jsonl` ([`cache_minutes`]).
+fn read_cache_history(path: &FsPath, now: i64, start: u64) -> io::Result<Vec<CacheMinute>> {
+    read_cache_minutes(path, now.saturating_sub(CHART_WINDOW_MS), now, start)
+}
+
+/// The compiler calls of the last 24 hours, summed into one element at `now`:
+/// the minutes of [`read_cache_minutes`] over that window. The read is
+/// bounded like the chart's, so a log of more than [`CHART_TAIL_LIMIT`]
+/// bytes in a day gives the calls of its last bytes.
+fn read_cache_day(path: &FsPath, now: i64, start: u64) -> io::Result<CacheMinute> {
+    let minutes = read_cache_minutes(path, now.saturating_sub(CACHE_DAY_MS), now, start)?;
+    let mut day = CacheMinute {
+        t: now,
+        ..CacheMinute::default()
+    };
+    for m in minutes {
+        day.hits += m.hits;
+        day.misses += m.misses;
+        day.not_cached += m.not_cached;
+        for (reason, n) in m.reasons {
+            *day.reasons.entry(reason).or_default() += n;
+        }
+    }
+    Ok(day)
+}
+
+/// The compiler calls per minute from `first` to `now`, from the counters
+/// at the end of `cache.jsonl` ([`cache_minutes`]). The reading before the
 /// window is what the first one in it is compared with; a port that has
 /// none in the tail starts counting at its first reading.
-fn read_cache_history(path: &FsPath, now: i64, start: u64) -> io::Result<Vec<CacheMinute>> {
-    let first = now.saturating_sub(CHART_WINDOW_MS);
+fn read_cache_minutes(
+    path: &FsPath,
+    first: i64,
+    now: i64,
+    start: u64,
+) -> io::Result<Vec<CacheMinute>> {
     let mut records = read_tail(path, first, start, |c: &Counters| {
         (c.t > 0 && c.port != 0).then_some(c.t)
     })?;
@@ -536,6 +580,78 @@ mod tests {
         assert_eq!(
             read_cache_history(&path, NOW - MIN, 4096).unwrap().len(),
             39
+        );
+    }
+
+    #[test]
+    fn cache_day_sums_the_calls_of_the_last_24_hours() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.jsonl");
+        let empty = read_cache_day(&path, NOW, 4096).unwrap();
+        assert_eq!(
+            empty,
+            CacheMinute {
+                t: NOW,
+                ..CacheMinute::default()
+            },
+            "no log yet: no calls"
+        );
+
+        let reading = |t: i64, port: u16, hits: u64, misses: u64, reasons: &[(&str, u64)]| {
+            let c = Counters {
+                t,
+                port,
+                rust_hits: hits,
+                rust_misses: misses,
+                not_cached: reasons.iter().map(|(r, n)| (r.to_string(), *n)).collect(),
+                ..Counters::default()
+            };
+            serde_json::to_string(&c).unwrap() + "\n"
+        };
+        // A second server: one reading 30 h ago, one an hour ago.
+        let mut text = reading(NOW - 30 * 60 * MIN, 4303, 1_000, 0, &[]);
+        // A reading every 10 minutes from 25 h ago to now; the server starts
+        // again at k = 100, so its counters fall and count from 0.
+        for k in 0..=150_i64 {
+            let n = if k < 100 { k } else { k - 100 } as u64;
+            let t = NOW - (150 - k) * 10 * MIN;
+            text += &reading(t, 4226, 3 * n, n, &[("incremental", 2 * n)]);
+            if k == 144 {
+                text += &reading(NOW - 60 * MIN, 4303, 1_500, 0, &[("crate-type", 7)]);
+            }
+        }
+        // A reading after `now` (a clock set back) is left out.
+        text += &reading(NOW + MIN, 4226, 1_000_000, 0, &[]);
+        std::fs::write(&path, &text).unwrap();
+
+        let day = read_cache_day(&path, NOW, 4096).unwrap();
+        // k = 6 is 24 h ago and is compared with k = 5; the restart at
+        // k = 100 gives no difference: 144 differences of 3, 1 and 2.
+        assert_eq!(day.t, NOW);
+        assert_eq!(day.hits, 144 * 3 + 500, "{day:?}");
+        assert_eq!(day.misses, 144);
+        assert_eq!(day.not_cached, 144 * 2 + 7);
+        assert_eq!(
+            day.reasons,
+            [
+                ("crate-type".to_string(), 7),
+                ("incremental".to_string(), 288)
+            ]
+            .into()
+        );
+        let history: u64 = read_cache_history(&path, NOW, 4096)
+            .unwrap()
+            .iter()
+            .map(|m| m.hits)
+            .sum();
+        assert!(history < day.hits, "the day reaches past the chart window");
+        assert_eq!(
+            serde_json::to_value(&day).unwrap(),
+            serde_json::json!({
+                "t": NOW, "hits": 932, "misses": 144, "not_cached": 295,
+                "reasons": {"crate-type": 7, "incremental": 288},
+            }),
+            "the shape of one element of /api/cache-history"
         );
     }
 
