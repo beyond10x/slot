@@ -148,6 +148,33 @@ export async function play(page: Page, run: Opened, task: Task, mode: Mode): Pro
     return r;
   }
 
+  if (task.kind === 'filter-node') {
+    const card = page.getByRole('button', { name: new RegExp(`^${task.name} `) }).first();
+    if ((await card.count()) === 0) {
+      r.notes.push(`no card for node ${task.name}`);
+      return r;
+    }
+    if (!(await reach(card))) return r;
+    if (mode === 'keyboard') await page.keyboard.press('Enter');
+    else await card.click();
+    r.actions++;
+    await page.waitForTimeout(300);
+    const heading = page.getByRole('heading', { name: new RegExp(`^Jobs on ${task.name}\\b`) });
+    const rows = page.getByRole('table', { name: 'Jobs, newest first' }).getByRole('row');
+    const texts = (await rows.allInnerTexts()).slice(1);
+    const others = texts.filter((t) => !t.includes(task.name));
+    r.done = (await heading.count()) > 0 && texts.length > 0 && others.length === 0;
+    if (!r.done) r.notes.push(`heading ${await heading.count()}, rows ${texts.length}, of other nodes ${others.length}`);
+    // Esc clears the filter again.
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(200);
+    if ((await heading.count()) > 0) {
+      r.done = false;
+      r.notes.push('Esc did not clear the node filter');
+    }
+    return r;
+  }
+
   if (task.kind === 'see') {
     const found = page.getByText(task.expect, { exact: false }).first();
     if ((await found.count()) === 0) {
