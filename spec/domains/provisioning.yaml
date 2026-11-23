@@ -1,0 +1,220 @@
+# Design: docs/design/remote-pool.md, cited as "§ n".
+# The provider contract: what the endpoint daemon asks of whatever launches remote nodes, and
+# what it must answer. slot defines the contract; a provider implements it. Two kinds ship with
+# slot (slot.hostconfig.ProviderKind): `aws`, a generic provider over the public `aws` CLI, and
+# `command`, an executable the host configuration names. Every account value comes from the host
+# configuration; the concrete binding of an operator's account is configuration outside this
+# repository, not code in it.
+#
+# Guarantees a provider gives, each a rule below:
+# - Idempotence by request key: ProvisionMachine with a key it has seen answers the machine it
+#   launched for that key and launches nothing; TerminateMachine of a key that is terminated or
+#   unknown succeeds and changes nothing.
+# - Self-termination: a machine is launched with its own end armed (§ 7.3 step 1, § 8.7 layers
+#   1 and 2), so it ends at `terminate_at` with the endpoint off. A provider that cannot arm it
+#   terminates the machine and refuses (SelfTerminationNotArmed).
+# - No credential crosses: the answer carries an address, an id and labels, nothing secret.
+#
+# Wire, for the `command` kind (§ 7.5): `<path> provision <key> <cpus> <memory_gib> <disk_gib>
+# <lifetime_hours> <spot> <public-key-file>` prints one JSON object, ProvisionMachine's
+# response; `<path> terminate <key>` exits 0 when the machine is terminated or unknown;
+# `<path> describe` prints one JSON object per line, rows of the Machines view.
+domain: slot.provisioning
+
+summary: The contract between the endpoint daemon and a provider of remote nodes.
+
+naming:
+  wire: provisioning
+  display: Provisioning
+
+types:
+  - name: slot.provisioning.RequestKey
+    kind: newtype
+    of: String
+    naming:
+      summary: The key a launch is requested under; the endpoint uses the name the node will have. A repeat of a key is the same request.
+
+entities:
+  - name: slot.provisioning.Machine
+    naming:
+      summary: A machine a provider launched for one request key.
+    identity:
+      name: key
+      type: slot.provisioning.RequestKey
+    fields:
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: machine_id, type: String, summary: "The provider's own id of the machine."}
+      - {name: address, type: String, summary: "What the endpoint's ssh connects to."}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: spot, type: Boolean}
+      - {name: terminate_at, type: Timestamp, summary: "The instant the machine ends itself; armed before the provider answers."}
+      - {name: location, type: Optional<String>, summary: "A label the provider reports, such as its region."}
+      - {name: machine_type, type: Optional<String>, summary: "A label the provider reports, such as its instance type."}
+      - {name: price_per_hour_cents, type: Optional<Integer>}
+    relations:
+      - name: launched_by
+        kind: references
+        target: slot.hostconfig.Provider
+        cardinality: one
+        via: provider
+    invariants:
+      - cpus > 0
+      - memory_gib > 0
+      - disk_gib > 0
+    lifecycle:
+      initial: Launched
+      states:
+        - {name: Launched, summary: "Running or booting, with its end armed."}
+        - {name: Terminated, summary: "Ended by TerminateMachine, by its own end, or by the provider."}
+      terminal: [Terminated]
+      transitions:
+        - {name: terminate, from: [Launched], to: Terminated}
+
+actors:
+  - name: slot.provisioning.Endpoint
+    naming:
+      display: Endpoint daemon
+      summary: "Calls the provider on `slot node up` and `slot node down`, and lists its machines for the orphan check (§ 8.5)."
+    may:
+      - slot.provisioning.ProvisionMachine
+      - slot.provisioning.TerminateMachine
+
+errors:
+  - name: slot.provisioning.InvalidRequest
+    summary: A size or the lifetime is not a positive number.
+    fields: []
+  - name: slot.provisioning.ProviderNotConfigured
+    summary: The host configuration declares no provider of that name.
+    fields: []
+  - name: slot.provisioning.LifetimeOverProviderMax
+    summary: The lifetime exceeds the provider's `max_hours`.
+    fields: []
+  - name: slot.provisioning.CostCapReached
+    summary: The launch would pass the provider's daily cost cap.
+    fields: []
+  - name: slot.provisioning.NoCapacity
+    summary: The provider found no machine of that size; nothing was launched.
+    fields: []
+  - name: slot.provisioning.SelfTerminationNotArmed
+    summary: The provider could not arm the machine's own end; it terminated the machine and answers this.
+    fields: []
+  - name: slot.provisioning.KeyTerminated
+    summary: The key's machine is terminated; a new launch takes a new key.
+    fields: []
+
+commands:
+  - name: slot.provisioning.ProvisionMachine
+    naming:
+      wire: provision
+      display: Provision a machine
+      summary: Launch one machine of a size, with its end armed at now plus the lifetime; a repeat of the key launches nothing.
+    input:
+      - {name: key, type: slot.provisioning.RequestKey}
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: lifetime_hours, type: Integer}
+      - {name: spot, type: Boolean}
+    response:
+      - {name: machine_id, type: String}
+      - {name: address, type: String}
+      - {name: terminate_at, type: Timestamp}
+    outcomes:
+      - name: invalid
+        when: {any: [cpus <= 0, memory_gib <= 0, disk_gib <= 0, lifetime_hours <= 0]}
+        error: slot.provisioning.InvalidRequest
+      - name: terminated-key
+        when_subject: {predicate: state == Terminated}
+        error: slot.provisioning.KeyTerminated
+      - name: no-provider
+        when_related: {via: input.provider, exists: false}
+        error: slot.provisioning.ProviderNotConfigured
+      - name: over-max
+        when_related: {via: input.provider, predicate: max_hours < input.lifetime_hours}
+        error: slot.provisioning.LifetimeOverProviderMax
+      - name: cost-cap
+        external: the launch would pass the provider's daily cost cap
+        error: slot.provisioning.CostCapReached
+      - name: no-capacity
+        external: the provider has no machine of that size
+        error: slot.provisioning.NoCapacity
+      - name: not-armed
+        external: the provider could not arm the machine's own end and terminated it
+        error: slot.provisioning.SelfTerminationNotArmed
+      - name: launched
+        unknown_instance: true
+        creates: slot.provisioning.Machine
+        instance: key
+        sets:
+          provider: input.provider
+          machine_id: {generated: true}
+          address: {generated: true}
+          cpus: input.cpus
+          memory_gib: input.memory_gib
+          disk_gib: input.disk_gib
+          spot: input.spot
+          terminate_at: {generated: true}
+        returns: true
+        emits: [slot.provisioning.MachineLaunched]
+        payload:
+          slot.provisioning.MachineLaunched: {key: input.key, provider: input.provider}
+      - name: repeated
+        preserves: slot.provisioning.Machine
+        instance: key
+        returns: true
+
+  - name: slot.provisioning.TerminateMachine
+    naming:
+      wire: terminate
+      display: Terminate a machine
+      summary: End the key's machine now. A key that is terminated or unknown succeeds and changes nothing.
+    input:
+      - {name: key, type: slot.provisioning.RequestKey}
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        refuses: false
+      - name: already
+        when_subject_state: Terminated
+        preserves: slot.provisioning.Machine
+        instance: key
+      - name: terminated
+        when_subject_state: Launched
+        moves: slot.provisioning.Machine.terminate
+        instance: key
+        emits: [slot.provisioning.MachineTerminated]
+        payload:
+          slot.provisioning.MachineTerminated: {key: input.key}
+
+events:
+  - name: slot.provisioning.MachineLaunched
+    fields:
+      - {name: key, type: slot.provisioning.RequestKey}
+      - {name: provider, type: slot.hostconfig.ProviderName}
+  - name: slot.provisioning.MachineTerminated
+    fields:
+      - {name: key, type: slot.provisioning.RequestKey}
+
+views:
+  # `describe`: every machine the provider holds for this endpoint, the orphan check's input.
+  - name: slot.provisioning.Machines
+    source: slot.provisioning.Machine
+    consistency: eventual
+    naming: {wire: machines, display: Machines}
+    fields:
+      - {name: key, type: slot.provisioning.RequestKey}
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: machine_id, type: String}
+      - {name: address, type: String}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: spot, type: Boolean}
+      - {name: terminate_at, type: Timestamp}
+      - {name: location, type: Optional<String>}
+      - {name: machine_type, type: Optional<String>}
+      - {name: price_per_hour_cents, type: Optional<Integer>}
+      - {name: state, type: slot.provisioning.Machine.State}

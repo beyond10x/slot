@@ -1,0 +1,477 @@
+# Design: docs/design/remote-pool.md, cited as "§ n".
+# The host configuration of a cluster endpoint: one TOML file of the endpoint's machine, outside
+# every repository (`$XDG_CONFIG_HOME/slot/cluster.toml`). It declares the local node's share,
+# the providers that launch remote nodes, and node templates. Operator's decision of 2026-11-23:
+# every account-specific value (profile, region, instance type, image, subnet, security group,
+# connection, hours, cost cap) lives only in this file, never in a repository; slot's code may
+# carry a generic `aws` provider (calling the public `aws` CLI) and a `command` provider (an
+# executable the file names).
+#
+# Shape, as TOML:
+#
+#   [node.local]          -> LoadHostConfig (cpu_percent, slots)
+#   [provider.<name>]     -> LoadProvider, one per table; `kind = "aws"` or `kind = "command"`
+#   [template.<name>]     -> LoadNodeTemplate, one per table
+#
+# The daemon loads the file at start and at reload by issuing these commands in that order; a
+# table the file no longer holds is removed (RemoveNodeTemplate, then RemoveProvider).
+# `slot cluster config check` issues the same commands against an empty state, writes nothing,
+# and prints every refusal.
+#
+# Secrets-free: every table is a closed record, so a key the shape does not declare (an access
+# key, a secret, a token) is refused, and no declared field holds a credential: `profile` names a
+# profile of the cloud CLI's own configuration, and the credential stays there.
+domain: slot.hostconfig
+
+summary: The endpoint machine's own cluster configuration, a TOML file outside every repository.
+
+naming:
+  wire: hostconfig
+  display: Host configuration
+
+types:
+  - name: slot.hostconfig.ProviderName
+    kind: newtype
+    of: String
+    alphabet: "abcdefghijklmnopqrstuvwxyz0123456789-"
+    naming:
+      summary: The `<name>` of a `[provider.<name>]` table.
+
+  - name: slot.hostconfig.TemplateName
+    kind: newtype
+    of: String
+    alphabet: "abcdefghijklmnopqrstuvwxyz0123456789-"
+    naming:
+      summary: The `<name>` of a `[template.<name>]` table.
+
+  - name: slot.hostconfig.ProviderKind
+    kind: enum
+    variants: [aws, command]
+    naming:
+      summary: "`aws` is slot's generic provider over the public `aws` CLI; `command` runs an executable the file names, which speaks the provider contract (slot.provisioning)."
+
+  - name: slot.hostconfig.ConnectMethod
+    kind: enum
+    variants: [session_manager, ssh]
+    naming:
+      summary: How the endpoint's ssh reaches a node of an `aws` provider (§ 8.1).
+
+  - name: slot.hostconfig.AwsSettings
+    kind: struct
+    naming:
+      summary: "The `aws` table of a provider. Every value is the operator's and is read only from the host configuration."
+    fields:
+      - {name: profile, type: String, summary: "A profile of the `aws` CLI's own configuration; the credential stays there."}
+      - {name: region, type: String}
+      - {name: instance_type, type: String}
+      - {name: image, type: String}
+      - {name: subnet, type: String}
+      - {name: security_group, type: String}
+      - {name: connect, type: slot.hostconfig.ConnectMethod}
+      - {name: spot, type: Boolean}
+
+  - name: slot.hostconfig.CommandSettings
+    kind: struct
+    naming:
+      summary: The `command` table of a provider.
+    fields:
+      - {name: path, type: String, summary: "Absolute path of the provider executable."}
+
+  # The file itself. The daemon parses `cluster.toml` into ClusterFile, then issues the Load
+  # commands above table by table; every struct is closed, so an undeclared key is refused.
+  - name: slot.hostconfig.LocalNodeTable
+    kind: struct
+    naming:
+      summary: "The `[node.local]` table: the share of the endpoint machine its local node takes."
+    fields:
+      - {name: cpu_percent, type: Optional<Integer>, summary: "Percent of the machine's CPUs; 50 when absent."}
+      - {name: slots, type: Optional<Integer>, summary: "Slots of the local pool; the CPUs of the share when absent."}
+
+  - name: slot.hostconfig.NodeTables
+    kind: struct
+    naming:
+      summary: "The `[node]` table."
+    fields:
+      - {name: local, type: Optional<slot.hostconfig.LocalNodeTable>}
+
+  - name: slot.hostconfig.ProviderTable
+    kind: struct
+    naming:
+      summary: "One `[provider.<name>]` table."
+    fields:
+      - {name: kind, type: slot.hostconfig.ProviderKind}
+      - {name: max_hours, type: Integer}
+      - {name: max_cost_cents_per_day, type: Integer}
+      - {name: aws, type: Optional<slot.hostconfig.AwsSettings>}
+      - {name: command, type: Optional<slot.hostconfig.CommandSettings>}
+
+  - name: slot.hostconfig.TemplateTable
+    kind: struct
+    naming:
+      summary: "One `[template.<name>]` table."
+    fields:
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: hours, type: Integer}
+      - {name: max_worktrees, type: Integer}
+
+  - name: slot.hostconfig.ClusterFile
+    kind: struct
+    naming:
+      summary: "The whole of `cluster.toml`."
+    fields:
+      - {name: node, type: Optional<slot.hostconfig.NodeTables>}
+      - {name: provider, type: "Map<slot.hostconfig.ProviderName, slot.hostconfig.ProviderTable>"}
+      - {name: template, type: "Map<slot.hostconfig.TemplateName, slot.hostconfig.TemplateTable>"}
+
+entities:
+  - name: slot.hostconfig.HostConfig
+    naming:
+      summary: The loaded file and the local node's share of the machine.
+    identity:
+      name: path
+      type: String
+    fields:
+      - name: cpu_percent
+        type: Integer
+        summary: "`[node.local] cpu_percent`: the share of the machine's CPUs the local node gives the cluster; 50 when the file leaves it out."
+      - name: slots
+        type: Optional<Integer>
+        summary: "`[node.local] slots`: the local node's slots; the CPUs of its share when left out."
+    invariants:
+      - cpu_percent > 0
+      - cpu_percent <= 100
+    lifecycle:
+      initial: Loaded
+      states:
+        - {name: Loaded, summary: "The daemon runs with this file."}
+      terminal: [Loaded]
+
+  - name: slot.hostconfig.Provider
+    naming:
+      summary: "A `[provider.<name>]` table: how remote nodes are launched and what they may cost."
+    identity:
+      name: name
+      type: slot.hostconfig.ProviderName
+    fields:
+      - name: kind
+        type: slot.hostconfig.ProviderKind
+      - name: max_hours
+        type: Integer
+        summary: The longest lifetime of one node of this provider.
+      - name: max_cost_cents_per_day
+        type: Integer
+        summary: The daily cost cap; a launch that would pass it is refused (§ 8.7 layer 3).
+      - name: aws
+        type: Optional<slot.hostconfig.AwsSettings>
+      - name: command
+        type: Optional<slot.hostconfig.CommandSettings>
+    invariants:
+      - max_hours > 0
+      - max_cost_cents_per_day > 0
+    lifecycle:
+      initial: Declared
+      states:
+        - {name: Declared, summary: "Nodes may be launched through it."}
+      terminal: [Declared]
+
+  - name: slot.hostconfig.NodeTemplate
+    naming:
+      summary: "A `[template.<name>]` table: the size and lifetime of a node `slot node up <template>` launches."
+    identity:
+      name: name
+      type: slot.hostconfig.TemplateName
+    fields:
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: hours, type: Integer}
+      - {name: max_worktrees, type: Integer}
+    relations:
+      - name: launched_by
+        kind: references
+        target: slot.hostconfig.Provider
+        cardinality: one
+        via: provider
+    invariants:
+      - cpus > 0
+      - memory_gib > 0
+      - disk_gib > 0
+      - hours > 0
+      - max_worktrees > 0
+    lifecycle:
+      initial: Declared
+      states:
+        - {name: Declared, summary: "`slot node up` may launch it."}
+      terminal: [Declared]
+
+actors:
+  - name: slot.hostconfig.Endpoint
+    naming:
+      display: Endpoint daemon
+      summary: Loads the file at start and at reload; `slot cluster config check` issues the same commands against an empty state.
+    may:
+      - slot.hostconfig.LoadHostConfig
+      - slot.hostconfig.LoadProvider
+      - slot.hostconfig.LoadNodeTemplate
+      - slot.hostconfig.RemoveProvider
+      - slot.hostconfig.RemoveNodeTemplate
+
+errors:
+  - name: slot.hostconfig.PathNotAbsolute
+    summary: A path in the file, or the file's own path, is not absolute.
+    fields: []
+  - name: slot.hostconfig.InsideRepository
+    summary: The file lies inside a git working tree; account values never live in a repository.
+    fields: []
+  - name: slot.hostconfig.ShareOutOfRange
+    summary: "`cpu_percent` is not between 1 and 100, or `slots` is not positive."
+    fields: []
+  - name: slot.hostconfig.LimitNotPositive
+    summary: "`max_hours` or `max_cost_cents_per_day` is not a positive number."
+    fields: []
+  - name: slot.hostconfig.SettingsDoNotMatchKind
+    summary: "A provider of kind `aws` needs an `aws` table and no `command` table; one of kind `command` the reverse."
+    fields: []
+  - name: slot.hostconfig.SizeNotPositive
+    summary: A template's size, hours or worktrees are not positive.
+    fields: []
+  - name: slot.hostconfig.ProviderNotDeclared
+    summary: The template names a provider the file does not declare.
+    fields: []
+  - name: slot.hostconfig.HoursOverProviderMax
+    summary: The template's hours exceed its provider's `max_hours`.
+    fields: []
+  - name: slot.hostconfig.ProviderInUse
+    summary: A template still names the provider.
+    fields: []
+  - name: slot.hostconfig.NotDeclared
+    summary: The file declares no table of that name.
+    fields: []
+
+commands:
+  - name: slot.hostconfig.LoadHostConfig
+    naming:
+      wire: load-host-config
+      display: Load the host configuration
+    input:
+      - name: path
+        type: String
+        example: /srv/config/slot/cluster.toml
+      - name: cpu_percent
+        type: Integer
+      - name: slots
+        type: Optional<Integer>
+    outcomes:
+      - name: path-not-absolute
+        when: {not: {path: {starts_with: "/"}}}
+        error: slot.hostconfig.PathNotAbsolute
+      - name: share-out-of-range
+        when: {any: [cpu_percent <= 0, cpu_percent > 100, slots <= 0]}
+        error: slot.hostconfig.ShareOutOfRange
+      - name: inside-repository
+        external: the file lies inside a git working tree
+        error: slot.hostconfig.InsideRepository
+      - name: loaded
+        unknown_instance: true
+        creates: slot.hostconfig.HostConfig
+        instance: path
+        sets: {cpu_percent: input.cpu_percent, slots: input.slots}
+        emits: [slot.hostconfig.HostConfigLoaded]
+        payload:
+          slot.hostconfig.HostConfigLoaded: {path: input.path, cpu_percent: input.cpu_percent}
+      - name: reloaded
+        updates: slot.hostconfig.HostConfig
+        instance: path
+        sets: {cpu_percent: input.cpu_percent, slots: input.slots}
+        emits: [slot.hostconfig.HostConfigLoaded]
+        payload:
+          slot.hostconfig.HostConfigLoaded: {path: input.path, cpu_percent: input.cpu_percent}
+
+  - name: slot.hostconfig.LoadProvider
+    naming:
+      wire: load-provider
+      display: Load a provider table
+    input:
+      - name: name
+        type: slot.hostconfig.ProviderName
+      - name: kind
+        type: slot.hostconfig.ProviderKind
+      - name: max_hours
+        type: Integer
+      - name: max_cost_cents_per_day
+        type: Integer
+      - name: aws
+        type: Optional<slot.hostconfig.AwsSettings>
+      - name: command
+        type: Optional<slot.hostconfig.CommandSettings>
+    outcomes:
+      - name: limit-not-positive
+        when: {any: [max_hours <= 0, max_cost_cents_per_day <= 0]}
+        error: slot.hostconfig.LimitNotPositive
+      - name: aws-without-table
+        when: {all: [kind == aws, not defined(aws)]}
+        error: slot.hostconfig.SettingsDoNotMatchKind
+      - name: command-without-table
+        when: {all: [kind == command, not defined(command)]}
+        error: slot.hostconfig.SettingsDoNotMatchKind
+      - name: both-tables
+        when: {all: [defined(aws), defined(command)]}
+        error: slot.hostconfig.SettingsDoNotMatchKind
+      - name: command-path-not-absolute
+        when: {all: [defined(command), {not: {command.path: {starts_with: "/"}}}]}
+        error: slot.hostconfig.PathNotAbsolute
+      - name: declared
+        unknown_instance: true
+        creates: slot.hostconfig.Provider
+        instance: name
+        sets: &provider_sets
+          kind: input.kind
+          max_hours: input.max_hours
+          max_cost_cents_per_day: input.max_cost_cents_per_day
+          aws: input.aws
+          command: input.command
+        emits: [slot.hostconfig.ProviderLoaded]
+        payload:
+          slot.hostconfig.ProviderLoaded: {name: input.name, kind: input.kind}
+      - name: redeclared
+        updates: slot.hostconfig.Provider
+        instance: name
+        sets: *provider_sets
+        emits: [slot.hostconfig.ProviderLoaded]
+        payload:
+          slot.hostconfig.ProviderLoaded: {name: input.name, kind: input.kind}
+
+  - name: slot.hostconfig.LoadNodeTemplate
+    naming:
+      wire: load-node-template
+      display: Load a node template
+    input:
+      - {name: name, type: slot.hostconfig.TemplateName}
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: hours, type: Integer}
+      - {name: max_worktrees, type: Integer}
+    outcomes:
+      - name: size-not-positive
+        when: {any: [cpus <= 0, memory_gib <= 0, disk_gib <= 0, hours <= 0, max_worktrees <= 0]}
+        error: slot.hostconfig.SizeNotPositive
+      - name: no-provider
+        when_related: {via: input.provider, exists: false}
+        error: slot.hostconfig.ProviderNotDeclared
+      - name: over-provider-max
+        when_related: {via: input.provider, predicate: max_hours < input.hours}
+        error: slot.hostconfig.HoursOverProviderMax
+      - name: declared
+        creates: slot.hostconfig.NodeTemplate
+        instance: name
+        sets:
+          provider: input.provider
+          cpus: input.cpus
+          memory_gib: input.memory_gib
+          disk_gib: input.disk_gib
+          hours: input.hours
+          max_worktrees: input.max_worktrees
+        emits: [slot.hostconfig.NodeTemplateLoaded]
+        payload:
+          slot.hostconfig.NodeTemplateLoaded: {name: input.name, provider: input.provider}
+
+  - name: slot.hostconfig.RemoveNodeTemplate
+    naming:
+      wire: remove-node-template
+      display: Remove a node template
+    input:
+      - {name: name, type: slot.hostconfig.TemplateName}
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.hostconfig.NotDeclared
+      - name: removed
+        deletes: slot.hostconfig.NodeTemplate
+        instance: name
+        emits: [slot.hostconfig.NodeTemplateRemoved]
+        payload:
+          slot.hostconfig.NodeTemplateRemoved: {name: input.name}
+
+  - name: slot.hostconfig.RemoveProvider
+    naming:
+      wire: remove-provider
+      display: Remove a provider
+    input:
+      - {name: name, type: slot.hostconfig.ProviderName}
+    outcomes:
+      - name: in-use
+        when_related: {entity: slot.hostconfig.NodeTemplate, where: provider == input.name, exists: true}
+        error: slot.hostconfig.ProviderInUse
+      - name: unknown
+        unknown_instance: true
+        error: slot.hostconfig.NotDeclared
+      - name: removed
+        deletes: slot.hostconfig.Provider
+        instance: name
+        emits: [slot.hostconfig.ProviderRemoved]
+        payload:
+          slot.hostconfig.ProviderRemoved: {name: input.name}
+
+events:
+  - name: slot.hostconfig.HostConfigLoaded
+    fields:
+      - {name: path, type: String}
+      - {name: cpu_percent, type: Integer}
+  - name: slot.hostconfig.ProviderLoaded
+    fields:
+      - {name: name, type: slot.hostconfig.ProviderName}
+      - {name: kind, type: slot.hostconfig.ProviderKind}
+  - name: slot.hostconfig.ProviderRemoved
+    fields:
+      - {name: name, type: slot.hostconfig.ProviderName}
+  - name: slot.hostconfig.NodeTemplateLoaded
+    fields:
+      - {name: name, type: slot.hostconfig.TemplateName}
+      - {name: provider, type: slot.hostconfig.ProviderName}
+  - name: slot.hostconfig.NodeTemplateRemoved
+    fields:
+      - {name: name, type: slot.hostconfig.TemplateName}
+
+# Views publish no account value: `slot cluster config check` and the web UI show which providers
+# and templates exist, their kinds, limits and sizes, never the `aws` or `command` tables.
+views:
+  - name: slot.hostconfig.HostConfigs
+    source: slot.hostconfig.HostConfig
+    consistency: read_your_writes
+    naming: {wire: host-config, display: Host configuration}
+    fields:
+      - {name: path, type: String}
+      - {name: cpu_percent, type: Integer}
+      - {name: slots, type: Optional<Integer>}
+      - {name: state, type: slot.hostconfig.HostConfig.State}
+
+  - name: slot.hostconfig.Providers
+    source: slot.hostconfig.Provider
+    consistency: read_your_writes
+    naming: {wire: providers, display: Providers}
+    fields:
+      - {name: name, type: slot.hostconfig.ProviderName}
+      - {name: kind, type: slot.hostconfig.ProviderKind}
+      - {name: max_hours, type: Integer}
+      - {name: max_cost_cents_per_day, type: Integer}
+      - {name: state, type: slot.hostconfig.Provider.State}
+
+  - name: slot.hostconfig.NodeTemplates
+    source: slot.hostconfig.NodeTemplate
+    consistency: read_your_writes
+    naming: {wire: templates, display: Node templates}
+    fields:
+      - {name: name, type: slot.hostconfig.TemplateName}
+      - {name: provider, type: slot.hostconfig.ProviderName}
+      - {name: cpus, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: hours, type: Integer}
+      - {name: max_worktrees, type: Integer}
+      - {name: state, type: slot.hostconfig.NodeTemplate.State}
