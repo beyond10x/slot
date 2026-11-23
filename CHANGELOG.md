@@ -57,6 +57,27 @@
   load (24 loads in place of 48, a third less CPU); both suites serve the built files with
   `ui/ux/serve.ts` in place of `vite preview` and `docusaurus serve`, and the docs gates take a
   free port, so two worktrees run them at once.
+- Admission by share, off by default: `slot admission shares|slots [--floor N] [--max N]
+  [--pressure P] [--min-budget CPUS]`, `GET` and `PUT /api/admission`, kept in `limits.json`
+  beside the headroom; `slots` changes nothing. By share a job asks for the CPUs its earlier runs
+  of the same repository and command used (a high percentile plus 15 %, at least 0.1, 1.0 with no
+  history) and starts while the CPUs the pool and the compile cache servers used over the last
+  5 s, the shares of jobs started in those 5 s and its own share fit a budget. The budget starts at
+  three quarters of the host's CPUs, never passes the pool's CPU quota and never falls under its
+  lower bound (half the CPUs by default), rises while finished jobs run near their best earlier
+  wall time and falls when they run over twice it. At least `--floor` jobs (4) and at most
+  `--max` (48) run; over the CPU pressure mark only short jobs start. The jobserver FIFO follows
+  the budget; a job holds no slot of its own, and `--tokens N` is read as a share of N, capped at
+  the budget. A job that uses almost no CPU lends its share to the queue while it idles; `Job`
+  has `lent_s` and `admission`, `slot usage` charges the share less what was lent, and `slot
+  status` and the web view show each job's asked and used share, the free share and the budget.
+  The saved setting applies before the daemon takes or resumes any job, and until the first CPU
+  figure every running job counts with its whole share. Back by slots, a job that started by
+  share keeps one slot held back until it ends. Not built: a CPU weight per job, which needs a
+  cgroup per job and so root. The budget rule is to be measured with shares on, on one host,
+  before it is switched on anywhere else (design section 26).
+- An unknown `/api/` path answers 404 for every method, so a newer client tells an older daemon
+  from a failed call.
 
 ## 0.24.0 — 2026-11-22
 

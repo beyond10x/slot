@@ -283,8 +283,10 @@ Open, one line each, with where the design lives. A session starts with (e).
   they run hands over their connections without the jobs; the clients resubmit them with a new
   id at the back of the queue (inferred from `client.rs`):
   `story:a-quick-second-reload-keeps-queued-jobs`.
-- (i) Jobs that use no CPU hold 29 % of the slot-hours while requests wait:
-  `story:idle-slots-are-lent-to-the-queue`.
+- (i) Admission by share (`slot admission shares`, built, off by default) admits by CPU share and
+  lends the share of idle jobs, answering (v) and (z). Its budget rule fell to 1 CPU when
+  replayed on this host's job log until it got a lower bound; it is measured with shares on, on
+  one host, before it is switched on, and the switch is the operator's (design.md § 26).
 - (l) `task ui-ux` and `task site-ux` stop themselves at 120 s and print their ten slowest
   tests. On this workstation both still stop at 120 s at a load of 50 to 170: `site-ux` with 23
   of 62 tests done at load 57, `ui-ux` with about 55 of 93 at load 57 to 78. The cause measured
@@ -336,8 +338,9 @@ Open, one line each, with where the design lives. A session starts with (e).
   fell from 31 minutes to under 5; in 15 minutes 12.3 jobs a minute ended against 7.7, the 90th
   percentile of the queue wait was 97 s against 1,467 s, and single jobs ran longer (4 commands
   seen in both windows, `pnpm build` 8 s then 120 s).
-  Design, the operator's, not built: no fixed count. The daemon reads the CPUs of the host and
-  what the pool uses, and admits the head of the queue while a share of CPU is free for it (about
+  Design, the operator's, built off by default as admission by share (i): no fixed count.
+  The daemon reads the CPUs of the host and what the pool uses, and admits the head of the
+  queue while a share of CPU is free for it (about
   0.4 CPUs per job); below that it admits nothing. A lower and an upper bound on the number of
   running jobs hold both ends. `policy::Controller` already computes a pool size from the census
   every tick and only shows it (`recommended_tokens`); (i) and (v) are cases of the same change.
