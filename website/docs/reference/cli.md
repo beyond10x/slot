@@ -67,7 +67,7 @@ slot proxy [OPTIONS]
 
 ### `slot shell`
 
-ssh forced command for a build server: runs only the sync, fetch, proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`
+ssh forced command for a build server: runs only the sync, sibling, fetch, proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`
 
 ```text
 slot shell [OPTIONS]
