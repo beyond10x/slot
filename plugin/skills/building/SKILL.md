@@ -21,9 +21,9 @@ curl -fsS http://127.0.0.1:7411/api/state
 ```
 
 JSON with `tokens` (pool size), `free`, `active` and `done` means it runs. If it does not answer,
-prefixing is still safe: `slot` prints `slot: daemon unreachable (…), ran locally` on stderr and
-runs the command here without the pool. Tell the user once, and do not start a daemon from the
-session; `slot:init` sets one up.
+`slot` waits up to 60 s for the socket, then exits with 125 and does not run the command
+(`slot: no daemon answered within 60s …`). Tell the user once, and do not start a daemon from the
+session; `slot:init` sets one up. `slot --local <command>` runs one command without the pool.
 
 ## Which commands get the prefix
 

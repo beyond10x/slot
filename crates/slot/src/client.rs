@@ -2,8 +2,9 @@
 //!
 //! Local mode talks to the daemon on this machine through its unix socket.
 //! Remote mode (`SLOT_HOST` set) rsyncs the repository to the server and
-//! talks to the daemon through `ssh $SLOT_HOST slot proxy`. When the daemon
-//! cannot be reached the command runs locally and slot says so on stderr.
+//! talks to the daemon through `ssh $SLOT_HOST slot proxy`. When no daemon
+//! answers, the call waits for one and then exits without running the
+//! command, unless `SLOT_LOCAL_FALLBACK` asks it to run here.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -100,16 +101,21 @@ pub struct Settings {
     /// `--timeout <duration>` or `SLOT_TIMEOUT`: seconds the job may run in
     /// place of the daemon's run-time limit; the daemon caps it.
     pub timeout: Option<u64>,
+    /// `SLOT_LOCAL_FALLBACK` set and not `0`: with no daemon answering, run
+    /// the command here, outside the pool, in place of exiting with
+    /// [`NOT_RUN`].
+    pub fallback: bool,
 }
 
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
-    /// `SLOT_ENV` and `SLOT_SOCKET`.
+    /// `SLOT_ENV`, `SLOT_SOCKET` and `SLOT_LOCAL_FALLBACK`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
             || {
-                let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| ".".into());
+                let runtime =
+                    paths::runtime_dir().map_or_else(|| ".".into(), |d| d.display().to_string());
                 [
                     "ssh",
                     "-o",
@@ -145,6 +151,7 @@ impl Settings {
             tokens: None,
             priority: None,
             timeout: None,
+            fallback: var("SLOT_LOCAL_FALLBACK").is_some_and(|v| v != "0"),
         }
     }
 }
@@ -196,12 +203,12 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                 );
                 req.workspace = None;
                 local_fields(&mut req, &cwd);
-                submit_local(&s.socket, &req, UPGRADE_WAIT)
+                submit_local(&s.socket, &req, &Waits::of(s))
             }
         };
     }
     local_fields(&mut req, &cwd);
-    submit_local(&s.socket, &req, UPGRADE_WAIT)
+    submit_local(&s.socket, &req, &Waits::of(s))
 }
 
 /// What only a daemon on this machine uses: the working directory, the whole
@@ -346,17 +353,102 @@ pub fn cancel(id: i64, s: &Settings) -> i32 {
     }
 }
 
-/// Runs `req` through the daemon at `socket`. An upgrading daemon drops the
-/// connections of jobs it has not started and re-executes; such a job is
-/// sent again, once, as soon as the socket is back, for up to `wait`.
-/// A job whose process had started is not sent again, nor one whose client
-/// got a signal: the signal cancelled it.
-pub fn submit_local(socket: &Path, req: &Request, wait: Duration) -> i32 {
+/// How long a call waits for a daemon whose socket does not answer, as
+/// during a restart, before it gives up.
+pub const DAEMON_WAIT: Duration = Duration::from_secs(60);
+
+/// Exit code of a call whose command did not run: no daemon answered.
+pub const NOT_RUN: i32 = 125;
+
+/// What a call does while the daemon does not answer.
+#[derive(Debug, Clone, Copy)]
+pub struct Waits {
+    /// How long a new call waits for the socket.
+    pub absent: Duration,
+    /// How long a job dropped by an upgrading daemon waits for it.
+    pub upgrade: Duration,
+    /// `SLOT_LOCAL_FALLBACK`: run the command here, outside the pool, when
+    /// the daemon does not answer, in place of exiting with [`NOT_RUN`].
+    pub fallback: bool,
+}
+
+impl Waits {
+    /// The waits of a call from the command line.
+    pub fn of(s: &Settings) -> Self {
+        Self {
+            absent: DAEMON_WAIT,
+            upgrade: UPGRADE_WAIT,
+            fallback: s.fallback,
+        }
+    }
+}
+
+/// Why no connection came within a wait.
+enum Gone {
+    /// The client got this signal.
+    Signal(i32),
+    /// The wait ended; the last error.
+    Timeout(anyhow::Error),
+}
+
+/// Connects to `socket`, trying again until `wait` has passed.
+fn connect_within(socket: &Path, wait: Duration) -> Result<Conn, Gone> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if let Some(sig) = signalled() {
+            return Err(Gone::Signal(sig));
+        }
+        match local(socket) {
+            Ok(c) => return Ok(c),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(UPGRADE_POLL),
+            Err(e) => return Err(Gone::Timeout(e)),
+        }
+    }
+}
+
+/// The end of a call no daemon answered within `wait`: run here with the
+/// opt-in, else not at all.
+fn unanswered(req: &Request, w: &Waits, wait: Duration, e: &anyhow::Error) -> i32 {
+    if w.fallback {
+        eprintln!(
+            "slot: daemon not answering after {}s ({e:#}), ran locally (SLOT_LOCAL_FALLBACK)",
+            wait.as_secs()
+        );
+        return run_local(&req.argv);
+    }
+    eprintln!(
+        "slot: no daemon answered within {}s ({e:#}); the command did not run. \
+         `slot --local …` or SLOT_LOCAL_FALLBACK=1 runs it outside the pool",
+        wait.as_secs()
+    );
+    NOT_RUN
+}
+
+/// Runs `req` through the daemon at `socket`. With no daemon answering, the
+/// call waits for the socket for up to `w.absent`, then exits with
+/// [`NOT_RUN`] without running the command, unless `w.fallback` is set:
+/// then it runs here at once, outside the pool. An upgrading daemon drops
+/// the connections of jobs it has not started and re-executes; such a job
+/// is sent again, once, as soon as the socket is back, for up to
+/// `w.upgrade`. A job whose process had started is not sent again, nor one
+/// whose client got a signal: the signal cancelled it.
+pub fn submit_local(socket: &Path, req: &Request, w: &Waits) -> i32 {
     let conn = match local(socket) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("slot: daemon unreachable ({e:#}), ran locally");
+        Err(e) if w.fallback => {
+            eprintln!("slot: daemon unreachable ({e:#}), ran locally (SLOT_LOCAL_FALLBACK)");
             return run_local(&req.argv);
+        }
+        Err(e) => {
+            eprintln!(
+                "slot: daemon unreachable ({e:#}); waiting up to {}s for it",
+                w.absent.as_secs()
+            );
+            match connect_within(socket, w.absent) {
+                Ok(c) => c,
+                Err(Gone::Signal(sig)) => return 128 + sig,
+                Err(Gone::Timeout(e)) => return unanswered(req, w, w.absent, &e),
+            }
         }
     };
     match talk(conn, req) {
@@ -367,22 +459,10 @@ pub fn submit_local(socket: &Path, req: &Request, wait: Duration) -> i32 {
         return 128 + sig;
     }
     eprintln!("slot: daemon upgrading, resubmitting job");
-    let deadline = Instant::now() + wait;
-    loop {
-        if let Some(sig) = signalled() {
-            return 128 + sig;
-        }
-        match local(socket) {
-            Ok(c) => return talk(c, req).code(),
-            Err(_) if Instant::now() < deadline => std::thread::sleep(UPGRADE_POLL),
-            Err(e) => {
-                eprintln!(
-                    "slot: daemon not back after {}s ({e:#}), ran locally",
-                    wait.as_secs()
-                );
-                return run_local(&req.argv);
-            }
-        }
+    match connect_within(socket, w.upgrade) {
+        Ok(c) => talk(c, req).code(),
+        Err(Gone::Signal(sig)) => 128 + sig,
+        Err(Gone::Timeout(e)) => unanswered(req, w, w.upgrade, &e),
     }
 }
 
@@ -740,6 +820,16 @@ mod tests {
         }
     }
 
+    /// No wait for an absent daemon, `upgrade` for an upgrading one, no
+    /// local run.
+    fn waits(upgrade: Duration) -> Waits {
+        Waits {
+            absent: Duration::ZERO,
+            upgrade,
+            fallback: false,
+        }
+    }
+
     fn git_setup(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
             .arg("-C")
@@ -880,7 +970,7 @@ mod tests {
         );
         let t0 = Instant::now();
         assert_eq!(
-            submit_local(&socket, &request(), Duration::from_secs(10)),
+            submit_local(&socket, &request(), &waits(Duration::from_secs(10))),
             7
         );
         assert!(t0.elapsed() >= Duration::from_millis(800));
@@ -904,7 +994,7 @@ mod tests {
             Duration::from_millis(100),
         );
         assert_eq!(
-            submit_local(&socket, &request(), Duration::from_secs(10)),
+            submit_local(&socket, &request(), &waits(Duration::from_secs(10))),
             3
         );
         assert_eq!(rx.recv().unwrap(), request());
@@ -924,10 +1014,91 @@ mod tests {
             Duration::ZERO,
         );
         assert_eq!(
-            submit_local(&socket, &request(), Duration::from_millis(600)),
+            submit_local(&socket, &request(), &waits(Duration::from_millis(600))),
             3
         );
         assert_eq!(rx.recv().unwrap(), request());
+    }
+
+    fn touch(marker: &Path) -> Request {
+        Request {
+            argv: vec!["touch".into(), marker.to_string_lossy().into_owned()],
+            ..Request::default()
+        }
+    }
+
+    #[test]
+    fn with_no_daemon_the_command_does_not_run_and_the_call_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let w = Waits {
+            absent: Duration::from_millis(300),
+            ..waits(Duration::from_secs(10))
+        };
+        let t0 = Instant::now();
+        assert_eq!(
+            submit_local(&dir.path().join("none.sock"), &touch(&marker), &w),
+            NOT_RUN
+        );
+        assert!(t0.elapsed() >= Duration::from_millis(300), "it waited");
+        assert!(!marker.exists(), "the command ran outside the pool");
+    }
+
+    #[test]
+    fn with_the_opt_in_and_no_daemon_the_command_runs_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let w = Waits {
+            fallback: true,
+            ..waits(Duration::from_secs(10))
+        };
+        assert_eq!(
+            submit_local(&dir.path().join("none.sock"), &touch(&marker), &w),
+            0
+        );
+        assert!(marker.exists());
+    }
+
+    #[test]
+    fn a_daemon_that_comes_back_within_the_wait_runs_the_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let (tx, rx) = mpsc::channel();
+        let s = socket.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(700));
+            let frames = vec![
+                Frame::Start {
+                    id: 1,
+                    target_dir: String::new(),
+                },
+                Frame::Exit { code: 5 },
+            ];
+            tx.send(fake_daemon(s, vec![frames], Duration::ZERO))
+                .unwrap();
+        });
+        let w = Waits {
+            absent: Duration::from_secs(10),
+            ..waits(Duration::from_secs(10))
+        };
+        assert_eq!(submit_local(&socket, &request(), &w), 5);
+        assert_eq!(rx.recv().unwrap().recv().unwrap(), request());
+    }
+
+    #[test]
+    fn a_job_whose_daemon_does_not_come_back_from_an_upgrade_does_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s");
+        let marker = dir.path().join("ran");
+        let queued = Frame::Info {
+            msg: "slot: job 1 queued".into(),
+        };
+        let _rx = fake_daemon(socket.clone(), vec![vec![queued]], Duration::ZERO);
+        assert_eq!(
+            submit_local(&socket, &touch(&marker), &waits(Duration::from_millis(400))),
+            NOT_RUN
+        );
+        assert!(!marker.exists(), "the command ran outside the pool");
     }
 
     #[test]

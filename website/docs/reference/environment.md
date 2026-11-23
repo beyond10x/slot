@@ -14,7 +14,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_WSROOT` | `.local/state/slot/ws` | workspace root on the remote host, relative to its home directory; must match the server's `--ws-root` |
 | `SLOT_REMOTE` | `slot` | the slot executable on the remote host |
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
-| `SLOT_SOCKET` | `$XDG_RUNTIME_DIR/slot.sock` | the local daemon's socket |
+| `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
+| `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`; by share (`slot admission shares`) the job asks for a share of N CPUs, at most the budget, and holds no slot. See [Toolchains](../toolchains.md#naming-the-slots) and [Admission by share](../how-it-works.md#admission-by-share). |
 | `SLOT_PRIORITY` | unset (`normal`) | a job's queue level, `urgent`, `high`, `normal` or `low`, as `slot --priority` (which wins over it); a rule set with `slot priority set` for the repository wins over both; ignored with `--local`. See [Priority](../how-it-works.md#priority). |
 | `SLOT_TIMEOUT` | unset | how long a job may run before the daemon ends it, in place of the daemon's run-time limit: seconds, or a number with `s`, `m` or `h` (`90s`, `30m`, `1h`), as `slot --timeout` (which wins over it); capped at the most a job may name (1 h unless `slot run-limit --max` changed it); ignored with `--local`. See [Run-time limit](../how-it-works.md#run-time-limit). |
@@ -28,7 +29,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 |---|---|
 | `SLOT_SOCKET` | default for `slot serve --socket` and `slot proxy --socket` |
 | `SLOT_GATE_DIRS` | default for `slot gate --dir`, directories separated by `:` |
-| `XDG_RUNTIME_DIR` | directory of the default socket; without it, `slot-<uid>.sock` in the temporary directory |
+| `XDG_RUNTIME_DIR` | directory of the default socket; without it `/run/user/<uid>` when that exists, else `slot-<uid>.sock` in the temporary directory |
 | `XDG_STATE_HOME` | the default state directory is `$XDG_STATE_HOME/slot`, otherwise `~/.local/state/slot` |
 
 ## Set in every job
