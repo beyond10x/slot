@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.31.1 — 2026-11-24
+
+- The UX gates' accessibility probe waits until every finite animation on the page has ended
+  before axe-core runs. The 0.31.0 release gate measured the colour of cluster-view rows while
+  they faded in and failed on contrast; 0.31.0 has no published release, and 0.31.1 carries its
+  changes.
+
 ## 0.31.0 — 2026-11-24
 
 - The web UI opens on a cluster view: headline numbers, the queue, a card per node with its
