@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-22",
-  "source": "CHANGELOG.md 0.1.0 to 0.24.0 and docs/design.md sections 10 to 24",
+  "asOf": "2026-11-23",
+  "source": "CHANGELOG.md 0.1.0 to 0.25.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -51,6 +51,27 @@
       "status": "shipped",
       "detail": "slot cpu-limit 17 holds the start of a queued job while the pool's jobs and the compile cache server use 17 or more CPUs and 4 jobs run; work outside both is not counted; a held job starts after 10 minutes at the latest. Off until it is set. (0.24.0)",
       "href": "/docs/how-it-works#waiting-for-the-hosts-cpus"
+    },
+    {
+      "area": "Pool",
+      "label": "Short jobs pass long ones",
+      "status": "shipped",
+      "detail": "Within one level a job predicted to run 5 s or less starts ahead of longer ones, and a request for many slots does not collect every freed slot while the jobs behind it wait; no job is passed for longer than slot serve --pass-for (300 s). (0.25.0)",
+      "href": "/docs/how-it-works#the-queue"
+    },
+    {
+      "area": "Pool",
+      "label": "Admission by share",
+      "status": "shipped",
+      "detail": "slot admission shares starts a job while the CPUs its earlier runs used fit a budget measured from the pool and the compile cache; jobs that idle lend their share to the queue. Off until it is set: slot admission slots is the default. (0.25.0)",
+      "href": "/docs/how-it-works#admission-by-share"
+    },
+    {
+      "area": "Pool",
+      "label": "The caller's open-file limit",
+      "status": "shipped",
+      "detail": "A local job runs with the open-file limit of the process that called slot, capped at the daemon's hard limit. (0.25.0)",
+      "href": "/docs/reference/environment#open-file-limit"
     },
     {
       "area": "Pool",
