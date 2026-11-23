@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.25.1 — 2026-11-23
+
+- The CPU limit for starts no longer lets a job through as "held as long as a job is" for time it
+  waited for disk or memory. A job held for the host's CPUs and then for disk kept the clock of
+  its first CPU hold; when the disk freed, it was past the 10-minute bound and started whatever the
+  host's CPUs did. On one host 5 jobs started that way at once after a disk hold of about 44
+  minutes, held 812 to 863 s by that clock. The clock now starts again while a job waits for disk
+  or memory.
+
+- Held jobs that reach the CPU hold's 10-minute bound together start one by one, 30 s apart,
+  not all at once: with the mark lowered on a busy host, 34 jobs held within 5 minutes would have
+  started within 5 minutes of each other. Each one waiting for its turn says "held as long as a
+  job is; one such job starts every 30 s".
+
 ## 0.25.0 — 2026-11-23
 
 - The host's busy CPUs no longer read more than the host has. The daemon divided the CPU time
