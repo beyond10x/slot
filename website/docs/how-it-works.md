@@ -442,10 +442,24 @@ short time. Its client prints `slot: job 12 is predicted to run 4 s: it is not h
 host's CPUs`, and the census log gets a `cpu_hold_short` line. A command without history is held
 as any other.
 
-A mark above the host's CPU count never holds a start, and `slot cpu-limit` says so. A mark under
-1 is refused. For the first 5 seconds after its start the daemon has no figure yet and holds
+A mark above the host's CPU count never holds a start for CPU time (the pressure mark below still
+holds), and `slot cpu-limit` says so. A mark under 1 is refused. For the first 5 seconds after its start the daemon has no figure yet and holds
 every start past the floor, so a reload does not start every held job at once. After that, a
 daemon whose last sample is older than 5 seconds holds nothing.
+
+**The pressure mark.** On a saturated host the pool's CPU time cannot rise past its share, however
+many threads wait, so the figure above stops rising while the host keeps getting slower. CPU
+pressure keeps rising: `some avg10` of `/proc/pressure/cpu`, the share of the last 10 seconds in
+which a runnable task waited for a CPU, in percent. `slot cpu-limit 17 --pressure 80` also holds a
+queued job while that value is at 80 % or more and the floor's jobs run, and lets it start when the
+value falls under 80; the reason reads `host busy: CPU pressure 85 % at or over the mark 80 %`.
+The two marks hold independently, and the pressure mark holds even with a CPU mark above the
+host's CPU count. It needs a CPU mark: `--pressure` without one is refused, and `slot cpu-limit off`
+clears both. `--pressure off` forgets it; it is off until one is named. The bound of 10 minutes,
+the pacing of the jobs that reach it and the pass for jobs predicted short apply to it as above.
+In the API it is `cpu_pressure_max` (a percent over 0, at most 100; `null` turns it off), and `GET
+/api/cpu-limit` answers the current value as `pressure`. `slot cpu-limit` prints both marks and both
+current values, and `/api/state` has `cpu_pressure_max` while it is set.
 
 What it costs: with the limit on, a queue forms while the host is saturated, also when slots are
 free. Work outside the pool and the compile cache does not hold a job, but it shares the CPUs

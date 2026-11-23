@@ -54,6 +54,11 @@ pub struct Saved {
     /// the file: [`crate::cpu_limit::DEFAULT_FLOOR`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_busy_floor: Option<usize>,
+    /// CPU pressure of the host, percent, from which the start of a queued
+    /// job is held as well (`slot cpu-limit --pressure`); `None`, and absent
+    /// from the file: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_pressure_max: Option<f64>,
     /// How queued jobs are admitted (`slot admission`); `slots`, and absent
     /// from the file, until shares are named.
     #[serde(default, skip_serializing_if = "is_slots")]
@@ -101,7 +106,11 @@ pub fn load(dir: &Path) -> Saved {
         .ok()
         .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
         .map(|s| {
-            let cpu = crate::cpu_limit::Limits::loaded(s.cpu_busy_max, s.cpu_busy_floor);
+            let cpu = crate::cpu_limit::Limits::loaded(
+                s.cpu_busy_max,
+                s.cpu_busy_floor,
+                s.cpu_pressure_max,
+            );
             let shares = s.shares();
             Saved {
                 headroom_percent: s.headroom_percent.min(MAX_HEADROOM),
@@ -112,6 +121,7 @@ pub fn load(dir: &Path) -> Saved {
                 job_parallel: s.job_parallel.filter(|&n| n > 0),
                 cpu_busy_max: cpu.cpu_busy_max,
                 cpu_busy_floor: cpu.cpu_busy_floor,
+                cpu_pressure_max: cpu.cpu_pressure_max,
                 admission: shares.mode,
                 share_floor: shares.floor,
                 share_max: shares.max,
@@ -486,6 +496,66 @@ mod tests {
         .unwrap();
         let s = load(dir.path());
         assert_eq!((s.cpu_busy_max, s.cpu_busy_floor), (Some(8.0), None));
+    }
+
+    #[test]
+    fn the_cpu_pressure_mark_is_kept_beside_the_cpu_limit_and_absent_when_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let before =
+            r#"{"headroom_percent":30,"base":"machine","cpu_busy_max":17.0,"cpu_busy_floor":6}"#;
+        std::fs::write(&file, before).unwrap();
+        let old = load(dir.path());
+        assert_eq!(old.cpu_pressure_max, None, "a file from before the setting");
+        save(dir.path(), old).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            before,
+            "off: the file is what a daemon without the setting writes"
+        );
+        save(
+            dir.path(),
+            Saved {
+                cpu_pressure_max: Some(80.0),
+                ..old
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.ends_with(r#","cpu_busy_max":17.0,"cpu_busy_floor":6,"cpu_pressure_max":80.0}"#),
+            "{text}"
+        );
+        let s = load(dir.path());
+        assert_eq!(
+            (s.cpu_busy_max, s.cpu_busy_floor, s.cpu_pressure_max),
+            (Some(17.0), Some(6), Some(80.0))
+        );
+        save(
+            dir.path(),
+            Saved {
+                cpu_pressure_max: None,
+                ..s
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        std::fs::write(&file, r#"{"headroom_percent":0,"cpu_pressure_max":80}"#).unwrap();
+        assert_eq!(
+            load(dir.path()).cpu_pressure_max,
+            None,
+            "no pressure mark stays without a CPU mark"
+        );
+        std::fs::write(
+            &file,
+            r#"{"headroom_percent":0,"cpu_busy_max":8,"cpu_pressure_max":0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load(dir.path()).cpu_pressure_max,
+            None,
+            "a mark of 0 written by hand is no mark"
+        );
     }
 
     #[test]

@@ -513,6 +513,12 @@ cpu_busy_max?: number,
  */
 cpu_busy_floor?: number, 
 /**
+ * CPU pressure of the host (`some avg10`, percent) from which the
+ * start of a queued job is held as well (`slot cpu-limit --pressure`).
+ * Absent without one and from a daemon without the setting.
+ */
+cpu_pressure_max?: number, 
+/**
  * Tokens that neither a job nor a live process with the pool open
  * accounts for, as the daemon counted them last: lost, and written back
  * once two counts in a row agree. 0 from a daemon that predates it.

@@ -15,6 +15,12 @@
 //! without that every held job would start in the moment the figure dips
 //! under the mark. A job held longer than [`HOLD_MAX`] starts whatever the
 //! figure says ([`Verdict::Overdue`]).
+//!
+//! On a saturated host the pool's CPU time stops rising at its share while
+//! the host keeps getting slower. With a pressure mark set
+//! ([`Limits::cpu_pressure_max`]) a job is also held while the host's CPU
+//! pressure (`some avg10` of `/proc/pressure/cpu`), which keeps rising, is
+//! at or over it, under the same floor and bound.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -52,13 +58,17 @@ pub const GRACE_MS: i64 = 5_000;
 /// CPUs a job with no history is expected to use.
 pub const DEFAULT_CORES: f64 = 1.0;
 
-/// The mark and the floor, as saved in `limits.json`.
+/// The marks and the floor, as saved in `limits.json`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Limits {
     /// Busy CPUs of the host from which a start is held; `None` = no limit.
     pub cpu_busy_max: Option<f64>,
     /// Jobs that may always run; `None` = [`DEFAULT_FLOOR`].
     pub cpu_busy_floor: Option<usize>,
+    /// CPU pressure of the host (`some avg10` of `/proc/pressure/cpu`,
+    /// percent) from which a start is held as well; `None` = none. Only
+    /// with a CPU mark.
+    pub cpu_pressure_max: Option<f64>,
 }
 
 /// Whether `mark` is a mark: a finite number of CPUs from 1.
@@ -66,13 +76,19 @@ fn valid(mark: f64) -> bool {
     mark.is_finite() && mark >= 1.0
 }
 
+/// Whether `p` is a pressure mark: a percent over 0, at most 100.
+fn valid_pressure(p: f64) -> bool {
+    p > 0.0 && p <= 100.0
+}
+
 impl Limits {
     /// What a `limits.json` holds, without values no request would set.
-    pub fn loaded(max: Option<f64>, floor: Option<usize>) -> Self {
+    pub fn loaded(max: Option<f64>, floor: Option<usize>, pressure: Option<f64>) -> Self {
         let cpu_busy_max = max.filter(|&m| valid(m));
         Self {
             cpu_busy_max,
             cpu_busy_floor: floor.filter(|&f| f > 0 && cpu_busy_max.is_some()),
+            cpu_pressure_max: pressure.filter(|&p| valid_pressure(p) && cpu_busy_max.is_some()),
         }
     }
 
@@ -83,9 +99,13 @@ impl Limits {
 
     /// The limits after `req`, or why it is refused.
     pub fn changed(&self, req: &Request) -> Result<Self, String> {
-        if req.cpu_busy_max.is_none() && req.cpu_busy_floor.is_none() {
+        if req.cpu_busy_max.is_none()
+            && req.cpu_busy_floor.is_none()
+            && req.cpu_pressure_max.is_none()
+        {
             return Err(
-                "slot: name cpu_busy_max (CPUs, or null for no limit), cpu_busy_floor, or both"
+                "slot: name cpu_busy_max (CPUs, or null for no limit), cpu_busy_floor, \
+                 cpu_pressure_max, or several"
                     .into(),
             );
         }
@@ -110,15 +130,41 @@ impl Limits {
             }
             _ => {}
         }
+        let pressure = match req.cpu_pressure_max {
+            None => self.cpu_pressure_max,
+            Some(None) => None,
+            Some(Some(p)) if !valid_pressure(p) => {
+                return Err(
+                    "slot: cpu_pressure_max is a percent over 0, at most 100; null turns it off"
+                        .into(),
+                );
+            }
+            Some(Some(_)) if max.is_none() => {
+                return Err(
+                    "slot: cpu_pressure_max needs cpu_busy_max: there is no CPU limit to hold \
+                     starts under"
+                        .into(),
+                );
+            }
+            Some(Some(p)) => Some(p),
+        };
         Ok(Self {
             cpu_busy_max: max,
             cpu_busy_floor: max.and(req.cpu_busy_floor.or(self.cpu_busy_floor)),
+            cpu_pressure_max: max.and(pressure),
         })
     }
 
     /// The limits as `GET /api/cpu-limit` answers, on a host of `cpus` CPUs
-    /// that is as busy as `parts` now, with `held` jobs held.
-    pub fn view(&self, cpus: u32, parts: Option<Parts>, held: usize) -> View {
+    /// that is as busy as `parts` now and under CPU pressure `pressure`
+    /// percent, with `held` jobs held.
+    pub fn view(
+        &self,
+        cpus: u32,
+        parts: Option<Parts>,
+        held: usize,
+        pressure: Option<f64>,
+    ) -> View {
         View {
             cpu_busy_max: self.cpu_busy_max,
             cpu_busy_floor: self.cpu_busy_max.map(|_| self.floor()),
@@ -128,6 +174,8 @@ impl Limits {
             pool: parts.map(|p| p.pool),
             compile_cache: parts.map(|p| p.compile_cache),
             outside: parts.map(|p| p.outside),
+            cpu_pressure_max: self.cpu_pressure_max,
+            pressure,
         }
     }
 }
@@ -146,6 +194,15 @@ pub struct Request {
     /// Jobs that may always run, at least 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_busy_floor: Option<usize>,
+    /// CPU pressure of the host (`some avg10`, percent) from which a start
+    /// is held as well, over 0 and at most 100; `null` for none. Needs a
+    /// CPU mark.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cpu_pressure_max: Option<Option<f64>>,
 }
 
 /// A field that tells `null` (`Some(None)`) from left out (`None`).
@@ -184,6 +241,14 @@ pub struct View {
     /// Busy CPUs outside the pool and the compile cache: not counted.
     #[serde(default)]
     pub outside: Option<f64>,
+    /// CPU pressure of the host (`some avg10`, percent) from which a start
+    /// is held as well; `None` = none, and from a daemon that predates it.
+    #[serde(default)]
+    pub cpu_pressure_max: Option<f64>,
+    /// CPU pressure of the host now, percent; `None` from a daemon that
+    /// predates it.
+    #[serde(default)]
+    pub pressure: Option<f64>,
 }
 
 /// The argument of `slot cpu-limit`: a number of CPUs, or `off`.
@@ -217,6 +282,44 @@ impl std::str::FromStr for Setting {
             Ok(_) => Err("the mark is a number of CPUs from 1; `off` for no limit".into()),
             Err(_) => Err(format!(
                 "`{s}` is not a number of CPUs: give one from 1, such as 17 or 17.5, or `off`"
+            )),
+        }
+    }
+}
+
+/// The value of `slot cpu-limit --pressure`: a percent, or `off`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PressureSetting {
+    /// No pressure mark.
+    Off,
+    /// CPU pressure, percent, from which a start is held.
+    At(f64),
+}
+
+impl PressureSetting {
+    /// The value the API carries.
+    pub fn value(self) -> Option<f64> {
+        match self {
+            Self::Off => None,
+            Self::At(p) => Some(p),
+        }
+    }
+}
+
+impl std::str::FromStr for PressureSetting {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "off" {
+            return Ok(Self::Off);
+        }
+        match s.parse::<f64>() {
+            Ok(p) if valid_pressure(p) => Ok(Self::At(p)),
+            Ok(_) => {
+                Err("the pressure mark is a percent over 0, at most 100; `off` for none".into())
+            }
+            Err(_) => Err(format!(
+                "`{s}` is not a percent: give one over 0, at most 100, such as 80, or `off`"
             )),
         }
     }
@@ -383,6 +486,8 @@ pub struct Load {
     pub ahead: f64,
     /// How long this job has been held for CPU, ms; `None` when it was not.
     pub held_ms: Option<i64>,
+    /// CPU pressure of the host (`some avg10`), percent.
+    pub pressure: f64,
 }
 
 /// Whether a queued job may start as far as the host's CPUs go.
@@ -402,20 +507,54 @@ pub enum Verdict {
 /// Weighs one queued job: held while at least `floor` jobs run and the
 /// busy CPUs of the pool and the compile cache ([`Parts::counted`]), with
 /// what is expected of jobs that just started and of held jobs ahead of it,
-/// reach the mark. CPUs outside both are not counted.
+/// reach the mark. CPUs outside both are not counted. With a pressure mark
+/// it is held as well while the host's CPU pressure is at or over it, which
+/// keeps rising once the host is saturated and the pool's CPU time cannot.
 pub fn verdict(limits: Limits, load: &Load, hold_max: Duration) -> Verdict {
     let Some(mark) = limits.cpu_busy_max else {
         return Verdict::Free;
     };
-    if load.running < limits.floor() || mark > f64::from(load.cpus) {
+    if load.running < limits.floor() {
         return Verdict::Free;
     }
+    let Some(text) = held_for(limits, mark, load) else {
+        return Verdict::Free;
+    };
+    let max = i64::try_from(hold_max.as_millis()).unwrap_or(i64::MAX);
+    if load.held_ms.is_some_and(|h| h >= max) {
+        Verdict::Overdue
+    } else {
+        Verdict::Held(text)
+    }
+}
+
+/// Why a job is held under CPU mark `mark` once the floor runs; `None`
+/// when nothing holds it.
+fn held_for(limits: Limits, mark: f64, load: &Load) -> Option<String> {
+    // A sampler that stalled holds nothing: the pressure it read last is as
+    // old as its CPU figure.
+    if matches!(load.figure, Figure::Unknown) {
+        return None;
+    }
+    if let Some(p) = limits.cpu_pressure_max
+        && load.pressure >= p
+    {
+        // The `host busy` prefix is what the web view and status read.
+        return Some(format!(
+            "host busy: CPU pressure {} % at or over the mark {} %",
+            percent(load.pressure),
+            percent(p)
+        ));
+    }
+    if mark > f64::from(load.cpus) {
+        return None;
+    }
     let text = match load.figure {
-        Figure::Unknown => return Verdict::Free,
+        Figure::Unknown => return None,
         Figure::Pending => "host busy: no sample of its CPUs yet".to_string(),
         Figure::Busy(parts) => {
             if parts.counted() + load.starting + load.ahead < mark {
-                return Verdict::Free;
+                return None;
             }
             // The `host busy` prefix is what the web view and status read.
             let mut text = format!(
@@ -432,11 +571,15 @@ pub fn verdict(limits: Limits, load: &Load, hold_max: Duration) -> Verdict {
             text
         }
     };
-    let max = i64::try_from(hold_max.as_millis()).unwrap_or(i64::MAX);
-    if load.held_ms.is_some_and(|h| h >= max) {
-        Verdict::Overdue
+    Some(text)
+}
+
+/// A percent as text: whole numbers without a decimal, others with one.
+pub fn percent(p: f64) -> String {
+    if p.fract() == 0.0 {
+        format!("{p:.0}")
     } else {
-        Verdict::Held(text)
+        format!("{p:.1}")
     }
 }
 
@@ -448,6 +591,15 @@ mod tests {
         Limits {
             cpu_busy_max: Some(mark),
             cpu_busy_floor: floor,
+            ..Limits::default()
+        }
+    }
+
+    /// A CPU mark with a pressure mark of `pressure` percent.
+    fn pressed(mark: f64, floor: Option<usize>, pressure: f64) -> Limits {
+        Limits {
+            cpu_pressure_max: Some(pressure),
+            ..at(mark, floor)
         }
     }
 
@@ -462,11 +614,188 @@ mod tests {
             starting: 0.0,
             ahead: 0.0,
             held_ms: None,
+            pressure: 0.0,
         }
     }
 
     fn held(text: &str) -> Verdict {
         Verdict::Held(text.into())
+    }
+
+    #[test]
+    fn a_start_is_held_at_or_over_the_pressure_mark_once_the_floor_runs() {
+        let l = pressed(17.0, Some(2), 80.0);
+        let mut d = load(5.0, 2);
+        d.pressure = 85.0;
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            held("host busy: CPU pressure 85 % at or over the mark 80 %"),
+            "CPU time under its mark, pressure over its own"
+        );
+        d.pressure = 80.0;
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            held("host busy: CPU pressure 80 % at or over the mark 80 %"),
+            "at the mark"
+        );
+        d.figure = Figure::Unknown;
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            Verdict::Free,
+            "a stalled sampler holds nothing, pressure included"
+        );
+        d.figure = load(5.0, 2).figure;
+        d.pressure = 79.9;
+        assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Free, "under the mark");
+        d.pressure = 95.0;
+        d.running = 1;
+        assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Free, "under the floor");
+        d.running = 2;
+        assert_eq!(
+            verdict(at(17.0, Some(2)), &d, HOLD_MAX),
+            Verdict::Free,
+            "without a pressure mark the pressure holds nothing"
+        );
+        d.pressure = 10.0;
+        d.figure = Figure::Busy(Parts {
+            pool: 18.0,
+            ..Parts::default()
+        });
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            held("host busy: pool 18.0 + compile cache 0.0 of 20 CPUs, mark 17.0"),
+            "the CPU mark holds on its own under the pressure mark"
+        );
+    }
+
+    #[test]
+    fn a_pressure_mark_holds_with_a_cpu_mark_above_the_hosts_cpus_and_keeps_the_bound() {
+        let l = pressed(25.0, Some(1), 60.0);
+        let mut d = load(3.0, 4);
+        d.pressure = 70.0;
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            held("host busy: CPU pressure 70 % at or over the mark 60 %")
+        );
+        d.pressure = 50.0;
+        assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Free);
+        d.pressure = 70.0;
+        d.held_ms = Some(599_999);
+        assert!(matches!(verdict(l, &d, HOLD_MAX), Verdict::Held(_)));
+        d.held_ms = Some(600_000);
+        assert_eq!(verdict(l, &d, HOLD_MAX), Verdict::Overdue, "the bound");
+        d.held_ms = None;
+        d.figure = Figure::Unknown;
+        assert_eq!(
+            verdict(l, &d, HOLD_MAX),
+            Verdict::Free,
+            "the pressure comes from the same sampler: stale with the figure"
+        );
+    }
+
+    #[test]
+    fn a_request_names_the_pressure_mark_beside_a_cpu_mark() {
+        let req = |body: &str| serde_json::from_str::<Request>(body).unwrap();
+        let off = Limits::default();
+        let on = off.changed(&req(r#"{"cpu_busy_max":17}"#)).unwrap();
+        let p = on.changed(&req(r#"{"cpu_pressure_max":80}"#)).unwrap();
+        assert_eq!(
+            p,
+            pressed(17.0, None, 80.0),
+            "the pressure mark alone keeps the CPU mark"
+        );
+        assert_eq!(
+            p.changed(&req(r#"{"cpu_busy_floor":6}"#)).unwrap(),
+            pressed(17.0, Some(6), 80.0),
+            "the floor alone keeps the pressure mark"
+        );
+        assert_eq!(
+            p.changed(&req(r#"{"cpu_busy_max":12}"#)).unwrap(),
+            pressed(12.0, None, 80.0),
+            "the CPU mark alone keeps the pressure mark"
+        );
+        assert_eq!(
+            p.changed(&req(r#"{"cpu_pressure_max":null}"#)).unwrap(),
+            on,
+            "null turns it off"
+        );
+        assert_eq!(
+            p.changed(&req(r#"{"cpu_busy_max":null}"#)).unwrap(),
+            off,
+            "no CPU limit clears the pressure mark"
+        );
+        assert_eq!(
+            off.changed(&req(r#"{"cpu_busy_max":12,"cpu_pressure_max":45.5}"#))
+                .unwrap(),
+            pressed(12.0, None, 45.5)
+        );
+        assert_eq!(
+            on.changed(&req(r#"{"cpu_pressure_max":100}"#)).unwrap(),
+            pressed(17.0, None, 100.0)
+        );
+        for bad in [
+            r#"{"cpu_busy_max":17,"cpu_pressure_max":0}"#,
+            r#"{"cpu_busy_max":17,"cpu_pressure_max":101}"#,
+            r#"{"cpu_busy_max":17,"cpu_pressure_max":-5}"#,
+            r#"{"cpu_busy_max":null,"cpu_pressure_max":80}"#,
+        ] {
+            let e = off.changed(&req(bad)).unwrap_err();
+            assert!(e.starts_with("slot: "), "{bad}: {e}");
+        }
+        let e = off.changed(&req(r#"{"cpu_pressure_max":80}"#)).unwrap_err();
+        assert!(e.contains("needs cpu_busy_max"), "{e}");
+        let e = on.changed(&req(r#"{"cpu_pressure_max":0}"#)).unwrap_err();
+        assert!(e.contains("percent over 0, at most 100"), "{e}");
+        assert!(
+            off.changed(&req("{}"))
+                .unwrap_err()
+                .contains("cpu_pressure_max")
+        );
+        let body = serde_json::to_string(&Request {
+            cpu_pressure_max: Some(None),
+            ..Request::default()
+        })
+        .unwrap();
+        assert_eq!(body, r#"{"cpu_pressure_max":null}"#);
+        let body = serde_json::to_string(&Request {
+            cpu_pressure_max: Some(Some(80.0)),
+            ..Request::default()
+        })
+        .unwrap();
+        assert_eq!(body, r#"{"cpu_pressure_max":80.0}"#);
+    }
+
+    #[test]
+    fn a_saved_pressure_mark_is_read_only_with_a_cpu_mark_and_the_view_shows_both_values() {
+        assert_eq!(
+            Limits::loaded(Some(17.0), None, Some(80.0)),
+            pressed(17.0, None, 80.0)
+        );
+        assert_eq!(Limits::loaded(None, None, Some(80.0)), Limits::default());
+        assert_eq!(Limits::loaded(Some(17.0), None, Some(0.0)), at(17.0, None));
+        assert_eq!(
+            Limits::loaded(Some(17.0), None, Some(150.0)),
+            at(17.0, None)
+        );
+        let v = pressed(17.0, None, 80.0).view(20, None, 2, Some(85.0));
+        assert_eq!((v.cpu_pressure_max, v.pressure), (Some(80.0), Some(85.0)));
+        let v = at(17.0, None).view(20, None, 0, Some(5.0));
+        assert_eq!((v.cpu_pressure_max, v.pressure), (None, Some(5.0)));
+        let old: View = serde_json::from_str(r#"{"cpu_busy_max":17,"cpus":20}"#).unwrap();
+        assert_eq!((old.cpu_pressure_max, old.pressure), (None, None));
+    }
+
+    #[test]
+    fn the_pressure_argument_is_a_percent_over_zero_or_off() {
+        assert_eq!("off".parse(), Ok(PressureSetting::Off));
+        assert_eq!("80".parse(), Ok(PressureSetting::At(80.0)));
+        assert_eq!("12.5".parse(), Ok(PressureSetting::At(12.5)));
+        assert_eq!("100".parse(), Ok(PressureSetting::At(100.0)));
+        assert_eq!(PressureSetting::Off.value(), None);
+        assert_eq!(PressureSetting::At(80.0).value(), Some(80.0));
+        for bad in ["0", "-3", "100.5", "nan", "inf", "many", "", "Off"] {
+            assert!(bad.parse::<PressureSetting>().is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -758,13 +1087,13 @@ mod tests {
         }
         let body = serde_json::to_string(&Request {
             cpu_busy_max: Some(None),
-            cpu_busy_floor: None,
+            ..Request::default()
         })
         .unwrap();
         assert_eq!(body, r#"{"cpu_busy_max":null}"#);
         let body = serde_json::to_string(&Request {
-            cpu_busy_max: None,
             cpu_busy_floor: Some(6),
+            ..Request::default()
         })
         .unwrap();
         assert_eq!(body, r#"{"cpu_busy_floor":6}"#);
@@ -772,16 +1101,16 @@ mod tests {
 
     #[test]
     fn a_saved_file_is_read_without_values_no_request_would_set() {
-        assert_eq!(Limits::loaded(Some(17.0), Some(6)), at(17.0, Some(6)));
-        assert_eq!(Limits::loaded(Some(0.5), Some(6)), Limits::default());
-        assert_eq!(Limits::loaded(None, Some(6)), Limits::default());
-        assert_eq!(Limits::loaded(Some(17.0), Some(0)), at(17.0, None));
+        assert_eq!(Limits::loaded(Some(17.0), Some(6), None), at(17.0, Some(6)));
+        assert_eq!(Limits::loaded(Some(0.5), Some(6), None), Limits::default());
+        assert_eq!(Limits::loaded(None, Some(6), None), Limits::default());
+        assert_eq!(Limits::loaded(Some(17.0), Some(0), None), at(17.0, None));
         let parts = Parts {
             pool: 12.0,
             compile_cache: 6.5,
             outside: 1.5,
         };
-        let v = at(17.0, None).view(20, Some(parts), 3);
+        let v = at(17.0, None).view(20, Some(parts), 3, None);
         assert_eq!(
             (v.cpu_busy_max, v.cpu_busy_floor, v.cpus, v.busy, v.held),
             (Some(17.0), Some(4), 20, Some(20.0), 3)
@@ -790,7 +1119,10 @@ mod tests {
             (v.pool, v.compile_cache, v.outside),
             (Some(12.0), Some(6.5), Some(1.5))
         );
-        assert_eq!(Limits::default().view(20, None, 0).cpu_busy_floor, None);
+        assert_eq!(
+            Limits::default().view(20, None, 0, None).cpu_busy_floor,
+            None
+        );
         let old: View = serde_json::from_str("{}").unwrap();
         assert_eq!(old, View::default(), "an answer without the fields");
     }

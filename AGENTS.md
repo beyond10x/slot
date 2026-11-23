@@ -254,7 +254,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.26.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.27.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 passing within a level for short jobs and whole-pool requests, admission by disk and memory,
 holds on the host's CPUs, admission by share (off by default), run-time limit, build processes
 per job, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`),
@@ -356,8 +356,9 @@ Open, one line each, with where the design lives. A session starts with (e).
   it off on the queue wait must count the ages of the queued jobs: the waits of started jobs
   alone read 46 s while 39 queued jobs had a median age of 200 s (2026-11-22). The CPU-time
   figure cannot see demand once the host is saturated (load 208 on 20 CPUs with the pool at
-  11.5 CPUs under a mark of 12, 2026-11-23): `story:cpu-hold-on-pressure`. Until it is built an
-  operator script steps the mark between 6, 10 and 12 by the load.
+  11.5 CPUs under a mark of 12, 2026-11-23). 0.27.0 adds a pressure mark
+  (`slot cpu-limit <mark> --pressure P`, off by default); its value for this host is not measured
+  yet, and an operator script steps the CPU mark between 6 and 10 until it is.
 - (ab) `--min-free-disk` and `--evict-below` are options of `slot serve`, so a change needs a
   full restart (g); both belong in `limits.json`.
 
