@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:jobs-ask-for-a-share-of-the-cpus
 kind: story
-status: active
+status: implemented
 title: A job asks for a share of the CPUs, and the pool admits while that share is free
 summary: admission by CPU share between two bounds, no fixed count of slots
 relations:
@@ -60,10 +60,11 @@ scope:
   path: website/docs/how-it-works.md
 - confidence: inferred
   path: website/docs/reference/cli.md
-revision: 30
+revision: 31
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 4}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-23T01:34:03Z", actor: "human:timo", revision: 31, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 
