@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-23T01:30:00Z",
+  "actor": "human:timo",
+  "artifact": "story:jobs-ask-for-a-share-of-the-cpus",
+  "kind": "story",
+  "revision": 30,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate of pull request 63 (task check)",
+    "reference": "https://github.com/beyond10x/slot/actions/runs/45094594618"
+  }
+}

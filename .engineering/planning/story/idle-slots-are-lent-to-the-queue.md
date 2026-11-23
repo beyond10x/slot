@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:idle-slots-are-lent-to-the-queue
 kind: story
-status: active
+status: implemented
 title: A job that leaves its slots idle does not keep the queue waiting
 relations:
 - serves: vision:O2
@@ -35,10 +35,11 @@ scope:
   path: website/docs/how-it-works.md
 - confidence: inferred
   path: website/docs/reference/cli.md
-revision: 17
+revision: 18
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-23T01:34:03Z", actor: "human:timo", revision: 18, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 
