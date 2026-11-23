@@ -28,6 +28,7 @@ pub mod run_limit;
 pub mod sccache;
 pub mod server;
 pub mod sessions;
+pub mod shares;
 pub mod shell;
 pub mod status;
 pub mod toolchain;

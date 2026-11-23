@@ -159,7 +159,31 @@ ahead?: boolean,
  * it has not been in the pool's queue, and from a daemon that does
  * not say: a view then takes `ahead` as 1 and anything else as 2.
  */
-queue_class?: number, };
+queue_class?: number, 
+/**
+ * The share of the CPUs the job asked for while admission is by share
+ * (`slot admission shares`): predicted from earlier runs of the same
+ * command, or the slots its client named. Absent with admission by
+ * slots and from a daemon without shares.
+ */
+share?: number, 
+/**
+ * CPUs the job used over the last 5 s while it runs, and over its
+ * whole run once it ended; with `share` only.
+ */
+share_used?: number, 
+/**
+ * CPU-seconds of its share the job lent to the queue while it used
+ * almost no CPU; with `share` only.
+ */
+lent_s?: number, 
+/**
+ * How the job was admitted when it started: by share it held no
+ * slot, and it is charged and counted by share until it ends, also
+ * after a switch back to slots. Absent by slots and from a daemon
+ * without shares.
+ */
+admission?: Admission, };
 
 export type Unit = { 
 /**
@@ -297,6 +321,76 @@ last: Array<Eviction>,
  */
 deleted_bytes: number, };
 
+export type Admission = "slots" | "shares";
+
+export type SharesView = { 
+/**
+ * How queued jobs are admitted.
+ */
+admission: Admission, 
+/**
+ * Jobs that run whatever the share says.
+ */
+floor: number, 
+/**
+ * The most jobs that run at once.
+ */
+max: number, 
+/**
+ * CPU pressure over which only jobs predicted short start, percent.
+ */
+pressure_max: number, 
+/**
+ * CPUs of the host.
+ */
+cpus: number, 
+/**
+ * CPUs the running jobs may use together now.
+ */
+budget: number, 
+/**
+ * The most the budget may reach: the pool's CPU quota.
+ */
+cap: number, 
+/**
+ * The least the budget falls to: the setting, or the CPUs the floor's
+ * running jobs asked for when that is more; never over `cap`.
+ */
+min_budget: number, 
+/**
+ * CPUs of the budget a queued job may ask for now.
+ */
+free: number, 
+/**
+ * CPUs the pool and the compile cache used over the last 5 s.
+ */
+busy: number, 
+/**
+ * CPUs promised to jobs that started in the last 5 s and do not show
+ * in `busy` yet.
+ */
+starting: number, 
+/**
+ * Jobs that run or were let through.
+ */
+running: number, 
+/**
+ * Running jobs that use almost no CPU.
+ */
+idle: number, 
+/**
+ * CPUs those idle jobs asked for and do not use: lent to the queue.
+ */
+lent: number, 
+/**
+ * CPU pressure of the host now, percent.
+ */
+pressure: number, 
+/**
+ * Whether the pressure is over its mark: only short jobs start.
+ */
+braking: boolean, };
+
 export type State = { 
 /**
  * Host name.
@@ -428,7 +522,13 @@ tokens_unaccounted: number,
  * Since when tokens are unaccounted for, Unix milliseconds; 0 while
  * there are none.
  */
-tokens_unaccounted_since_ms: number, };
+tokens_unaccounted_since_ms: number, 
+/**
+ * Admission by CPU share (`slot admission shares`): the budget, the
+ * free share and what idle jobs lend. Absent with admission by slots
+ * and from a daemon without shares.
+ */
+shares?: SharesView, };
 
 export type By = "project" | "repo" | "session";
 
@@ -705,7 +805,13 @@ quota_floor: boolean,
 /**
  * Machine base: at the floor and still over the target.
  */
-over_target: boolean, };
+over_target: boolean, 
+/**
+ * Admission by CPU share: the budget, the free share and what idle
+ * jobs lend. Absent with admission by slots and from a daemon
+ * without shares.
+ */
+shares?: SharesView, };
 
 export type Chunk = { 
 /**

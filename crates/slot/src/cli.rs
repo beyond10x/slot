@@ -105,6 +105,9 @@ pub enum Cmd {
     /// Show or set the CPU limit: the start of a queued job is held while
     /// the pool's jobs and the compile cache use more CPUs than a mark.
     CpuLimit(CpuLimitArgs),
+    /// Show or set how queued jobs are admitted: by slots of the pool, or
+    /// by a share of the CPUs while that share is free.
+    Admission(AdmissionArgs),
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
@@ -484,6 +487,57 @@ impl CpuLimitArgs {
     }
 }
 
+/// `slot admission` arguments. Without any, prints the values in force.
+#[derive(Debug, Clone, Args)]
+pub struct AdmissionArgs {
+    /// `slots`, the default: a job holds slots of the pool while it runs,
+    /// and the pool's size bounds how many run. `shares`: a job asks for a
+    /// share of the CPUs, predicted from earlier runs of the same command
+    /// (`--tokens N` asks for N), holds no slot of its own and starts while
+    /// that share is free in a budget that follows how much slower than
+    /// their best the jobs run, never above the pool's CPU quota. The
+    /// pool's slots then bound the build processes inside the jobs, as
+    /// many as the budget has CPUs. Kept in `limits.json` in the state
+    /// directory; holds across reloads and restarts.
+    #[arg(value_name = "shares|slots")]
+    pub mode: Option<crate::shares::Mode>,
+    /// By share: jobs that run whatever the share says, from 1; 4 until
+    /// one is named.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub floor: Option<u32>,
+    /// By share: the most jobs that run at once, at least the floor; 48
+    /// until one is named.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub max: Option<u32>,
+    /// By share: CPU pressure of the host (`some avg10` of
+    /// `/proc/pressure/cpu`, percent) over which only jobs predicted to run
+    /// 5 s or less start; 60 until one is named.
+    #[arg(long, value_name = "PERCENT")]
+    pub pressure: Option<f64>,
+    /// By share: the least CPUs the budget falls to, at least 1; half the
+    /// host's CPUs until one is named, and never under the shares of the
+    /// floor's running jobs.
+    #[arg(long, value_name = "CPUS")]
+    pub min_budget: Option<f64>,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+}
+
+impl AdmissionArgs {
+    /// The change the arguments name; `None` to print the values in force.
+    pub fn request(&self) -> Option<crate::shares::Request> {
+        let req = crate::shares::Request {
+            admission: self.mode,
+            floor: self.floor.map(|n| n as usize),
+            max: self.max.map(|n| n as usize),
+            pressure_max: self.pressure,
+            min_budget: self.min_budget,
+        };
+        (req != crate::shares::Request::default()).then_some(req)
+    }
+}
+
 /// `slot job-parallel` arguments. Without any, prints the value in force.
 #[derive(Debug, Clone, Args)]
 pub struct JobParallelArgs {
@@ -633,6 +687,7 @@ impl ServeArgs {
             cpu_busy: None,
             host_cpus: None,
             cpu_hold_max: crate::cpu_limit::HOLD_MAX,
+            cpu_pressure: None,
             cache_budget: gb_bytes(self.cache_budget),
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
@@ -901,5 +956,52 @@ mod tests {
         }
         let cli = parse(&["cpu-limit", "8", "--http", "127.0.0.1:9"]).unwrap();
         assert!(matches!(cli.command, Cmd::CpuLimit(ref a) if a.http == "127.0.0.1:9"));
+    }
+
+    #[test]
+    fn admission_takes_shares_or_slots_the_bounds_and_the_pressure_mark() {
+        use crate::shares::{Mode, Request};
+        let req = |argv: &[&str]| {
+            let mut all = vec!["admission"];
+            all.extend_from_slice(argv);
+            parse(&all).map(|cli| {
+                let Cmd::Admission(a) = cli.command else {
+                    panic!("not admission")
+                };
+                a.request()
+            })
+        };
+        assert_eq!(req(&[]).unwrap(), None, "prints the values in force");
+        assert_eq!(
+            req(&["shares"]).unwrap(),
+            Some(Request {
+                admission: Some(Mode::Shares),
+                ..Request::default()
+            })
+        );
+        assert_eq!(
+            req(&["slots"]).unwrap().and_then(|r| r.admission),
+            Some(Mode::Slots)
+        );
+        assert_eq!(
+            req(&["--floor", "2", "--max", "30", "--pressure", "45"]).unwrap(),
+            Some(Request {
+                admission: None,
+                floor: Some(2),
+                max: Some(30),
+                pressure_max: Some(45.0),
+                min_budget: None,
+            })
+        );
+        for bad in [
+            &["cores"][..],
+            &["Shares"],
+            &["--floor", "0"],
+            &["--max", "0"],
+            &["--max", "-1"],
+            &["--pressure"],
+        ] {
+            assert!(req(bad).is_err(), "{bad:?}");
+        }
     }
 }

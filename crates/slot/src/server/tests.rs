@@ -78,6 +78,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         cpu_busy: None,
         host_cpus: None,
         cpu_hold_max: cpu_limit::HOLD_MAX,
+        cpu_pressure: None,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -628,6 +629,7 @@ fn history_survives_restart() {
         cpu_busy: None,
         host_cpus: None,
         cpu_hold_max: cpu_limit::HOLD_MAX,
+        cpu_pressure: None,
         cache_budget: 0,
         evict: crate::evict::Settings {
             floor: 0,
@@ -3669,4 +3671,762 @@ fn a_cpu_sample_covers_the_time_between_two_scans_not_two_ticks() {
     );
     // A clock that reads earlier than the last scan gives 0, never a negative interval.
     assert_eq!(scans.next(at(4_000)), 0.0);
+}
+
+// Admission by share
+
+/// A CPU pressure of 0 %: no brake.
+fn no_pressure() -> f64 {
+    0.0
+}
+
+/// Declares, inside one test, the CPUs its daemon reads as busy in the
+/// pool in hundredths of a CPU, and the function that reads it, like
+/// [`host_busy!`] with a finer figure.
+macro_rules! pool_busy {
+    ($cell:ident, $read:ident, $hundredths:expr) => {
+        static $cell: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new($hundredths);
+        fn $read() -> Option<cpu_limit::Parts> {
+            let v = $cell.load(std::sync::atomic::Ordering::SeqCst);
+            Some(cpu_limit::Parts {
+                pool: v as f64 / 100.0,
+                ..cpu_limit::Parts::default()
+            })
+        }
+    };
+}
+
+/// A daemon of `tokens` slots on a host of `cpus` CPUs whose busy figure
+/// is `busy`, without CPU pressure, whose queue looks again every 20 ms.
+fn start_shares(
+    tokens: usize,
+    cpus: u32,
+    busy: fn() -> Option<cpu_limit::Parts>,
+    change: impl FnOnce(&mut Config),
+) -> Fixture {
+    start_cfg(tokens, |c| {
+        c.cpu_busy = Some(busy);
+        c.host_cpus = Some(cpus);
+        c.cpu_pressure = Some(no_pressure);
+        c.resource_poll = Duration::from_millis(20);
+        change(c);
+    })
+}
+
+/// Switches admission to shares with `floor` and `max`.
+fn by_share(f: &Fixture, floor: usize, max: Option<usize>) -> crate::shares::View {
+    f.server
+        .set_admission(&crate::shares::Request {
+            admission: Some(crate::shares::Mode::Shares),
+            floor: Some(floor),
+            max,
+            pressure_max: None,
+            min_budget: None,
+        })
+        .unwrap()
+}
+
+/// Whether job `id` claimed its start (or ended) within `within`.
+fn claimed_within(f: &Fixture, id: i64, within: Duration) -> Option<Duration> {
+    let t0 = Instant::now();
+    loop {
+        let claimed = {
+            let g = f.server.inner.lock().unwrap();
+            g.active.get(&id).is_none_or(|l| l.claimed)
+        };
+        if claimed {
+            return Some(t0.elapsed());
+        }
+        if t0.elapsed() >= within {
+            return None;
+        }
+        // The poll interval of a bounded wait.
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Waits until the daemon has looked at admission by share `n` more times
+/// (once a sampler tick).
+fn after_looks(f: &Fixture, n: usize) {
+    let last = || f.server.inner.lock().unwrap().share_last_ms;
+    let mut seen = last();
+    for _ in 0..n {
+        wait_for_jobs(f, "the next look of admission by share", || {
+            let now = last();
+            now.is_some() && now != seen
+        });
+        seen = last();
+    }
+}
+
+/// The ids of the jobs that claimed their start, oldest first: a job
+/// counts from its claim, before its process runs.
+fn claimed(f: &Fixture) -> Vec<i64> {
+    let g = f.server.inner.lock().unwrap();
+    let mut ids: Vec<i64> = g
+        .active
+        .iter()
+        .filter(|(_, l)| l.claimed)
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Samples the sampler has taken of running job `id`.
+fn samples_of(f: &Fixture, id: i64) -> usize {
+    let g = f.server.inner.lock().unwrap();
+    g.active.get(&id).map_or(0, |l| l.recent.len())
+}
+
+/// Gives the command `sleep 60` of `repo` three earlier runs that used
+/// `cores` CPUs each, so its share is predicted, and returns its request.
+fn give_share_history(f: &Fixture, repo: &str, cores: f64) -> Request {
+    assert_eq!(run(f, sh(&f.root, "true")).code, 0);
+    let mut j = f.server.state().done[0].clone();
+    let mut req = sh(&f.root, "sleep 60");
+    req.repo = repo.into();
+    let now = now_ms();
+    j.repo = repo.into();
+    j.argv.clone_from(&req.argv);
+    j.state = JobState::Ok;
+    for i in 0..3 {
+        j.ended_ms = now - 1000 * (3 - i);
+        j.started_ms = j.ended_ms - 10_000;
+        j.cpu_s = cores * 10.0;
+        f.server.inner.lock().unwrap().memory.record(&j);
+    }
+    req
+}
+
+/// Sets `cell` to `per_job` hundredths of a CPU for each job that claimed
+/// its start, every 10 ms, until the returned flag is set: the census of a
+/// host whose jobs each use `per_job`.
+fn busy_follows_jobs(
+    f: &Fixture,
+    cell: &'static std::sync::atomic::AtomicI64,
+    per_job: i64,
+) -> Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::Ordering::SeqCst;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (server, done) = (Arc::clone(&f.server), Arc::clone(&stop));
+    std::thread::spawn(move || {
+        while !done.load(SeqCst) {
+            let n = {
+                let g = server.inner.lock().unwrap();
+                g.active.values().filter(|l| l.claimed).count()
+            };
+            cell.store(per_job * n as i64, SeqCst);
+            // The census of this test follows its jobs within 10 ms.
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    stop
+}
+
+/// By slots (the default) nothing changes: with 2 slots two jobs that
+/// sleep hold both, a third waits however many times the sampler looks,
+/// and no job and no state carries a share.
+#[test]
+fn by_slots_two_sleeping_jobs_hold_both_slots_and_a_third_waits() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(2, 3, busy, |_| {});
+    let (a, ja) = quiet(&f);
+    let (b, jb) = quiet(&f);
+    wait_for_jobs(&f, "two jobs to run", || running(&f) == vec![ja, jb]);
+    let (c, jc) = queued_job(&f, sh(&f.root, "echo third"));
+    wait_for_jobs(&f, "the sampler to look 3 times at a sleeping job", || {
+        samples_of(&f, ja) >= 3
+    });
+    assert_eq!(state_of(&f, jc), JobState::Queued);
+    assert_eq!(running(&f), vec![ja, jb]);
+    let st = f.server.state();
+    assert_eq!(st.shares, None);
+    assert!(st.active.iter().all(|j| j.share.is_none()), "{st:?}");
+    assert_eq!(
+        f.server.admission_view().admission,
+        crate::shares::Mode::Slots
+    );
+    assert_eq!(f.server.pool().limit(), 2);
+    end_all(&f, vec![a, b, c]);
+}
+
+/// By share, with a budget of 2.25 CPUs (a host of 3, pool of 2 slots)
+/// and a floor of 1: two jobs that sleep start and a third waits; once
+/// the sampler measures the two near 0 CPUs they count with what they use
+/// and the third starts within 5 s while both still run. `slot status`
+/// shows the lent share; the jobs' records the CPU-seconds they lent.
+/// When the lenders' CPU comes back no further job starts until the busy
+/// CPUs leave room for its share; a job that ends gives that room.
+#[test]
+fn by_share_jobs_that_sleep_lend_their_share_and_take_it_back_when_they_use_cpu() {
+    use std::sync::atomic::Ordering::SeqCst;
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(2, 3, busy, |_| {});
+    let view = by_share(&f, 1, None);
+    assert_eq!((view.budget, view.cap, view.free), (2.25, 3.0, 2.25));
+    assert_eq!(f.server.pool().limit(), 2, "the FIFO follows the budget");
+    let (first, ja) = quiet(&f);
+    let (second, jb) = quiet(&f);
+    wait_for_jobs(&f, "two jobs to run", || running(&f) == vec![ja, jb]);
+    let t0 = Instant::now();
+    let (third, jc) = submit(&f, sh(&f.root, "sleep 60"));
+    let took = claimed_within(&f, jc, Duration::from_secs(5));
+    assert!(took.is_some(), "the third job did not start within 5 s");
+    eprintln!("third job started {:?} after it was sent", t0.elapsed());
+    wait_for_jobs(&f, "the third job to run beside the first two", || {
+        running(&f) == vec![ja, jb, jc]
+    });
+    wait_for_jobs(&f, "the two sleeping jobs to lend their shares", || {
+        let v = f.server.admission_view();
+        v.idle >= 2 && v.lent >= 1.9
+    });
+    let shown = crate::status::render(&f.server.state());
+    assert!(shown.contains(" idle lend "), "{shown}");
+    let job = active_job(&f, ja).unwrap();
+    assert_eq!(job.share, Some(1.0));
+    assert!(job.share_used.is_some_and(|u| u < 0.1), "{job:?}");
+
+    // The lenders use their CPU again: the census reads 2.5 busy.
+    BUSY.store(250, SeqCst);
+    after_looks(&f, 1);
+    let (fourth, jd) = queued_job(&f, sh(&f.root, "echo fourth"));
+    wait_for_jobs(&f, "the fourth job to wait for its share", || {
+        reason_of(&f, jd).starts_with("waits for a share of 1.0 CPUs: 0.0 of a budget of")
+    });
+    after_looks(&f, 2);
+    assert_eq!(state_of(&f, jd), JobState::Queued, "{}", reason_of(&f, jd));
+
+    // The first job ends: its CPU leaves the census and the fourth starts.
+    drop(first);
+    wait_for_jobs(&f, "the first job to end", || active_job(&f, ja).is_none());
+    BUSY.store(100, SeqCst);
+    let res = collect(fourth);
+    assert_eq!((res.code, res.out.as_str()), (0, "fourth\n"), "{res:?}");
+    let lent = done_job(&f, ja).lent_s;
+    assert!(lent > 0.5, "the first job lent {lent} CPU-seconds");
+    end_all(&f, vec![second, third]);
+}
+
+/// The most jobs by share bounds the loans: with a most of 2 a third job
+/// waits while two sleep, whatever share is free.
+#[test]
+fn by_share_the_most_jobs_bound_what_idle_jobs_lend() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    by_share(&f, 1, Some(2));
+    let (a, ja) = quiet(&f);
+    let (b, jb) = quiet(&f);
+    wait_for_jobs(&f, "two jobs to run", || running(&f) == vec![ja, jb]);
+    let (c, jc) = queued_job(&f, sh(&f.root, "echo third"));
+    wait_for_jobs(&f, "the third job to wait for the most", || {
+        reason_of(&f, jc) == "2 jobs run, the most by share"
+    });
+    after_looks(&f, 2);
+    assert_eq!(state_of(&f, jc), JobState::Queued);
+    assert!(f.server.admission_view().free > 10.0);
+    end_all(&f, vec![a, b, c]);
+}
+
+/// Jobs that each use 0.25 CPUs: on a host of 2 CPUs more of them run at
+/// once than it has CPUs, up to the most (5).
+#[test]
+fn by_share_jobs_of_a_quarter_cpu_run_more_than_the_host_has_cpus() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(2, 2, busy, |_| {});
+    let req = give_share_history(&f, "quarter", 0.2);
+    let stop = busy_follows_jobs(&f, &BUSY, 25);
+    by_share(&f, 1, Some(5));
+    let mut clients = Vec::new();
+    let mut ids = Vec::new();
+    for _ in 0..7 {
+        let (c, id) = submit(&f, req.clone());
+        clients.push(c);
+        ids.push(id);
+    }
+    wait_for_jobs(&f, "five jobs to run", || running(&f).len() == 5);
+    wait_for_jobs(&f, "the rest to wait for the most", || {
+        reason_of(&f, ids[6]) == "5 jobs run, the most by share"
+    });
+    assert_eq!(active_job(&f, ids[0]).unwrap().share, Some(0.23));
+    after_looks(&f, 2);
+    assert_eq!(claimed(&f).len(), 5, "more than the 2 CPUs, at most 5");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    end_all(&f, clients);
+}
+
+/// Jobs that each use 4 CPUs: on a host of 20 CPUs (budget 15) three run,
+/// fewer than a quarter of the CPUs, and the fourth waits for its share.
+#[test]
+fn by_share_jobs_of_four_cpus_run_fewer_than_a_quarter_of_the_cpus() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    let req = give_share_history(&f, "four", 3.5);
+    let stop = busy_follows_jobs(&f, &BUSY, 400);
+    by_share(&f, 1, None);
+    let mut clients = Vec::new();
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        let (c, id) = submit(&f, req.clone());
+        clients.push(c);
+        ids.push(id);
+    }
+    wait_for_jobs(&f, "the fourth job to wait for its share", || {
+        reason_of(&f, ids[3]) == "waits for a share of 4.0 CPUs: 3.0 of a budget of 15.0 free"
+    });
+    assert_eq!(claimed(&f), ids[..3].to_vec(), "three let through");
+    after_looks(&f, 2);
+    assert_eq!(claimed(&f).len(), 3, "fewer than 5, a quarter of 20 CPUs");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    end_all(&f, clients);
+}
+
+/// A queued job does not start while the free share is under its share
+/// (0.9 of 1.0) over several looks, and starts within one tick once the
+/// free share reaches it (1.1).
+#[test]
+fn by_share_a_job_starts_within_one_tick_of_its_share_coming_free_and_not_before() {
+    use std::sync::atomic::Ordering::SeqCst;
+    pool_busy!(BUSY, busy, 1410);
+    let f = start_shares(20, 20, busy, |_| {});
+    by_share(&f, 1, None);
+    let (a, ja) = quiet(&f);
+    wait_for_jobs(&f, "the floor job to run", || running(&f) == vec![ja]);
+    let (b, jb) = queued_job(&f, sh(&f.root, "echo second"));
+    wait_for_jobs(&f, "the second job to wait at 0.9 free", || {
+        reason_of(&f, jb) == "waits for a share of 1.0 CPUs: 0.9 of a budget of 15.0 free"
+    });
+    after_looks(&f, 3);
+    assert_eq!(state_of(&f, jb), JobState::Queued);
+    let t0 = Instant::now();
+    BUSY.store(1390, SeqCst);
+    let took = claimed_within(&f, jb, Duration::from_millis(2500));
+    eprintln!("started {:?} after its share came free", t0.elapsed());
+    assert!(took.is_some(), "not started within one tick");
+    let res = collect(b);
+    assert_eq!((res.code, res.out.as_str()), (0, "second\n"), "{res:?}");
+    end_all(&f, vec![a]);
+}
+
+/// A client of 0.21.0 or older asks for slots: `--tokens 3` is read as a
+/// share of 3 CPUs, and the job runs. It holds no slot of the FIFO: the
+/// FIFO's tokens are left for the build processes inside the jobs.
+#[test]
+fn by_share_a_request_for_slots_is_read_as_a_share() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    by_share(&f, 1, None);
+    let (a, ja) = quiet(&f);
+    let mut r = sh(&f.root, "sleep 60");
+    r.tokens = Some(3);
+    let (b, jb) = submit(&f, r);
+    wait_for_jobs(&f, "both jobs to run", || running(&f) == vec![ja, jb]);
+    assert_eq!(active_job(&f, jb).unwrap().share, Some(3.0));
+    let held = f.server.inner.lock().unwrap().active[&jb].held;
+    assert_eq!(held, 0, "a job by share holds no slot of the FIFO");
+    assert_eq!(f.server.pool().free(), 15);
+    end_all(&f, vec![a, b]);
+}
+
+/// The budget never passes the pool's CPUs less the headroom: with 50 %
+/// on 20 CPUs it is 10, and the FIFO carries 10 tokens.
+#[test]
+fn by_share_the_budget_stays_inside_the_pools_cpus() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(Arc::clone(&f.server).set_headroom(50));
+    let v = by_share(&f, 1, None);
+    assert_eq!((v.cap, v.budget), (10.0, 10.0));
+    assert_eq!(f.server.pool().limit(), 10);
+    let shown = f
+        .server
+        .state()
+        .shares
+        .expect("the state carries the shares");
+    assert_eq!(shown.budget, 10.0);
+}
+
+/// By share the FIFO carries as many tokens as the budget has CPUs (15 of
+/// 20), and back by slots the pool's 20; no token is lost on the way.
+#[test]
+fn the_fifo_follows_the_budget_and_goes_back_to_the_pool_by_slots() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    let (a, _) = quiet(&f);
+    by_share(&f, 1, None);
+    assert_eq!(f.server.pool().limit(), 15);
+    after_looks(&f, 1);
+    assert!(
+        f.server
+            .metrics_text()
+            .contains("slot_tokens_unaccounted 0\n"),
+        "{}",
+        f.server.metrics_text()
+    );
+    let v = f
+        .server
+        .set_admission(&crate::shares::Request {
+            admission: Some(crate::shares::Mode::Slots),
+            ..crate::shares::Request::default()
+        })
+        .unwrap();
+    assert_eq!(v.admission, crate::shares::Mode::Slots);
+    assert_eq!(f.server.pool().limit(), 20);
+    assert_eq!(f.server.state().shares, None);
+    assert!(
+        f.server
+            .metrics_text()
+            .contains("slot_tokens_unaccounted 0\n"),
+        "{}",
+        f.server.metrics_text()
+    );
+    end_all(&f, vec![a]);
+}
+
+/// Over the CPU pressure mark only a job predicted short starts; a longer
+/// one waits and is told why.
+#[test]
+fn by_share_over_the_pressure_mark_only_short_jobs_start() {
+    fn pressing() -> f64 {
+        80.0
+    }
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |c| c.cpu_pressure = Some(pressing));
+    give_history(&f, "brake");
+    f.server
+        .set_admission(&crate::shares::Request {
+            admission: Some(crate::shares::Mode::Shares),
+            floor: Some(1),
+            max: None,
+            pressure_max: Some(60.0),
+            min_budget: None,
+        })
+        .unwrap();
+    let (a, ja) = quiet(&f);
+    wait_for_jobs(&f, "the floor job to run", || running(&f) == vec![ja]);
+    let (long, jl) = queued_job(&f, named(&f, LONG_CMD, "brake-long", "long", None));
+    wait_for_jobs(&f, "the longer job to wait for the pressure", || {
+        reason_of(&f, jl) == "CPU pressure 80 % over 60 %: only short jobs start"
+    });
+    let (short, js) = submit(&f, named(&f, SHORT_CMD, "brake", "short", None));
+    assert!(
+        claimed_within(&f, js, Duration::from_secs(3)).is_some(),
+        "the short job did not start"
+    );
+    assert_eq!(state_of(&f, jl), JobState::Queued);
+    assert!(f.server.admission_view().braking);
+    go(&f, "short");
+    assert_eq!(collect(short).code, 0);
+    end_all(&f, vec![a, long]);
+}
+
+/// Status and text of the answer to `PUT /api/admission`.
+fn put_admission(f: &Fixture, content_type: &str, body: &str) -> (u16, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        content_type.parse().unwrap(),
+    );
+    let state = axum::extract::State(Arc::clone(&f.server));
+    let body = axum::body::Bytes::from(body.to_owned());
+    answer(http::admission_put(state, headers, body))
+}
+
+/// Status and text of the answer to `GET /api/admission`.
+fn get_admission(f: &Fixture) -> (u16, String) {
+    use axum::response::IntoResponse;
+    let state = axum::extract::State(Arc::clone(&f.server));
+    answer(async move { http::admission_get(state).await.into_response() })
+}
+
+/// Admission set through `PUT /api/admission`, the call `slot admission`
+/// makes, is read back by `GET`, saved beside the headroom, and in force
+/// in the daemon that starts next; back by slots it leaves the file.
+/// Bounds that do not fit are refused.
+#[test]
+fn the_admission_is_set_saved_and_read_back() {
+    use crate::shares::Mode;
+    let f = start_cfg(2, |c| c.host_cpus = Some(20));
+    let json = "application/json";
+    let view = |(status, text): (u16, String)| {
+        assert_eq!(status, 200, "{text}");
+        let v: crate::shares::View = serde_json::from_str(&text).unwrap();
+        (v.admission, v.floor, v.max, v.pressure_max)
+    };
+    let saved = || std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    let restarted = |socket: &str| {
+        let next = Server::new(Config {
+            socket: f.root.join(socket),
+            host_cpus: Some(20),
+            ..config(&f.root, 2)
+        })
+        .unwrap();
+        let v = next.admission_view();
+        (v.admission, v.floor, v.max)
+    };
+    assert_eq!(view(get_admission(&f)), (Mode::Slots, 4, 48, 60.0));
+    assert_eq!(
+        view(put_admission(
+            &f,
+            json,
+            r#"{"admission":"shares","floor":2,"max":30}"#
+        )),
+        (Mode::Shares, 2, 30, 60.0)
+    );
+    assert_eq!(view(get_admission(&f)), (Mode::Shares, 2, 30, 60.0));
+    assert!(
+        saved().contains(r#""admission":"shares","share_floor":2,"share_max":30"#),
+        "{}",
+        saved()
+    );
+    assert_eq!(restarted("s2"), (Mode::Shares, 2, 30));
+    for bad in [
+        "{}",
+        r#"{"floor":0}"#,
+        r#"{"max":0}"#,
+        r#"{"floor":40}"#,
+        r#"{"pressure_max":0}"#,
+        r#"{"pressure_max":120}"#,
+        r#"{"admission":"tokens"}"#,
+        "not json",
+    ] {
+        let (status, text) = put_admission(&f, json, bad);
+        assert_eq!(status, 400, "{bad}: {text}");
+        assert!(text.starts_with("slot: "), "{bad}: {text}");
+        assert_eq!(view(get_admission(&f)), (Mode::Shares, 2, 30, 60.0));
+    }
+    let (status, _) = put_admission(&f, "text/plain", r#"{"admission":"slots"}"#);
+    assert_eq!(status, 415);
+    assert_eq!(
+        view(put_admission(&f, json, r#"{"admission":"slots"}"#)),
+        (Mode::Slots, 2, 30, 60.0)
+    );
+    assert!(!saved().contains("\"admission\""), "{}", saved());
+    assert_eq!(restarted("s3").0, Mode::Slots);
+}
+
+// adversary u6
+
+/// A request for 16 slots on a host of 20 CPUs: by slots it starts beside
+/// four sleeping jobs (16 of 20 slots free). By share it is read as a
+/// share of 16 CPUs while the budget is 15, so it never fits the free
+/// share, although the host is idle; it starts only once fewer than the
+/// floor (4) run. The client is even told its request was capped at the
+/// 15 slots in circulation.
+#[test]
+fn adversary_u6_a_request_for_more_slots_than_the_budget_starts_on_an_idle_host() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    by_share(&f, crate::shares::DEFAULT_FLOOR, None);
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        clients.push(quiet(&f).0);
+    }
+    wait_for_jobs(&f, "four sleeping jobs to run", || running(&f).len() == 4);
+    let mut wide = sh(&f.root, "sleep 60");
+    wide.tokens = Some(16);
+    let (c, id) = submit(&f, wide);
+    clients.push(c);
+    let started = claimed_within(&f, id, Duration::from_millis(3000));
+    assert!(
+        started.is_some(),
+        "a request for 16 slots waits on an idle host: share {:?}, {}; {:?}",
+        active_job(&f, id).and_then(|j| j.share),
+        reason_of(&f, id),
+        f.server.admission_view()
+    );
+    end_all(&f, clients);
+}
+
+/// After a reload the jobs that run are in the table with no samples and
+/// their old start (`adopt_running`), and the first look of the sampler
+/// has no busy figure (`primed` is false, so `host_busy` is empty and the
+/// figure is unknown). Three jobs of 4 CPUs run on a budget of 15; a
+/// fourth waits. In that state the running jobs count with nothing and
+/// the unknown figure with 0 CPUs: the whole budget is free and the
+/// fourth job is let through beside the 12 CPUs the three asked for.
+#[test]
+fn adversary_u6_an_unknown_busy_figure_does_not_free_the_budget_of_the_running_jobs() {
+    fn unknown() -> Option<cpu_limit::Parts> {
+        None
+    }
+    let f = start_shares(20, 20, unknown, |_| {});
+    let req = give_share_history(&f, "four", 3.5);
+    // The most of 3 holds the fourth job in the queue until the look
+    // below, so the sleeping jobs lending their share cannot let it in
+    // first.
+    by_share(&f, 1, Some(3));
+    let mut clients = Vec::new();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let (c, id) = submit(&f, req.clone());
+        clients.push(c);
+        ids.push(id);
+    }
+    wait_for_jobs(&f, "three jobs of 4 CPUs to run", || running(&f) == ids);
+    let (c, fourth) = queued_job(&f, req.clone());
+    clients.push(c);
+    let granted = {
+        let mut g = f.server.inner.lock().unwrap();
+        f.server.shares.lock().unwrap().max = None;
+        for id in &ids {
+            let l = g.active.get_mut(id).unwrap();
+            // As `adopt_running` puts a job that has run for a minute.
+            l.job.started_ms -= 60_000;
+            l.recent = cpu_limit::Recent::default();
+        }
+        f.server.share_step(&mut g, now_ms());
+        g.active[&fourth]
+            .waiter
+            .as_ref()
+            .is_some_and(WaiterHandle::granted)
+    };
+    let view = f.server.admission_view();
+    assert!(
+        !granted,
+        "let through beside three running jobs of 4 CPUs with the busy figure unknown: {view:?}"
+    );
+    end_all(&f, clients);
+}
+
+/// A daemon whose `limits.json` says shares, started (or re-executed by a
+/// reload) on a host whose pool is 20 of 20 CPUs busy, with a floor of
+/// one job. `run` starts the admission of the queued jobs a handover passed on
+/// and then the sampler, whose first look is the first that hands the
+/// pool a room for shares. Until then the pool admits by its tokens: the
+/// FIFO is full (jobs by share hold none), so every queued job starts,
+/// not the one the floor lets through.
+#[test]
+fn adversary_u6_a_daemon_that_starts_by_share_admits_no_job_by_slots_before_its_first_look() {
+    pool_busy!(BUSY, busy, 2000);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut cfg = config(&root, 20);
+    cfg.cpu_busy = Some(busy);
+    cfg.host_cpus = Some(20);
+    cfg.cpu_pressure = Some(no_pressure);
+    cfg.resource_poll = Duration::from_millis(20);
+    std::fs::create_dir_all(&cfg.state_dir).unwrap();
+    std::fs::write(
+        cfg.state_dir.join(limits::FILE),
+        r#"{"headroom_percent":0,"admission":"shares","share_floor":1}"#,
+    )
+    .unwrap();
+    let server = Server::new(cfg).unwrap();
+    assert_eq!(
+        server.admission_view().admission,
+        crate::shares::Mode::Shares
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut gone = Vec::new();
+    // What `run` does after a handover: each queued job's admission is
+    // spawned, then the sampler.
+    for _ in 0..3 {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+        let (g, gone_rx) = watch::channel(false);
+        gone.push(g);
+        let mut req = sh(&root, "sleep 30");
+        req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+        let s = Arc::clone(&server);
+        rt.spawn(async move {
+            let _ = s.run_job(req, tx, gone_rx, None, None, None).await;
+        });
+        rt.spawn(async move { while rx.recv().await.is_some() {} });
+    }
+    rt.spawn(Arc::clone(&server).sampler());
+    let started = || {
+        let g = server.inner.lock().unwrap();
+        g.active.values().filter(|l| l.claimed).count()
+    };
+    let t0 = Instant::now();
+    while started() < 3 && t0.elapsed() < Duration::from_millis(2000) {
+        // The poll interval of a bounded wait.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let n = started();
+    let held: Vec<usize> = server
+        .inner
+        .lock()
+        .unwrap()
+        .active
+        .values()
+        .map(|l| l.held)
+        .collect();
+    for g in &gone {
+        let _ = g.send(true);
+    }
+    let t1 = Instant::now();
+    while !server.inner.lock().unwrap().active.is_empty() && t1.elapsed() < Duration::from_secs(10)
+    {
+        // The poll interval of a bounded wait.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        n <= 1,
+        "{n} jobs started on a host 20 of 20 busy with the floor at 1; slots held {held:?}"
+    );
+}
+
+/// Three sleeping jobs started by share (floor 3) on a pool of 2 slots,
+/// each holding no slot. Back by slots the pool does not count them: its
+/// 2 tokens are free, and a fourth job starts at once, so 4 jobs run on a
+/// pool of 2 until the three end.
+#[test]
+fn adversary_u6_back_by_slots_the_jobs_that_started_by_share_still_count() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(2, 3, busy, |_| {});
+    by_share(&f, 3, None);
+    let mut clients = Vec::new();
+    for _ in 0..3 {
+        clients.push(quiet(&f).0);
+    }
+    wait_for_jobs(&f, "three jobs to run by share", || running(&f).len() == 3);
+    f.server
+        .set_admission(&crate::shares::Request {
+            admission: Some(crate::shares::Mode::Slots),
+            ..crate::shares::Request::default()
+        })
+        .unwrap();
+    let (c, id) = submit(&f, sh(&f.root, "sleep 60"));
+    clients.push(c);
+    let started = claimed_within(&f, id, Duration::from_millis(1500));
+    let free = f.server.pool().free();
+    assert!(
+        started.is_none(),
+        "by slots a fourth job started on a pool of 2 beside 3 running; {free} slot(s) free"
+    );
+    end_all(&f, clients);
+}
+
+/// `slot admission shares` against a daemon without `/api/admission` is
+/// meant to say "the daemon is older than this slot" (`status::admission`
+/// looks for a 404, as AGENTS.md promises for an unknown `/api/` path).
+/// The call is a `PUT`; this daemon answers a `PUT` on an `/api/` path it
+/// lacks, as an older one does on `/api/admission`, with what?
+#[test]
+fn adversary_u6_a_put_on_an_api_path_the_daemon_lacks_answers_404() {
+    use std::io::Read as _;
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let _f = start_cfg(2, |c| c.http = Some(addr));
+    wait_for("the web address to listen", || {
+        std::net::TcpStream::connect(addr).is_ok()
+    });
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    let body = r#"{"admission":"shares"}"#;
+    write!(
+        s,
+        "PUT /api/no-such-setting HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let first = raw.lines().next().unwrap_or_default().to_string();
+    assert!(first.contains(" 404"), "{first}");
 }

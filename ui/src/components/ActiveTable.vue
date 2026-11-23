@@ -3,6 +3,7 @@ import { computed, reactive } from 'vue';
 import { fmtBytes, fmtDur } from '../lib/format.ts';
 import { sessionName } from '../lib/host.ts';
 import { checkoutLabel, cmdText, jobId, runS, waitS } from '../lib/job.ts';
+import { shareCell } from '../lib/shares.ts';
 import { phase } from '../lib/units.ts';
 import { jobs, live, select, sessionTitles, sparks, store } from '../store.ts';
 import CoresSpark from './CoresSpark.vue';
@@ -34,6 +35,7 @@ const rows = computed(() => {
       cores: l ? l.cores.toFixed(1) : '',
       rss: l ? fmtBytes(l.rss) : '',
       spark: [...sparks.get(id)],
+      slots: shareCell(j),
     };
   });
 });
@@ -50,7 +52,7 @@ function toggle(id: number, open: boolean): void {
       <tr>
         <th class="c-lead"><span class="sr">units</span></th><th class="c-job">job</th><th class="c-tool"><span>tool</span></th><th class="c-repo">repo</th>
         <th class="c-session h-b">session</th><th>command</th><th class="c-out h-c">output</th>
-        <th class="c-state">phase</th><th class="c-slots num">slots</th><th class="c-wait num">wait</th><th class="c-run num">elapsed</th>
+        <th class="c-state">phase</th><th class="c-slots num">{{ store.shares ? 'share' : 'slots' }}</th><th class="c-wait num">wait</th><th class="c-run num">elapsed</th>
         <th class="c-cores num">cores</th><th class="c-extra h-a">last 60 s</th><th class="c-mem num h-a">RSS</th>
       </tr>
     </thead>
@@ -73,7 +75,7 @@ function toggle(id: number, open: boolean): void {
               @click.stop="select(r.id, $event)"><i></i>live</button>
           </td>
           <td class="c-state"><span class="phase" :class="r.phase">{{ r.phase }}</span></td>
-          <td class="num">{{ r.job.tokens }}</td>
+          <td class="num" :title="r.slots.title || undefined">{{ r.slots.text }}</td>
           <td class="num">{{ r.wait }}</td>
           <td class="num">{{ r.elapsed }}</td>
           <td class="num">{{ r.cores }}</td>

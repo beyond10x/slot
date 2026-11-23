@@ -260,6 +260,23 @@ impl Recent {
         let n = n.clamp(1, WINDOW);
         self.samples.iter().rev().take(n).sum::<f64>() / n as f64
     }
+
+    /// The mean of the last `n` samples (at most [`WINDOW`]); `None` as
+    /// [`Recent::mean`] says.
+    pub fn mean_last(&self, now_ms: i64, n: usize) -> Option<f64> {
+        if self.samples.is_empty() || now_ms - self.at_ms > STALE_MS {
+            return None;
+        }
+        let n = n.clamp(1, WINDOW).min(self.samples.len());
+        Some(self.samples.iter().rev().take(n).sum::<f64>() / n as f64)
+    }
+
+    /// Whether there are `n` samples or more and each of the last `n` is
+    /// under `below`.
+    pub fn idle(&self, n: usize, below: f64) -> bool {
+        self.samples.len() >= n.max(1)
+            && self.samples.iter().rev().take(n.max(1)).all(|&c| c < below)
+    }
 }
 
 /// Busy CPUs of the host in three parts that do not overlap
@@ -319,6 +336,16 @@ impl RecentParts {
             pool: self.pool.mean(now_ms)?,
             compile_cache: self.compile_cache.mean(now_ms)?,
             outside: self.outside.mean(now_ms)?,
+        })
+    }
+
+    /// The mean of each part over the last `n` samples, as
+    /// [`Recent::mean_last`].
+    pub fn mean_last(&self, now_ms: i64, n: usize) -> Option<Parts> {
+        Some(Parts {
+            pool: self.pool.mean_last(now_ms, n)?,
+            compile_cache: self.compile_cache.mean_last(now_ms, n)?,
+            outside: self.outside.mean_last(now_ms, n)?,
         })
     }
 }
@@ -622,6 +649,43 @@ mod tests {
             "a host window of 2 samples"
         );
         assert!((job.share(0) - 6.0).abs() < 1e-9, "never over nothing");
+    }
+
+    #[test]
+    fn the_last_samples_give_a_shorter_mean_and_tell_an_idle_job() {
+        let mut r = Recent::default();
+        assert_eq!(r.mean_last(0, 5), None);
+        assert!(!r.idle(2, 0.1), "no sample is not idle");
+        for c in [9.0, 9.0, 0.05, 0.0] {
+            r.push(c, 1_000);
+        }
+        assert_eq!(r.mean_last(1_000, 2), Some(0.025));
+        assert!(
+            r.mean_last(1_000, 50)
+                .is_some_and(|m| (m - 4.5125).abs() < 1e-9),
+            "as many as there are"
+        );
+        assert_eq!(r.mean_last(1_001 + STALE_MS, 2), None);
+        assert!(r.idle(2, 0.1));
+        assert!(!r.idle(3, 0.1));
+        let mut parts = RecentParts::default();
+        parts.push(
+            Parts {
+                pool: 2.0,
+                compile_cache: 1.0,
+                outside: 0.0,
+            },
+            0,
+        );
+        parts.push(
+            Parts {
+                pool: 4.0,
+                compile_cache: 3.0,
+                outside: 1.0,
+            },
+            0,
+        );
+        assert_eq!(parts.mean_last(0, 1).map(|p| p.counted()), Some(7.0));
     }
 
     #[test]
