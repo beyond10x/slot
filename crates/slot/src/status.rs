@@ -752,6 +752,7 @@ mod tests {
             share: None,
             share_used: None,
             lent_s: 0.0,
+            admission: crate::shares::Mode::Slots,
         }
     }
 
@@ -1418,6 +1419,7 @@ mod tests {
                 cpus: 3,
                 budget: 2.26,
                 cap: 3.0,
+                min_budget: 1.5,
                 free: 0.26,
                 busy: 0.0,
                 starting: 2.0,

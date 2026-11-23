@@ -70,6 +70,10 @@ pub struct Saved {
     /// absent from the file: [`crate::shares::DEFAULT_PRESSURE`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_pressure_max: Option<f64>,
+    /// The least the budget falls to by share, CPUs; `None`, and absent
+    /// from the file: [`crate::shares::DEFAULT_MIN_FRACTION`] of the CPUs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_min_budget: Option<f64>,
 }
 
 // serde hands `skip_serializing_if` a reference.
@@ -87,6 +91,7 @@ impl Saved {
             self.share_max,
             self.share_pressure_max,
         )
+        .with_min_budget(self.share_min_budget)
     }
 }
 
@@ -111,6 +116,7 @@ pub fn load(dir: &Path) -> Saved {
                 share_floor: shares.floor,
                 share_max: shares.max,
                 share_pressure_max: shares.pressure_max,
+                share_min_budget: shares.min_budget,
             }
         })
         .unwrap_or_default()

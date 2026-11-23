@@ -176,7 +176,14 @@ share_used?: number,
  * CPU-seconds of its share the job lent to the queue while it used
  * almost no CPU; with `share` only.
  */
-lent_s?: number, };
+lent_s?: number, 
+/**
+ * How the job was admitted when it started: by share it held no
+ * slot, and it is charged and counted by share until it ends, also
+ * after a switch back to slots. Absent by slots and from a daemon
+ * without shares.
+ */
+admission?: Admission, };
 
 export type Unit = { 
 /**
@@ -345,6 +352,11 @@ budget: number,
  * The most the budget may reach: the pool's CPU quota.
  */
 cap: number, 
+/**
+ * The least the budget falls to: the setting, or the CPUs the floor's
+ * running jobs asked for when that is more; never over `cap`.
+ */
+min_budget: number, 
 /**
  * CPUs of the budget a queued job may ask for now.
  */

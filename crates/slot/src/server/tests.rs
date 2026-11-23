@@ -3721,6 +3721,7 @@ fn by_share(f: &Fixture, floor: usize, max: Option<usize>) -> crate::shares::Vie
             floor: Some(floor),
             max,
             pressure_max: None,
+            min_budget: None,
         })
         .unwrap()
 }
@@ -4099,6 +4100,7 @@ fn by_share_over_the_pressure_mark_only_short_jobs_start() {
             floor: Some(1),
             max: None,
             pressure_max: Some(60.0),
+            min_budget: None,
         })
         .unwrap();
     let (a, ja) = quiet(&f);
@@ -4202,4 +4204,229 @@ fn the_admission_is_set_saved_and_read_back() {
     );
     assert!(!saved().contains("\"admission\""), "{}", saved());
     assert_eq!(restarted("s3").0, Mode::Slots);
+}
+
+// adversary u6
+
+/// A request for 16 slots on a host of 20 CPUs: by slots it starts beside
+/// four sleeping jobs (16 of 20 slots free). By share it is read as a
+/// share of 16 CPUs while the budget is 15, so it never fits the free
+/// share, although the host is idle; it starts only once fewer than the
+/// floor (4) run. The client is even told its request was capped at the
+/// 15 slots in circulation.
+#[test]
+fn adversary_u6_a_request_for_more_slots_than_the_budget_starts_on_an_idle_host() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(20, 20, busy, |_| {});
+    by_share(&f, crate::shares::DEFAULT_FLOOR, None);
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        clients.push(quiet(&f).0);
+    }
+    wait_for_jobs(&f, "four sleeping jobs to run", || running(&f).len() == 4);
+    let mut wide = sh(&f.root, "sleep 60");
+    wide.tokens = Some(16);
+    let (c, id) = submit(&f, wide);
+    clients.push(c);
+    let started = claimed_within(&f, id, Duration::from_millis(3000));
+    assert!(
+        started.is_some(),
+        "a request for 16 slots waits on an idle host: share {:?}, {}; {:?}",
+        active_job(&f, id).and_then(|j| j.share),
+        reason_of(&f, id),
+        f.server.admission_view()
+    );
+    end_all(&f, clients);
+}
+
+/// After a reload the jobs that run are in the table with no samples and
+/// their old start (`adopt_running`), and the first look of the sampler
+/// has no busy figure (`primed` is false, so `host_busy` is empty and the
+/// figure is unknown). Three jobs of 4 CPUs run on a budget of 15; a
+/// fourth waits. In that state the running jobs count with nothing and
+/// the unknown figure with 0 CPUs: the whole budget is free and the
+/// fourth job is let through beside the 12 CPUs the three asked for.
+#[test]
+fn adversary_u6_an_unknown_busy_figure_does_not_free_the_budget_of_the_running_jobs() {
+    fn unknown() -> Option<cpu_limit::Parts> {
+        None
+    }
+    let f = start_shares(20, 20, unknown, |_| {});
+    let req = give_share_history(&f, "four", 3.5);
+    // The most of 3 holds the fourth job in the queue until the look
+    // below, so the sleeping jobs lending their share cannot let it in
+    // first.
+    by_share(&f, 1, Some(3));
+    let mut clients = Vec::new();
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let (c, id) = submit(&f, req.clone());
+        clients.push(c);
+        ids.push(id);
+    }
+    wait_for_jobs(&f, "three jobs of 4 CPUs to run", || running(&f) == ids);
+    let (c, fourth) = queued_job(&f, req.clone());
+    clients.push(c);
+    let granted = {
+        let mut g = f.server.inner.lock().unwrap();
+        f.server.shares.lock().unwrap().max = None;
+        for id in &ids {
+            let l = g.active.get_mut(id).unwrap();
+            // As `adopt_running` puts a job that has run for a minute.
+            l.job.started_ms -= 60_000;
+            l.recent = cpu_limit::Recent::default();
+        }
+        f.server.share_step(&mut g, now_ms());
+        g.active[&fourth]
+            .waiter
+            .as_ref()
+            .is_some_and(WaiterHandle::granted)
+    };
+    let view = f.server.admission_view();
+    assert!(
+        !granted,
+        "let through beside three running jobs of 4 CPUs with the busy figure unknown: {view:?}"
+    );
+    end_all(&f, clients);
+}
+
+/// A daemon whose `limits.json` says shares, started (or re-executed by a
+/// reload) on a host whose pool is 20 of 20 CPUs busy, with a floor of
+/// one job. `run` starts the admission of the queued jobs a handover passed on
+/// and then the sampler, whose first look is the first that hands the
+/// pool a room for shares. Until then the pool admits by its tokens: the
+/// FIFO is full (jobs by share hold none), so every queued job starts,
+/// not the one the floor lets through.
+#[test]
+fn adversary_u6_a_daemon_that_starts_by_share_admits_no_job_by_slots_before_its_first_look() {
+    pool_busy!(BUSY, busy, 2000);
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut cfg = config(&root, 20);
+    cfg.cpu_busy = Some(busy);
+    cfg.host_cpus = Some(20);
+    cfg.cpu_pressure = Some(no_pressure);
+    cfg.resource_poll = Duration::from_millis(20);
+    std::fs::create_dir_all(&cfg.state_dir).unwrap();
+    std::fs::write(
+        cfg.state_dir.join(limits::FILE),
+        r#"{"headroom_percent":0,"admission":"shares","share_floor":1}"#,
+    )
+    .unwrap();
+    let server = Server::new(cfg).unwrap();
+    assert_eq!(
+        server.admission_view().admission,
+        crate::shares::Mode::Shares
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut gone = Vec::new();
+    // What `run` does after a handover: each queued job's admission is
+    // spawned, then the sampler.
+    for _ in 0..3 {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
+        let (g, gone_rx) = watch::channel(false);
+        gone.push(g);
+        let mut req = sh(&root, "sleep 30");
+        req.env = std::env::vars().map(|(k, v)| format!("{k}={v}")).collect();
+        let s = Arc::clone(&server);
+        rt.spawn(async move {
+            let _ = s.run_job(req, tx, gone_rx, None, None, None).await;
+        });
+        rt.spawn(async move { while rx.recv().await.is_some() {} });
+    }
+    rt.spawn(Arc::clone(&server).sampler());
+    let started = || {
+        let g = server.inner.lock().unwrap();
+        g.active.values().filter(|l| l.claimed).count()
+    };
+    let t0 = Instant::now();
+    while started() < 3 && t0.elapsed() < Duration::from_millis(2000) {
+        // The poll interval of a bounded wait.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let n = started();
+    let held: Vec<usize> = server
+        .inner
+        .lock()
+        .unwrap()
+        .active
+        .values()
+        .map(|l| l.held)
+        .collect();
+    for g in &gone {
+        let _ = g.send(true);
+    }
+    let t1 = Instant::now();
+    while !server.inner.lock().unwrap().active.is_empty() && t1.elapsed() < Duration::from_secs(10)
+    {
+        // The poll interval of a bounded wait.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        n <= 1,
+        "{n} jobs started on a host 20 of 20 busy with the floor at 1; slots held {held:?}"
+    );
+}
+
+/// Three sleeping jobs started by share (floor 3) on a pool of 2 slots,
+/// each holding no slot. Back by slots the pool does not count them: its
+/// 2 tokens are free, and a fourth job starts at once, so 4 jobs run on a
+/// pool of 2 until the three end.
+#[test]
+fn adversary_u6_back_by_slots_the_jobs_that_started_by_share_still_count() {
+    pool_busy!(BUSY, busy, 0);
+    let f = start_shares(2, 3, busy, |_| {});
+    by_share(&f, 3, None);
+    let mut clients = Vec::new();
+    for _ in 0..3 {
+        clients.push(quiet(&f).0);
+    }
+    wait_for_jobs(&f, "three jobs to run by share", || running(&f).len() == 3);
+    f.server
+        .set_admission(&crate::shares::Request {
+            admission: Some(crate::shares::Mode::Slots),
+            ..crate::shares::Request::default()
+        })
+        .unwrap();
+    let (c, id) = submit(&f, sh(&f.root, "sleep 60"));
+    clients.push(c);
+    let started = claimed_within(&f, id, Duration::from_millis(1500));
+    let free = f.server.pool().free();
+    assert!(
+        started.is_none(),
+        "by slots a fourth job started on a pool of 2 beside 3 running; {free} slot(s) free"
+    );
+    end_all(&f, clients);
+}
+
+/// `slot admission shares` against a daemon without `/api/admission` is
+/// meant to say "the daemon is older than this slot" (`status::admission`
+/// looks for a 404, as AGENTS.md promises for an unknown `/api/` path).
+/// The call is a `PUT`; this daemon answers a `PUT` on an `/api/` path it
+/// lacks, as an older one does on `/api/admission`, with what?
+#[test]
+fn adversary_u6_a_put_on_an_api_path_the_daemon_lacks_answers_404() {
+    use std::io::Read as _;
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let _f = start_cfg(2, |c| c.http = Some(addr));
+    wait_for("the web address to listen", || {
+        std::net::TcpStream::connect(addr).is_ok()
+    });
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    let body = r#"{"admission":"shares"}"#;
+    write!(
+        s,
+        "PUT /api/no-such-setting HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut raw = String::new();
+    s.read_to_string(&mut raw).unwrap();
+    let first = raw.lines().next().unwrap_or_default().to_string();
+    assert!(first.contains(" 404"), "{first}");
 }

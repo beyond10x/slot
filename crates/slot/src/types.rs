@@ -179,6 +179,12 @@ pub struct Job {
     /// almost no CPU; with `share` only.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub lent_s: f64,
+    /// How the job was admitted when it started: by share it held no
+    /// slot, and it is charged and counted by share until it ends, also
+    /// after a switch back to slots. Absent by slots and from a daemon
+    /// without shares.
+    #[serde(default, skip_serializing_if = "crate::shares::Mode::is_slots")]
+    pub admission: crate::shares::Mode,
 }
 
 // serde hands `skip_serializing_if` a reference.

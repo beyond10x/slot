@@ -465,6 +465,7 @@ slot admission                       # print the setting and, by share, the budg
 slot admission shares                # admit by share
 slot admission shares --floor 2      # and let 2 jobs run whatever the share says
 slot admission --max 30 --pressure 70
+slot admission --min-budget 8        # the budget never falls under 8 CPUs
 slot admission slots                 # back to slots
 ```
 
@@ -472,7 +473,9 @@ slot admission slots                 # back to slots
 last 20 runs of the same command in the same repository, newer runs weighing more, the 90th
 percentile plus 15 %, at least 0.1. The compilers a compile cache server ran for the job count.
 A command with fewer than 3 runs of a second or longer asks for 1 CPU. `slot --tokens N` (and a
-client of 0.21.0 or older that asks for slots) asks for N CPUs.
+client of 0.21.0 or older that asks for slots) asks for N CPUs, at most the budget; a larger
+request is told the share it gets (`slot: --tokens 16 capped at a share of 15.0 CPUs, the
+budget`).
 
 **A queued job starts** in the queue's usual order (level, then the jobs that may no longer be
 passed, short jobs, the rest, then arrival) while
@@ -485,21 +488,27 @@ seconds, less what the jobs that started in those 5 seconds are expected to add.
 once a second, so a job starts within a second of its share coming free. A running job that uses
 almost no CPU (under 0.1 CPU for 2 seconds) counts with what it uses, not with its share: the
 queue gets the rest, and the job's record carries the CPU-seconds it lent (`lent_s`). When it
-uses CPU again, that CPU is in the figure within a second and no further job starts until the
-free share covers one.
+uses CPU again, that CPU enters the figure at a fifth per second (the figure is a 5-second mean),
+and no further job starts until the free share covers one. Until the daemon has a CPU figure
+(right after a start or a reload) every running job counts with its whole share.
 
 **The budget** starts at three quarters of the host's CPUs and is never above the pool's CPU
 quota, or the host's CPUs less the headroom. Every 5 seconds it grows by 0.5 CPU while the jobs
 that ended ran at most 1.3 times as long as their best earlier run (the median of them), and
-shrinks to 85 % when they ran more than twice as long.
+shrinks to 85 % when they ran more than twice as long. The best earlier run is one that ended ok
+and was not served from the compile cache. The budget never falls under `--min-budget` (half the
+host's CPUs until one is named), nor under the shares of the floor's jobs. This controller has
+not yet been measured with shares on: try it on one host before you switch it on elsewhere.
 
 **Over a CPU pressure** of `--pressure` (60 % until one is named; `/proc/pressure/cpu`) only jobs
 predicted to run 5 seconds or less start, beside the floor. The admission by disk and memory
 holds jobs as by slots.
 
 A job let through by share holds no slot of its own. The slots in circulation are at most the
-budget's CPUs, so build tools that read the jobserver still run no more processes than the budget
-has CPUs.
+budget's CPUs, so build tools that read the jobserver run at most one process per running job
+(the implicit slot every jobserver client has) plus one per CPU of the budget. Back by slots, a
+job that started by share keeps one slot held back until it ends, and `slot usage` charges it by
+the admission it started under.
 
 A queued job's line says what it waits for:
 
@@ -513,11 +522,13 @@ what it uses (`share 2.3, uses 0.4`). The web view names the slots column `share
 `used/asked`, and the free share under the header. `slot usage` charges a job its share for its
 run, less what it lent.
 
-The setting is kept in `limits.json` beside the headroom and holds across reloads and restarts.
-`GET` and `PUT /api/admission` read and change it (`{"admission": "shares", "floor": 4, "max":
-48, "pressure_max": 60}`, any field alone; a floor or most under 1, a floor over the most and a
-pressure outside 0 to 100 are refused with 400). `/api/state` and every tick have `shares` while
-it is on.
+The setting is kept in `limits.json` beside the headroom and holds across reloads and restarts;
+the daemon applies it before it takes or resumes any job. `GET` and `PUT /api/admission` read and
+change it (`{"admission": "shares", "floor": 4, "max": 48, "pressure_max": 60, "min_budget":
+10}`, any field alone; a floor or most under 1, a floor over the most, a pressure outside 0 to
+100 and a lower bound under 1 CPU are refused with 400). `/api/state` and every tick have
+`shares` while it is on. A daemon older than the setting answers 404 on `/api/admission`, for
+every method.
 
 Not built: a CPU weight per job (a cgroup of its own per job) needs the service's cgroup to be
 delegated, which needs root.

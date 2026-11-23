@@ -48,7 +48,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         )
         .route("/api/cpu-limit", get(cpu_limit_get).put(cpu_limit_put))
         .route("/api/admission", get(admission_get).put(admission_put))
-        .fallback(get(asset))
+        .fallback(fallback)
         .with_state(s);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -419,7 +419,21 @@ async fn output(State(s): State<Arc<Server>>, Path(id): Path<i64>) -> Response {
         .into_response()
 }
 
-async fn asset(uri: axum::http::Uri) -> Response {
+/// Every path no route has: an unknown `/api/` path answers 404 whatever
+/// the method, so a newer client can tell an older daemon from a failed
+/// call (`PUT /api/admission` on a daemon without it); other paths serve
+/// the UI to `GET` and `HEAD`.
+async fn fallback(method: axum::http::Method, uri: axum::http::Uri) -> Response {
+    if uri.path().starts_with("/api/") {
+        return (StatusCode::NOT_FOUND, "slot: no such API path\n").into_response();
+    }
+    if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    asset(&uri)
+}
+
+fn asset(uri: &axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     // An unknown API path is a 404, not the UI page, so a newer client can
     // tell that this daemon lacks it.

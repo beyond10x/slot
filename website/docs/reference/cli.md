@@ -225,6 +225,7 @@ slot admission [OPTIONS] [shares|slots]
 - `--floor`: By share: jobs that run whatever the share says, from 1; 4 until one is named
 - `--max`: By share: the most jobs that run at once, at least the floor; 48 until one is named
 - `--pressure`: By share: CPU pressure of the host (`some avg10` of `/proc/pressure/cpu`, percent) over which only jobs predicted to run 5 s or less start; 60 until one is named
+- `--min-budget`: By share: the least CPUs the budget falls to, at least 1; half the host's CPUs until one is named, and never under the shares of the floor's running jobs
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cancel`

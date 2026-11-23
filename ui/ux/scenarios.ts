@@ -380,7 +380,7 @@ function byShare(): Scenario {
   const waiting = [{ ...queued(163, -20), share: 4.03, wait_reason: 'waits for a share of 4.0 CPUs: 3.2 of a budget of 15.0 free' }];
   const finished = Array.from({ length: 5 }, (_, i) => done(150 + i, -300 + i * 40, { share: 2, share_used: 1.8 }));
   const shares = (k: number): SharesView => ({
-    admission: 'shares', floor: 4, max: 48, pressure_max: 60, cpus: 20, budget: 15, cap: 20, free: 3.2, busy: 9 + (k % 2) * 0.1,
+    admission: 'shares', floor: 4, max: 48, pressure_max: 60, cpus: 20, budget: 15, cap: 20, min_budget: 10, free: 3.2, busy: 9 + (k % 2) * 0.1,
     starting: 2.8, running: 3, idle: 1, lent: 1, pressure: 14, braking: false,
   });
   const st = { ...state([...running, ...waiting], finished, 20, 0), shares: shares(0) };

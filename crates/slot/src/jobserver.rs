@@ -183,6 +183,10 @@ struct Inner {
     debt: usize,
     /// Admission by CPU share: `Some` while it is on ([`Pool::set_shares`]).
     shares: Option<ShareRoom>,
+    /// Tokens held back besides `reserve` for jobs that run holding none
+    /// ([`Pool::set_owed`]): jobs started by share, after admission went
+    /// back to slots.
+    owed: usize,
 }
 
 /// What a handover passes on about the pool besides the FIFO itself.
@@ -465,13 +469,52 @@ impl Pool {
     }
 
     /// What a handover passes on: size, reserve and the tokens held back.
+    /// Tokens held back for jobs that hold none ([`Pool::set_owed`]) go
+    /// back to the FIFO first: the new image counts those jobs again.
     pub fn state(&self) -> PoolState {
-        let inner = self.inner.lock().expect("jobserver lock");
+        let mut inner = self.inner.lock().expect("jobserver lock");
+        if inner.held_back > inner.reserve {
+            let back = inner.held_back - inner.reserve;
+            inner.held_back = inner.reserve;
+            self.write(back);
+        }
+        inner.owed = 0;
         PoolState {
             size: self.size,
             reserve: inner.reserve,
             held_back: inner.held_back,
         }
+    }
+
+    /// Tokens held back now or to be held back as they return: the reserve
+    /// and the tokens owed, at most the pool.
+    fn keep(&self, inner: &Inner) -> usize {
+        (inner.reserve + inner.owed).min(self.size)
+    }
+
+    /// Holds `n` tokens back besides the reserve, one for each job that
+    /// runs holding none: a job started by share after admission went back
+    /// to slots. Tokens over the new count go back to the FIFO at once;
+    /// missing ones are taken as they return. `limit` is unchanged.
+    pub fn set_owed(&self, n: usize) {
+        let mut inner = self.inner.lock().expect("jobserver lock");
+        if inner.owed == n {
+            return;
+        }
+        inner.owed = n;
+        if inner.held_back > self.keep(&inner) {
+            let back = inner.held_back - self.keep(&inner);
+            inner.held_back = self.keep(&inner);
+            self.write(back);
+        }
+        self.distribute(&mut inner, 0);
+        drop(inner);
+        self.wake.notify_one();
+    }
+
+    /// Tokens held back for jobs that run holding none.
+    pub fn owed(&self) -> usize {
+        self.inner.lock().expect("jobserver lock").owed
     }
 
     /// The daemon's open descriptor of the FIFO.
@@ -513,9 +556,9 @@ impl Pool {
         let limit = limit.clamp(1, self.size);
         let mut inner = self.inner.lock().expect("jobserver lock");
         inner.reserve = self.size - limit;
-        if inner.held_back > inner.reserve {
-            let back = inner.held_back - inner.reserve;
-            inner.held_back = inner.reserve;
+        if inner.held_back > self.keep(&inner) {
+            let back = inner.held_back - self.keep(&inner);
+            inner.held_back = self.keep(&inner);
             self.write(back);
         }
         for w in &inner.queue {
@@ -730,9 +773,9 @@ impl Pool {
             hand += st.got.saturating_sub(st.lent);
             st.got = st.lent;
         }
-        if inner.held_back > inner.reserve {
-            let back = inner.held_back - inner.reserve;
-            inner.held_back = inner.reserve;
+        if inner.held_back > self.keep(inner) {
+            let back = inner.held_back - self.keep(inner);
+            inner.held_back = self.keep(inner);
             self.write(back);
         }
         let mut keeper: Option<usize> = None;
@@ -814,9 +857,9 @@ impl Pool {
             st.got = 0;
             st.lent = 0;
         }
-        if inner.held_back > inner.reserve {
-            hand += inner.held_back - inner.reserve;
-            inner.held_back = inner.reserve;
+        if inner.held_back > self.keep(inner) {
+            hand += inner.held_back - self.keep(inner);
+            inner.held_back = self.keep(inner);
         }
         self.write(hand);
         let mut uncovered: Option<Priority> = None;
@@ -1053,7 +1096,7 @@ impl Pool {
                         // By share the queue takes no token: the reader
                         // reads only to hold tokens back or take them out.
                         if (inner.shares.is_none() && Self::head(&mut inner).is_some())
-                            || inner.held_back < inner.reserve
+                            || inner.held_back < self.keep(&inner)
                             || inner.debt > 0
                         {
                             break;
@@ -1082,7 +1125,7 @@ impl Pool {
                 continue;
             }
             // An urgent head gets the token before the held-back set does.
-            if inner.held_back < inner.reserve
+            if inner.held_back < self.keep(&inner)
                 && (inner.shares.is_some() || !Self::urgent_head(&mut inner))
             {
                 inner.held_back += 1;
@@ -1205,6 +1248,40 @@ mod tests {
         assert_eq!(p.held_back(), 0);
         assert_eq!(p.free(), 4);
         assert_eq!(p.reconcile(), 0);
+    }
+
+    #[tokio::test]
+    async fn owed_tokens_are_held_back_besides_the_reserve_until_they_are_paid() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Pool::new(&dir.path().join("fifo"), 4).unwrap();
+        p.set_limit(3);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        p.set_owed(2);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.held_back(), 3, "the reserve of 1 and 2 owed");
+        assert_eq!(p.free(), 1);
+        let mut a = p.acquire(2);
+        assert!(
+            !ready_within(&mut a, 200).await,
+            "2 tokens granted while 2 are owed to jobs holding none"
+        );
+        p.set_owed(1);
+        assert!(ready_within(&mut a, 1000).await, "a paid debt frees one");
+        p.release(2);
+        p.set_owed(0);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.held_back(), 1, "back to the reserve");
+        assert_eq!(p.free(), 3);
+        assert_eq!(p.owed(), 0);
+        p.set_owed(9);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(p.held_back(), 4, "never more than the pool");
+        assert_eq!(
+            p.state().held_back,
+            1,
+            "a handover hands back what was owed"
+        );
+        assert_eq!(p.owed(), 0);
     }
 
     #[tokio::test]

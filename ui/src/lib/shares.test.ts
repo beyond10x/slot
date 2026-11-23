@@ -13,7 +13,7 @@ function job(over: Partial<Job>): Job {
 
 function view(over: Partial<SharesView>): SharesView {
   return {
-    admission: 'shares', floor: 4, max: 48, pressure_max: 60, cpus: 20, budget: 15, cap: 17, free: 3.2, busy: 9, starting: 2.8,
+    admission: 'shares', floor: 4, max: 48, pressure_max: 60, cpus: 20, budget: 15, cap: 17, min_budget: 10, free: 3.2, busy: 9, starting: 2.8,
     running: 12, idle: 0, lent: 0, pressure: 12, braking: false, ...over,
   };
 }

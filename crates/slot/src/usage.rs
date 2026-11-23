@@ -143,10 +143,14 @@ fn median(v: &mut [f64]) -> f64 {
 /// `end`) inside the window: its slots times that time; by share its share
 /// times that time, less the CPU-seconds it lent while it used almost
 /// nothing, in the same proportion. The job that ran on a loan pays its own
-/// share.
+/// share. A job is charged by the admission it started under, also when
+/// the admission changed while it ran.
 fn charged_s(job: &Job, end: i64, run_ms: i64) -> f64 {
     let ran_s = run_ms as f64 / 1000.0;
-    match job.share {
+    match job
+        .share
+        .filter(|_| job.admission == crate::shares::Mode::Shares)
+    {
         Some(share) => {
             let whole_ms = (end - job.started_ms).max(1);
             let lent = job.lent_s * run_ms as f64 / whole_ms as f64;
@@ -371,6 +375,7 @@ mod tests {
             share: None,
             share_used: None,
             lent_s: 0.0,
+            admission: crate::shares::Mode::Slots,
         };
         serde_json::to_string(&j).unwrap()
     }
@@ -434,6 +439,7 @@ mod tests {
             let mut j: Job = serde_json::from_str(&line).unwrap();
             j.share = Some(share);
             j.lent_s = lent_s;
+            j.admission = crate::shares::Mode::Shares;
             serde_json::to_string(&j).unwrap()
         };
         let log = [
@@ -461,6 +467,19 @@ mod tests {
             (lender.slot_s - (60.0 - 45.0)).abs() < 1e-9,
             "half the run, half the loan: {lender:?}"
         );
+        // A job that started by slots and ran on after admission switched
+        // to shares carries a share in its record; it is charged its slots.
+        let mut spanned: Job =
+            serde_json::from_str(&job(4, "spanned", "p", "s", 2, (0, 1_000, 11_000), 1.0)).unwrap();
+        spanned.share = Some(0.5);
+        let u = aggregate(
+            serde_json::to_string(&spanned).unwrap().as_bytes(),
+            0,
+            61_000,
+            By::Repo,
+            &mut none,
+        );
+        assert!((u.rows[0].slot_s - 20.0).abs() < 1e-9, "{u:?}");
     }
 
     #[test]

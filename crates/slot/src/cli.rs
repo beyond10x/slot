@@ -514,6 +514,11 @@ pub struct AdmissionArgs {
     /// 5 s or less start; 60 until one is named.
     #[arg(long, value_name = "PERCENT")]
     pub pressure: Option<f64>,
+    /// By share: the least CPUs the budget falls to, at least 1; half the
+    /// host's CPUs until one is named, and never under the shares of the
+    /// floor's running jobs.
+    #[arg(long, value_name = "CPUS")]
+    pub min_budget: Option<f64>,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -527,6 +532,7 @@ impl AdmissionArgs {
             floor: self.floor.map(|n| n as usize),
             max: self.max.map(|n| n as usize),
             pressure_max: self.pressure,
+            min_budget: self.min_budget,
         };
         (req != crate::shares::Request::default()).then_some(req)
     }
@@ -984,6 +990,7 @@ mod tests {
                 floor: Some(2),
                 max: Some(30),
                 pressure_max: Some(45.0),
+                min_budget: None,
             })
         );
         for bad in [

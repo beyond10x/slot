@@ -85,6 +85,11 @@ pub const DEFAULT_FLOOR: usize = 4;
 /// The most jobs that run at once, until one is named.
 pub const DEFAULT_MAX: usize = 48;
 
+/// The least the budget falls to, until one is named, as a share of the
+/// host's CPUs: a replay of one host's job log through the controller fell
+/// to 1 CPU without it (`docs/design.md`).
+pub const DEFAULT_MIN_FRACTION: f64 = 0.5;
+
 /// CPU pressure of the host (`some avg10`, percent) over which only jobs
 /// predicted short start, until one is named: the median pressure of the
 /// census windows with 15 or more of 20 CPUs busy (`docs/design.md`).
@@ -110,6 +115,13 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// Whether this is [`Mode::Slots`], the default a record leaves out.
+    // serde hands `skip_serializing_if` a reference.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_slots(&self) -> bool {
+        *self == Self::Slots
+    }
+
     /// The name the command line and the API use.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -143,11 +155,19 @@ pub struct Settings {
     /// CPU pressure over which only short jobs start; `None` =
     /// [`DEFAULT_PRESSURE`].
     pub pressure_max: Option<f64>,
+    /// The least the budget falls to, CPUs; `None` =
+    /// [`DEFAULT_MIN_FRACTION`] of the host's CPUs.
+    pub min_budget: Option<f64>,
 }
 
 /// Whether `p` is a pressure mark: a percent over 0, at most 100.
 fn valid_pressure(p: f64) -> bool {
     p.is_finite() && p > 0.0 && p <= 100.0
+}
+
+/// Whether `b` is a lower bound of the budget: CPUs, at least 1.
+fn valid_min_budget(b: f64) -> bool {
+    b.is_finite() && b >= MIN_BUDGET
 }
 
 impl Settings {
@@ -163,12 +183,29 @@ impl Settings {
             floor: floor.filter(|&f| f > 0),
             max: max.filter(|&m| m > 0),
             pressure_max: pressure_max.filter(|&p| valid_pressure(p)),
+            min_budget: None,
         };
         if s.floor() > s.max() {
             s.floor = None;
             s.max = None;
         }
         s
+    }
+
+    /// These settings with the saved lower bound of the budget, dropped
+    /// when no request would set it.
+    #[must_use]
+    pub fn with_min_budget(mut self, min_budget: Option<f64>) -> Self {
+        self.min_budget = min_budget.filter(|&b| valid_min_budget(b));
+        self
+    }
+
+    /// The least the budget falls to on a host of `cpus` CPUs, before the
+    /// floor's jobs and the cap.
+    pub fn min_budget(&self, cpus: u32) -> f64 {
+        self.min_budget
+            .unwrap_or(DEFAULT_MIN_FRACTION * f64::from(cpus))
+            .max(MIN_BUDGET)
     }
 
     /// Jobs that run whatever the share says.
@@ -205,11 +242,17 @@ impl Settings {
         {
             return Err("slot: pressure_max is a percent over 0, at most 100".into());
         }
+        if let Some(b) = req.min_budget
+            && !valid_min_budget(b)
+        {
+            return Err("slot: min_budget is CPUs, at least 1".into());
+        }
         let next = Self {
             mode: req.admission.unwrap_or(self.mode),
             floor: req.floor.or(self.floor),
             max: req.max.or(self.max),
             pressure_max: req.pressure_max.or(self.pressure_max),
+            min_budget: req.min_budget.or(self.min_budget),
         };
         if next.floor() > next.max() {
             return Err(format!(
@@ -228,6 +271,7 @@ impl Settings {
             floor: self.floor(),
             max: self.max(),
             pressure_max: self.pressure_max(),
+            min_budget: self.min_budget(cpus),
             cpus,
             ..View::default()
         }
@@ -250,6 +294,9 @@ pub struct Request {
     /// short start; over 0, at most 100.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pressure_max: Option<f64>,
+    /// The least the budget falls to, CPUs, at least 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_budget: Option<f64>,
 }
 
 /// Answer of `GET` and `PUT /api/admission`, and the figures `slot status`
@@ -280,6 +327,10 @@ pub struct View {
     /// The most the budget may reach: the pool's CPU quota.
     #[serde(default)]
     pub cap: f64,
+    /// The least the budget falls to: the setting, or the CPUs the floor's
+    /// running jobs asked for when that is more; never over `cap`.
+    #[serde(default)]
+    pub min_budget: f64,
     /// CPUs of the budget a queued job may ask for now.
     #[serde(default)]
     pub free: f64,
@@ -394,8 +445,9 @@ impl Budget {
     }
 
     /// Moves the budget at `now_ms` when [`STEP_MS`] passed since the last
-    /// step, and keeps it between [`MIN_BUDGET`] and `cap`; returns it.
-    pub fn step(&mut self, now_ms: i64, cap: f64) -> f64 {
+    /// step, and keeps it between `lower` (at least [`MIN_BUDGET`]) and
+    /// `cap`; `cap` wins when `lower` is over it. Returns it.
+    pub fn step(&mut self, now_ms: i64, cap: f64, lower: f64) -> f64 {
         match self.last_ms {
             None => self.last_ms = Some(now_ms),
             Some(last) if now_ms - last >= STEP_MS => {
@@ -413,7 +465,7 @@ impl Budget {
             }
             Some(_) => {}
         }
-        self.value = bounded(self.value, cap);
+        self.value = bounded(self.value.max(lower), cap);
         self.value
     }
 }
@@ -469,10 +521,11 @@ pub fn room(budget: f64, busy: f64, jobs: &[Running]) -> Room {
 
 /// The line `slot status` and `slot admission` print while shares are on.
 pub fn line(v: &View) -> String {
-    let mut s = format!(
-        "shares: budget {:.1} of {:.1} CPUs, {:.1} free ({:.1} busy",
-        v.budget, v.cap, v.free, v.busy
-    );
+    let mut s = format!("shares: budget {:.1} of {:.1} CPUs", v.budget, v.cap);
+    if v.budget < v.cap - 0.05 && v.budget <= v.min_budget + 0.05 {
+        s.push_str(" (its lower bound)");
+    }
+    let _ = write!(s, ", {:.1} free ({:.1} busy", v.free, v.busy);
     if v.starting >= 0.05 {
         let _ = write!(s, ", {:.1} for jobs that just started", v.starting);
     }
@@ -548,19 +601,19 @@ mod tests {
         assert!((Budget::new(1, 1.0).value() - MIN_BUDGET).abs() < 1e-9);
         let mut b = Budget::new(20, 17.0);
         assert!(
-            (b.step(0, 17.0) - 15.0).abs() < 1e-9,
+            (b.step(0, 17.0, MIN_BUDGET) - 15.0).abs() < 1e-9,
             "the first step only starts the clock"
         );
         for i in 1..=10 {
             b.finished(1.0);
-            b.step(i * STEP_MS, 17.0);
+            b.step(i * STEP_MS, 17.0, MIN_BUDGET);
         }
         assert!(
             (b.value() - 17.0).abs() < 1e-9,
             "fast jobs raise it to the quota, not past it"
         );
         assert!(
-            (b.step(11 * STEP_MS, 12.0) - 12.0).abs() < 1e-9,
+            (b.step(11 * STEP_MS, 12.0, MIN_BUDGET) - 12.0).abs() < 1e-9,
             "a lower quota"
         );
     }
@@ -568,29 +621,38 @@ mod tests {
     #[test]
     fn the_median_slowdown_of_ended_jobs_moves_the_budget_every_five_seconds() {
         let mut b = Budget::new(20, 20.0);
-        b.step(0, 20.0);
+        b.step(0, 20.0, MIN_BUDGET);
         b.finished(1.1);
         b.finished(1.2);
         b.finished(5.0);
-        assert!((b.step(STEP_MS - 1, 20.0) - 15.0).abs() < 1e-9, "not yet");
-        assert!((b.step(STEP_MS, 20.0) - 15.5).abs() < 1e-9, "median 1.2");
+        assert!(
+            (b.step(STEP_MS - 1, 20.0, MIN_BUDGET) - 15.0).abs() < 1e-9,
+            "not yet"
+        );
+        assert!(
+            (b.step(STEP_MS, 20.0, MIN_BUDGET) - 15.5).abs() < 1e-9,
+            "median 1.2"
+        );
         b.finished(2.5);
         b.finished(3.0);
         b.finished(1.0);
         assert!(
-            (b.step(2 * STEP_MS, 20.0) - 15.5 * LOWER).abs() < 1e-9,
+            (b.step(2 * STEP_MS, 20.0, MIN_BUDGET) - 15.5 * LOWER).abs() < 1e-9,
             "median 2.5"
         );
         let v = b.value();
         b.finished(1.6);
         assert!(
-            (b.step(3 * STEP_MS, 20.0) - v).abs() < 1e-9,
+            (b.step(3 * STEP_MS, 20.0, MIN_BUDGET) - v).abs() < 1e-9,
             "between the marks"
         );
-        assert!((b.step(4 * STEP_MS, 20.0) - v).abs() < 1e-9, "no job ended");
+        assert!(
+            (b.step(4 * STEP_MS, 20.0, MIN_BUDGET) - v).abs() < 1e-9,
+            "no job ended"
+        );
         for i in 5..60 {
             b.finished(10.0);
-            b.step(i * STEP_MS, 20.0);
+            b.step(i * STEP_MS, 20.0, MIN_BUDGET);
         }
         assert!((b.value() - MIN_BUDGET).abs() < 1e-9, "{}", b.value());
     }
@@ -711,6 +773,46 @@ mod tests {
         assert_eq!((s.floor(), s.max(), s.pressure_max()), (2, 8, 45.0));
     }
 
+    /// The budget falls no lower than its lower bound, half the host's CPUs
+    /// until one is named; the cap wins over a bound above it. A bound
+    /// under 1 CPU is refused.
+    #[test]
+    fn the_budget_falls_no_lower_than_its_bound_and_the_cap_wins_over_it() {
+        let s = Settings::default();
+        assert!((s.min_budget(20) - 10.0).abs() < 1e-9);
+        assert!((s.min_budget(1) - MIN_BUDGET).abs() < 1e-9);
+        let named = s
+            .changed(&Request {
+                min_budget: Some(6.0),
+                ..Request::default()
+            })
+            .unwrap();
+        assert!((named.min_budget(20) - 6.0).abs() < 1e-9);
+        assert!((named.view(20).min_budget - 6.0).abs() < 1e-9);
+        for bad in [0.5, 0.0, -1.0, f64::NAN] {
+            let r = Request {
+                min_budget: Some(bad),
+                ..Request::default()
+            };
+            assert!(s.changed(&r).is_err(), "{bad}");
+        }
+        assert_eq!(
+            Settings::default().with_min_budget(Some(0.2)).min_budget,
+            None
+        );
+        let mut b = Budget::new(20, 20.0);
+        b.step(0, 20.0, 10.0);
+        for i in 1..60 {
+            b.finished(10.0);
+            b.step(i * STEP_MS, 20.0, 10.0);
+        }
+        assert!((b.value() - 10.0).abs() < 1e-9, "{}", b.value());
+        assert!(
+            (b.step(61 * STEP_MS, 8.0, 10.0) - 8.0).abs() < 1e-9,
+            "the cap wins"
+        );
+    }
+
     #[test]
     fn the_status_line_names_the_budget_the_free_share_and_what_idle_jobs_lend() {
         let v = View {
@@ -721,6 +823,7 @@ mod tests {
             cpus: 20,
             budget: 15.0,
             cap: 17.0,
+            min_budget: 10.0,
             free: 3.24,
             busy: 9.0,
             starting: 2.76,
@@ -746,6 +849,19 @@ mod tests {
             line(&braking),
             "shares: budget 15.0 of 17.0 CPUs, 3.2 free (9.0 busy, 2.8 for jobs that just \
              started), 12 running (4 to 48), CPU pressure 72 % over 60 %: only short jobs start\n"
+        );
+        let at_bound = View {
+            budget: 10.0,
+            free: 0.0,
+            starting: 0.0,
+            idle: 0,
+            lent: 0.0,
+            ..v
+        };
+        assert_eq!(
+            line(&at_bound),
+            "shares: budget 10.0 of 17.0 CPUs (its lower bound), 0.0 free (9.0 busy), 12 \
+             running (4 to 48)\n"
         );
     }
 }
