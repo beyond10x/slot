@@ -357,8 +357,13 @@ Open, one line each, with where the design lives. A session starts with (e).
   alone read 46 s while 39 queued jobs had a median age of 200 s (2026-11-22). The CPU-time
   figure cannot see demand once the host is saturated (load 208 on 20 CPUs with the pool at
   11.5 CPUs under a mark of 12, 2026-11-23). 0.27.0 adds a pressure mark
-  (`slot cpu-limit <mark> --pressure P`, off by default); its value for this host is not measured
-  yet, and an operator script steps the CPU mark between 6 and 10 until it is.
+  (`slot cpu-limit <mark> --pressure P`, off by default). Measured on the live host, 30 minutes
+  with `--pressure 80` against 30 minutes without (2026-11-23): 155 jobs against 176, queue wait
+  p90 1,264 s against 996 s, peak load 132 against 136. It held more and lowered nothing, so it
+  was switched off again. CPU pressure there was 74 % at the median and 80 % at p75 over 3 hours:
+  it saturates near 80 % at a load of 100 as the CPU figure does, and a mark under that holds
+  most of the day. Every held job still starts on the 10-minute bound (40 in that window), so
+  the wait is set by the bound and the queue's length, not by the mark.
 - (ab) `--min-free-disk` and `--evict-below` are options of `slot serve`, so a change needs a
   full restart (g); both belong in `limits.json`.
 
