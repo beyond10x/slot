@@ -31,6 +31,8 @@ export interface Scenario {
   chartHistory?: RecordedBucket[];
   /** Answer of `api/cache-history`; the path answers 404 when absent, as a daemon older than the page does. */
   cacheHistory?: CacheMinute[];
+  /** Answer of `api/cache-day`; the path answers 404 when absent, as a daemon older than the page does. */
+  cacheDay?: CacheMinute;
   steps: Step[];
   output: Record<number, { chunks: Chunk[]; end: string }>;
   task: Task | null;
@@ -147,6 +149,13 @@ function cacheCalls(minutes = 120, lastSec = -20): CacheMinute[] {
   return out;
 }
 
+/** Answer of `api/cache-day`: the calls of the last 24 hours, 31 % of all from the cache, 55 % of the cacheable ones. */
+const CACHE_DAY: CacheMinute = {
+  t: s(-20), hits: 21_000, misses: 17_000, not_cached: 30_000, reasons: { 'crate-type': 24_000, incremental: 6_000 },
+};
+/** Answer of `api/cache-day` from a daemon that read no call in 24 hours. */
+const NO_CALLS: CacheMinute = { t: s(-1), hits: 0, misses: 0, not_cached: 0, reasons: {} };
+
 function state(active: Job[], doneJobs: Job[], tokens: number, headroom: number, callApps: string[] = []): State {
   const limit = Math.max(1, Math.round((tokens * (100 - headroom)) / 100));
   const used = active.filter((j) => j.state === 'running').reduce((a, j) => a + j.tokens, 0);
@@ -201,7 +210,7 @@ function busyFailed(): Scenario {
   return {
     name: 'busy-failed', anchor: true,
     card: 'An agent says its build failed a moment ago. Open that build\'s output and read the error.',
-    state: st, history: history(running, 20, 20, 0, 3), cacheHistory: cacheCalls(), steps,
+    state: st, history: history(running, 20, 20, 0, 3), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY, steps,
     output: { 42: { chunks: COMPILE_ERROR, end: 'exit 101' } },
     task: { kind: 'open-output', job: 42, expect: ['ledger · worktree tax-rounding', 'error[E0308]', 'exit 101'] },
   };
@@ -216,7 +225,7 @@ function videoCall(name: string, fails: boolean): Scenario {
     card: fails
       ? 'You join a video call and keep 40 % of the CPU for yourself, but the daemon is older than the page.'
       : 'You join a video call: keep 40 % of the CPU for yourself, and see what builds get now.',
-    state: st, history: history(running, 20, 20, 0, 0), ...(fails ? {} : { cacheHistory: cacheCalls() }),
+    state: st, history: history(running, 20, 20, 0, 0), ...(fails ? {} : { cacheHistory: cacheCalls(), cacheDay: CACHE_DAY }),
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 20, 0, 0, 1)] }],
     output: {},
     task: fails
@@ -233,7 +242,7 @@ function queuePosition(): Scenario {
   return {
     name: 'queue-position', anchor: false,
     card: 'An agent asks why its build (job 79) has not started. Find how many jobs are ahead of it.',
-    state: st, history: history(running, 20, 20, 0, 6), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 20, 0, 6), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 20, 0, 6, 1)] }],
     output: {}, task: { kind: 'queue-position', job: 79, position: 4 },
   };
@@ -255,7 +264,7 @@ function queueLevels(): Scenario {
   return {
     name: 'queue-levels', anchor: false,
     card: 'An agent asks why its build (job 168) has not started although later builds have. Find its place in the queue.',
-    state: st, history: history(running, 20, 20, 0, 7), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 20, 0, 7), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 20, 0, 7, 1)] }],
     output: {}, task: { kind: 'queue-position', job: 168, position: 7 },
   };
@@ -277,7 +286,7 @@ function crowded(): Scenario {
   return {
     name: 'crowded', anchor: false,
     card: 'A busy afternoon: 14 builds, 10 queued, long commands and session titles, output pane open.',
-    state: st, history: history(running, 20, 14, 30, 10), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 14, 30, 10), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [
       { moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 14, 30, 10, 1)] },
       { moment: 'next tick', dt_s: 1, events: [tick(s(2), running, 20, 14, 30, 10, 2)] },
@@ -300,7 +309,7 @@ function callMode(): Scenario {
   return {
     name: 'call-mode', anchor: false,
     card: 'A call holds the headroom at 40 %; three builds wait for disk space, memory and a target directory, not for slots. Read what the first one waits for.',
-    state: st, history: history(running, 20, 12, 40, 2, apps), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 12, 40, 2, apps), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 12, 40, 2, 1, apps)] }],
     output: {}, task: { kind: 'see', expect: 'free space on the build filesystem is below 25 GB' },
   };
@@ -316,7 +325,7 @@ function upgradePending(): Scenario {
   return {
     name: 'upgrade-pending', anchor: false,
     card: 'Three builds wait although slots are free. Find out why.',
-    state: st, history: history(running, 20, 20, 0, 3).map((h) => ({ ...h, upgrade: line })), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 20, 0, 3).map((h) => ({ ...h, upgrade: line })), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [t(1, 1)] }, { moment: 'still held', dt_s: 1, events: [t(2, 2)] }],
     output: {}, task: { kind: 'see', expect: 'upgrade pending' },
   };
@@ -327,7 +336,7 @@ function idle(): Scenario {
   const st = state([], finished, 20, 0);
   return {
     name: 'idle', anchor: false, card: 'Nothing builds. The page must say so.',
-    state: st, history: history([], 20, 20, 0, 0), cacheHistory: cacheCalls(60, -1800),
+    state: st, history: history([], 20, 20, 0, 0), cacheHistory: cacheCalls(60, -1800), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), [], 20, 20, 0, 0, 1)] }],
     output: {}, task: null,
   };
@@ -337,7 +346,7 @@ function idle(): Scenario {
 function fresh(): Scenario {
   return {
     name: 'fresh', anchor: false, card: 'The daemon has just started and no job has run yet. The page must say so in every table.',
-    state: state([], [], 20, 0), history: [tick(s(-1), [], 20, 20, 0, 0, 0)], cacheHistory: [],
+    state: state([], [], 20, 0), history: [tick(s(-1), [], 20, 20, 0, 0, 0)], cacheHistory: [], cacheDay: NO_CALLS,
     steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), [], 20, 20, 0, 0, 1)] }],
     output: {}, task: null,
   };
@@ -360,7 +369,7 @@ function machineHeadroom(): Scenario {
   return {
     name: 'machine-headroom', anchor: false,
     card: 'The headroom is 45 % of the machine, yet the machine is nearly full. Find out whether slot is holding builds back and what uses the rest.',
-    state: st, history: history(running, 20, 11, 45, 1).map((h, k) => ({ ...h, ...machine(k) })), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 11, 45, 1).map((h, k) => ({ ...h, ...machine(k) })), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [t(1, 1)] }, { moment: 'next tick', dt_s: 1, events: [t(2, 2)] }],
     output: {}, task: { kind: 'see', expect: 'over target' },
   };
@@ -388,7 +397,7 @@ function byShare(): Scenario {
   return {
     name: 'by-share', anchor: false,
     card: 'Jobs start by the CPUs they use, not by slots. Read how much of the budget is free and what the queued job waits for.',
-    state: st, history: history(running, 20, 15, 0, 1).map((h, k) => ({ ...h, shares: shares(k) })), cacheHistory: cacheCalls(),
+    state: st, history: history(running, 20, 15, 0, 1).map((h, k) => ({ ...h, shares: shares(k) })), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
     steps: [{ moment: 'loaded', dt_s: 1, events: [t(1, 1)] }, { moment: 'next tick', dt_s: 1, events: [t(2, 2)] }],
     output: {}, task: { kind: 'see', expect: '3.2 of a budget of 15.0 CPUs free' },
   };

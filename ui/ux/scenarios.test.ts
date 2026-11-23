@@ -28,3 +28,17 @@ test('api/cache-history is answered with calls, with an empty array and with 404
     }
   }
 });
+
+test('api/cache-day is answered with calls, with no call and with 404, and the sum is as the daemon sends it', () => {
+  const days = SCENARIOS.flatMap((s) => (s.cacheDay ? [s.cacheDay] : []));
+  assert.ok(days.some((d) => d.hits + d.misses + d.not_cached > 0), 'a scenario with compiler calls');
+  assert.ok(days.some((d) => d.hits + d.misses + d.not_cached === 0), 'a scenario with no call in the day');
+  assert.ok(SCENARIOS.some((s) => s.cacheDay === undefined), 'a scenario whose daemon has no such path');
+  for (const sc of SCENARIOS) {
+    const d = sc.cacheDay;
+    if (!d) continue;
+    assert.equal(d.not_cached, Object.values(d.reasons).reduce((a, n) => a + n, 0), `${sc.name}: not_cached is the sum of its reasons`);
+    assert.ok(d.t <= T0, `${sc.name}: no reading after the scenario's start`);
+    assert.equal(sc.cacheHistory !== undefined, true, `${sc.name}: a daemon with api/cache-day has api/cache-history`);
+  }
+});

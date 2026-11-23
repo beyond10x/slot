@@ -1,7 +1,7 @@
 // The compile cache chart of the chart row: its values, and its empty states, which keep the row's height.
 import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
-import { MINUTE_MS, cachePoint, percentOrDash } from '../src/lib/cache.ts';
+import { MINUTE_MS, cachePoint, minuteAndDay, percentOrDash } from '../src/lib/cache.ts';
 import { SETTLE_FRAMES, open } from './harness.ts';
 import { clsObserver, layoutShift } from './probes.ts';
 import { SCENARIOS } from './scenarios.ts';
@@ -44,17 +44,25 @@ async function heights(page: Page): Promise<{ chart: number; running: number }> 
 
 // One page per state: UXF-037 and the layout gates hold the row at both gating sizes, so each state here is opened at one.
 for (const size of GATING.slice(0, 1)) {
-  test(`busy-failed @ ${vpName(size)}: the legend has the newest minute's shares and both lines are drawn`, async ({ page, baseURL }) => {
+  test(`busy-failed @ ${vpName(size)}: the legend has the newest minute's and the 24 hours' shares and both lines are drawn`, async ({ page, baseURL }) => {
     const sc = scenario('busy-failed');
     await page.setViewportSize({ width: size.width, height: size.height });
     await open(page, baseURL ?? '/', sc);
     const minutes = sc.cacheHistory ?? [];
     const newest = minutes[minutes.length - 1];
     const now = cachePoint(newest);
+    if (!sc.cacheDay) throw new Error('busy-failed answers api/cache-day');
+    const day = cachePoint(sc.cacheDay);
     const legend = chart(page).locator('.legend > span');
-    await expect(legend.nth(0)).toHaveText(`of all calls${percentOrDash(now.all)}`);
-    await expect(legend.nth(1)).toHaveText(`of cacheable calls${percentOrDash(now.cacheable)}`);
-    expect(percentOrDash(now.all), 'the scenario has calls in its newest minute').toMatch(/^\d+ %$/);
+    await expect(legend.nth(0)).toHaveText(`of all calls${minuteAndDay(now.all, day.all)}`);
+    await expect(legend.nth(1)).toHaveText(`of cacheable calls${minuteAndDay(now.cacheable, day.cacheable)}`);
+    expect(minuteAndDay(now.all, day.all), 'the scenario has calls in its newest minute and its day').toMatch(/^\d+ % · 24 h: \d+ %$/);
+    expect(percentOrDash(now.all), 'the minute and the day differ').not.toBe(percentOrDash(day.all));
+    // Each share stays on one line beside its label: a legend of more lines would move the tables below.
+    for (const k of [0, 1]) {
+      const box = await legend.nth(k).boundingBox();
+      expect(box?.height, `legend entry ${k} takes one line`).toBeLessThan(22);
+    }
     await expect(chart(page).locator('.none')).toHaveCount(0);
     await expect.poll(async () => (await ink(page)).all, 'pixels of the line "of all calls"').toBeGreaterThan(50);
     expect((await ink(page)).cacheable, 'pixels of the line "of cacheable calls"').toBeGreaterThan(50);
@@ -76,18 +84,19 @@ for (const [name, why, size] of [['fresh', 'an empty answer', GATING[0]], ['vide
       await expect(none).toBeVisible();
       expect(await none.evaluate((el) => getComputedStyle(el).color), 'the quiet colour').toBe('rgb(92, 92, 92)');
       const legend = chart(page).locator('.legend > span');
-      await expect(legend.nth(0)).toHaveText('of all calls–');
-      await expect(legend.nth(1)).toHaveText('of cacheable calls–');
+      await expect(legend.nth(0)).toHaveText('of all calls– · 24 h: –');
+      await expect(legend.nth(1)).toHaveText('of cacheable calls– · 24 h: –');
       await page.evaluate((n) => (window as unknown as { __ux: { settle(n: number): Promise<number> } }).__ux.settle(n), SETTLE_FRAMES);
       expect(await ink(page), 'no line is drawn').toEqual({ all: 0, cacheable: 0 });
       const without = await heights(page);
 
-      // The page asks again every minute; this time the daemon has calls.
-      const minutes = scenario('busy-failed').cacheHistory ?? [];
-      await page.route('**/api/cache-history', (r) => r.fulfill({ json: minutes }));
+      // The page asks again every minute; this time the daemon has calls, and their sum over 24 hours.
+      const busy = scenario('busy-failed');
+      await page.route('**/api/cache-history', (r) => r.fulfill({ json: busy.cacheHistory ?? [] }));
+      await page.route('**/api/cache-day', (r) => r.fulfill({ json: busy.cacheDay }));
       await page.clock.fastForward(MINUTE_MS);
       await expect(none).toHaveCount(0);
-      await expect(legend.nth(0)).toHaveText(/^of all calls\d+ %$/);
+      await expect(legend.nth(0)).toHaveText(/^of all calls\d+ % · 24 h: \d+ %$/);
       await expect.poll(async () => (await ink(page)).all, 'pixels of the line "of all calls"').toBeGreaterThan(50);
       expect(await heights(page), 'the chart and the tables stand where they did without calls').toEqual(without);
       expect(await layoutShift(page), 'layout shift from the first paint to the chart with calls').toBeLessThanOrEqual(0.01);
@@ -101,12 +110,12 @@ test('idle: no call in the window shown reads so, with dashes; the 6 h window ha
   const none = chart(page).locator('.none');
   await expect(none).toHaveText('no compiler calls in this window');
   const legend = chart(page).locator('.legend > span');
-  await expect(legend.nth(0)).toHaveText('of all calls–');
-  await expect(legend.nth(1)).toHaveText('of cacheable calls–');
+  await expect(legend.nth(0), 'no minute now, the calls of the day').toHaveText('of all calls– · 24 h: 31 %');
+  await expect(legend.nth(1)).toHaveText('of cacheable calls– · 24 h: 55 %');
   const before = await heights(page);
   await page.getByLabel('window').selectOption('21600');
   await expect(none).toHaveCount(0);
   await expect.poll(async () => (await ink(page)).all).toBeGreaterThan(0);
-  await expect(legend.nth(0), 'a minute of half an hour ago is not now').toHaveText('of all calls–');
+  await expect(legend.nth(0), 'a minute of half an hour ago is not now').toHaveText('of all calls– · 24 h: 31 %');
   expect(await heights(page)).toEqual(before);
 });
