@@ -581,7 +581,7 @@ slot evict-below            # the mark and the idle keep in force, and where the
 slot evict-below 100        # delete below 100 GB free; the daemon looks at once
 slot evict-below 0          # eviction off
 slot evict-below default    # forget both: --evict-below and 2 hours apply again
-slot evict-below 100 --idle 30m   # also delete target dirs not built for 30 minutes
+slot evict-below 100 --idle 30m   # also delete target dirs idle for 30 minutes
 ```
 
 The mark set this way replaces `--evict-below`, is still raised to `--min-free-disk` when that is
