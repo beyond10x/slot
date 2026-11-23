@@ -254,7 +254,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.28.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.29.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 passing within a level for short jobs and whole-pool requests, admission by disk and memory,
 holds on the host's CPUs, admission by share (off by default), run-time limit, build processes
 per job, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`),
@@ -364,8 +364,8 @@ Open, one line each, with where the design lives. A session starts with (e).
   it saturates near 80 % at a load of 100 as the CPU figure does, and a mark under that holds
   most of the day. Every held job still starts on the 10-minute bound (40 in that window), so
   the wait is set by the bound and the queue's length, not by the mark.
-- (ab) `--min-free-disk` and `--evict-below` are options of `slot serve`, so a change needs a
-  full restart (g); both belong in `limits.json`.
+- (ab) `--min-free-disk` is an option of `slot serve`, so a change needs a full restart (g); it
+  belongs in `limits.json`. The eviction mark is there already (`slot evict-below`).
 
 ## Never
 

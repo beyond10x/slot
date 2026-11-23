@@ -886,8 +886,8 @@ fn eviction_touches_only_target_dirs_jobs_built_into() {
         min_idle: Duration::from_secs(7200),
         dry_run: false,
     };
-    let busy_repos: HashSet<String> = ["busy".to_string()].into();
-    let (_, planned) = evict_pass(&seen, &busy_repos, &HashSet::new(), now, s);
+    let busy_cwds: HashSet<PathBuf> = [w.join("busy")].into();
+    let (_, planned) = evict_pass(&seen, &HashSet::new(), &busy_cwds, now, s);
     let paths: Vec<&Path> = planned.iter().map(|(c, _)| c.path.as_path()).collect();
     assert_eq!(paths, [old.as_path()]);
     assert!(planned[0].1 >= 4096);
@@ -3382,6 +3382,100 @@ fn evict_below_0_stays_off_whatever_the_disk_hold_is() {
     let e = f.server.state().evict;
     assert_eq!((e.floor, e.checked_ms), (0, 0), "{e:?}");
     drop(c);
+}
+
+/// Status and text of the answer to `PUT /api/evict-below` with `body`.
+fn put_evict_below(f: &Fixture, body: &str) -> (u16, String) {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    let state = axum::extract::State(Arc::clone(&f.server));
+    let body = axum::body::Bytes::from(body.to_owned());
+    answer(http::evict_below_put(state, headers, body))
+}
+
+/// `PUT /api/evict-below`, the call `slot evict-below` makes, turns
+/// eviction on at run time over `--evict-below 0`: the watch looks at once
+/// at the new mark and deletes, the mark is saved beside the headroom and
+/// in force in the daemon that starts next, and `null` forgets it. The disk
+/// hold keeps its own mark. A negative or too large mark is refused.
+#[test]
+fn the_eviction_mark_is_set_at_run_time_saved_and_looked_at_once() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(45 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 25 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 0,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+    });
+    let target = old_target(&f, "old");
+    let view = |(status, text): (u16, String)| {
+        assert_eq!(status, 200, "{text}");
+        serde_json::from_str::<crate::evict::BelowView>(&text).unwrap()
+    };
+    let get = || {
+        use axum::response::IntoResponse;
+        let state = axum::extract::State(Arc::clone(&f.server));
+        view(answer(async move {
+            http::evict_below_get(state).await.into_response()
+        }))
+    };
+    assert_eq!((get().evict_below_gb, get().floor), (None, 0));
+
+    for bad in [
+        "{}",
+        r#"{"evict_below_gb":-1}"#,
+        r#"{"evict_below_gb":100001}"#,
+        "",
+    ] {
+        let (status, text) = put_evict_below(&f, bad);
+        assert_eq!(status, 400, "{bad}: {text}");
+        assert!(text.starts_with("slot: "), "{bad}: {text}");
+    }
+    assert_eq!(get().evict_below_gb, None, "a refused body changed nothing");
+
+    let v = view(put_evict_below(&f, r#"{"evict_below_gb":50}"#));
+    assert_eq!((v.evict_below_gb, v.floor), (Some(50.0), 50 * GB));
+    wait_for_jobs(&f, "the look at the new mark", || !target.exists());
+    let e = f.server.state().evict;
+    assert_eq!((e.floor, e.raised_from), (50 * GB, 0), "{e:?}");
+    assert_eq!(e.last.len(), 1, "{e:?}");
+    let saved = std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    assert!(saved.contains(r#""evict_below_gb":50.0"#), "{saved}");
+    let next = Server::new(Config {
+        socket: f.root.join("s2"),
+        evict: crate::evict::Settings {
+            floor: 0,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        },
+        ..config(&f.root, 2)
+    })
+    .unwrap();
+    assert_eq!(next.evict_below_view().evict_below_gb, Some(50.0));
+
+    let v = view(put_evict_below(&f, r#"{"evict_below_gb":null}"#));
+    assert_eq!(
+        (v.evict_below_gb, v.floor),
+        (None, 0),
+        "the option again: off"
+    );
+    wait_for_jobs(&f, "eviction off again", || {
+        f.server.state().evict.floor == 0
+    });
+    let saved = std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    assert!(!saved.contains("evict_below_gb"), "{saved}");
 }
 
 /// Declares, inside one test, the three parts of the CPUs its daemon reads

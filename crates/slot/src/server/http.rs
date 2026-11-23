@@ -48,6 +48,10 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
             "/api/job-parallel",
             get(job_parallel_get).put(job_parallel_put),
         )
+        .route(
+            "/api/evict-below",
+            get(evict_below_get).put(evict_below_put),
+        )
         .route("/api/cpu-limit", get(cpu_limit_get).put(cpu_limit_put))
         .route("/api/admission", get(admission_get).put(admission_put))
         .fallback(fallback)
@@ -213,6 +217,29 @@ pub(super) async fn job_parallel_put(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
     };
     match s.set_job_parallel(&req) {
+        Ok(v) => axum::Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("{e}\n")).into_response(),
+    }
+}
+
+pub(super) async fn evict_below_get(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    axum::Json(s.evict_below_view())
+}
+
+pub(super) async fn evict_below_put(
+    State(s): State<Arc<Server>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let port = s.cfg.http.map_or(0, |a| a.port());
+    if let Some(r) = refuse_change(&headers, port) {
+        return r.into_response();
+    }
+    let req: crate::evict::BelowRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
+    };
+    match s.set_evict_below(&req) {
         Ok(v) => axum::Json(v).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, format!("{e}\n")).into_response(),
     }

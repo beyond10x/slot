@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.29.0 — 2026-11-23
+
+- `slot evict-below [GB|default]` sets the eviction mark on the running daemon: the free space
+  below which it deletes idle target directories. `--evict-below` changed only at a full
+  restart, which drains the pool. The mark replaces `--evict-below`, is still raised to
+  `--min-free-disk`, leaves the wait for disk unchanged, and 0 turns eviction off; `default`
+  forgets it. A new mark makes eviction look at once. It is kept in `limits.json` only when set;
+  the API is `GET` and `PUT /api/evict-below` with `evict_below_gb`.
+
+- Eviction keeps only what a job uses: a target directory a queued or running job builds into,
+  or one in the checkout such a job runs in. Before, any queued or running job of a repository
+  kept every target directory of that repository, so on a host with many sessions at work
+  nothing of their repositories was deleted.
+
 ## 0.28.0 — 2026-11-23
 
 - The compile cache chart's legend gives the share of the last 24 hours beside the newest minute's

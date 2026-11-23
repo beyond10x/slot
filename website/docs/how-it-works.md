@@ -571,9 +571,26 @@ disk: 45.0 GB free, under 50.0 GB, raised from 40.0 GB to the disk hold's mark: 
 ```
 
 A job that starts to wait for disk makes the daemon look at once instead of at the next minute.
-`--evict-below 0` still turns eviction off. It never deletes:
+`--evict-below 0` still turns eviction off.
 
-- a target directory of a repository with a queued or running job;
+`slot evict-below` changes the mark on the running daemon, without a restart and without
+changing the wait for disk:
+
+```sh
+slot evict-below            # the mark in force and where it comes from
+slot evict-below 100        # delete below 100 GB free; the daemon looks at once
+slot evict-below 0          # eviction off
+slot evict-below default    # forget it: --evict-below applies again
+```
+
+The mark set this way replaces `--evict-below`, is still raised to `--min-free-disk` when that is
+larger, and is kept in `limits.json` in the state directory across reloads and restarts. The
+daemon serves it at `GET` and `PUT /api/evict-below` (`{"evict_below_gb": 100}`, `null` to
+forget it). Eviction never deletes:
+
+- a target directory a queued or running job builds into, or one in the checkout a queued or
+  running job runs in (the directory above the target directory, or below it); another worktree
+  or clone of the same repository may go;
 - one built in the last 2 hours;
 - a directory no job built into, or one without the `CACHEDIR.TAG` Cargo writes;
 - a directory a process uses: its executable, its working directory, or a file it has open or

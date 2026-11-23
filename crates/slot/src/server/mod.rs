@@ -495,6 +495,12 @@ pub struct Server {
     /// Woken by a job held for disk, so eviction looks at once
     /// ([`Server::evict_watch`]).
     evict_wake: tokio::sync::Notify,
+    /// Woken by `slot evict-below`, so eviction looks at once at the new
+    /// mark.
+    evict_set: tokio::sync::Notify,
+    /// The eviction mark set with `slot evict-below`, GB, as saved in
+    /// `limits.json`; `None` = `--evict-below`.
+    evict_below: Mutex<Option<f64>>,
     /// The daemon's cgroup v2 path, from `/proc/self/cgroup`.
     own_cgroup: Option<String>,
     /// The daemon's user id, which names its login sessions' cgroups.
@@ -745,12 +751,14 @@ impl Server {
             unaccounted: AtomicU64::new(0),
             unaccounted_since: AtomicI64::new(0),
             evict: Mutex::new(crate::evict::Report {
-                floor: evict_settings.floor,
+                floor: crate::evict::below(saved.evict_below_gb, evict_settings.floor),
                 dry_run: evict_settings.dry_run,
                 ..crate::evict::Report::default()
             }),
             evicting: Mutex::new(HashSet::new()),
             evict_wake: tokio::sync::Notify::new(),
+            evict_set: tokio::sync::Notify::new(),
+            evict_below: Mutex::new(saved.evict_below_gb),
             own_cgroup: std::fs::read_to_string("/proc/self/cgroup")
                 .ok()
                 .and_then(|s| machine::own_cgroup(&s)),
@@ -901,9 +909,8 @@ impl Server {
         tokio::spawn(Arc::clone(&self).token_watch());
         tokio::spawn(Arc::clone(&self).priority_watch());
         tokio::spawn(Arc::clone(&self).run_limit_watch());
-        if self.cfg.evict.floor > 0 {
-            tokio::spawn(Arc::clone(&self).evict_watch());
-        }
+        // Always: `slot evict-below` may turn eviction on at run time.
+        tokio::spawn(Arc::clone(&self).evict_watch());
         if self.cfg.sccache_watch {
             tokio::spawn(Arc::clone(&self).sccache_watch());
             tokio::spawn(Arc::clone(&self).cache_stats_watch());
@@ -3021,6 +3028,7 @@ impl Server {
                 share_max: shares.max,
                 share_pressure_max: shares.pressure_max,
                 share_min_budget: shares.min_budget,
+                evict_below_gb: *self.evict_below.lock().expect("evict below lock"),
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -3218,6 +3226,29 @@ impl Server {
         *self.job_parallel.lock().expect("job parallel lock") = to;
         self.save_limits();
         Ok(self.job_parallel_view())
+    }
+
+    /// The eviction mark in force and where it comes from, as `GET
+    /// /api/evict-below` answers.
+    pub fn evict_below_view(&self) -> crate::evict::BelowView {
+        crate::evict::BelowView::of(
+            *self.evict_below.lock().expect("evict below lock"),
+            self.cfg.evict.floor,
+            self.cfg.admission.min_free_disk,
+        )
+    }
+
+    /// Sets or forgets the eviction mark (`slot evict-below`), saves it and
+    /// makes eviction look at once at the new mark.
+    pub fn set_evict_below(
+        &self,
+        req: &crate::evict::BelowRequest,
+    ) -> Result<crate::evict::BelowView, String> {
+        let to = req.setting()?;
+        *self.evict_below.lock().expect("evict below lock") = to;
+        self.save_limits();
+        self.evict_set.notify_one();
+        Ok(self.evict_below_view())
     }
 
     /// The mark and the floor of the CPU limit in force.
@@ -3986,17 +4017,15 @@ impl Server {
     /// Every 60 s, when the filesystem of a target directory jobs built into
     /// has less free space than the mark, deletes the least recently built
     /// ones until it has the mark plus the margin; in a dry run it only
-    /// says which. The mark is the larger of `--evict-below` and
-    /// `--min-free-disk` ([`crate::evict::mark`]), so eviction runs whenever
-    /// the disk hold holds builds. A job held for disk wakes the watch at
-    /// once when its last look found enough free space or deleted something;
-    /// a look that found too little and could delete nothing waits for the
-    /// minute. See [`crate::evict`].
+    /// says which. The mark is the larger of `--evict-below` (or the mark
+    /// `slot evict-below` set, read at every look) and `--min-free-disk`
+    /// ([`crate::evict::mark`]), so eviction runs whenever the disk hold
+    /// holds builds. A job held for disk wakes the watch at once when its
+    /// last look found enough free space or deleted something; a look that
+    /// found too little and could delete nothing waits for the minute. A
+    /// new mark always wakes it. See [`crate::evict`].
     async fn evict_watch(self: Arc<Self>) {
         let flag = self.cfg.evict.dry_run;
-        let below = self.cfg.evict.floor;
-        let floor = crate::evict::mark(below, self.cfg.admission.min_free_disk);
-        let raised_from = if floor > below { below } else { 0 };
         let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -4006,31 +4035,45 @@ impl Server {
             tokio::select! {
                 _ = tick.tick() => {}
                 () = self.evict_wake.notified(), if wake => {}
+                () = self.evict_set.notified() => {}
+            }
+            let below = crate::evict::below(
+                *self.evict_below.lock().expect("evict below lock"),
+                self.cfg.evict.floor,
+            );
+            let floor = crate::evict::mark(below, self.cfg.admission.min_free_disk);
+            let raised_from = if floor > below { below } else { 0 };
+            if floor == 0 {
+                let mut r = self.evict.lock().expect("evict lock");
+                r.floor = 0;
+                r.raised_from = 0;
+                wake = true;
+                continue;
             }
             let s = crate::evict::Settings {
                 floor,
                 dry_run: crate::evict::dry_run(&self.cfg.state_dir, flag),
                 ..self.cfg.evict
             };
-            let (seen, busy_repos, busy_dirs) = {
+            let (seen, busy_dirs, busy_cwds) = {
                 let g = self.inner.lock().expect("server lock");
-                let repos: HashSet<String> = g
-                    .active
-                    .values()
-                    .filter(|l| !l.job.repo.is_empty())
-                    .map(|l| l.job.repo.clone())
-                    .collect();
                 let dirs: HashSet<PathBuf> = g
                     .active
                     .values()
                     .filter(|l| !l.job.target_dir.is_empty())
                     .map(|l| PathBuf::from(&l.job.target_dir))
                     .collect();
-                (g.targets.clone(), repos, dirs)
+                let cwds: HashSet<PathBuf> = g
+                    .active
+                    .values()
+                    .filter(|l| !l.job.cwd.is_empty())
+                    .map(|l| PathBuf::from(&l.job.cwd))
+                    .collect();
+                (g.targets.clone(), dirs, cwds)
             };
             let known = seen.len() as u32;
             let Ok((lowest, planned)) = tokio::task::spawn_blocking(move || {
-                evict_pass_with(&seen, &busy_repos, &busy_dirs, now_ms(), s, disk_free)
+                evict_pass_with(&seen, &busy_dirs, &busy_cwds, now_ms(), s, disk_free)
             })
             .await
             else {
@@ -4095,14 +4138,17 @@ impl Server {
         }
     }
 
-    /// Deletes one target directory unless a job of its repository or
-    /// directory started meanwhile; returns what happened.
+    /// Deletes one target directory unless a job that builds into it or
+    /// runs in its checkout started meanwhile; returns what happened.
     async fn evict_one(&self, c: &crate::evict::Candidate) -> String {
         {
             let g = self.inner.lock().expect("server lock");
             let busy = g.active.values().any(|l| {
-                (!c.repo.is_empty() && l.job.repo == c.repo)
-                    || Path::new(&l.job.target_dir) == c.path.as_path()
+                crate::evict::job_keeps(
+                    &c.path,
+                    Path::new(&l.job.target_dir),
+                    Path::new(&l.job.cwd),
+                )
             });
             if busy {
                 return "kept: a job started".into();
@@ -4622,21 +4668,23 @@ impl Attached {
 #[cfg(test)]
 fn evict_pass(
     seen: &HashMap<PathBuf, (String, i64)>,
-    busy_repos: &HashSet<String>,
     busy_dirs: &HashSet<PathBuf>,
+    busy_cwds: &HashSet<PathBuf>,
     now: i64,
     s: crate::evict::Settings,
 ) -> (Option<u64>, Vec<(crate::evict::Candidate, u64)>) {
-    evict_pass_with(seen, busy_repos, busy_dirs, now, s, admission::disk_free)
+    evict_pass_with(seen, busy_dirs, busy_cwds, now, s, admission::disk_free)
 }
 
 /// [`evict_pass`] with the free space read by `disk_free`
 /// ([`Config::disk_free`]). The lowest free space is `None` when no known
-/// target directory exists.
+/// target directory exists. `busy_dirs` and `busy_cwds` are the target
+/// and working directories of queued and running jobs
+/// ([`crate::evict::candidates`]).
 fn evict_pass_with(
     seen: &HashMap<PathBuf, (String, i64)>,
-    busy_repos: &HashSet<String>,
     busy_dirs: &HashSet<PathBuf>,
+    busy_cwds: &HashSet<PathBuf>,
     now: i64,
     s: crate::evict::Settings,
     disk_free: fn(&Path) -> Option<u64>,
@@ -4648,7 +4696,7 @@ fn evict_pass_with(
         .filter_map(|p| disk_free(p))
         .min();
     let cands: Vec<evict::Candidate> =
-        evict::candidates(seen, busy_repos, busy_dirs, now, s.min_idle)
+        evict::candidates(seen, busy_dirs, busy_cwds, now, s.min_idle)
             .into_iter()
             .filter(|c| evict::is_target_dir(&c.path))
             .collect();

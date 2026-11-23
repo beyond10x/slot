@@ -51,7 +51,7 @@ slot serve [OPTIONS]
 - `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes. `slot priority promote-after` changes it at run time; a value set that way wins over this option until `slot priority promote-after default` removes it (default `1800`)
 - `--pass-for`: A queued job may be passed by later jobs of its own level only until it has waited this long: by a job predicted to run 5 s or less, and by a job that fits in the slots a larger request collected and cannot use yet. From then on it starts before every job that came after it. A job of a lower level never passes it. 0: nobody passes; the queue is served by level, then arrival (default `300`)
 - `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
-- `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. The mark is `--min-free-disk` when that is larger, so eviction runs whenever jobs wait for disk; a job that starts to wait makes it look at once. Directories of a repository with a queued or running job, or built in the last 2 h, are kept. 0 turns it off, whatever `--min-free-disk` is (default `40`)
+- `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. The mark is `--min-free-disk` when that is larger, so eviction runs whenever jobs wait for disk; a job that starts to wait makes it look at once. A directory a queued or running job builds into or whose checkout it runs in, one built in the last 2 h, and one a process uses are kept. 0 turns it off, whatever `--min-free-disk` is. `slot evict-below` replaces this mark at run time (default `40`)
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
 
@@ -199,6 +199,17 @@ slot job-parallel [OPTIONS] [N|off]
 ```
 
 - `<LIMIT>`: Build processes one job may run at once, from 1; `off` for no limit, the default. With a limit N the daemon starts a job without the pool's jobserver and with `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` set to N, or to the slots the job holds if that is more (`slot --tokens`): `cargo` and `make` in the job then bound themselves and take no slots of the pool, so the pool limits how many jobs run, not how many compilers. It applies to the jobs that start after the change, is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+### `slot evict-below`
+
+Show or set the eviction mark: the free space below which the daemon deletes idle Cargo target directories, without a restart
+
+```text
+slot evict-below [OPTIONS] [GB|default]
+```
+
+- `<MARK>`: Free space, GB, below which eviction deletes idle target directories, from 0 (eviction off) to 100000; `default` forgets the mark and `serve --evict-below` applies again. It replaces `--evict-below` and is raised to `--min-free-disk` when that is larger; the disk hold itself does not change. Eviction looks at once. The mark is kept in `limits.json` in the state directory and holds across reloads and restarts
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cpu-limit`

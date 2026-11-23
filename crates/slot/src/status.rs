@@ -245,6 +245,32 @@ pub fn job_parallel(
     serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
 }
 
+/// Reads the eviction mark (`slot evict-below`), or first sets or forgets
+/// it.
+pub fn evict_below(
+    addr: &str,
+    mark: Option<crate::evict::BelowSetting>,
+) -> Result<crate::evict::BelowView> {
+    let path = "/api/evict-below";
+    let answer = match mark {
+        None => request(addr, "GET", path, None),
+        Some(m) => {
+            let body = serde_json::to_string(&crate::evict::BelowRequest {
+                evict_below_gb: m.value(),
+            })?;
+            request(addr, "PUT", path, Some(&body))
+        }
+    };
+    let answer = answer.map_err(|e| {
+        if e.to_string().contains(" 404") {
+            e.context("the daemon is older than this slot and has no run-time eviction mark")
+        } else {
+            e
+        }
+    })?;
+    serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
+}
+
 /// `slot job-parallel`: the value in force.
 pub fn render_job_parallel(v: &JobParallelView) -> String {
     match v.job_parallel {
