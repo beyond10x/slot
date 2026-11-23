@@ -501,6 +501,14 @@ pub struct Server {
     /// The eviction mark set with `slot evict-below`, GB, as saved in
     /// `limits.json`; `None` = `--evict-below`.
     evict_below: Mutex<Option<f64>>,
+    /// The idle keep set with `slot evict-below --idle`, seconds, as saved
+    /// in `limits.json`; `None` = [`crate::evict::Settings::min_idle`] of
+    /// the config.
+    evict_idle: Mutex<Option<u64>>,
+    /// Target directories whose removal failed, with the time (Unix
+    /// milliseconds): eviction leaves them out for
+    /// [`crate::evict::FAILED_KEEP`], so a pass plans the next ones.
+    evict_failed: Mutex<HashMap<PathBuf, i64>>,
     /// The daemon's cgroup v2 path, from `/proc/self/cgroup`.
     own_cgroup: Option<String>,
     /// The daemon's user id, which names its login sessions' cgroups.
@@ -759,6 +767,8 @@ impl Server {
             evict_wake: tokio::sync::Notify::new(),
             evict_set: tokio::sync::Notify::new(),
             evict_below: Mutex::new(saved.evict_below_gb),
+            evict_idle: Mutex::new(saved.evict_idle_s),
+            evict_failed: Mutex::new(HashMap::new()),
             own_cgroup: std::fs::read_to_string("/proc/self/cgroup")
                 .ok()
                 .and_then(|s| machine::own_cgroup(&s)),
@@ -3029,6 +3039,7 @@ impl Server {
                 share_pressure_max: shares.pressure_max,
                 share_min_budget: shares.min_budget,
                 evict_below_gb: *self.evict_below.lock().expect("evict below lock"),
+                evict_idle_s: *self.evict_idle.lock().expect("evict idle lock"),
             }
         };
         if let Err(e) = limits::save(&self.cfg.state_dir, saved) {
@@ -3228,24 +3239,34 @@ impl Server {
         Ok(self.job_parallel_view())
     }
 
-    /// The eviction mark in force and where it comes from, as `GET
-    /// /api/evict-below` answers.
+    /// The eviction mark and the idle keep in force and where they come
+    /// from, as `GET /api/evict-below` answers.
     pub fn evict_below_view(&self) -> crate::evict::BelowView {
         crate::evict::BelowView::of(
             *self.evict_below.lock().expect("evict below lock"),
             self.cfg.evict.floor,
             self.cfg.admission.min_free_disk,
         )
+        .with_idle(
+            *self.evict_idle.lock().expect("evict idle lock"),
+            self.cfg.evict.min_idle,
+        )
     }
 
-    /// Sets or forgets the eviction mark (`slot evict-below`), saves it and
-    /// makes eviction look at once at the new mark.
+    /// Sets or forgets the eviction mark and the idle keep (`slot
+    /// evict-below`), the ones the request names, saves them and makes
+    /// eviction look at once.
     pub fn set_evict_below(
         &self,
         req: &crate::evict::BelowRequest,
     ) -> Result<crate::evict::BelowView, String> {
-        let to = req.setting()?;
-        *self.evict_below.lock().expect("evict below lock") = to;
+        let req = req.checked()?;
+        if let Some(to) = req.evict_below_gb {
+            *self.evict_below.lock().expect("evict below lock") = to;
+        }
+        if let Some(to) = req.evict_idle_s {
+            *self.evict_idle.lock().expect("evict idle lock") = to;
+        }
         self.save_limits();
         self.evict_set.notify_one();
         Ok(self.evict_below_view())
@@ -4053,7 +4074,20 @@ impl Server {
             let s = crate::evict::Settings {
                 floor,
                 dry_run: crate::evict::dry_run(&self.cfg.state_dir, flag),
+                min_idle: crate::evict::min_idle(
+                    *self.evict_idle.lock().expect("evict idle lock"),
+                    self.cfg.evict.min_idle,
+                ),
                 ..self.cfg.evict
+            };
+            // A directory whose removal failed in the last hour is left
+            // out like a busy one, so the pass plans the next ones.
+            let failed: Vec<PathBuf> = {
+                let keep = i64::try_from(crate::evict::FAILED_KEEP.as_millis()).unwrap_or(i64::MAX);
+                let now = now_ms();
+                let mut f = self.evict_failed.lock().expect("evict failed lock");
+                f.retain(|_, at| now - *at < keep);
+                f.keys().cloned().collect()
             };
             let (seen, busy_dirs, busy_cwds) = {
                 let g = self.inner.lock().expect("server lock");
@@ -4062,6 +4096,7 @@ impl Server {
                     .values()
                     .filter(|l| !l.job.target_dir.is_empty())
                     .map(|l| PathBuf::from(&l.job.target_dir))
+                    .chain(failed)
                     .collect();
                 let cwds: HashSet<PathBuf> = g
                     .active
@@ -4087,6 +4122,17 @@ impl Server {
                 } else {
                     self.evict_one(&c).await
                 };
+                if action.starts_with("failed") {
+                    eprintln!(
+                        "slot: disk: eviction leaves {} out for {}: its removal failed",
+                        c.path.display(),
+                        crate::run_limit::text(crate::evict::FAILED_KEEP.as_secs())
+                    );
+                    self.evict_failed
+                        .lock()
+                        .expect("evict failed lock")
+                        .insert(c.path.clone(), now_ms());
+                }
                 done.push(crate::evict::Eviction {
                     path: c.path.to_string_lossy().into_owned(),
                     bytes,
@@ -4680,7 +4726,8 @@ fn evict_pass(
 /// ([`Config::disk_free`]). The lowest free space is `None` when no known
 /// target directory exists. `busy_dirs` and `busy_cwds` are the target
 /// and working directories of queued and running jobs
-/// ([`crate::evict::candidates`]).
+/// ([`crate::evict::candidates`]); `busy_dirs` also holds the target
+/// directories whose removal failed in the last hour.
 fn evict_pass_with(
     seen: &HashMap<PathBuf, (String, i64)>,
     busy_dirs: &HashSet<PathBuf>,

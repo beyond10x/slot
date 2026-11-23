@@ -245,19 +245,18 @@ pub fn job_parallel(
     serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
 }
 
-/// Reads the eviction mark (`slot evict-below`), or first sets or forgets
-/// it.
+/// Reads the eviction mark and the idle keep (`slot evict-below`), or first
+/// sets or forgets them.
 pub fn evict_below(
     addr: &str,
     mark: Option<crate::evict::BelowSetting>,
+    idle_s: Option<u64>,
 ) -> Result<crate::evict::BelowView> {
     let path = "/api/evict-below";
-    let answer = match mark {
+    let answer = match crate::evict::BelowRequest::of(mark, idle_s) {
         None => request(addr, "GET", path, None),
-        Some(m) => {
-            let body = serde_json::to_string(&crate::evict::BelowRequest {
-                evict_below_gb: m.value(),
-            })?;
+        Some(r) => {
+            let body = serde_json::to_string(&r)?;
             request(addr, "PUT", path, Some(&body))
         }
     };

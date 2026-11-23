@@ -577,21 +577,31 @@ A job that starts to wait for disk makes the daemon look at once instead of at t
 changing the wait for disk:
 
 ```sh
-slot evict-below            # the mark in force and where it comes from
+slot evict-below            # the mark and the idle keep in force, and where they come from
 slot evict-below 100        # delete below 100 GB free; the daemon looks at once
 slot evict-below 0          # eviction off
-slot evict-below default    # forget it: --evict-below applies again
+slot evict-below default    # forget both: --evict-below and 2 hours apply again
+slot evict-below 100 --idle 30m   # also delete target dirs idle for 30 minutes
 ```
 
 The mark set this way replaces `--evict-below`, is still raised to `--min-free-disk` when that is
 larger, and is kept in `limits.json` in the state directory across reloads and restarts. The
 daemon serves it at `GET` and `PUT /api/evict-below` (`{"evict_below_gb": 100}`, `null` to
-forget it). Eviction never deletes:
+forget it).
+
+`--idle` sets how long eviction keeps a target directory after its last build: from `5m` to
+`168h` (7 days), 2 hours until it is set. After a host restart every session rebuilds, and with
+2 hours nearly every target directory is too new to delete. It applies at the next look, is kept
+in `limits.json` like the mark, and is `evict_idle_s` (seconds) in the same `PUT` body; a field
+left out stays as it is, `null` forgets it. Eviction never deletes:
 
 - a target directory a queued or running job builds into, or one in the checkout a queued or
   running job runs in (the directory above the target directory, or below it); another worktree
   or clone of the same repository may go;
-- one built in the last 2 hours;
+- one built in the last 2 hours, or the idle keep set with `--idle`;
+- one whose deletion failed in the last hour, for example a managed worktree with a live session
+  lease: the next look deletes the next candidates instead (the journal says
+  `slot: disk: eviction leaves <path> out for 1h: its removal failed` once);
 - a directory no job built into, or one without the `CACHEDIR.TAG` Cargo writes;
 - a directory a process uses: its executable, its working directory, or a file it has open or
   mapped is inside it;

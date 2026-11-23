@@ -83,6 +83,10 @@ pub struct Saved {
     /// evict-below`); `None`, and absent from the file: `--evict-below`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evict_below_gb: Option<f64>,
+    /// The idle keep of eviction, seconds (`slot evict-below --idle`); `None`,
+    /// and absent from the file: [`crate::evict::DEFAULT_MIN_IDLE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evict_idle_s: Option<u64>,
 }
 
 // serde hands `skip_serializing_if` a reference.
@@ -134,6 +138,9 @@ pub fn load(dir: &Path) -> Saved {
                 evict_below_gb: s
                     .evict_below_gb
                     .filter(|&g| crate::evict::below_refused(g).is_none()),
+                evict_idle_s: s
+                    .evict_idle_s
+                    .filter(|&i| crate::evict::idle_refused(i).is_none()),
             }
         })
         .unwrap_or_default()
@@ -457,6 +464,44 @@ mod tests {
             )
             .unwrap();
             assert_eq!(load(dir.path()).evict_below_gb, None, "{bad} is dropped");
+        }
+    }
+
+    #[test]
+    fn the_idle_keep_is_kept_and_absent_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let before = r#"{"headroom_percent":30,"base":"pool","evict_below_gb":100.0}"#;
+        std::fs::write(&file, before).unwrap();
+        let old = load(dir.path());
+        assert_eq!(old.evict_idle_s, None, "a file from before the setting");
+        save(
+            dir.path(),
+            Saved {
+                evict_idle_s: Some(1800),
+                ..old
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.ends_with(r#","evict_idle_s":1800}"#), "{text}");
+        let s = load(dir.path());
+        assert_eq!(
+            (s.evict_idle_s, s.evict_below_gb),
+            (Some(1800), Some(100.0))
+        );
+        save(
+            dir.path(),
+            Saved {
+                evict_idle_s: None,
+                ..s
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        for bad in ["0", "299", "604801"] {
+            std::fs::write(&file, format!(r#"{{"evict_idle_s":{bad}}}"#)).unwrap();
+            assert_eq!(load(dir.path()).evict_idle_s, None, "{bad} is dropped");
         }
     }
 

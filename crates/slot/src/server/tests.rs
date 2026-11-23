@@ -3478,6 +3478,140 @@ fn the_eviction_mark_is_set_at_run_time_saved_and_looked_at_once() {
     assert!(!saved.contains("evict_below_gb"), "{saved}");
 }
 
+/// The view a `PUT /api/evict-below` answers with.
+fn evict_view((status, text): (u16, String)) -> crate::evict::BelowView {
+    assert_eq!(status, 200, "{text}");
+    serde_json::from_str(&text).unwrap()
+}
+
+/// `PUT /api/evict-below` with `evict_idle_s` replaces the 2 h idle keep at
+/// run time: a target directory built 40 min ago is kept at 2 h and
+/// deleted at the next look after `{"evict_idle_s":1800}`. The mark is left
+/// as it is, the keep is saved, and `null` forgets it.
+#[test]
+fn the_idle_keep_is_set_at_run_time_and_applies_at_the_next_look() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(45 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 25 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 0,
+            margin: 10 * GB,
+            min_idle: crate::evict::DEFAULT_MIN_IDLE,
+            dry_run: false,
+        };
+    });
+    let target = old_target(&f, "recent");
+    f.server
+        .inner
+        .lock()
+        .unwrap()
+        .targets
+        .insert(target.clone(), ("recent".into(), now_ms() - 40 * 60_000));
+    let v = evict_view(put_evict_below(&f, r#"{"evict_below_gb":50}"#));
+    assert_eq!((v.evict_idle_s, v.idle_s), (None, 7200), "the default");
+    wait_for_jobs(&f, "the look at the new mark", || {
+        f.server.state().evict.checked_ms > 0
+    });
+    assert!(target.exists(), "built 40 min ago: kept at 2 h");
+
+    let v = evict_view(put_evict_below(&f, r#"{"evict_idle_s":1800}"#));
+    assert_eq!((v.evict_idle_s, v.idle_s), (Some(1800), 1800));
+    assert_eq!(v.evict_below_gb, Some(50.0), "the mark is left as it is");
+    wait_for_jobs(&f, "the look at the new idle keep", || !target.exists());
+    let saved = std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    assert!(saved.contains(r#""evict_idle_s":1800"#), "{saved}");
+
+    let (status, text) = put_evict_below(&f, r#"{"evict_idle_s":60}"#);
+    assert_eq!(status, 400, "{text}");
+    assert!(text.starts_with("slot: the idle keep"), "{text}");
+    let v = evict_view(put_evict_below(&f, r#"{"evict_idle_s":null}"#));
+    assert_eq!((v.evict_idle_s, v.idle_s), (None, 7200), "forgotten");
+    assert_eq!(v.evict_below_gb, Some(50.0));
+    let saved = std::fs::read_to_string(f.root.join("state").join(limits::FILE)).unwrap();
+    assert!(!saved.contains("evict_idle_s"), "{saved}");
+}
+
+/// A target directory whose removal fails is left out of the next pass:
+/// the pass plans and deletes the next candidate instead of failing on the
+/// same one every minute.
+#[test]
+fn a_target_dir_whose_removal_failed_is_skipped_and_the_next_one_deleted() {
+    use std::os::unix::fs::PermissionsExt as _;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(1000)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 0;
+        c.evict = crate::evict::Settings {
+            floor: 0,
+            margin: 0,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+    });
+    let stuck = old_target(&f, "stuck");
+    let next = old_target(&f, "next");
+    for (t, last) in [(&stuck, 1), (&next, 2)] {
+        std::fs::write(t.join("blob"), vec![1u8; 1 << 16]).unwrap();
+        let repo = t.parent().unwrap().file_name().unwrap();
+        f.server
+            .inner
+            .lock()
+            .unwrap()
+            .targets
+            .insert(t.clone(), (repo.to_string_lossy().into_owned(), last));
+    }
+    let mode = |m| std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o555);
+    if std::fs::write(stuck.join("probe"), "").is_ok() {
+        // Run as root: a read-only directory does not stop a removal.
+        mode(0o755);
+        return;
+    }
+    // 5000 bytes: the oldest directory alone would free enough.
+    let body = r#"{"evict_below_gb":0.000005}"#;
+    evict_view(put_evict_below(&f, body));
+    wait_for_jobs(&f, "the failed removal", || {
+        f.server
+            .state()
+            .evict
+            .last
+            .iter()
+            .any(|e| e.action.starts_with("failed"))
+    });
+    let e = f.server.state().evict;
+    assert_eq!(e.last.len(), 1, "{e:?}");
+    assert_eq!(e.last[0].path, stuck.to_string_lossy(), "{e:?}");
+    assert!(next.exists());
+
+    evict_view(put_evict_below(&f, body));
+    let next_text = next.to_string_lossy().into_owned();
+    wait_for_jobs(&f, "the next candidate deleted", || {
+        f.server
+            .state()
+            .evict
+            .last
+            .iter()
+            .any(|e| e.path == next_text)
+    });
+    mode(0o755);
+    assert!(stuck.exists() && !next.exists());
+    let e = f.server.state().evict;
+    assert_eq!(
+        e.last.len(),
+        1,
+        "the failed one is not planned again: {e:?}"
+    );
+    assert_eq!(e.last[0].action, "deleted", "{e:?}");
+}
+
 /// Declares, inside one test, the three parts of the CPUs its daemon reads
 /// as busy, each in tenths of a CPU, and the function that reads them.
 macro_rules! cpu_parts {

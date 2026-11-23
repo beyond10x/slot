@@ -47,10 +47,12 @@ fn main() -> ExitCode {
             print!("{}", slot::status::render_job_parallel(&v));
             0
         }),
-        Cmd::EvictBelow(args) => slot::status::evict_below(&args.http, args.mark).map(|v| {
-            print!("{}", v.render());
-            0
-        }),
+        Cmd::EvictBelow(args) => {
+            slot::status::evict_below(&args.http, args.mark, args.idle).map(|v| {
+                print!("{}", v.render());
+                0
+            })
+        }
         Cmd::CpuLimit(args) => args
             .request()
             .map_err(anyhow::Error::msg)
