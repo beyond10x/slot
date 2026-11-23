@@ -551,6 +551,7 @@ A boot script (POSIX sh, in user-data), later a baked image. It runs as root and
    the slot state directory, `CARGO_HOME`, `RUSTUP_HOME`, the Go module cache, the sccache store
    and the jobs' `TMPDIR`. The root volume is small, and tests write temporary files.
 3. Install rsync 3.4 or later, a C toolchain, and the linker the workstation's cargo config names.
+   Install bubblewrap for the job sandbox (design.md § 27): `dnf install -y bubblewrap`.
 4. Create the build user without sudo and enable lingering for its systemd user units.
 5. Block the build user from the metadata service with a firewall rule on its user id (§ 8.3).
 6. sshd: `MaxSessions 200`, `ClientAliveInterval 15`, `ClientAliveCountMax 3`. Every remote job
@@ -566,6 +567,8 @@ A boot script (POSIX sh, in user-data), later a baked image. It runs as root and
 11. Start `slot serve` with floors for the host's size (design.md § 16 items 2 and 6), for
     example `--min-free-disk 50 --min-free-memory 8`, a raised open-file limit in its unit (a
     remote job gets the host daemon's limit, `client.rs:214-217`) and the workstation's run limit.
+    Add `--sandbox`, so every job sees the node read-only but for its workspace, its target
+    directory, a private `/tmp` and the download caches (design.md § 27).
 12. Start two root units: the idle watchdog (no job for 30 minutes: `shutdown -h now`) and, on
     spot, the interruption watcher of § 3.5.
 13. Install the per-host public key with the forced command (§ 8.2). Check the clock is synced.

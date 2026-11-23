@@ -37,6 +37,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | variable | value |
 |---|---|
 | `SLOT_JOB` | the job id, used to attribute sccache CPU time to the job |
+| `SLOT_SANDBOX`, `TMPDIR` | `bwrap` and `/tmp` (a private tmpfs), for every job of a daemon started with [`slot serve --sandbox`](../remote-builds.md#run-every-job-in-a-sandbox) |
 | `MAKEFLAGS`, `CARGO_MAKEFLAGS` | `-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo`, for rust and other jobs; `fifo:<gate-dir>/jobserver.fifo` for a gated job; not set this way while `slot job-parallel` is on |
 | `CARGO_BUILD_JOBS`, `MAKEFLAGS` | only while [`slot job-parallel N`](../how-it-works.md#build-processes-per-job) is on, for every job: `<P>` and `-j<P>`, where P is N or the slots the job holds if those are more; `CARGO_MAKEFLAGS` and `MFLAGS` are then not set, and nothing names the pool's FIFO |
 | `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2); rust and other jobs, unless the caller set them |

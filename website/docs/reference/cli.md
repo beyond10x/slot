@@ -54,6 +54,8 @@ slot serve [OPTIONS]
 - `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. The mark is `--min-free-disk` when that is larger, so eviction runs whenever jobs wait for disk; a job that starts to wait makes it look at once. A directory a queued or running job builds into or whose checkout it runs in, one built in the last 2 h, and one a process uses are kept. 0 turns it off, whatever `--min-free-disk` is. `slot evict-below` replaces this mark at run time (default `40`)
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
+- `--sandbox`: Run every job in a sandbox (bubblewrap): the whole filesystem read-only and in its own pid namespace; writable are only the job's checkout, its target directory, a private /tmp and the download caches of cargo and Go. Other workspaces, other jobs' target directories and the user's runtime directory are hidden. Without a working `bwrap` the daemon does not start (default `false`)
+- `--sandbox-write`: One more path a sandboxed job may write, for example a package manager's store; repeat for more
 
 ### `slot proxy`
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is
+  read-only, in a pid and IPC namespace of the job's own. Writable are only the job's checkout
+  (its synced workspace, or the git checkout of a local job), its target directory, a private
+  `/tmp` (`TMPDIR=/tmp`), cargo's `registry/` and `git/` with their lock files, the Go caches and
+  each `--sandbox-write <path>`. Other workspaces, other jobs' target directories, the user's
+  runtime directory and the daemon's socket are hidden; the network is the host's. A job can no
+  longer delete, replace or install a program in `~/.cargo/bin`, `~/.rustup` or `/usr` that
+  another build needs. Without a `bwrap` that can create the sandbox the daemon does not start.
+  `SLOT_SANDBOX=bwrap` is set in the job. Off by default; meant first for build nodes
+  (`dnf install -y bubblewrap` in the boot script).
+
 ## 0.30.0 — 2026-11-23
 
 - `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction

@@ -189,7 +189,36 @@ port, agent and X11 forwarding and the terminal. Pass `--ws-root`, `--cache-root
 `--state-dir` to `slot shell` when `slot serve` uses other values.
 
 This narrows the key to slot's protocol. It is not a sandbox: a job is any command, so whoever
-holds the key can still run code on the server as that user through `slot proxy`.
+holds the key can still run code on the server as that user through `slot proxy`. What that code
+can write is what `--sandbox` below confines.
+
+### Run every job in a sandbox
+
+`slot serve --sandbox` runs each job under bubblewrap (`bwrap`), so one build cannot delete,
+replace or install a program another build needs, or change another build's tree:
+
+- The whole filesystem is read-only to the job: the home directory, `~/.rustup`, `~/.cargo/bin`,
+  `/usr`, `/usr/local`.
+- Writable: the job's workspace (or, for a local job, the git checkout it runs in), its target
+  directory, a private `/tmp` (`TMPDIR=/tmp`), cargo's `registry/` and `git/` with their lock
+  files, the Go build and module caches, and each path given with `--sandbox-write <path>`.
+- Hidden: the other workspaces, the other jobs' target directories, the user's runtime directory
+  with the user bus, and the daemon's socket.
+- The job has its own pid namespace: it sees and signals only its own processes.
+- The network is the host's: the compile cache server answers on TCP and cargo may fetch.
+- `SLOT_SANDBOX=bwrap` is set in the job's environment.
+
+Install bubblewrap first (`dnf install -y bubblewrap` on Amazon Linux and Fedora,
+`apt install bubblewrap`, `pacman -S bubblewrap`). Without a `bwrap` that can create the
+sandbox, `slot serve --sandbox` does not start; it never runs a job outside it.
+
+```sh
+slot serve --sandbox --sandbox-write /srv/pnpm-store
+```
+
+A build that writes somewhere else (a package manager's store, a browser download) fails with
+`Read-only file system` until that path is named with `--sandbox-write`. Every path and its
+reason: the repository's `docs/design.md` § 27.
 
 ## Measured
 

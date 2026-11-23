@@ -1642,3 +1642,113 @@ method; another method on a page path answers 405.
 - *A second queue order*: shortest-predicted-first and least-attained-service
   are what § 25 already does inside a level with short jobs first and the pass bound.
 - *A flag that names a share.* `--tokens N` is read as a share of N.
+
+## 27. Jobs in a sandbox (`slot serve --sandbox`)
+
+**The problem.** Every job runs as the daemon's user, and that user can write its whole home
+directory: the toolchains in `~/.rustup` and `~/.cargo/bin`, every other workspace and target
+directory, the compile cache's store. One build script or test can delete, replace or install a
+program another build needs, or change another build's tree, and nothing tells the two apart
+afterwards. On a build node every job is a synced workspace of some checkout, so the node is
+where it matters first.
+
+**The option** (`sandbox.rs`, `slot serve --sandbox`, `--sandbox-write <path>` repeated). The
+daemon starts every job under bubblewrap: `bwrap`, its options, `--`, the job's command. A
+daemon option, not a setting in `limits.json`: a switch that `PUT /api/...` could turn off would
+let anything that reaches the HTTP port lift the sandbox. A reload keeps it, because the new image
+gets the old one's arguments (§ 15.2).
+
+**Refusal, never a silent fallback.** At start the daemon looks for `bwrap` on `PATH` (then
+`/usr/bin`) and runs `true` in the namespaces and mounts every job gets. When `bwrap` is missing
+or cannot create them (unprivileged user namespaces off), `slot serve` exits non-zero and names
+the package and the sysctl; it never runs a job outside the sandbox. It prints
+`slot: every job runs in a sandbox (<bwrap>)` to the journal when it starts.
+
+**What a job gets.**
+
+- The root bound read-only (`--ro-bind / /`), so the home directory, `~/.rustup`,
+  `~/.cargo/bin`, `/usr`, `/usr/local` and every other workspace are read-only.
+- A pid namespace and an IPC namespace of its own (`--unshare-pid --unshare-ipc`), a fresh
+  `/proc` and a minimal `/dev` with a private `/dev/shm`. The job sees only its own processes
+  and cannot signal one outside. bwrap's own init is pid 1; when it ends, every process left in
+  the namespace ends with it.
+- The network of the host. A build needs no other: the compile cache server answers on
+  `127.0.0.1:4226`, and cargo may fetch crates. Tests should need no network (workspace
+  `AGENTS.md`), which a sandbox does not enforce.
+
+**Writable**, each bound at its own path; a path that does not exist is left out unless the
+daemon creates it (column *created*):
+
+| path | why | created |
+|---|---|---|
+| the job's checkout: `<ws-root>/<id>` for a synced workspace; for a local job the nearest ancestor of its directory with a `.git` entry below the home directory (a home kept in git is not a checkout), else the directory | a build writes generated files and `Cargo.lock` in its tree | no |
+| the job's target directory: `<cache-root>/target/<id>`, or for a local job `--target-dir`, `CARGO_TARGET_DIR` or the workspace's `target/` | what cargo builds | yes |
+| `/tmp`, a private tmpfs; `TMPDIR=/tmp` in the job's environment | temporary files of compilers and tests; gone with the job, so nothing is left to clean and no job reads another's | (tmpfs) |
+| `$CARGO_HOME/registry`, `$CARGO_HOME/git` | cargo's download cache of crates and git dependencies, shared by every build | when `CARGO_HOME` exists |
+| `$CARGO_HOME/.package-cache`, `.package-cache-mutate` | cargo's lock on that cache, so two jobs that download at once still take turns. The rest of `CARGO_HOME` stays read-only: `bin/`, `config.toml`, credentials; a job cannot add a `config.toml` that names a `rustc-wrapper` for the builds after it | when `CARGO_HOME` exists |
+| `GOCACHE` (`<cache-root>/go-build` for a synced workspace; else `$XDG_CACHE_HOME/go-build`) | Go's build cache, content-addressed | when named in the environment |
+| `GOMODCACHE` (else the first `GOPATH` entry's `pkg/mod`, else `~/go/pkg/mod`) | Go's module download cache | no |
+| each `--sandbox-write` path | what a build of that host must write beyond these: a package manager's store, a browser download | no |
+
+The compile cache's store stays read-only: rustc's wrapper sends each compile to the sccache
+server over TCP, and the server, outside the sandbox, writes its own store. A job never writes
+the home directory itself, of the job's environment or of the daemon, nor a directory that holds
+one: a job started there gets its directory read-only.
+
+**Hidden**, an empty tmpfs over each, then the job's own paths bound again on top: the workspace
+root (other synced workspaces), `<cache-root>/target` (other jobs' target directories), and the
+user's runtime directory (`XDG_RUNTIME_DIR`: the user bus, through which `systemd-run --user`
+would start anything outside the sandbox, and the daemon's socket). The daemon's socket is also
+bound to `/dev/null` wherever it lives, so a job cannot submit a job of its own with another
+directory. Writable paths are bound before the hidden ones are covered and again after, so a
+checkout that holds the workspace root does not bring the other workspaces back.
+
+**What keeps working.**
+
+- The jobserver: a FIFO stays writable on a read-only mount (the kernel's read-only check covers
+  regular files and directories, not FIFOs and sockets), and its path is bound again after the
+  hidden ones in case one of them or `/tmp` held it. The job's output pipes are descriptors and
+  cross the sandbox unchanged.
+- `--memory-max`: `systemd-run --scope` wraps `bwrap`, not the reverse, because the scope needs the
+  user bus the sandbox hides. The caller's open-file limit, which `slot __exec` sets, is set
+  before `bwrap` starts and is inherited.
+- The daemon's view of a job: it starts `bwrap`, samples its process tree in `/proc` of the host,
+  where the job's processes have host pids, and on a cancel signals the process group, which
+  `bwrap` and the job share (no `--new-session`, no `--die-with-parent`: the latter fires when the
+  daemon's spawning thread ends or the daemon re-executes on reload, and would kill jobs a
+  handover passes on).
+- `SLOT_SANDBOX=bwrap` in the job's environment says it is sandboxed.
+
+**Build nodes.** Amazon Linux 2023 has no `bwrap` by default. The node boot script
+(`docs/design/remote-pool.md` § 7.3, step 3) installs it with the other packages:
+
+```sh
+dnf install -y bubblewrap
+```
+
+and step 11 adds `--sandbox` to `slot serve`. The probe at start tells whether the kernel there
+admits unprivileged user namespaces; with them off the daemon does not start.
+
+**Measured** (2026-11-24, one workstation, bubblewrap 0.13.0): a job under the sandbox could not
+write `~/.cargo/bin/x`, could not move a file in another checkout, wrote its tree, target
+directory, `/tmp` and `/dev/shm`, and wrote the pool FIFO; `cargo fetch` of two crates from
+crates.io succeeded with `CARGO_HOME` read-only but `registry/`, `git/` and the two lock files.
+
+**Not covered.**
+
+- The network is the host's, and with it abstract Unix sockets: a job can reach every service
+  on the host's loopback.
+- A writable shared cache (cargo's registry, Go's caches) can be changed by one job for the
+  next; the same as without the sandbox, but now the only such place.
+- Sessions on the workstation that run commands outside slot are not affected; and on a
+  workstation, `slot task check` of a repository that writes a package manager's store
+  (`pnpm`, Playwright's browsers) fails until that store is named with `--sandbox-write`.
+- `slot gate` (§ 19): its hold process writes `<id>.env` in the gate directory, so a sandboxed
+  daemon serving a gate names each gate directory with `--sandbox-write`.
+- A `build.target-dir` set in a `.cargo/config.toml` is not read: such a target directory outside
+  the checkout is read-only to the job.
+- The private `/tmp` is memory, and counts against the job's `--memory-max` scope; a node's
+  disk for temporary files (`docs/design/remote-pool.md` § 7.3, step 2) is not used for it. A
+  test suite that writes gigabytes there needs a per-job directory on disk instead.
+- A sccache server started by a job, where no server runs, starts inside the sandbox: it cannot
+  write its store and ends with the job. Run sccache as a service on a sandboxed host.

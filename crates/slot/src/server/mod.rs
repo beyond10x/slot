@@ -164,6 +164,9 @@ pub struct Config {
     /// On reload, hand running and queued jobs to the new binary instead of
     /// waiting for an idle pool (`handover`); the bounded hold is the fallback.
     pub handover: bool,
+    /// Run every job in this sandbox (`slot serve --sandbox`); `None` runs
+    /// jobs as the daemon's user with its whole filesystem.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -2054,6 +2057,28 @@ impl Server {
         env.push(format!("{JOB_ENV}={id}"));
 
         let mut argv = req.argv.clone();
+        // Inside the memory scope: `systemd-run` needs the user bus, which
+        // the sandbox hides.
+        if let Some(sandbox) = &self.cfg.sandbox {
+            env = crate::sandbox::Sandbox::env(env);
+            let workspace = req.workspace.as_ref().map(|w| self.cfg.ws_root.join(&w.id));
+            let target_dir = match &req.workspace {
+                Some(w) => Some(self.cfg.cache_root.join("target").join(&w.id)),
+                None => crate::evict::target_dir(&shown, &env, &cwd),
+            };
+            let job = crate::sandbox::Job {
+                cwd: &cwd,
+                workspace: workspace.as_deref(),
+                target_dir,
+                env: &env,
+                ws_root: &self.cfg.ws_root,
+                cache_root: &self.cfg.cache_root,
+                socket: &self.cfg.socket,
+                fifo: self.pool.path(),
+            };
+            sandbox.prepare(&job);
+            argv = sandbox.wrap(&job, argv);
+        }
         if let Some(mem) = &self.cfg.memory_max {
             let mut wrap: Vec<String> = [
                 "systemd-run",
