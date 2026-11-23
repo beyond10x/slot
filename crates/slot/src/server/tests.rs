@@ -2568,6 +2568,7 @@ fn set_cpu_limit(f: &Fixture, mark: Option<f64>, floor: Option<usize>) -> cpu_li
         .set_cpu_limit(&cpu_limit::Request {
             cpu_busy_max: Some(mark),
             cpu_busy_floor: floor,
+            ..cpu_limit::Request::default()
         })
         .unwrap()
 }
@@ -4473,6 +4474,51 @@ fn time_held_for_disk_does_not_count_towards_the_cpu_holds_bound() {
     );
     assert_eq!(running(&f), [a]);
     end_all(&f, vec![first, second]);
+}
+
+/// With a pressure mark the CPU limit holds a queued job while the host's
+/// CPU pressure is at or over it, though the CPU figure is far under its own
+/// mark, and lets it start when the pressure falls under the mark.
+#[test]
+fn a_start_is_held_while_cpu_pressure_is_at_or_over_its_mark_and_let_go_when_it_falls() {
+    use std::sync::atomic::{AtomicI64, Ordering::SeqCst};
+    static PRESSURE: AtomicI64 = AtomicI64::new(85);
+    fn pressure() -> f64 {
+        PRESSURE.load(SeqCst) as f64
+    }
+    host_busy!(BUSY, busy, 50);
+    let f = start_busy(4, busy, |c| c.cpu_pressure = Some(pressure));
+    let view = f
+        .server
+        .set_cpu_limit(&cpu_limit::Request {
+            cpu_busy_max: Some(Some(17.0)),
+            cpu_busy_floor: Some(1),
+            cpu_pressure_max: Some(Some(80.0)),
+        })
+        .unwrap();
+    assert_eq!(
+        (view.cpu_busy_max, view.cpu_pressure_max, view.pressure),
+        (Some(17.0), Some(80.0), Some(85.0))
+    );
+    assert_eq!(f.server.state().cpu_pressure_max, Some(80.0));
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run: it is the floor", || {
+        running(&f) == [a]
+    });
+    let (second, b) = submit(&f, sh(&f.root, "echo second"));
+    let held = "host busy: CPU pressure 85 % at or over the mark 80 %";
+    wait_for_jobs(&f, "the second job to be held for CPU pressure", || {
+        reason_of(&f, b) == held
+    });
+    assert_eq!(state_of(&f, b), JobState::Queued);
+    assert_eq!(f.server.cpu_limit_view().held, 1);
+    assert_eq!(f.server.pool().free(), 3, "a held job holds no slot");
+
+    PRESSURE.store(79, SeqCst);
+    let res = collect(second);
+    assert_eq!((res.code, res.out.as_str()), (0, "second\n"), "{res:?}");
+    assert_eq!(f.server.cpu_limit_view().held, 0);
+    end_all(&f, vec![first]);
 }
 
 /// Held jobs that reach the CPU hold's bound together start one by one,

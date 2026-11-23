@@ -765,6 +765,7 @@ impl Server {
             cpu_limit: Mutex::new(cpu_limit::Limits::loaded(
                 saved.cpu_busy_max,
                 saved.cpu_busy_floor,
+                saved.cpu_pressure_max,
             )),
             shares: Mutex::new(saved.shares()),
             born_ms: now_ms(),
@@ -3014,6 +3015,7 @@ impl Server {
                 job_parallel,
                 cpu_busy_max: cpu.cpu_busy_max,
                 cpu_busy_floor: cpu.cpu_busy_floor,
+                cpu_pressure_max: cpu.cpu_pressure_max,
                 admission: shares.mode,
                 share_floor: shares.floor,
                 share_max: shares.max,
@@ -3237,12 +3239,19 @@ impl Server {
             .values()
             .filter(|l| l.cpu_wait && !l.job.wait_reason.is_empty())
             .count();
-        limits.view(self.cores, parts, held)
+        limits.view(self.cores, parts, held, Some(self.cpu_pressure(&g)))
     }
 
-    /// Sets the mark, the floor or both, or switches the CPU limit off
-    /// (`slot cpu-limit`), and saves them. A queued job is weighed against
-    /// the new values the next time it looks ([`Config::resource_poll`]).
+    /// CPU pressure of the host (`some avg10`, percent) as the census
+    /// sampler last read it, or [`Config::cpu_pressure`] in tests.
+    fn cpu_pressure(&self, g: &Inner) -> f64 {
+        self.cfg.cpu_pressure.map_or(g.psi_cpu, |read| read())
+    }
+
+    /// Sets the CPU mark, the floor or the pressure mark, or switches the
+    /// CPU limit off (`slot cpu-limit`), and saves them. A queued job is
+    /// weighed against the new values the next time it looks
+    /// ([`Config::resource_poll`]).
     pub fn set_cpu_limit(&self, req: &cpu_limit::Request) -> Result<cpu_limit::View, String> {
         {
             let mut limits = self.cpu_limit.lock().expect("cpu limit lock");
@@ -3495,7 +3504,7 @@ impl Server {
             }
         }
         let room = shares::room(budget, busy, &jobs);
-        let pressure = self.cfg.cpu_pressure.map_or(g.psi_cpu, |read| read());
+        let pressure = self.cpu_pressure(g);
         let braking = pressure > settings.pressure_max();
         self.pool.set_shares(Some(jobserver::ShareRoom {
             free: room.free,
@@ -3597,6 +3606,7 @@ impl Server {
             starting: 0.0,
             ahead: 0.0,
             held_ms: me.cpu_wait_since.map(|since| now - since),
+            pressure: self.cpu_pressure(g),
         };
         let window = g.host_busy.len();
         let mine = (me.job.priority, id);
@@ -4280,6 +4290,7 @@ impl Server {
             job_parallel,
             cpu_busy_max: cpu.cpu_busy_max,
             cpu_busy_floor: cpu.cpu_busy_max.map(|_| cpu.floor()),
+            cpu_pressure_max: cpu.cpu_pressure_max,
             headroom_base: base,
             busy_cores: m.busy,
             target_cores: m.target,

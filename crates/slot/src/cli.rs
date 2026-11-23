@@ -447,7 +447,8 @@ pub struct CpuLimitArgs {
     /// expected to add; work outside both is shown, not counted. Without
     /// arguments it prints both parts and the CPUs outside them. A job
     /// held for 10 minutes starts whatever the figure says. A mark above the
-    /// host's CPU count never holds. The mark reaches queued jobs within 2
+    /// host's CPU count never holds for CPU time (`--pressure` still does).
+    /// The mark reaches queued jobs within 2
     /// seconds, is kept in `limits.json` in the state directory and holds
     /// across reloads and restarts.
     #[arg(value_name = "CPUs|off")]
@@ -456,6 +457,16 @@ pub struct CpuLimitArgs {
     /// until one is named. `off` forgets it.
     #[arg(long, value_name = "N", value_parser = cpu_floor)]
     pub floor: Option<usize>,
+    /// CPU pressure of the host (`some avg10` of `/proc/pressure/cpu`,
+    /// percent, over 0 and at most 100) from which the start of a queued
+    /// job is held as well, while the floor's jobs run; `off` forgets it,
+    /// the default. On a saturated host the CPU time of the pool stops
+    /// rising at its share while the pressure keeps rising. It needs a CPU
+    /// mark, holds also with a mark above the host's CPU count, keeps the
+    /// bound of 10 minutes, and is kept in `limits.json`. Without arguments
+    /// `slot cpu-limit` prints it and the pressure now.
+    #[arg(long, value_name = "PERCENT|off")]
+    pub pressure: Option<crate::cpu_limit::PressureSetting>,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -473,16 +484,23 @@ fn cpu_floor(s: &str) -> Result<usize, String> {
 impl CpuLimitArgs {
     /// The change the arguments name; `None` to print the values in force.
     pub fn request(&self) -> Result<Option<crate::cpu_limit::Request>, String> {
-        use crate::cpu_limit::{Request, Setting};
+        use crate::cpu_limit::{PressureSetting, Request, Setting};
         if self.mark == Some(Setting::Off) && self.floor.is_some() {
             return Err("`off` takes no --floor: without a mark there is no floor".into());
         }
-        if self.mark.is_none() && self.floor.is_none() {
+        if self.mark == Some(Setting::Off) && matches!(self.pressure, Some(PressureSetting::At(_)))
+        {
+            return Err(
+                "`off` takes no --pressure: without a CPU mark there is no pressure mark".into(),
+            );
+        }
+        if self.mark.is_none() && self.floor.is_none() && self.pressure.is_none() {
             return Ok(None);
         }
         Ok(Some(Request {
             cpu_busy_max: self.mark.map(Setting::value),
             cpu_busy_floor: self.floor,
+            cpu_pressure_max: self.pressure.map(PressureSetting::value),
         }))
     }
 }
@@ -922,8 +940,44 @@ mod tests {
             Ok(Some(Request {
                 cpu_busy_max: mark,
                 cpu_busy_floor: floor,
+                ..Request::default()
             }))
         };
+        let pressure = |p: Option<f64>| {
+            Ok(Some(Request {
+                cpu_pressure_max: Some(p),
+                ..Request::default()
+            }))
+        };
+        assert_eq!(
+            args(&["--pressure", "80"]).unwrap().request(),
+            pressure(Some(80.0)),
+            "the pressure mark alone"
+        );
+        assert_eq!(
+            args(&["--pressure", "off"]).unwrap().request(),
+            pressure(None)
+        );
+        assert_eq!(
+            args(&["17", "--pressure", "62.5"]).unwrap().request(),
+            Ok(Some(Request {
+                cpu_busy_max: Some(Some(17.0)),
+                cpu_pressure_max: Some(Some(62.5)),
+                ..Request::default()
+            }))
+        );
+        let e = args(&["off", "--pressure", "80"])
+            .unwrap()
+            .request()
+            .unwrap_err();
+        assert!(e.contains("takes no --pressure"), "{e}");
+        for bad in [
+            &["--pressure", "0"][..],
+            &["--pressure", "101"],
+            &["--pressure"],
+        ] {
+            assert!(args(bad).is_err(), "{bad:?}");
+        }
         let a = args(&[]).unwrap();
         assert_eq!((a.mark, a.floor), (None, None));
         assert_eq!(a.request(), Ok(None), "prints the values in force");

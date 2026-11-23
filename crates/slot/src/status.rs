@@ -282,46 +282,68 @@ pub fn cpu_limit(addr: &str, change: Option<&crate::cpu_limit::Request>) -> Resu
     serde_json::from_str(&answer).with_context(|| format!("{addr}: {path}"))
 }
 
-/// What a CPU limit of `mark` CPUs with a floor of `floor` jobs does on a
-/// host of `cpus` CPUs (0 when the daemon did not say).
-fn cpu_limit_text(mark: f64, floor: usize, cpus: u32) -> String {
-    if cpus > 0 && mark > f64::from(cpus) {
-        return format!("the CPU limit of {mark:.1} CPUs never holds a start: the host has {cpus}");
-    }
+/// What a CPU limit of `mark` CPUs with a floor of `floor` jobs and a
+/// pressure mark of `pressure` percent does on a host of `cpus` CPUs (0 when
+/// the daemon did not say).
+fn cpu_limit_text(mark: f64, floor: usize, cpus: u32, pressure: Option<f64>) -> String {
     let run = if floor == 1 { "job runs" } else { "jobs run" };
-    format!(
-        "starts held while the pool and the compile cache use more than {mark:.1} CPUs and {floor} {run}"
-    )
+    let over = cpus > 0 && mark > f64::from(cpus);
+    match (over, pressure.map(crate::cpu_limit::percent)) {
+        (true, None) => {
+            format!("the CPU limit of {mark:.1} CPUs never holds a start: the host has {cpus}")
+        }
+        (true, Some(p)) => format!(
+            "starts held while CPU pressure is at {p} % or more and {floor} {run} \
+             (the CPU mark of {mark:.1} is over the host's {cpus} CPUs)"
+        ),
+        (false, None) => format!(
+            "starts held while the pool and the compile cache use more than {mark:.1} CPUs and {floor} {run}"
+        ),
+        (false, Some(p)) => format!(
+            "starts held while the pool and the compile cache use more than {mark:.1} CPUs \
+             or CPU pressure is at {p} % or more, and {floor} {run}"
+        ),
+    }
 }
 
-/// `slot cpu-limit`: the values in force and the host's busy CPUs now.
+/// `slot cpu-limit`: the values in force and the host's busy CPUs and CPU
+/// pressure now.
 pub fn render_cpu_limit(v: &CpuLimitView) -> String {
     use std::fmt::Write as _;
     let Some(mark) = v.cpu_busy_max else {
         return "no CPU limit: a queued job starts whatever the host's CPUs do\n".into();
     };
     let floor = v.cpu_busy_floor.unwrap_or(crate::cpu_limit::DEFAULT_FLOOR);
-    let mut out = cpu_limit_text(mark, floor, v.cpus);
-    if v.cpus > 0 && mark > f64::from(v.cpus) {
+    let mut out = cpu_limit_text(mark, floor, v.cpus, v.cpu_pressure_max);
+    let cpu_holds = !(v.cpus > 0 && mark > f64::from(v.cpus));
+    if !cpu_holds && v.cpu_pressure_max.is_none() {
         out.push('\n');
         return out;
     }
-    match (v.pool, v.compile_cache, v.outside, v.busy) {
-        (Some(pool), Some(cache), outside, _) => {
-            let _ = write!(
-                out,
-                "; now pool {pool:.1} + compile cache {cache:.1} of {} CPUs",
-                v.cpus
-            );
-            if let Some(o) = outside {
-                let _ = write!(out, ", {o:.1} outside both");
+    if cpu_holds {
+        match (v.pool, v.compile_cache, v.outside, v.busy) {
+            (Some(pool), Some(cache), outside, _) => {
+                let _ = write!(
+                    out,
+                    "; now pool {pool:.1} + compile cache {cache:.1} of {} CPUs",
+                    v.cpus
+                );
+                if let Some(o) = outside {
+                    let _ = write!(out, ", {o:.1} outside both");
+                }
             }
+            // A daemon that predates the parts counts the whole host.
+            (_, _, _, Some(busy)) => {
+                let _ = write!(out, "; now {busy:.1} of {} CPUs busy", v.cpus);
+            }
+            _ => out.push_str("; no sample of the host's CPUs yet"),
         }
-        // A daemon that predates the parts counts the whole host.
-        (_, _, _, Some(busy)) => {
-            let _ = write!(out, "; now {busy:.1} of {} CPUs busy", v.cpus);
-        }
-        _ => out.push_str("; no sample of the host's CPUs yet"),
+    }
+    if v.cpu_pressure_max.is_some()
+        && let Some(p) = v.pressure
+    {
+        let lead = if cpu_holds { ", " } else { "; now " };
+        let _ = write!(out, "{lead}CPU pressure {} %", crate::cpu_limit::percent(p));
     }
     match v.held {
         0 => {}
@@ -372,7 +394,7 @@ pub fn render_admission(v: &crate::shares::View) -> String {
 fn cpu_limit_line(s: &State) -> Option<String> {
     let mark = s.cpu_busy_max?;
     let floor = s.cpu_busy_floor.unwrap_or(crate::cpu_limit::DEFAULT_FLOOR);
-    Some(cpu_limit_text(mark, floor, s.cores) + "\n")
+    Some(cpu_limit_text(mark, floor, s.cores, s.cpu_pressure_max) + "\n")
 }
 
 /// `slot priority list`: one line per rule, then the promotion limit.
@@ -1583,6 +1605,7 @@ mod tests {
         let limits = Limits {
             cpu_busy_max: Some(17.0),
             cpu_busy_floor: Some(6),
+            ..Limits::default()
         };
         let parts = Parts {
             pool: 12.0,
@@ -1590,15 +1613,75 @@ mod tests {
             outside: 1.5,
         };
         assert_eq!(
-            render_cpu_limit(&limits.view(20, Some(parts), 1)),
+            render_cpu_limit(&limits.view(20, Some(parts), 1, Some(30.0))),
             "starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; \
-             now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held\n"
+             now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, 1 job held\n",
+            "without a pressure mark the line is as before"
         );
         assert_eq!(
-            render_cpu_limit(&limits.view(20, None, 0)),
+            render_cpu_limit(&limits.view(20, None, 0, None)),
             "starts held while the pool and the compile cache use more than 17.0 CPUs and 6 jobs run; \
              no sample of the host's CPUs yet\n"
         );
+    }
+
+    #[test]
+    fn slot_cpu_limit_prints_the_pressure_mark_and_the_pressure_now() {
+        use crate::cpu_limit::{Limits, Parts};
+        let limits = Limits {
+            cpu_busy_max: Some(17.0),
+            cpu_busy_floor: Some(6),
+            cpu_pressure_max: Some(80.0),
+        };
+        let parts = Parts {
+            pool: 12.0,
+            compile_cache: 6.0,
+            outside: 1.5,
+        };
+        assert_eq!(
+            render_cpu_limit(&limits.view(20, Some(parts), 2, Some(85.24))),
+            "starts held while the pool and the compile cache use more than 17.0 CPUs \
+             or CPU pressure is at 80 % or more, and 6 jobs run; \
+             now pool 12.0 + compile cache 6.0 of 20 CPUs, 1.5 outside both, CPU pressure 85.2 %, \
+             2 jobs held\n"
+        );
+        let over = Limits {
+            cpu_busy_max: Some(25.0),
+            cpu_busy_floor: Some(1),
+            cpu_pressure_max: Some(62.5),
+        };
+        assert_eq!(
+            render_cpu_limit(&over.view(20, Some(parts), 0, Some(40.0))),
+            "starts held while CPU pressure is at 62.5 % or more and 1 job runs \
+             (the CPU mark of 25.0 is over the host's 20 CPUs); now CPU pressure 40 %\n"
+        );
+        assert_eq!(
+            render_cpu_limit(&over.view(20, None, 0, None)),
+            "starts held while CPU pressure is at 62.5 % or more and 1 job runs \
+             (the CPU mark of 25.0 is over the host's 20 CPUs)\n",
+            "a daemon that does not say the pressure"
+        );
+        let mut s = State {
+            cores: 20,
+            tokens: 4,
+            limit: 4,
+            free: 4,
+            cpu_busy_max: Some(17.0),
+            cpu_busy_floor: Some(4),
+            cpu_pressure_max: Some(80.0),
+            ..State::default()
+        };
+        assert!(
+            render(&s).ends_with(
+                "starts held while the pool and the compile cache use more than 17.0 CPUs \
+                 or CPU pressure is at 80 % or more, and 4 jobs run\n"
+            ),
+            "{}",
+            render(&s)
+        );
+        s.cpu_pressure_max = None;
+        let line = serde_json::to_string(&s).unwrap();
+        assert!(!line.contains("cpu_pressure_max"), "{line}");
     }
 
     #[test]

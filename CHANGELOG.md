@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.27.0 — 2026-11-23
+
+- The CPU limit for starts also holds on CPU pressure: `slot cpu-limit 17 --pressure 80` holds a
+  queued job while `some avg10` of `/proc/pressure/cpu` is at 80 % or more and the floor's jobs
+  run, and lets it start when the value falls under the mark. On a saturated host the CPU time of
+  the pool stops rising at its share while the host keeps getting slower; the pressure keeps
+  rising. On one host a mark of 12 CPUs held nothing at a load of 208 on 20 CPUs, because the
+  pool read 11.5 CPUs. Off by default; it needs a CPU mark, is kept in `limits.json` only when
+  set, and keeps the bound of 10 minutes, its pacing and the pass for short jobs. `slot cpu-limit`
+  prints the mark and the current pressure, `slot status` names the mark, and the API field is
+  `cpu_pressure_max`.
+
 ## 0.26.0 — 2026-11-23
 
 - Eviction no longer deletes a target directory that a process or a service uses. It deleted one
