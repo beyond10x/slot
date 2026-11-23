@@ -350,10 +350,12 @@ Open, one line each, with where the design lives. A session starts with (e).
   A job then asks for a share of the CPUs, not for a number of slots:
   `story:jobs-ask-for-a-share-of-the-cpus`.
 - (aa) The CPU limit for starts (`slot cpu-limit`) counts the pool and the compile cache server
-  only (unreleased). It ran once on the live host with the old figure, which counted work
-  outside the pool, and was switched off. A watch that switches it off on the queue wait must
-  count the ages of the queued jobs: the waits of started jobs alone read 46 s while 39 queued
-  jobs had a median age of 200 s (2026-11-22). Switching it on again is the operator's.
+  only (0.25.0). On the live host since 2026-11-23, set by the operator. A watch that switches
+  it off on the queue wait must count the ages of the queued jobs: the waits of started jobs
+  alone read 46 s while 39 queued jobs had a median age of 200 s (2026-11-22). The CPU-time
+  figure cannot see demand once the host is saturated (load 208 on 20 CPUs with the pool at
+  11.5 CPUs under a mark of 12, 2026-11-23): `story:cpu-hold-on-pressure`. Until it is built an
+  operator script steps the mark between 6, 10 and 12 by the load.
 - (ab) `--min-free-disk` and `--evict-below` are options of `slot serve`, so a change needs a
   full restart (g); both belong in `limits.json`.
 
