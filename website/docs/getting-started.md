@@ -19,7 +19,7 @@ Each [release](https://github.com/beyond10x/slot/releases) carries one archive p
 includes the web UI.
 
 ```console
-version=0.25.1
+version=0.25.2
 target=x86_64-unknown-linux-gnu
 base=https://github.com/beyond10x/slot/releases/download/$version
 curl -LO "$base/slot-$version-$target.tar.gz"
@@ -67,7 +67,7 @@ Local builds run with the caller's environment; the unit's `PATH` matters when t
 By default the daemon:
 
 - creates one slot per CPU (`--tokens`),
-- listens on `$XDG_RUNTIME_DIR/slot.sock` (`--socket`, or `SLOT_SOCKET`),
+- listens on `$XDG_RUNTIME_DIR/slot.sock`, or `/run/user/<uid>/slot.sock` when the variable is unset (`--socket`, or `SLOT_SOCKET`),
 - keeps its jobserver FIFO and job log in `$XDG_STATE_HOME/slot`, or `~/.local/state/slot`
   (`--state-dir`),
 - serves the web UI on `127.0.0.1:7411` (`--http`, `off` disables it).
@@ -122,14 +122,17 @@ slot run serve --port 8080
 
 ## When the daemon is not running
 
-If `slot` cannot reach the daemon, it runs the command locally and prints one line on stderr:
+If `slot` cannot reach the daemon, it waits up to 60 s for the socket, as during a restart, and
+then exits with 125 without running the command:
 
 ```text
-slot: daemon unreachable (connect <socket>: Connection refused (os error 111)), ran locally
+slot: daemon unreachable (connect <socket>: No such file or directory (os error 2)); waiting up to 60s for it
+slot: no daemon answered within 60s (…); the command did not run. `slot --local …` or SLOT_LOCAL_FALLBACK=1 runs it outside the pool
 ```
 
-The build still runs and keeps its exit code; it just does not share the pool. To skip the daemon
-on purpose, use `--local`:
+Before 0.25.2 it ran the command at once outside the pool and exited with its code, so a build
+that should have queued ran unrecorded. `SLOT_LOCAL_FALLBACK=1` brings that back: with no daemon
+answering, the command runs here at once. To skip the daemon on purpose, use `--local`:
 
 ```console
 slot --local cargo build

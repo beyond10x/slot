@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.25.2 — 2026-11-23
+
+- With no daemon answering, `slot <command>` no longer runs the command outside the pool and
+  exits 0. It waits up to 60 s for the socket, as during a restart, then exits with 125 without
+  running the command and names the opt-in. A program that started slot with a cleared
+  environment ran every build unpooled and unrecorded this way. `SLOT_LOCAL_FALLBACK=1` restores
+  the old behaviour; `slot --local` still runs one command without the daemon. A job dropped by
+  an upgrading daemon that does not come back within 10 min also ends with 125 now.
+
+- Without `XDG_RUNTIME_DIR`, the client and the daemon look for the socket in `/run/user/<uid>`
+  when that directory exists, where systemd puts it, before the temporary directory. The ssh
+  control socket of remote mode follows the same directory.
+
 ## 0.25.1 — 2026-11-23
 
 - The CPU limit for starts no longer lets a job through as "held as long as a job is" for time it

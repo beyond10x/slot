@@ -170,8 +170,9 @@ client (0.3.1 and later) sees the connection close before a `start` frame, waits
 the socket and resubmits the same request once. A job that had started is never resubmitted, nor
 one whose client got SIGINT, SIGTERM or SIGHUP: the signal thread records the signal before it
 closes the connection (`client::handle_signals`).
-`systemctl --user restart slot` instead drains: the socket disappears, new `slot` calls run
-locally outside the pool, and the stop waits for the longest running job. Use it only when the
+`systemctl --user restart slot` instead drains: the socket disappears, new `slot` calls wait
+60 s for it and then exit 125 without running (0.25.2; before, they ran outside the pool), and the
+stop waits for the longest running job. Use it only when the
 unit file itself changed.
 
 Every field added to a type the daemon sends (`State`, `Tick`, `Job`, the census types, `Frame`
@@ -253,7 +254,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.25.1 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.25.2 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 passing within a level for short jobs and whole-pool requests, admission by disk and memory,
 holds on the host's CPUs, admission by share (off by default), run-time limit, build processes
 per job, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`),
@@ -318,7 +319,8 @@ Open, one line each, with where the design lives. A session starts with (e).
 - (t) The web view has no dark theme.
 - (u) The pool size (`slot serve --tokens`) changes only at a full restart, and a restart drains:
   the old daemon runs every running and queued job to its end under the old size, while new
-  calls find no socket and run outside the pool, unrecorded. Measured with 69 jobs: about 4 ended
+  calls find no socket and, from 0.25.2, exit 125 after 60 s without running (before, they ran
+  outside the pool, unrecorded). Measured with 69 jobs: about 4 ended
   a minute. The pool size belongs in `limits.json` beside the headroom, changed by a command.
 - (v) Script jobs hold slots they do not use: over 3 hours, 256 jobs whose command was a script
   held 60 % of the slot-hours at 0.74 CPUs per slot (plain `cargo` jobs: 1.47), and 63 of them
