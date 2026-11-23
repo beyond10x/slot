@@ -4814,3 +4814,30 @@ fn a_job_predicted_short_is_not_held_for_the_hosts_cpus() {
     );
     end_all(&f, vec![first, long]);
 }
+
+/// `GET /api/jobs` sends every job of `GET /api/state` as a bare array, the
+/// ended ones newest first, and `GET /api/jobs/{id}` the one job or 404
+/// (views `slot.pool.Jobs` and `slot.pool.JobDetail` of `spec/`).
+#[test]
+fn the_job_routes_answer_as_the_spec_binds_them() {
+    use axum::response::IntoResponse;
+    let f = start(2);
+    assert_eq!(run(&f, sh(&f.root, "true")).code, 0);
+    assert_eq!(run(&f, sh(&f.root, "exit 3")).code, 3);
+    let state = || axum::extract::State(Arc::clone(&f.server));
+    let (status, text) = answer(async { http::jobs(state()).await.into_response() });
+    assert_eq!(status, 200, "{text}");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+    let st = f.server.state();
+    assert_eq!(rows.len(), st.active.len() + st.done.len(), "{text}");
+    let newest = st.done.last().unwrap();
+    assert_eq!(rows[0]["id"], newest.id, "newest first: {text}");
+    assert_eq!(rows[0]["state"], "failed", "{text}");
+    assert_eq!(rows[1]["state"], "ok", "{text}");
+    let (status, text) = answer(http::job(state(), axum::extract::Path(newest.id)));
+    assert_eq!(status, 200, "{text}");
+    let one: crate::types::Job = serde_json::from_str(&text).unwrap();
+    assert_eq!(&one, newest);
+    let (status, text) = answer(http::job(state(), axum::extract::Path(newest.id + 100)));
+    assert_eq!((status, text.as_str()), (404, ""));
+}

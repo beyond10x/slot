@@ -16,6 +16,11 @@ import OutputPane from './components/OutputPane.vue';
 import SectionHead from './components/SectionHead.vue';
 import ToolDot from './components/ToolDot.vue';
 import UsageTable from './components/UsageTable.vue';
+import SpecRoute from './components/spec/SpecRoute.vue';
+import { currentRoute } from './lib/spec.ts';
+
+/** The page of the UI spec the hash names; null shows the dashboard. */
+const specRoute = computed(() => currentRoute());
 
 const newest = computed(() => {
   const j = newestRunning(jobs.values());
@@ -53,7 +58,8 @@ watchEffect(() => {
 
 <template>
   <HeaderBar />
-  <p v-if="!store.ready" class="muted waiting">loading jobs and history from the daemon…</p>
+  <SpecRoute v-if="specRoute" :route="specRoute" />
+  <p v-else-if="!store.ready" class="muted waiting">loading jobs and history from the daemon…</p>
   <main v-else :class="{ nopane: store.selected === null }">
     <div>
       <TrendCharts />

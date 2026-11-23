@@ -5,6 +5,7 @@ components:
       domains:
         - slot.cluster
         - slot.hostconfig
+        - slot.pool
     accepts:
       commands:
         - slot.cluster.OpenCluster
@@ -30,6 +31,10 @@ components:
         - slot.hostconfig.LoadNodeTemplate
         - slot.hostconfig.RemoveProvider
         - slot.hostconfig.RemoveNodeTemplate
+        - slot.pool.SubmitJob
+        - slot.pool.StartJob
+        - slot.pool.EndJob
+        - slot.pool.CancelJob
     reached_by: network
 
   - component: node-provider

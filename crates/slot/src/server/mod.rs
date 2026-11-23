@@ -4366,6 +4366,45 @@ impl Server {
         });
     }
 
+    /// The running and queued jobs, as `GET /api/state` sends them in
+    /// `active`: a queued job carries its marks in the queue.
+    fn active_jobs(g: &Inner) -> Vec<Job> {
+        g.active.values().map(Self::shown).collect()
+    }
+
+    /// A running or queued job as the views show it.
+    fn shown(l: &Live) -> Job {
+        let mut j = l.job.clone();
+        if j.state == JobState::Queued {
+            (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
+        }
+        j
+    }
+
+    /// The `GET /api/jobs` list (view `slot.pool.Jobs` of `spec/`): every
+    /// job of `GET /api/state`, the running and queued ones first as
+    /// `active` lists them, then the ended ones newest first.
+    pub fn jobs(&self) -> Vec<Job> {
+        let g = self.inner.lock().expect("server lock");
+        let mut jobs = Self::active_jobs(&g);
+        jobs.extend(g.done.iter().rev().map(|d| d.job.clone()));
+        jobs
+    }
+
+    /// The `GET /api/jobs/{id}` answer (view `slot.pool.JobDetail`): the
+    /// job of that id, as `jobs` lists it, or none.
+    pub fn job(&self, id: i64) -> Option<Job> {
+        let g = self.inner.lock().expect("server lock");
+        if let Some(l) = g.active.get(&id) {
+            return Some(Self::shown(l));
+        }
+        g.done
+            .iter()
+            .rev()
+            .find(|d| d.job.id == id)
+            .map(|d| d.job.clone())
+    }
+
     /// The `GET /api/state` snapshot.
     pub fn state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
@@ -4402,17 +4441,7 @@ impl Server {
             shares: (self.shares_on() && g.share_view.admission == crate::shares::Mode::Shares)
                 .then_some(g.share_view),
             free: self.pool.free() as u32,
-            active: g
-                .active
-                .values()
-                .map(|l| {
-                    let mut j = l.job.clone();
-                    if j.state == JobState::Queued {
-                        (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
-                    }
-                    j
-                })
-                .collect(),
+            active: Self::active_jobs(&g),
             done: g.done.iter().map(|d| d.job.clone()).collect(),
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),

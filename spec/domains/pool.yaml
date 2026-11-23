@@ -1,0 +1,377 @@
+# The pool of one daemon as it is built: the jobs it queues, runs and keeps after they end, as
+# `GET /api/jobs` and `GET /api/jobs/{id}` send them. Every field is a field of `Job` in
+# crates/slot/src/types.rs with its JSON spelling; a field the daemon leaves out when it holds its
+# default (`skip_serializing_if`) is Optional here.
+#
+# The daemon records jobs itself; no caller sends a command that this domain declares. A job is
+# submitted over the daemon's socket (crates/slot/src/proto.rs), which is not an HTTP surface.
+domain: slot.pool
+
+summary: The jobs of one daemon's pool, queued, running and ended, as its web view reads them.
+
+naming:
+  wire: pool
+  display: Pool
+
+types:
+  - name: slot.pool.JobId
+    kind: newtype
+    of: Integer
+    naming:
+      summary: The id of a job in the daemon's job log, increasing.
+
+  - name: slot.pool.Priority
+    kind: enum
+    variants: [urgent, high, normal, low]
+    naming:
+      summary: "Which queued job gets free slots first: every urgent job before every high one, high before normal, normal before low; first in, first out inside one level."
+
+  - name: slot.pool.Admission
+    kind: enum
+    variants: [slots, shares]
+    naming:
+      summary: How the job was admitted when it started; the daemon leaves it out for slots.
+
+  - name: slot.pool.CheckoutRepository
+    kind: struct
+    fields: []
+    naming:
+      summary: The repository's main working tree.
+
+  - name: slot.pool.CheckoutWorktree
+    kind: struct
+    fields:
+      - {name: name, type: String, summary: "Name of the linked working directory."}
+    naming:
+      summary: A linked working tree of the repository.
+
+  - name: slot.pool.CheckoutDirectory
+    kind: struct
+    fields: []
+    naming:
+      summary: The working directory is outside a Git checkout.
+
+  - name: slot.pool.Checkout
+    kind: union
+    tag: kind
+    variants:
+      repository: slot.pool.CheckoutRepository
+      worktree: slot.pool.CheckoutWorktree
+      directory: slot.pool.CheckoutDirectory
+    naming:
+      summary: The Git checkout that holds the submitting client's working directory.
+
+entities:
+  - name: slot.pool.Job
+    naming:
+      summary: One command run through the pool.
+    identity:
+      name: id
+      type: slot.pool.JobId
+    fields:
+      - {name: argv, type: List<String>, summary: "Command and arguments."}
+      - {name: cwd, type: String, summary: "Working directory on the daemon's host."}
+      - {name: repo, type: String, summary: "Repository name."}
+      - {name: checkout, type: Optional<slot.pool.Checkout>, summary: "How the client identified its checkout; absent for unverified jobs."}
+      - {name: project, type: Optional<String>, summary: "The namespace of the repository's remote, or `.slot.toml`'s `project`; absent when unknown."}
+      - {name: session, type: String, summary: "Agent session id."}
+      - {name: client, type: String, summary: "`host:pid` of the client's parent."}
+      - {name: toolchain, type: String}
+      - {name: remote, type: Boolean, summary: "Whether the source was synced from another host."}
+      - {name: tokens, type: Integer, summary: "Slots the job holds."}
+      - {name: enqueued_ms, type: Integer, summary: "Enqueue time, Unix milliseconds."}
+      - {name: started_ms, type: Integer, summary: "Start time, Unix milliseconds; 0 if it never started."}
+      - {name: ended_ms, type: Integer, summary: "End time, Unix milliseconds; 0 while it runs."}
+      - {name: exit, type: Integer, summary: "Exit code; -1 when cancelled."}
+      - {name: cpu_s, type: Binary64, summary: "CPU seconds of the job's tree plus compile-server work."}
+      - {name: compile_server_cpu_s, type: Binary64, summary: "Sampled CPU seconds spent in compile servers, part of cpu_s."}
+      - {name: peak_rss, type: Integer, summary: "Highest sampled resident memory, bytes."}
+      - {name: wait_reason, type: String, summary: "Why a queued job waits besides slots; empty otherwise."}
+      - {name: target_dir, type: String, summary: "Cargo target directory of a local Rust job; empty otherwise."}
+      - {name: priority, type: slot.pool.Priority}
+      - {name: promoted, type: Boolean, summary: "Whether priority is high only because the job waited that long."}
+      - {name: cache_env, type: "Optional<Map<String, String>>", summary: "Rust jobs: the variables of the job's environment that decide what the compile cache can do."}
+      - {name: warnings, type: Optional<List<String>>, summary: "What is unusual about the job's compile cache setup; absent when nothing is."}
+      - {name: limit_s, type: Optional<Integer>, summary: "Seconds the job may run from its start before the daemon ends it."}
+      - {name: timed_out, type: Optional<Boolean>, summary: "Whether the daemon ended the job at limit_s; absent when it did not."}
+      - {name: predicted_ms, type: Optional<Integer>, summary: "The run time the daemon predicted when the job queued."}
+      - {name: collected, type: Optional<Integer>, summary: "Slots a queued job has collected towards its tokens; absent when none."}
+      - {name: ahead, type: Optional<Boolean>, summary: "Whether the job was moved ahead of a job that priority then arrival serves first."}
+      - {name: queue_class, type: Optional<Integer>, summary: "Where a queued job stands inside its level: 0 may no longer be passed, 1 predicted short, 2 the others."}
+      - {name: share, type: Optional<Binary64>, summary: "The share of the CPUs the job asked for while admission is by share."}
+      - {name: share_used, type: Optional<Binary64>, summary: "CPUs the job used, with share only."}
+      - {name: lent_s, type: Optional<Binary64>, summary: "CPU-seconds of its share the job lent to the queue; absent when none."}
+      - {name: admission, type: Optional<slot.pool.Admission>, summary: "How the job was admitted; absent by slots."}
+    invariants:
+      - tokens >= 0
+    lifecycle:
+      initial: Queued
+      states:
+        - {name: Queued, wire: queued, summary: "Waits for slots."}
+        - {name: Running, wire: running, summary: "Holds its slots."}
+        - {name: Ok, wire: ok, summary: "Exited 0."}
+        - {name: Failed, wire: failed, summary: "Exited non-zero or could not start."}
+        - {name: Cancelled, wire: cancelled, summary: "The client went away."}
+      terminal: [Ok, Failed, Cancelled]
+      transitions:
+        - {name: start, from: [Queued], to: Running}
+        - {name: succeed, from: [Running], to: Ok}
+        - {name: fail, from: [Queued, Running], to: Failed}
+        - {name: cancel, from: [Queued, Running], to: Cancelled}
+
+actors:
+  - name: slot.pool.Daemon
+    naming:
+      display: Daemon
+      summary: "The daemon itself: it records each job it is handed over its socket, starts it when slots are free and records how it ended."
+    may:
+      - slot.pool.SubmitJob
+      - slot.pool.StartJob
+      - slot.pool.EndJob
+      - slot.pool.CancelJob
+
+errors:
+  - name: slot.pool.JobNotFound
+    summary: The daemon holds no job of that id.
+    fields: []
+  - name: slot.pool.JobStateConflict
+    summary: The job is not in a state this command acts from, so nothing changed.
+    fields:
+      - name: state
+        type: slot.pool.Job.State
+
+# The daemon takes these over its socket (crates/slot/src/proto.rs) and from its own scheduler;
+# none of them is an HTTP route.
+commands:
+  - name: slot.pool.SubmitJob
+    naming:
+      wire: submit-job
+      display: Submit a job
+      summary: A client hands the daemon a command; the daemon queues it.
+    input:
+      - {name: argv, type: List<String>}
+      - {name: cwd, type: String}
+      - {name: repo, type: String}
+      - {name: checkout, type: Optional<slot.pool.Checkout>}
+      - {name: project, type: Optional<String>}
+      - {name: session, type: String}
+      - {name: client, type: String}
+      - {name: toolchain, type: String}
+      - {name: remote, type: Boolean}
+      - {name: tokens, type: Integer}
+      - {name: priority, type: slot.pool.Priority}
+      - {name: target_dir, type: String}
+      - {name: cache_env, type: "Optional<Map<String, String>>"}
+      - {name: warnings, type: Optional<List<String>>}
+      - {name: predicted_ms, type: Optional<Integer>}
+    outcomes:
+      - name: queued
+        creates: slot.pool.Job
+        instance: id
+        emits: [slot.pool.JobQueued]
+        payload:
+          slot.pool.JobQueued: {id: {generated: true}}
+        sets:
+          argv: input.argv
+          cwd: input.cwd
+          repo: input.repo
+          checkout: input.checkout
+          project: input.project
+          session: input.session
+          client: input.client
+          toolchain: input.toolchain
+          remote: input.remote
+          tokens: input.tokens
+          priority: input.priority
+          target_dir: input.target_dir
+          cache_env: input.cache_env
+          warnings: input.warnings
+          predicted_ms: input.predicted_ms
+          enqueued_ms: {generated: true}
+          started_ms: 0
+          ended_ms: 0
+          exit: 0
+          peak_rss: 0
+          wait_reason: ""
+          promoted: false
+
+  - name: slot.pool.StartJob
+    naming:
+      wire: start-job
+      display: Start a job
+      summary: Free slots let the daemon start a queued job.
+    input:
+      - {name: id, type: slot.pool.JobId}
+      - {name: started_ms, type: Integer}
+      - {name: limit_s, type: Optional<Integer>}
+      - {name: admission, type: Optional<slot.pool.Admission>}
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.pool.JobNotFound
+      - name: started
+        moves: slot.pool.Job.start
+        instance: id
+        emits: [slot.pool.JobStarted]
+        payload:
+          slot.pool.JobStarted: {id: input.id}
+        sets:
+          started_ms: input.started_ms
+          limit_s: input.limit_s
+          admission: input.admission
+      - name: wrong-state
+        wrong_state: true
+        error: slot.pool.JobStateConflict
+        payload:
+          slot.pool.JobStateConflict: {state: {subject: state}}
+
+  - name: slot.pool.EndJob
+    naming:
+      wire: end-job
+      display: End a job
+      summary: The job's command exited, or could not start; exit 0 is ok, anything else failed.
+    input:
+      - {name: id, type: slot.pool.JobId}
+      - {name: ended_ms, type: Integer}
+      - {name: exit, type: Integer}
+      - {name: cpu_s, type: Binary64}
+      - {name: compile_server_cpu_s, type: Binary64}
+      - {name: peak_rss, type: Integer}
+      - {name: timed_out, type: Optional<Boolean>}
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.pool.JobNotFound
+      - name: succeeded
+        when: exit == 0
+        moves: slot.pool.Job.succeed
+        instance: id
+        emits: [slot.pool.JobEnded]
+        payload:
+          slot.pool.JobEnded: {id: input.id, exit: input.exit}
+        sets:
+          ended_ms: input.ended_ms
+          exit: input.exit
+          cpu_s: input.cpu_s
+          compile_server_cpu_s: input.compile_server_cpu_s
+          peak_rss: input.peak_rss
+          timed_out: input.timed_out
+      - name: failed
+        moves: slot.pool.Job.fail
+        instance: id
+        emits: [slot.pool.JobEnded]
+        payload:
+          slot.pool.JobEnded: {id: input.id, exit: input.exit}
+        sets:
+          ended_ms: input.ended_ms
+          exit: input.exit
+          cpu_s: input.cpu_s
+          compile_server_cpu_s: input.compile_server_cpu_s
+          peak_rss: input.peak_rss
+          timed_out: input.timed_out
+      - name: wrong-state
+        wrong_state: true
+        error: slot.pool.JobStateConflict
+        payload:
+          slot.pool.JobStateConflict: {state: {subject: state}}
+
+  - name: slot.pool.CancelJob
+    naming:
+      wire: cancel-job
+      display: Cancel a job
+      summary: The job's client went away; the daemon ends the job with exit -1.
+    input:
+      - {name: id, type: slot.pool.JobId}
+      - {name: ended_ms, type: Integer}
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.pool.JobNotFound
+      - name: cancelled
+        moves: slot.pool.Job.cancel
+        instance: id
+        emits: [slot.pool.JobCancelled]
+        payload:
+          slot.pool.JobCancelled: {id: input.id}
+        sets:
+          ended_ms: input.ended_ms
+          exit: -1
+      - name: wrong-state
+        wrong_state: true
+        error: slot.pool.JobStateConflict
+        payload:
+          slot.pool.JobStateConflict: {state: {subject: state}}
+
+# The daemon sends each change of a job on `GET /api/events` as `{"type": "job", "job": <the whole
+# job>}`; these events name only what the commands above know.
+events:
+  - name: slot.pool.JobQueued
+    fields:
+      - {name: id, type: slot.pool.JobId}
+  - name: slot.pool.JobStarted
+    fields:
+      - {name: id, type: slot.pool.JobId}
+  - name: slot.pool.JobEnded
+    fields:
+      - {name: id, type: slot.pool.JobId}
+      - {name: exit, type: Integer}
+  - name: slot.pool.JobCancelled
+    fields:
+      - {name: id, type: slot.pool.JobId}
+
+views:
+  # The job list of the web view: every job the daemon holds, running and queued first, then the
+  # ended ones newest first.
+  - name: slot.pool.Jobs
+    source: slot.pool.Job
+    consistency: read_your_writes
+    naming:
+      wire: jobs
+      display: Jobs
+    fields: &job_fields
+      - {name: id, type: slot.pool.JobId}
+      - {name: state, type: slot.pool.Job.State}
+      - {name: argv, type: List<String>}
+      - {name: cwd, type: String}
+      - {name: repo, type: String}
+      - {name: checkout, type: Optional<slot.pool.Checkout>}
+      - {name: project, type: Optional<String>}
+      - {name: session, type: String}
+      - {name: client, type: String}
+      - {name: toolchain, type: String}
+      - {name: remote, type: Boolean}
+      - {name: tokens, type: Integer}
+      - {name: enqueued_ms, type: Integer}
+      - {name: started_ms, type: Integer}
+      - {name: ended_ms, type: Integer}
+      - {name: exit, type: Integer}
+      - {name: cpu_s, type: Binary64}
+      - {name: compile_server_cpu_s, type: Binary64}
+      - {name: peak_rss, type: Integer}
+      - {name: wait_reason, type: String}
+      - {name: target_dir, type: String}
+      - {name: priority, type: slot.pool.Priority}
+      - {name: promoted, type: Boolean}
+      - {name: cache_env, type: "Optional<Map<String, String>>"}
+      - {name: warnings, type: Optional<List<String>>}
+      - {name: limit_s, type: Optional<Integer>}
+      - {name: timed_out, type: Optional<Boolean>}
+      - {name: predicted_ms, type: Optional<Integer>}
+      - {name: collected, type: Optional<Integer>}
+      - {name: ahead, type: Optional<Boolean>}
+      - {name: queue_class, type: Optional<Integer>}
+      - {name: share, type: Optional<Binary64>}
+      - {name: share_used, type: Optional<Binary64>}
+      - {name: lent_s, type: Optional<Binary64>}
+      - {name: admission, type: Optional<slot.pool.Admission>}
+
+  - name: slot.pool.JobDetail
+    source: slot.pool.Job
+    consistency: read_your_writes
+    params:
+      - {name: id, type: slot.pool.JobId}
+    filter: id == param.id
+    naming:
+      wire: job
+      display: Job
+    fields: *job_fields

@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use ts_rs::TS;
 
-/// Generate slot's CLI reference, UI types and documentation-site provenance.
+mod ui_pages;
+
+/// Generate slot's CLI reference, UI types, UI pages and documentation-site provenance.
 #[derive(Debug, Parser)]
 #[command(name = "slot-docs", version)]
 struct Cli {
@@ -36,6 +38,16 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Write the web UI's pages from the UI spec (`spec/ui/slot.ui.yaml` and
+    /// `spec/http.yaml`) into `ui/src/generated/`.
+    UiPages {
+        /// Output directory.
+        #[arg(long, default_value = "ui/src/generated")]
+        out: PathBuf,
+        /// Fail instead of writing when a file is out of date.
+        #[arg(long)]
+        check: bool,
+    },
     /// Write `.well-known/b10x-site.json` into a built documentation site.
     Provenance {
         /// Built site directory.
@@ -54,6 +66,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Cmd::CliReference { out, check } => emit(&out, &cli_reference(), check),
         Cmd::TsTypes { out, check } => emit(&out, &ts_types(), check),
+        Cmd::UiPages { out, check } => ui_pages(&out, check),
         Cmd::Provenance {
             site,
             commit,
@@ -93,6 +106,52 @@ fn emit(path: &Path, content: &str, check: bool) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(path, content).with_context(|| format!("write {}", path.display()))
+}
+
+/// Writes the UI pages, or with `check` fails when a written file differs or a page file is
+/// left over from a page the spec no longer has.
+fn ui_pages(out: &Path, check: bool) -> Result<()> {
+    let read = |p: &str| std::fs::read_to_string(p).with_context(|| format!("read {p}"));
+    let files = ui_pages::generate(&read("spec/ui/slot.ui.yaml")?, &read("spec/http.yaml")?)?;
+    let pages = out.join("pages");
+    let stale: Vec<PathBuf> = std::fs::read_dir(&pages)
+        .map(|d| {
+            d.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    let rel = format!(
+                        "pages/{}",
+                        p.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                    !files.contains_key(&rel)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if check {
+        let mut wrong: Vec<String> = files
+            .iter()
+            .filter(|(rel, content)| {
+                std::fs::read_to_string(out.join(rel)).unwrap_or_default() != **content
+            })
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        wrong.extend(stale.iter().map(|p| format!("{} (no page)", p.display())));
+        if !wrong.is_empty() {
+            bail!(
+                "out of date in {}: {}; run `cargo run -q -p b10x-slot-docs -- ui-pages`",
+                out.display(),
+                wrong.join(", ")
+            );
+        }
+        return Ok(());
+    }
+    for p in stale {
+        std::fs::remove_file(&p).with_context(|| format!("remove {}", p.display()))?;
+    }
+    for (rel, content) in &files {
+        emit(&out.join(rel), content, false)?;
+    }
+    Ok(())
 }
 
 fn ts_types() -> String {

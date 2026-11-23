@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `GET /api/jobs` answers every job the daemon holds as one array, running and queued first,
+  then the ended ones newest first; `GET /api/jobs/{id}` answers one job, or 404.
+
+- The web view has a job list (`#/jobs`: running, queued and ended jobs, a search and a state
+  filter) and a job detail (`#/jobs/<id>`, with the job's live output). Both pages are generated
+  from the UI spec `spec/ui/slot.ui.yaml` by `b10x-slot-docs ui-pages` into
+  `ui/src/generated/`; `task check` regenerates and compares them, and checks the spec with
+  `ess ui check`.
+
 ## 0.30.0 — 2026-11-23
 
 - `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction

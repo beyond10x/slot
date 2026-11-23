@@ -1,0 +1,187 @@
+# The job pages of the web view. `slot-docs ui-pages` generates ui/src/generated/pages/ from this
+# document onto the hand-written components of ui/src/components/spec/; `ess ui check` checks it
+# against spec/ (every read is a view routed in spec/http.yaml). Hand-written code stands only in
+# the host slots below; their names are listed in slot.hosts beside this file and registered in
+# ui/src/hosts.ts.
+
+format: ess-ui/1
+app: slot
+title: slot
+model: slot
+actor: anonymous
+placement_profile: thin
+
+tone_maps:
+  job_state: {queued: neutral, running: info, ok: success, failed: danger, cancelled: warning}
+  priority: {urgent: danger, high: warning, normal: neutral, low: neutral}
+
+shells:
+  app:
+    regions:
+      main: {kind: page_outlet}
+
+navigation:
+  home: jobs.list
+  sections:
+    - {name: jobs, label: Jobs, pages: [jobs.list]}
+  hidden: [jobs.detail]
+
+pages:
+
+  jobs.list:
+    kind: list_page
+    title: Jobs
+    nav: {label: Jobs, synonyms: [queue, builds]}
+    state:
+      search: {type: string, class: page_state, store: url, pinned: true}
+      state: {type: string, class: page_state, store: url, pinned: true}
+      page: null
+      size: null
+      sort: null
+    header: {title: from_page, total: null, filters: filters}
+    sections:
+      - name: filters
+        component: filter_bar
+        binds: [state.search, state.state]
+        search: {binds: state.search, placeholder: command}
+        choices:
+          - name: state
+            component: choice
+            binds: state.state
+            placeholder: any state
+            options: [queued, running, ok, failed, cancelled]
+      - name: list
+        remove: true
+      - name: running
+        title: Running
+        component: collection
+        reads:
+          view: slot.pool.Jobs
+          key: id
+          refresh: 2s
+          filter: row.state == running and row.state contains state.state and row.argv contains state.search
+        columns:
+          - {field: id, label: job}
+          - {field: toolchain, label: tool, host: RunningTool, stands_in_for: text, reason: "draws the toolchain's colour dot, the colour every chart of the web view gives it"}
+          - {field: repo, label: repo, host: RunningRepo, stands_in_for: text, reason: "names the repository and, in the quiet colour, the worktree from the job's checkout"}
+          - &session {field: session}
+          - &command {field: argv, label: command, as: list}
+          - {field: priority, label: level, tone_by: priority}
+          - &slots {field: tokens, label: slots, as: number}
+          - {field: enqueued_ms, label: wait, host: RunningWait, stands_in_for: text, reason: "the time from enqueued_ms to started_ms, or to now while the job waits: a value computed from two fields and the clock"}
+          - {field: started_ms, label: elapsed, host: RunningRunTime, stands_in_for: text, reason: "the time from started_ms to ended_ms, or to now while the job runs: a value computed from two fields and the clock"}
+        row_actions: &open
+          - {name: open, navigate: {to: jobs.detail, params: {id: row.id}}, label: Open}
+        states: {empty: {message: nothing running}}
+      - name: queued
+        title: Queued
+        component: collection
+        reads:
+          view: slot.pool.Jobs
+          key: id
+          refresh: 2s
+          filter: row.state == queued and row.state contains state.state and row.argv contains state.search
+        columns:
+          - {field: id, label: job}
+          - {field: toolchain, label: tool, host: QueuedTool, stands_in_for: text, reason: "draws the toolchain's colour dot, the colour every chart of the web view gives it"}
+          - {field: repo, label: repo, host: QueuedRepo, stands_in_for: text, reason: "names the repository and, in the quiet colour, the worktree from the job's checkout"}
+          - *session
+          - *command
+          - {field: priority, label: level, tone_by: priority}
+          - *slots
+          - {field: enqueued_ms, label: wait, host: QueuedWait, stands_in_for: text, reason: "the time from enqueued_ms to started_ms, or to now while the job waits: a value computed from two fields and the clock"}
+          - {field: wait_reason, label: waits for}
+        row_actions: *open
+        states: {empty: {message: nothing queued}}
+      - name: done
+        title: Finished
+        component: collection
+        reads:
+          view: slot.pool.Jobs
+          key: id
+          refresh: 2s
+          filter: row.state in [ok, failed, cancelled] and row.state contains state.state and row.argv contains state.search
+        columns:
+          - {field: id, label: job}
+          - {field: toolchain, label: tool, host: DoneTool, stands_in_for: text, reason: "draws the toolchain's colour dot, the colour every chart of the web view gives it"}
+          - {field: repo, label: repo, host: DoneRepo, stands_in_for: text, reason: "names the repository and, in the quiet colour, the worktree from the job's checkout"}
+          - *session
+          - *command
+          - {field: ended_ms, label: ended, as: time}
+          - {field: state, label: result, as: badge, tone_by: job_state}
+          - *slots
+          - {field: enqueued_ms, label: wait, host: DoneWait, stands_in_for: text, reason: "the time from enqueued_ms to started_ms, or to now while the job waits: a value computed from two fields and the clock"}
+          - {field: started_ms, label: duration, host: DoneRunTime, stands_in_for: text, reason: "the time from started_ms to ended_ms, or to now while the job runs: a value computed from two fields and the clock"}
+          - {field: cpu_s, label: CPU s, as: number}
+          - {field: peak_rss, label: peak RSS, as: bytes}
+        row_actions: *open
+        states: {empty: {message: nothing finished yet}}
+
+  jobs.detail:
+    kind: detail_page
+    title: Job
+    params: {id: JobId}
+    layout:
+      columns:
+        - {name: side, sections: [summary], width: narrow}
+        - {name: main, sections: [output], width: wide}
+    header:
+      title_from: {section: summary, field: id}
+      badge: {text: section.summary.row.state}
+      actions:
+        - {name: back, navigate: {to: jobs.list}, label: all jobs, as: link}
+    sections:
+      - name: summary
+        component: record
+        reads: {view: slot.pool.JobDetail, params: {id: params.id}, refresh: 2s}
+        fields:
+          - {field: argv, label: command, as: list}
+          - {field: state, label: state, as: badge, tone_by: job_state}
+          - {field: exit, as: number}
+        groups:
+          - name: where
+            label: where
+            fields:
+              - {field: repo, label: repo}
+              - {field: cwd, label: in}
+              - {field: project}
+              - {field: target_dir, label: target directory}
+              - {field: session}
+              - {field: client}
+          - name: scheduling
+            label: scheduling
+            fields:
+              - {field: toolchain, label: tool}
+              - {field: tokens, label: slots, as: number}
+              - {field: priority, label: level, tone_by: priority}
+              - {field: wait_reason, label: waits for}
+              - {field: queue_class, label: queue class, as: number}
+              - {field: admission}
+          - name: timing
+            label: timing
+            fields:
+              - {field: enqueued_ms, label: queued at, as: timestamp}
+              - {field: started_ms, label: started at, as: timestamp}
+              - {field: ended_ms, label: ended at, as: timestamp}
+              - {field: predicted_ms, label: predicted run time, as: duration, unit: ms}
+              - {field: limit_s, label: run-time limit, as: duration, unit: s}
+          - name: resources
+            label: resources
+            fields:
+              - {field: cpu_s, label: CPU s, as: number}
+              - {field: compile_server_cpu_s, label: compile-server CPU s, as: number}
+              - {field: peak_rss, label: peak RSS, as: bytes}
+          - name: cache
+            label: compile cache
+            collapsed: true
+            fields:
+              - {field: cache_env, label: environment, as: map}
+              - {field: warnings, as: list}
+      - name: output
+        title: Output
+        host: JobOutput
+        stands_in_for: collection
+        reason: >-
+          The job's output is a stream of text chunks the daemon sends as server-sent events on
+          GET /api/jobs/{id}/output, ending with an `end` event. ESS declares neither the stream
+          nor its chunk type, so no generated composite can read it.
