@@ -2136,8 +2136,13 @@ mod tests {
         assert!(reaches(|| big.held() == 1).await, "gathers the free token");
         p.set_shares(Some(room(1.0, 1, 1, 48)));
         assert_eq!(big.held(), 0, "gave it back");
-        assert!(reaches(|| p.free() == 1).await);
-        assert_eq!((p.missing(2), p.surplus(2)), (0, 0));
+        // The reader thread was polling when shares came on: it may read the
+        // token handed back and write it back once more, in flight for a
+        // moment (see `Pool::missing`).
+        assert!(
+            reaches(|| p.free() == 1 && (p.missing(2), p.surplus(2)) == (0, 0)).await,
+            "every token placed"
+        );
         assert!(!ready_within(&mut big, 200).await, "2 asked, 1 free");
         p.set_shares(None);
         assert!(reaches(|| big.held() == 1).await, "slots again");
