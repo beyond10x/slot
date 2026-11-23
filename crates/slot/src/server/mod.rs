@@ -139,6 +139,10 @@ pub struct Config {
     /// The longest a job is held for the host's CPUs:
     /// [`cpu_limit::HOLD_MAX`] outside tests.
     pub cpu_hold_max: Duration,
+    /// After a job started on that bound, how long the next job held as
+    /// long must wait: [`cpu_limit::STARTING_MS`] outside tests, so held
+    /// jobs that reach the bound together start one by one.
+    pub cpu_bound_gap: Duration,
     /// CPU pressure of the host (`some avg10`, percent), for the brake of
     /// admission by share. `None` reads the census sampler's, as everywhere
     /// outside tests.
@@ -426,6 +430,8 @@ struct Inner {
     /// The host's busy CPUs over the last seconds, in parts, for the CPU
     /// limit.
     host_busy: cpu_limit::RecentParts,
+    /// When a job last started on the CPU hold's bound, Unix ms.
+    cpu_bound_ms: i64,
     controller: policy::Controller,
     /// Peak memory of finished jobs, for admission.
     memory: admission::History,
@@ -693,6 +699,7 @@ impl Server {
                 title_pending: HashSet::new(),
                 last_census: HostCensus::default(),
                 host_busy: cpu_limit::RecentParts::default(),
+                cpu_bound_ms: 0,
                 controller: policy::Controller::new(policy::Settings::new(
                     cores as usize,
                     pool_size,
@@ -1963,6 +1970,9 @@ impl Server {
                 } else {
                     let n = waiter.take_held();
                     let ahead = waiter.ahead();
+                    if cpu == cpu_limit::Verdict::Overdue {
+                        g.cpu_bound_ms = now_ms();
+                    }
                     g.active.get_mut(&id).map(|l| {
                         l.held = n;
                         l.claimed = true;
@@ -2427,6 +2437,11 @@ impl Server {
                     // Let through after a hold, it stays weighed until it
                     // claims its slots; held for something else, it is not.
                     l.cpu_wait = cpu || (l.cpu_wait && short.is_none());
+                    // Held for disk or memory, the time does not count
+                    // towards the CPU hold's bound: its clock starts again.
+                    if short.is_some() && !cpu {
+                        l.cpu_wait_since = None;
+                    }
                     let first = cpu && l.cpu_wait_since.is_none();
                     if first {
                         l.cpu_wait_since = Some(now);
@@ -3594,7 +3609,16 @@ impl Server {
                 load.ahead += l.expect_cores;
             }
         }
-        cpu_limit::verdict(limits, &load, self.cfg.cpu_hold_max)
+        let v = cpu_limit::verdict(limits, &load, self.cfg.cpu_hold_max);
+        // Jobs that reach the bound together start one by one.
+        let gap = i64::try_from(self.cfg.cpu_bound_gap.as_millis()).unwrap_or(i64::MAX);
+        if v == cpu_limit::Verdict::Overdue && now - g.cpu_bound_ms < gap {
+            return cpu_limit::Verdict::Held(format!(
+                "host busy: held as long as a job is; one such job starts every {} s",
+                (gap + 999) / 1000
+            ));
+        }
+        v
     }
 
     /// Job `id` starts although the host is busier than the mark: it was

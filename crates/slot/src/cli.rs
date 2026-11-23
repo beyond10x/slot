@@ -687,6 +687,7 @@ impl ServeArgs {
             cpu_busy: None,
             host_cpus: None,
             cpu_hold_max: crate::cpu_limit::HOLD_MAX,
+            cpu_bound_gap: std::time::Duration::from_millis(crate::cpu_limit::STARTING_MS as u64),
             cpu_pressure: None,
             cache_budget: gb_bytes(self.cache_budget),
             evict: crate::evict::Settings {

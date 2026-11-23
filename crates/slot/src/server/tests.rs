@@ -78,6 +78,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         cpu_busy: None,
         host_cpus: None,
         cpu_hold_max: cpu_limit::HOLD_MAX,
+        cpu_bound_gap: Duration::from_millis(cpu_limit::STARTING_MS as u64),
         cpu_pressure: None,
         cache_budget: 0,
         evict: crate::evict::Settings {
@@ -629,6 +630,7 @@ fn history_survives_restart() {
         cpu_busy: None,
         host_cpus: None,
         cpu_hold_max: cpu_limit::HOLD_MAX,
+        cpu_bound_gap: Duration::from_millis(cpu_limit::STARTING_MS as u64),
         cpu_pressure: None,
         cache_budget: 0,
         evict: crate::evict::Settings {
@@ -4429,4 +4431,81 @@ fn adversary_u6_a_put_on_an_api_path_the_daemon_lacks_answers_404() {
     s.read_to_string(&mut raw).unwrap();
     let first = raw.lines().next().unwrap_or_default().to_string();
     assert!(first.contains(" 404"), "{first}");
+}
+
+/// The bound on a CPU hold counts only time held for the host's CPUs: a job
+/// held for CPU, then for disk past the bound, is held for CPU again when
+/// the disk frees, and does not start as "held as long as a job is".
+#[test]
+fn time_held_for_disk_does_not_count_towards_the_cpu_holds_bound() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const GB: u64 = crate::admission::GB;
+    static FREE: AtomicU64 = AtomicU64::new(60 * GB);
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(FREE.load(SeqCst))
+    }
+    host_busy!(BUSY, busy, 184);
+    let f = start_busy(4, busy, |c| {
+        c.cpu_hold_max = Duration::from_millis(300);
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 50 * GB;
+    });
+    set_cpu_limit(&f, Some(17.0), Some(1));
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run", || running(&f) == [a]);
+    let (second, b) = submit(&f, sh(&f.root, "echo second"));
+    wait_for_jobs(&f, "the second job to be held for CPU", || {
+        reason_of(&f, b).contains("host busy")
+    });
+    FREE.store(45 * GB, SeqCst);
+    wait_for_jobs(&f, "the second job to be held for disk", || {
+        reason_of(&f, b).contains("builds need 50.0 GB")
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    FREE.store(60 * GB, SeqCst);
+    wait_for_jobs(&f, "the second job to be held for CPU again", || {
+        reason_of(&f, b).contains("host busy")
+    });
+    assert!(
+        census_events(&f, "cpu_hold_bound").is_empty(),
+        "started on the bound although it was held for disk"
+    );
+    assert_eq!(running(&f), [a]);
+    end_all(&f, vec![first, second]);
+}
+
+/// Held jobs that reach the CPU hold's bound together start one by one,
+/// `cpu_bound_gap` apart, not all at once.
+#[test]
+fn held_jobs_that_reach_the_bound_together_start_one_by_one() {
+    host_busy!(BUSY, busy, 184);
+    let f = start_busy(4, busy, |c| {
+        c.cpu_hold_max = Duration::from_millis(300);
+        c.cpu_bound_gap = Duration::from_millis(1500);
+    });
+    set_cpu_limit(&f, Some(17.0), Some(1));
+    let (first, a) = quiet(&f);
+    wait_for_jobs(&f, "the first job to run", || running(&f) == [a]);
+    let (second, b) = quiet(&f);
+    let (third, c) = quiet(&f);
+    wait_for_jobs(&f, "one held job to start on the bound", || {
+        census_events(&f, "cpu_hold_bound").len() == 1
+    });
+    std::thread::sleep(Duration::from_millis(700));
+    assert_eq!(
+        census_events(&f, "cpu_hold_bound").len(),
+        1,
+        "the second held job started within the gap"
+    );
+    wait_for_jobs(&f, "the other held job to start", || {
+        census_events(&f, "cpu_hold_bound").len() == 2
+    });
+    let starts: Vec<i64> = census_events(&f, "cpu_hold_bound")
+        .iter()
+        .map(|e| e["t"].as_i64().unwrap())
+        .collect();
+    assert!(starts[1] - starts[0] >= 1500, "{starts:?}");
+    wait_for_jobs(&f, "all three to run", || running(&f) == [a, b, c]);
+    end_all(&f, vec![first, second, third]);
 }
