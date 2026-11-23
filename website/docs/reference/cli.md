@@ -209,7 +209,8 @@ Show or set the eviction mark: the free space below which the daemon deletes idl
 slot evict-below [OPTIONS] [GB|default]
 ```
 
-- `<MARK>`: Free space, GB, below which eviction deletes idle target directories, from 0 (eviction off) to 100000; `default` forgets the mark and `serve --evict-below` applies again. It replaces `--evict-below` and is raised to `--min-free-disk` when that is larger; the disk hold itself does not change. Eviction looks at once. The mark is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `<MARK>`: Free space, GB, below which eviction deletes idle target directories, from 0 (eviction off) to 100000; `default` forgets the mark and the idle keep, and `serve --evict-below` and 2 h apply again. It replaces `--evict-below` and is raised to `--min-free-disk` when that is larger; the disk hold itself does not change. Eviction looks at once. The mark is kept in `limits.json` in the state directory and holds across reloads and restarts
+- `--idle`: The idle keep: eviction keeps a target directory built more recently than this, from 5m to 168h (7 days); 2h until it is set. Kept in `limits.json` like the mark; applies at the next look
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot cpu-limit`

@@ -908,7 +908,12 @@ Need: the workstation's `/` fills with target directories of worktrees nobody bu
   directories costs a walk of each, and a dry run would size the same ones every 2 s.
 - **Kept.** A directory a queued or running job builds into, one in the checkout such a job runs
   in (the job's working directory is at or below the target directory's parent), one built in
-  the last 2 h, and one a process or a unit uses. Before each deletion the job check repeats
+  the last 2 h, and one a process or a unit uses. The 2 h are the idle keep: `slot evict-below
+  --idle <duration>` (5 min to 7 days, `evict_idle_s` in `limits.json` and in the `PUT` body)
+  replaces them at run time; after a host restart about 100 target directories were under 2 h
+  old and eviction could free 8 GB of the wanted 100. A directory whose deletion failed (`worktree
+  discard-cache` refuses a tree with a live session lease) is left out for 1 h from the failure:
+  before, it was planned first again on every look and eviction freed nothing. Before each deletion the job check repeats
   under the server lock. Up to 0.28 any queued or running job of a repository kept every target
   directory of that repository; with about 24 sessions at work that kept nearly all of them.
 - **What counts as a target directory.** Absolute, at least three levels deep, a real directory

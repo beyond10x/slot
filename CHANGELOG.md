@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.30.0 — 2026-11-23
+
+- `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction
+  keeps a target directory after its last build, from 5 minutes to 7 days; 2 hours until it is
+  set. After a host restart every session rebuilt, about 100 target directories were under
+  2 hours old, and eviction could free 8 GB. It applies at the next look, is kept in
+  `limits.json` (`evict_idle_s`) only when set, and is `evict_idle_s` in the body of
+  `PUT /api/evict-below`, where a field left out stays as it is and `null` forgets it.
+  `slot evict-below` prints it; `default` forgets it with the mark.
+
+- A target directory whose deletion failed, such as a managed worktree whose session lease is
+  live, is left out of eviction for an hour, and the journal says so once. Before, it was
+  planned first again every minute and eviction freed nothing.
+
 ## 0.29.0 — 2026-11-23
 
 - `slot evict-below [GB|default]` sets the eviction mark on the running daemon: the free space

@@ -254,7 +254,7 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.29.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+Done: 0.1.0 to 0.30.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
 passing within a level for short jobs and whole-pool requests, admission by disk and memory,
 holds on the host's CPUs, admission by share (off by default), run-time limit, build processes
 per job, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`),

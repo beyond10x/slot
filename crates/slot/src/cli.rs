@@ -561,19 +561,24 @@ impl AdmissionArgs {
     }
 }
 
-/// `slot evict-below` arguments. Without any, prints the mark in force and
-/// where it comes from.
+/// `slot evict-below` arguments. Without any, prints the mark and the idle
+/// keep in force and where they come from.
 #[derive(Debug, Clone, Args)]
 pub struct EvictBelowArgs {
     /// Free space, GB, below which eviction deletes idle target
     /// directories, from 0 (eviction off) to 100000; `default` forgets the
-    /// mark and `serve --evict-below` applies again. It replaces
-    /// `--evict-below` and is raised to `--min-free-disk` when that is
-    /// larger; the disk hold itself does not change. Eviction looks at
-    /// once. The mark is kept in `limits.json` in the state directory and
-    /// holds across reloads and restarts.
+    /// mark and the idle keep, and `serve --evict-below` and 2 h apply
+    /// again. It replaces `--evict-below` and is raised to
+    /// `--min-free-disk` when that is larger; the disk hold itself does not
+    /// change. Eviction looks at once. The mark is kept in `limits.json` in
+    /// the state directory and holds across reloads and restarts.
     #[arg(value_name = "GB|default")]
     pub mark: Option<crate::evict::BelowSetting>,
+    /// The idle keep: eviction keeps a target directory built more recently
+    /// than this, from 5m to 168h (7 days); 2h until it is set. Kept in
+    /// `limits.json` like the mark; applies at the next look.
+    #[arg(long, value_name = "DURATION", value_parser = crate::evict::parse_idle)]
+    pub idle: Option<u64>,
     /// The daemon's web address.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
@@ -734,7 +739,7 @@ impl ServeArgs {
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
                 margin: 10 * crate::admission::GB,
-                min_idle: std::time::Duration::from_secs(2 * 3600),
+                min_idle: crate::evict::DEFAULT_MIN_IDLE,
                 dry_run: self.evict_dry_run,
             },
             disk_free: None,
@@ -935,6 +940,32 @@ mod tests {
         }
         let cli = parse(&["evict-below", "80", "--http", "127.0.0.1:9"]).unwrap();
         assert!(matches!(cli.command, Cmd::EvictBelow(ref a) if a.http == "127.0.0.1:9"));
+    }
+
+    #[test]
+    fn evict_below_takes_an_idle_keep() {
+        use crate::evict::BelowSetting;
+        let args = |args: &[&str]| {
+            let mut argv = vec!["evict-below"];
+            argv.extend(args);
+            parse(&argv).map(|cli| {
+                let Cmd::EvictBelow(a) = cli.command else {
+                    panic!("not evict-below")
+                };
+                (a.mark, a.idle)
+            })
+        };
+        assert_eq!(args(&[]).unwrap(), (None, None));
+        assert_eq!(
+            args(&["100", "--idle", "30m"]).unwrap(),
+            (Some(BelowSetting::At(100.0)), Some(1800))
+        );
+        assert_eq!(args(&["--idle", "1h"]).unwrap(), (None, Some(3600)));
+        assert_eq!(args(&["--idle", "168h"]).unwrap(), (None, Some(604_800)));
+        assert_eq!(args(&["--idle", "300"]).unwrap(), (None, Some(300)));
+        for bad in ["4m", "169h", "0", "soon", "default"] {
+            assert!(args(&["100", "--idle", bad]).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -4,14 +4,16 @@
 //! a floor, the daemon deletes the target directories it saw jobs build
 //! into, least recently built first, until free space is above the floor
 //! plus a margin. It never deletes a directory a queued or running job
-//! builds into or whose checkout such a job runs in, one built in the last
-//! two hours, one a process or a service uses, or a path that no job of the
-//! log built into. The mark is `--evict-below`, or the one `slot
-//! evict-below` set at run time. A path must carry Cargo's `CACHEDIR.TAG` to count
-//! as a target directory. A dry run (`--evict-dry-run`, or [`FILE`]) only says
-//! what it would delete.
+//! builds into or whose checkout such a job runs in, one built more recently
+//! than the idle keep (2 h, or the one `slot evict-below --idle` set), one
+//! a process or a service uses, one whose removal failed in the last hour,
+//! or a path that no job of the log built into. The mark is
+//! `--evict-below`, or the one `slot evict-below` set at run time. A path
+//! must carry Cargo's `CACHEDIR.TAG` to count as a target directory. A dry
+//! run (`--evict-dry-run`, or [`FILE`]) only says what it would delete.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -34,6 +36,48 @@ pub struct Settings {
     pub min_idle: Duration,
     /// Only report what would be deleted.
     pub dry_run: bool,
+}
+
+/// The idle keep until `slot evict-below --idle` sets one: a target
+/// directory built in the last 2 h is kept.
+pub const DEFAULT_MIN_IDLE: Duration = Duration::from_secs(2 * 3600);
+
+/// The least idle keep `slot evict-below --idle` accepts, seconds.
+pub const MIN_IDLE_S: u64 = 5 * 60;
+
+/// The most idle keep `slot evict-below --idle` accepts, seconds: 7 days.
+pub const MAX_IDLE_S: u64 = 7 * 24 * 3600;
+
+/// How long a target directory whose removal failed is left out of
+/// eviction, so the next pass plans the next candidates.
+pub const FAILED_KEEP: Duration = Duration::from_secs(3600);
+
+/// The idle keep in force: the one set with `slot evict-below --idle`
+/// (`set_s`, kept in `limits.json`), else `option`.
+pub fn min_idle(set_s: Option<u64>, option: Duration) -> Duration {
+    set_s.map_or(option, Duration::from_secs)
+}
+
+/// Why an idle keep for `slot evict-below --idle` is refused; `None` when
+/// it is from [`MIN_IDLE_S`] to [`MAX_IDLE_S`].
+pub fn idle_refused(s: u64) -> Option<String> {
+    (!(MIN_IDLE_S..=MAX_IDLE_S).contains(&s)).then(|| {
+        format!(
+            "slot: the idle keep must be from {} to {} (7 days), not {}",
+            crate::run_limit::text(MIN_IDLE_S),
+            crate::run_limit::text(MAX_IDLE_S),
+            crate::run_limit::text(s)
+        )
+    })
+}
+
+/// `--idle` of `slot evict-below`: a duration from 5 min to 7 days.
+pub fn parse_idle(s: &str) -> Result<u64, String> {
+    let secs = crate::run_limit::parse_duration(s)?;
+    match idle_refused(secs) {
+        Some(why) => Err(why.trim_start_matches("slot: ").to_string()),
+        None => Ok(secs),
+    }
 }
 
 /// File in the state directory that overrides `--evict-dry-run`.
@@ -105,28 +149,71 @@ pub fn below_refused(gb: f64) -> Option<String> {
     None
 }
 
-/// Body of `PUT /api/evict-below`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Body of `PUT /api/evict-below`. A field that is absent leaves its
+/// setting as it is; at least one must be named, so an empty body changes
+/// nothing.
+#[allow(
+    clippy::option_option,
+    reason = "absent leaves a setting, `null` forgets it, a value sets it"
+)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct BelowRequest {
     /// The mark, GB, 0 = eviction off; `null` forgets it and
-    /// `--evict-below` applies again. The field must be named.
-    #[serde(deserialize_with = "named_gb")]
-    pub evict_below_gb: Option<f64>,
+    /// `--evict-below` applies again.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub evict_below_gb: Option<Option<f64>>,
+    /// The idle keep, seconds: a target directory built more recently is
+    /// kept; `null` forgets it and the 2 h default applies again.
+    #[serde(
+        default,
+        deserialize_with = "named",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub evict_idle_s: Option<Option<u64>>,
 }
 
-/// An `Option` that must be present: a missing field is an error, so an
-/// empty body changes nothing.
-fn named_gb<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
-    Option::deserialize(d)
+/// A field that is present: `Some(None)` for `null`, so it differs from an
+/// absent field (`None`, by `default`).
+#[allow(clippy::option_option, reason = "the type of a field of BelowRequest")]
+fn named<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::deserialize(d).map(Some)
 }
 
 impl BelowRequest {
-    /// The setting the request names, or why it is refused.
-    pub fn setting(&self) -> Result<Option<f64>, String> {
-        match self.evict_below_gb {
-            Some(gb) => below_refused(gb).map_or(Ok(Some(gb)), Err),
-            None => Ok(None),
+    /// The request `slot evict-below [GB|default] [--idle DURATION]` makes;
+    /// `None` without arguments (it only reads). `default` forgets the mark
+    /// and, unless `--idle` names one, the idle keep.
+    pub fn of(mark: Option<BelowSetting>, idle_s: Option<u64>) -> Option<Self> {
+        let idle = match (mark, idle_s) {
+            (_, Some(s)) => Some(Some(s)),
+            (Some(BelowSetting::Default), None) => Some(None),
+            _ => None,
+        };
+        let r = Self {
+            evict_below_gb: mark.map(BelowSetting::value),
+            evict_idle_s: idle,
+        };
+        (r != Self::default()).then_some(r)
+    }
+
+    /// The request when its values are accepted, or why it is refused.
+    pub fn checked(self) -> Result<Self, String> {
+        if self.evict_below_gb.is_none() && self.evict_idle_s.is_none() {
+            return Err("slot: name `evict_below_gb`, `evict_idle_s` or both".into());
         }
+        if let Some(why) = self.evict_below_gb.flatten().and_then(below_refused) {
+            return Err(why);
+        }
+        if let Some(why) = self.evict_idle_s.flatten().and_then(idle_refused) {
+            return Err(why);
+        }
+        Ok(self)
     }
 }
 
@@ -145,6 +232,14 @@ pub struct BelowView {
     /// The mark in force, bytes, after the disk hold raised it; 0 = off.
     #[serde(default)]
     pub floor: u64,
+    /// The idle keep set with `slot evict-below --idle`, seconds; `None` =
+    /// the 2 h default.
+    #[serde(default)]
+    pub evict_idle_s: Option<u64>,
+    /// The idle keep in force, seconds; 0 from a daemon older than the
+    /// setting.
+    #[serde(default)]
+    pub idle_s: u64,
 }
 
 impl BelowView {
@@ -156,11 +251,40 @@ impl BelowView {
             option,
             min_free_disk,
             floor: mark(below(set_gb, option), min_free_disk),
+            ..Self::default()
         }
     }
 
-    /// `slot evict-below`: the mark in force and where it comes from.
+    /// The view with the idle keep `set_s` over the default `option`.
+    #[must_use]
+    pub fn with_idle(self, set_s: Option<u64>, option: Duration) -> Self {
+        Self {
+            evict_idle_s: set_s,
+            idle_s: min_idle(set_s, option).as_secs(),
+            ..self
+        }
+    }
+
+    /// `slot evict-below`: the mark in force and where it comes from, and
+    /// the idle keep.
     pub fn render(&self) -> String {
+        let mut out = self.render_mark();
+        if self.idle_s > 0 {
+            let from = if self.evict_idle_s.is_some() {
+                "set with `slot evict-below --idle`"
+            } else {
+                "the default"
+            };
+            let _ = writeln!(
+                out,
+                "eviction keeps target dirs built in the last {} ({from})",
+                crate::run_limit::text(self.idle_s)
+            );
+        }
+        out
+    }
+
+    fn render_mark(&self) -> String {
         let below = below(self.evict_below_gb, self.option);
         let from = match self.evict_below_gb {
             Some(_) => format!(
@@ -1051,17 +1175,116 @@ mod tests {
         let setting = |body: &str| {
             serde_json::from_str::<BelowRequest>(body)
                 .map_err(|e| e.to_string())
-                .and_then(|r| r.setting())
+                .and_then(BelowRequest::checked)
+                .map(|r| (r.evict_below_gb, r.evict_idle_s))
         };
-        assert_eq!(setting(r#"{"evict_below_gb":100}"#), Ok(Some(100.0)));
-        assert_eq!(setting(r#"{"evict_below_gb":null}"#), Ok(None));
+        assert_eq!(
+            setting(r#"{"evict_below_gb":100}"#),
+            Ok((Some(Some(100.0)), None)),
+            "the idle keep is left as it is"
+        );
+        assert_eq!(
+            setting(r#"{"evict_below_gb":null}"#),
+            Ok((Some(None), None))
+        );
+        assert_eq!(
+            setting(r#"{"evict_idle_s":1800}"#),
+            Ok((None, Some(Some(1800))))
+        );
+        assert_eq!(
+            setting(r#"{"evict_below_gb":null,"evict_idle_s":null}"#),
+            Ok((Some(None), Some(None)))
+        );
         for bad in [
             "{}",
             r#"{"evict_below_gb":-1}"#,
             r#"{"evict_below_gb":"9"}"#,
+            r#"{"evict_idle_s":299}"#,
+            r#"{"evict_idle_s":604801}"#,
+            r#"{"evict_below_gb":50,"evict_idle_s":-1}"#,
         ] {
             assert!(setting(bad).is_err(), "{bad}");
         }
+        let body = |r: BelowRequest| serde_json::to_string(&r).unwrap();
+        assert_eq!(
+            body(BelowRequest {
+                evict_below_gb: Some(Some(100.0)),
+                evict_idle_s: None,
+            }),
+            r#"{"evict_below_gb":100.0}"#,
+            "an older daemon reads it"
+        );
+        assert_eq!(
+            body(BelowRequest {
+                evict_below_gb: Some(None),
+                evict_idle_s: Some(None),
+            }),
+            r#"{"evict_below_gb":null,"evict_idle_s":null}"#
+        );
+        let of = |m, i| BelowRequest::of(m, i).map(|r| (r.evict_below_gb, r.evict_idle_s));
+        assert_eq!(of(None, None), None, "no arguments: only read");
+        assert_eq!(
+            of(Some(BelowSetting::At(100.0)), None),
+            Some((Some(Some(100.0)), None))
+        );
+        assert_eq!(
+            of(Some(BelowSetting::At(100.0)), Some(1800)),
+            Some((Some(Some(100.0)), Some(Some(1800))))
+        );
+        assert_eq!(of(None, Some(1800)), Some((None, Some(Some(1800)))));
+        assert_eq!(
+            of(Some(BelowSetting::Default), None),
+            Some((Some(None), Some(None))),
+            "`default` forgets both"
+        );
+    }
+
+    /// The idle keep set at run time replaces the 2 h default, from 5 min
+    /// to 7 days, and `slot evict-below` names it.
+    #[test]
+    fn the_idle_keep_set_at_run_time_replaces_the_default() {
+        assert_eq!(min_idle(None, DEFAULT_MIN_IDLE), Duration::from_secs(7200));
+        assert_eq!(
+            min_idle(Some(1800), DEFAULT_MIN_IDLE),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(parse_idle("30m"), Ok(1800));
+        assert_eq!(parse_idle("5m"), Ok(300));
+        assert_eq!(parse_idle("168h"), Ok(MAX_IDLE_S));
+        for bad in ["4m", "169h", "0", "soon", "default"] {
+            assert!(parse_idle(bad).is_err(), "{bad}");
+        }
+        let h = 3_600_000;
+        let now = 10 * h;
+        let seen: HashMap<PathBuf, (String, i64)> = [
+            (PathBuf::from("/w/a/target"), ("a".to_string(), now - h)),
+            (PathBuf::from("/w/b/target"), ("b".to_string(), now - h / 4)),
+        ]
+        .into();
+        let none = HashSet::new();
+        let names = |idle| -> Vec<String> {
+            candidates(&seen, &none, &none, now, idle)
+                .into_iter()
+                .map(|c| c.repo)
+                .collect()
+        };
+        assert!(names(DEFAULT_MIN_IDLE).is_empty(), "both built in 2 h");
+        assert_eq!(names(min_idle(Some(1800), DEFAULT_MIN_IDLE)), ["a"]);
+        assert_eq!(names(min_idle(Some(300), DEFAULT_MIN_IDLE)), ["a", "b"]);
+        let v = BelowView::of(Some(100.0), 40 * GB, 25 * GB);
+        assert_eq!(
+            v.with_idle(None, DEFAULT_MIN_IDLE).render(),
+            "eviction starts below 100.0 GB free (set with `slot evict-below`; \
+             `--evict-below` is 40.0 GB)\n\
+             eviction keeps target dirs built in the last 2h (the default)\n"
+        );
+        assert_eq!(
+            v.with_idle(Some(1800), DEFAULT_MIN_IDLE).render(),
+            "eviction starts below 100.0 GB free (set with `slot evict-below`; \
+             `--evict-below` is 40.0 GB)\n\
+             eviction keeps target dirs built in the last 30m (set with \
+             `slot evict-below --idle`)\n"
+        );
     }
 
     #[test]
