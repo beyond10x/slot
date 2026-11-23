@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.31.0 — 2026-11-24
 
 - The web UI opens on a cluster view: headline numbers, the queue, a card per node with its
   slots, CPU over 60 s, memory, free disk and the checkouts with jobs on it, jobs moving from the
