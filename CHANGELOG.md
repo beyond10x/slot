@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.26.0 — 2026-11-23
+
+- Eviction no longer deletes a target directory that a process or a service uses. It deleted one
+  that a systemd user unit ran its daemon from while a command executed from it; the next run
+  failed with exit 127. Before it deletes, eviction now reads `/proc` once per pass and keeps a
+  directory that holds a process's executable, working directory, or an open or mapped file, and
+  one that an `ExecStart` line of a user unit names, whether or not the unit runs. The journal
+  says which and why.
+
+- A job whose command is predicted to run 30 s or less is not held by the CPU limit for starts.
+  On one host 51 of 169 jobs in 30 minutes ran under 30 s; they waited 22,180 s in the queue,
+  435 s each, for 176 CPU-seconds of work in all, most of it the CPU hold's bound of 10 minutes.
+  The prediction is the 90th percentile of the command's last runs in the same repository, with
+  at least 3; a command without history is held as before. The client says why the job passed,
+  and the census log gets a `cpu_hold_short` line.
+
 ## 0.25.2 — 2026-11-23
 
 - With no daemon answering, `slot <command>` no longer runs the command outside the pool and

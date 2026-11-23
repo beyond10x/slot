@@ -1989,14 +1989,16 @@ impl Server {
                         l.job.collected = 0;
                         l.job.ahead |= ahead;
                         l.job.queue_class = None;
-                        (n, cpu == cpu_limit::Verdict::Overdue)
+                        (n, cpu)
                     })
                 }
             };
             match claimed {
-                Some((n, overdue)) => {
-                    if overdue {
-                        self.cpu_hold_ran_out(id, &tx);
+                Some((n, cpu)) => {
+                    match cpu {
+                        cpu_limit::Verdict::Overdue => self.cpu_hold_ran_out(id, &tx),
+                        cpu_limit::Verdict::Short(ms) => self.cpu_hold_passed(id, ms, &tx),
+                        cpu_limit::Verdict::Free | cpu_limit::Verdict::Held(_) => {}
                     }
                     break n;
                 }
@@ -2381,7 +2383,9 @@ impl Server {
         let g = self.inner.lock().expect("server lock");
         match self.cpu_verdict(&g, cpu, id, now_ms()) {
             cpu_limit::Verdict::Held(text) => Some(("cpu", text)),
-            cpu_limit::Verdict::Free | cpu_limit::Verdict::Overdue => None,
+            cpu_limit::Verdict::Free
+            | cpu_limit::Verdict::Overdue
+            | cpu_limit::Verdict::Short(_) => None,
         }
     }
 
@@ -3610,6 +3614,13 @@ impl Server {
             }
         }
         let v = cpu_limit::verdict(limits, &load, self.cfg.cpu_hold_max);
+        // A job predicted short is not held: it would add little load for
+        // a short time.
+        if v != cpu_limit::Verdict::Free
+            && let Some(ms) = me.job.predicted_ms.filter(|&ms| ms <= cpu_limit::PASS_MS)
+        {
+            return cpu_limit::Verdict::Short(ms);
+        }
         // Jobs that reach the bound together start one by one.
         let gap = i64::try_from(self.cfg.cpu_bound_gap.as_millis()).unwrap_or(i64::MAX);
         if v == cpu_limit::Verdict::Overdue && now - g.cpu_bound_ms < gap {
@@ -3643,6 +3654,23 @@ impl Server {
             "event": "cpu_hold_bound",
             "job": id,
             "held_ms": held_ms,
+        }));
+    }
+
+    /// Job `id` starts although the host is busier than the mark: its
+    /// command is predicted to run `predicted_ms`, at most
+    /// [`cpu_limit::PASS_MS`].
+    fn cpu_hold_passed(&self, id: i64, predicted_ms: u64, tx: &mpsc::UnboundedSender<Frame>) {
+        let msg = format!(
+            "slot: job {id} is predicted to run {} s: it is not held for the host's CPUs",
+            predicted_ms.div_ceil(1000)
+        );
+        let _ = tx.send(Frame::Info { msg });
+        self.census_event(&serde_json::json!({
+            "t": now_ms(),
+            "event": "cpu_hold_short",
+            "job": id,
+            "predicted_ms": predicted_ms,
         }));
     }
 
@@ -4614,6 +4642,7 @@ fn evict_pass_with(
             .filter(|c| evict::is_target_dir(&c.path))
             .collect();
     let mut out = Vec::new();
+    let mut in_use: Option<evict::InUse> = None;
     for group in evict::by_device(cands).into_values() {
         let Some(fs_free) = group.first().and_then(|c| disk_free(&c.path)) else {
             continue;
@@ -4621,12 +4650,18 @@ fn evict_pass_with(
         if fs_free >= s.floor {
             continue;
         }
+        // A directory a process or a service uses is kept.
+        let used = in_use.get_or_insert_with(evict::InUse::scan);
         let goal = s.floor.saturating_add(s.margin);
         let mut sized = Vec::new();
         let mut have = fs_free;
         for c in group {
             if have >= goal {
                 break;
+            }
+            if let Some(why) = used.why(&c.path) {
+                eprintln!("slot: disk: kept {}: {why}", c.path.display());
+                continue;
             }
             let b = evict::dir_size(&c.path);
             have = have.saturating_add(b);

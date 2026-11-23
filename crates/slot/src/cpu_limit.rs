@@ -28,6 +28,11 @@ pub const DEFAULT_FLOOR: usize = 4;
 /// The longest a job is held for the host's CPUs; then it starts.
 pub const HOLD_MAX: Duration = Duration::from_secs(600);
 
+/// A job whose command's p90 run time is at most this, ms, is not held for
+/// the host's CPUs: it would add little load for a short time, and holding
+/// it for minutes saves the host nothing.
+pub const PASS_MS: u64 = 30_000;
+
 /// Samples of the census (one a second) the busy figure is the mean of.
 pub const WINDOW: usize = 10;
 
@@ -389,6 +394,9 @@ pub enum Verdict {
     Held(String),
     /// It would be held, and has been for `hold_max`: it starts.
     Overdue,
+    /// It would be held, but its command is predicted to run this many ms,
+    /// at most [`PASS_MS`]: it starts.
+    Short(u64),
 }
 
 /// Weighs one queued job: held while at least `floor` jobs run and the

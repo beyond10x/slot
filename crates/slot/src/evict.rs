@@ -332,6 +332,128 @@ pub fn plan(free: u64, s: Settings, cands: &[(Candidate, u64)]) -> Vec<&(Candida
     out
 }
 
+/// Paths that processes and services use, read once per eviction pass: a
+/// target directory that holds one of them is kept.
+#[derive(Debug, Default)]
+pub struct InUse {
+    /// A used path and who uses it (`process 123 runs it`).
+    paths: Vec<(PathBuf, String)>,
+}
+
+impl InUse {
+    /// Reads `/proc` and the user's systemd unit directories.
+    pub fn scan() -> Self {
+        let mut unit_dirs = Vec::new();
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+        if let Some(c) = config {
+            unit_dirs.push(c.join("systemd/user"));
+        }
+        if let Some(r) = crate::paths::runtime_dir() {
+            unit_dirs.push(r.join("systemd/transient"));
+            unit_dirs.push(r.join("systemd/user"));
+        }
+        Self::scan_from(Path::new("/proc"), &unit_dirs)
+    }
+
+    /// [`InUse::scan`] over `proc_root` and `unit_dirs`.
+    pub fn scan_from(proc_root: &Path, unit_dirs: &[PathBuf]) -> Self {
+        let mut paths = Vec::new();
+        for e in std::fs::read_dir(proc_root).into_iter().flatten().flatten() {
+            let name = e.file_name();
+            let Some(pid) = name
+                .to_str()
+                .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
+            else {
+                continue;
+            };
+            let dir = e.path();
+            if let Ok(p) = std::fs::read_link(dir.join("exe")) {
+                paths.push((p, format!("process {pid} runs it")));
+            }
+            if let Ok(p) = std::fs::read_link(dir.join("cwd")) {
+                paths.push((p, format!("process {pid} works in it")));
+            }
+            for fd in std::fs::read_dir(dir.join("fd"))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if let Ok(p) = std::fs::read_link(fd.path())
+                    && p.is_absolute()
+                {
+                    paths.push((p, format!("process {pid} has a file of it open")));
+                }
+            }
+            let maps = std::fs::read_to_string(dir.join("maps")).unwrap_or_default();
+            for line in maps.lines() {
+                if let Some(i) = line.find('/') {
+                    paths.push((
+                        PathBuf::from(&line[i..]),
+                        format!("process {pid} has a file of it mapped"),
+                    ));
+                }
+            }
+        }
+        for d in unit_dirs {
+            for (file, line) in unit_lines(d) {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                if !key.trim().starts_with("ExecStart") {
+                    continue;
+                }
+                for word in value.split_whitespace() {
+                    let word = word.trim_start_matches(['-', '@', ':', '+', '!']);
+                    if word.starts_with('/') {
+                        paths.push((
+                            PathBuf::from(word),
+                            format!("the unit {} starts from it", file.display()),
+                        ));
+                    }
+                }
+            }
+        }
+        Self { paths }
+    }
+
+    /// Why target directory `dir` is in use, if it is.
+    pub fn why(&self, dir: &Path) -> Option<&str> {
+        self.paths
+            .iter()
+            .find(|(p, _)| p.starts_with(dir))
+            .map(|(_, why)| why.as_str())
+    }
+}
+
+/// The lines of the unit files in `dir` and in its drop-in directories
+/// (`<unit>.d/*.conf`), with the file each came from.
+fn unit_lines(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    let mut files = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            files.extend(
+                std::fs::read_dir(&p)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|e| e.path()),
+            );
+        } else {
+            files.push(p);
+        }
+    }
+    for f in files {
+        if let Ok(text) = std::fs::read_to_string(&f) {
+            out.extend(text.lines().map(|l| (f.clone(), l.to_string())));
+        }
+    }
+    out
+}
+
 /// Groups candidates by filesystem (device id).
 pub fn by_device(cands: Vec<Candidate>) -> BTreeMap<u64, Vec<Candidate>> {
     let mut m: BTreeMap<u64, Vec<Candidate>> = BTreeMap::new();
@@ -388,6 +510,136 @@ mod tests {
     use super::*;
 
     const GB: u64 = 1_000_000_000;
+
+    /// A process started from a binary inside a target directory keeps it
+    /// until the process ends.
+    #[test]
+    fn a_target_a_process_runs_from_is_in_use_until_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir_all(target.join("debug")).unwrap();
+        // A multi-call coreutils picks its tool by name: keep `sleep`.
+        let bin = target.join("debug/sleep");
+        std::fs::copy("/bin/sleep", &bin).unwrap();
+        let mut child = Command::new(&bin).arg("30").spawn().unwrap();
+        // Until the child has called exec, its executable is this test's.
+        let exe = PathBuf::from(format!("/proc/{}/exe", child.id()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_link(&exe).ok().as_deref() != Some(bin.as_path()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never ran {bin:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut used = InUse::scan_from(Path::new("/proc"), &[]);
+        while used.why(&target).is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            used = InUse::scan_from(Path::new("/proc"), &[]);
+        }
+        let why = used.why(&target).map(String::from);
+        let pid = format!("process {} ", child.id());
+        let seen: Vec<_> = used
+            .paths
+            .iter()
+            .filter(|(_, w)| w.starts_with(&pid))
+            .collect();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(
+            why,
+            Some(format!("process {} runs it", child.id())),
+            "the scan saw for the child: {seen:?}; exe now {:?}",
+            std::fs::read_link(&exe)
+        );
+        assert_eq!(InUse::scan_from(Path::new("/proc"), &[]).why(&target), None);
+    }
+
+    /// A process working in a target directory, or holding a file of it
+    /// open, keeps it.
+    #[test]
+    fn a_target_a_process_works_in_or_holds_open_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd_target = dir.path().join("a/target");
+        let open_target = dir.path().join("b/target");
+        std::fs::create_dir_all(&cwd_target).unwrap();
+        std::fs::create_dir_all(&open_target).unwrap();
+        std::fs::write(open_target.join("f"), "x").unwrap();
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .current_dir(&cwd_target)
+            .spawn()
+            .unwrap();
+        // Until the child has changed directory, its directory is this test's.
+        let cwd = PathBuf::from(format!("/proc/{}/cwd", child.id()));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_link(&cwd).ok().as_deref() != Some(cwd_target.as_path()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never worked in {cwd_target:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let file = std::fs::File::open(open_target.join("f")).unwrap();
+        let used = InUse::scan_from(Path::new("/proc"), &[]);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        drop(file);
+        assert_eq!(
+            used.why(&cwd_target),
+            Some(format!("process {} works in it", child.id()).as_str())
+        );
+        assert_eq!(
+            used.why(&open_target),
+            Some(format!("process {} has a file of it open", std::process::id()).as_str())
+        );
+    }
+
+    /// A user unit whose `ExecStart` names a binary inside a target
+    /// directory keeps it, from the unit file or from a drop-in, whether or
+    /// not the unit runs.
+    #[test]
+    fn a_target_a_units_exec_start_names_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let units = dir.path().join("units");
+        let a = dir.path().join("a/target");
+        let b = dir.path().join("b/target");
+        let c = dir.path().join("c/target");
+        std::fs::create_dir_all(units.join("svc-b.service.d")).unwrap();
+        std::fs::write(
+            units.join("svc-a.service"),
+            format!(
+                "[Service]\nExecStart=-{}/release/svcd --serve\nWorkingDirectory=/\n",
+                a.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            units.join("svc-b.service.d/override.conf"),
+            format!("[Service]\nExecStartPre={}/release/prep\n", b.display()),
+        )
+        .unwrap();
+        let used = InUse::scan_from(
+            dir.path().join("no-proc").as_path(),
+            std::slice::from_ref(&units),
+        );
+        assert_eq!(
+            used.why(&a),
+            Some(
+                format!(
+                    "the unit {} starts from it",
+                    units.join("svc-a.service").display()
+                )
+                .as_str()
+            )
+        );
+        assert!(
+            used.why(&b).is_some_and(|w| w.contains("override.conf")),
+            "{:?}",
+            used.why(&b)
+        );
+        assert_eq!(used.why(&c), None);
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| (*x).to_string()).collect()
