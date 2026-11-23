@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-23T22:45:33Z",
+  "actor": "human:timo",
+  "artifact": "story:new-worktree-seeded-from-a-sibling",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:compute-cluster-acceptance-round-2",
+    "review": "review-result:compute-cluster-acceptance-round-2",
+    "outcome": "no-op"
+  }
+}

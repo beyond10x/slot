@@ -1,0 +1,51 @@
+components:
+  - component: slot-daemon
+    summary: "The endpoint daemon of a cluster: `slot serve` on the machine every session calls. It reads the host configuration, schedules jobs on nodes and keeps the job log; `/api/` serves the views."
+    owns:
+      domains:
+        - slot.cluster
+        - slot.hostconfig
+    accepts:
+      commands:
+        - slot.cluster.OpenCluster
+        - slot.cluster.AddLocalNode
+        - slot.cluster.AddRemoteNode
+        - slot.cluster.AdmitNode
+        - slot.cluster.RecordNodeState
+        - slot.cluster.SetNodeCapacity
+        - slot.cluster.DrainNode
+        - slot.cluster.MarkNodeGone
+        - slot.cluster.RemoveNode
+        - slot.cluster.AllowRepository
+        - slot.cluster.DisallowRepository
+        - slot.cluster.PlaceWorktree
+        - slot.cluster.UnplaceWorktree
+        - slot.cluster.SubmitJob
+        - slot.cluster.StartJob
+        - slot.cluster.EndJob
+        - slot.cluster.WithdrawJob
+        - slot.cluster.FallBackJob
+        - slot.hostconfig.LoadHostConfig
+        - slot.hostconfig.LoadProvider
+        - slot.hostconfig.LoadNodeTemplate
+        - slot.hostconfig.RemoveProvider
+        - slot.hostconfig.RemoveNodeTemplate
+    reached_by: network
+
+  - component: node-provider
+    summary: "A provider of remote nodes: slot's generic `aws` provider, or the executable a `command` provider names. The daemon runs it as a program; it holds the account, slot does not."
+    owns:
+      domains:
+        - slot.provisioning
+    accepts:
+      commands:
+        - slot.provisioning.ProvisionMachine
+        - slot.provisioning.TerminateMachine
+    reached_by: command_line
+    cli:
+      binary: provider
+      commands:
+        - slot.provisioning.ProvisionMachine
+        - slot.provisioning.TerminateMachine
+      views:
+        - slot.provisioning.Machines

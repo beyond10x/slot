@@ -1,0 +1,95 @@
+type: ess-http/1
+specification: {system: slot, version: v1, source_digest: "sha256:76c1e24593b61ddca0c08bc9f6c15bb0f313e249da74f90f3bfce54ab9671cc8"}
+servers:
+  slot-daemon:
+    - {url: /, description: The daemon's own port on the local machine}
+routes:
+  - view: slot.cluster.ClusterStatus
+    operation_id: clusterStatus
+    method: get
+    path: /api/cluster
+    body: array
+  - view: slot.cluster.NodeList
+    operation_id: listNodes
+    method: get
+    path: /api/nodes
+    body: array
+  - view: slot.cluster.NodeDetail
+    operation_id: getNode
+    method: get
+    path: /api/nodes/{node_id}
+    parameters: {node_id: param.node_id}
+    body: single
+    empty: {status: 404}
+  - view: slot.cluster.Placements
+    operation_id: listPlacements
+    method: get
+    path: /api/placements
+    body: array
+  - view: slot.cluster.PlacementsOnNode
+    operation_id: listPlacementsOnNode
+    method: get
+    path: /api/nodes/{node_id}/placements
+    parameters: {node_id: param.node_id}
+    body: array
+  - view: slot.cluster.Repositories
+    operation_id: listRepositories
+    method: get
+    path: /api/repositories
+    body: array
+  - view: slot.cluster.Jobs
+    operation_id: listClusterJobs
+    method: get
+    path: /api/cluster/jobs
+    body: array
+  - view: slot.cluster.JobsOnNode
+    operation_id: listJobsOnNode
+    method: get
+    path: /api/nodes/{node_id}/jobs
+    parameters: {node_id: param.node_id}
+    body: array
+  - view: slot.hostconfig.HostConfigs
+    operation_id: listHostConfigs
+    method: get
+    path: /api/cluster/config
+    body: array
+  - view: slot.hostconfig.Providers
+    operation_id: listProviders
+    method: get
+    path: /api/cluster/providers
+    body: array
+  - view: slot.hostconfig.NodeTemplates
+    operation_id: listNodeTemplates
+    method: get
+    path: /api/cluster/templates
+    body: array
+  - command: slot.cluster.AddRemoteNode
+    operation_id: addRemoteNode
+    method: post
+    path: /api/nodes
+  - command: slot.cluster.SetNodeCapacity
+    operation_id: setNodeCapacity
+    method: post
+    path: /api/nodes/{node_id}/capacity
+    parameters: {node_id: input.node_id}
+  - command: slot.cluster.DrainNode
+    operation_id: drainNode
+    method: post
+    path: /api/nodes/{node_id}/drain
+    parameters: {node_id: input.node_id}
+  - command: slot.cluster.RemoveNode
+    operation_id: removeNode
+    method: delete
+    path: /api/nodes/{node_id}
+    parameters: {node_id: input.node_id}
+    request: {encoding: query}
+  - command: slot.cluster.AllowRepository
+    operation_id: allowRepository
+    method: post
+    path: /api/repositories
+  - command: slot.cluster.DisallowRepository
+    operation_id: disallowRepository
+    method: delete
+    path: /api/repositories/{repository}
+    parameters: {repository: input.repository}
+    request: {encoding: query}

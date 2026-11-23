@@ -25,6 +25,7 @@ what is specific to slot.
 | `crates/slot-docs` | generators: CLI reference, UI TypeScript types, site provenance |
 | `ui/` | web UI, Vue 3 + TypeScript + Vite + pnpm; built into `ui/dist`, embedded at compile time |
 | `website/` | public documentation site, Docusaurus on `@beyond10x/docs-system` |
+| `spec/` | ESS specification of the compute cluster (§ ESS) |
 | `plugin/`, `.claude-plugin/marketplace.json` | the `slot` agent plugin (skills, hook, slot-warden agent) and its marketplace; plugin version = workspace version |
 
 ## Boundary
@@ -43,9 +44,17 @@ what is specific to slot.
 
 ## ESS
 
-Opted out of the workspace rule that every product repository is specified in ESS: slot is build
-tooling, the class the rule exempts ("Atlas, docs and release tooling are tooling"). Revisit if
-slot grows a multi-tenant service surface.
+The compute cluster is specified in ESS before it is built: the operator decided on 2026-11-23
+that slot is spec first for the cluster of build nodes (several nodes behind the local daemon).
+The specification is `spec/` (`spec/ess-inputs.yaml` lists its files): `slot.cluster` (cluster,
+node, placement of a worktree, the node a job ran on), `slot.hostconfig` (the host's
+`cluster.toml`, outside every repository) and `slot.provisioning` (the provider contract). Check
+it with `ess specify validate --path spec`; a story of the cluster cites the declaration it
+implements. The design is `docs/design/remote-pool.md`; the plan is `epic:compute-cluster`.
+
+The rest of slot keeps its opt-out of the workspace rule that every product repository is
+specified in ESS: it is build tooling, the class the rule exempts ("Atlas, docs and release
+tooling are tooling").
 
 ## Gate
 
@@ -366,6 +375,8 @@ Open, one line each, with where the design lives. A session starts with (e).
   the wait is set by the bound and the queue's length, not by the mark.
 - (ab) `--min-free-disk` is an option of `slot serve`, so a change needs a full restart (g); it
   belongs in `limits.json`. The eviction mark is there already (`slot evict-below`).
+- (ac) The compute cluster: several build nodes behind the local daemon, specified in `spec/`,
+  designed in `docs/design/remote-pool.md`, planned in `epic:compute-cluster`.
 
 ## Never
 

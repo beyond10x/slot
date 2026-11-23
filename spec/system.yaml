@@ -1,0 +1,13 @@
+format: ess/37
+system: slot
+version: v1
+
+domains:
+  - slot.cluster
+  - slot.hostconfig
+  - slot.provisioning
+
+preconditions:
+  - command: slot.cluster.OpenCluster
+    as: slot.cluster.Endpoint
+    input: {cluster_id: main, topology: Hub}
