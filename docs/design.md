@@ -899,14 +899,18 @@ Need: the workstation's `/` fills with target directories of worktrees nobody bu
   between 40 and 50 GB free held every build for disk and nothing was deleted (up to 38 jobs
   queued for about 12 minutes, measured 2026-11-22). `slot status` prints the mark in force and,
   when `--min-free-disk` raised it, says so in the same line (`under 50.0 GB, raised from 40.0 GB
-  to the disk hold's mark`).
+  to the disk hold's mark`). `slot evict-below <GB>` (`PUT /api/evict-below`) replaces
+  `--evict-below` at run time and is kept in `limits.json`; `default` forgets it. The watch reads
+  it at every look, and a new mark wakes it at once.
 - **At the hold.** A job held for disk wakes the watch. It looks at once, instead of at the next
   minute, when its last look found free space at or above the mark (or there was none yet). A
   look that already found it under the mark is not repeated before the minute: sizing
   directories costs a walk of each, and a dry run would size the same ones every 2 s.
-- **Kept.** A directory whose repository has a queued or running job, a directory a queued or
-  running job builds into, and one built in the last 2 h. Before each deletion the check repeats
-  under the server lock.
+- **Kept.** A directory a queued or running job builds into, one in the checkout such a job runs
+  in (the job's working directory is at or below the target directory's parent), one built in
+  the last 2 h, and one a process or a unit uses. Before each deletion the job check repeats
+  under the server lock. Up to 0.28 any queued or running job of a repository kept every target
+  directory of that repository; with about 24 sessions at work that kept nearly all of them.
 - **What counts as a target directory.** Absolute, at least three levels deep, a real directory
   (not a symlink), with a `CACHEDIR.TAG` whose first line is Cargo's signature. Anything else is
   never deleted, whatever the log says.

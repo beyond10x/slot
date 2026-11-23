@@ -79,6 +79,10 @@ pub struct Saved {
     /// from the file: [`crate::shares::DEFAULT_MIN_FRACTION`] of the CPUs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_min_budget: Option<f64>,
+    /// Free space below which eviction starts, GB, 0 = off (`slot
+    /// evict-below`); `None`, and absent from the file: `--evict-below`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evict_below_gb: Option<f64>,
 }
 
 // serde hands `skip_serializing_if` a reference.
@@ -127,6 +131,9 @@ pub fn load(dir: &Path) -> Saved {
                 share_max: shares.max,
                 share_pressure_max: shares.pressure_max,
                 share_min_budget: shares.min_budget,
+                evict_below_gb: s
+                    .evict_below_gb
+                    .filter(|&g| crate::evict::below_refused(g).is_none()),
             }
         })
         .unwrap_or_default()
@@ -407,6 +414,50 @@ mod tests {
             None,
             "a 0 written by hand is no limit, not a bound of 0"
         );
+    }
+
+    #[test]
+    fn the_eviction_mark_is_kept_beside_the_headroom_and_absent_when_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        let before = r#"{"headroom_percent":30,"base":"machine","run_limit_s":600}"#;
+        std::fs::write(&file, before).unwrap();
+        let old = load(dir.path());
+        assert_eq!(old.evict_below_gb, None, "a file from before the setting");
+        save(dir.path(), old).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        for gb in [100.0, 0.0] {
+            save(
+                dir.path(),
+                Saved {
+                    evict_below_gb: Some(gb),
+                    ..old
+                },
+            )
+            .unwrap();
+            let s = load(dir.path());
+            assert_eq!(s.evict_below_gb, Some(gb), "0 is kept: eviction off");
+            assert_eq!((s.headroom_percent, s.run_limit_s), (30, Some(600)));
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.ends_with(r#","evict_below_gb":0.0}"#), "{text}");
+        save(
+            dir.path(),
+            Saved {
+                evict_below_gb: None,
+                ..old
+            },
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+        for bad in ["-5", "1e9"] {
+            std::fs::write(
+                &file,
+                format!(r#"{{"headroom_percent":0,"evict_below_gb":{bad}}}"#),
+            )
+            .unwrap();
+            assert_eq!(load(dir.path()).evict_below_gb, None, "{bad} is dropped");
+        }
     }
 
     #[test]

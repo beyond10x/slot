@@ -3,9 +3,11 @@
 //! When the filesystem holding target directories has less free space than
 //! a floor, the daemon deletes the target directories it saw jobs build
 //! into, least recently built first, until free space is above the floor
-//! plus a margin. It never deletes a directory whose repository has a job
-//! queued or running, one built in the last two hours, or a path that no job
-//! of the log built into. A path must carry Cargo's `CACHEDIR.TAG` to count
+//! plus a margin. It never deletes a directory a queued or running job
+//! builds into or whose checkout such a job runs in, one built in the last
+//! two hours, one a process or a service uses, or a path that no job of the
+//! log built into. The mark is `--evict-below`, or the one `slot
+//! evict-below` set at run time. A path must carry Cargo's `CACHEDIR.TAG` to count
 //! as a target directory. A dry run (`--evict-dry-run`, or [`FILE`]) only says
 //! what it would delete.
 
@@ -66,6 +68,173 @@ pub fn mark(evict_below: u64, min_free_disk: u64) -> u64 {
     } else {
         evict_below.max(min_free_disk)
     }
+}
+
+/// The largest eviction mark `slot evict-below` accepts, GB.
+pub const MAX_BELOW_GB: f64 = 100_000.0;
+
+/// GB as bytes; 0 for 0, a negative or a non-finite value.
+pub fn gb_bytes(gb: f64) -> u64 {
+    if gb.is_finite() && gb > 0.0 {
+        (gb * crate::admission::GB as f64) as u64
+    } else {
+        0
+    }
+}
+
+/// The eviction mark before the disk hold raises it: the one set with
+/// `slot evict-below` (`set_gb`, kept in `limits.json`), else
+/// `--evict-below` (`option`, bytes). 0 is off.
+pub fn below(set_gb: Option<f64>, option: u64) -> u64 {
+    set_gb.map_or(option, gb_bytes)
+}
+
+/// Why a mark for `slot evict-below` is refused; `None` when it is a
+/// number from 0 to [`MAX_BELOW_GB`].
+pub fn below_refused(gb: f64) -> Option<String> {
+    if !gb.is_finite() || gb < 0.0 {
+        return Some(format!(
+            "slot: the eviction mark must be a number of GB from 0 (off) to {MAX_BELOW_GB}, not {gb}"
+        ));
+    }
+    if gb > MAX_BELOW_GB {
+        return Some(format!(
+            "slot: the eviction mark {gb} GB is over the most, {MAX_BELOW_GB} GB"
+        ));
+    }
+    None
+}
+
+/// Body of `PUT /api/evict-below`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BelowRequest {
+    /// The mark, GB, 0 = eviction off; `null` forgets it and
+    /// `--evict-below` applies again. The field must be named.
+    #[serde(deserialize_with = "named_gb")]
+    pub evict_below_gb: Option<f64>,
+}
+
+/// An `Option` that must be present: a missing field is an error, so an
+/// empty body changes nothing.
+fn named_gb<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    Option::deserialize(d)
+}
+
+impl BelowRequest {
+    /// The setting the request names, or why it is refused.
+    pub fn setting(&self) -> Result<Option<f64>, String> {
+        match self.evict_below_gb {
+            Some(gb) => below_refused(gb).map_or(Ok(Some(gb)), Err),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Answer of `GET` and `PUT /api/evict-below`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct BelowView {
+    /// The mark set with `slot evict-below`, GB; `None` = `--evict-below`.
+    #[serde(default)]
+    pub evict_below_gb: Option<f64>,
+    /// `--evict-below`, bytes.
+    #[serde(default)]
+    pub option: u64,
+    /// `--min-free-disk`, bytes.
+    #[serde(default)]
+    pub min_free_disk: u64,
+    /// The mark in force, bytes, after the disk hold raised it; 0 = off.
+    #[serde(default)]
+    pub floor: u64,
+}
+
+impl BelowView {
+    /// The view of a mark `set_gb` over the options `option` and
+    /// `min_free_disk`.
+    pub fn of(set_gb: Option<f64>, option: u64, min_free_disk: u64) -> Self {
+        Self {
+            evict_below_gb: set_gb,
+            option,
+            min_free_disk,
+            floor: mark(below(set_gb, option), min_free_disk),
+        }
+    }
+
+    /// `slot evict-below`: the mark in force and where it comes from.
+    pub fn render(&self) -> String {
+        let below = below(self.evict_below_gb, self.option);
+        let from = match self.evict_below_gb {
+            Some(_) => format!(
+                "set with `slot evict-below`; `--evict-below` is {}",
+                crate::admission::gb(self.option)
+            ),
+            None => "`--evict-below`".to_string(),
+        };
+        if self.floor == 0 {
+            return format!("eviction is off ({from})\n");
+        }
+        let raised = if self.floor > below {
+            format!(
+                ", raised from {} to the disk hold's mark (`--min-free-disk`)",
+                crate::admission::gb(below)
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "eviction starts below {} free{raised} ({from})\n",
+            crate::admission::gb(self.floor)
+        )
+    }
+}
+
+/// The argument of `slot evict-below`: a number of GB, or `default`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BelowSetting {
+    /// Forget the mark: `--evict-below` applies again.
+    Default,
+    /// The mark, GB; 0 turns eviction off.
+    At(f64),
+}
+
+impl BelowSetting {
+    /// The value `limits.json` and the API carry.
+    pub fn value(self) -> Option<f64> {
+        match self {
+            Self::Default => None,
+            Self::At(gb) => Some(gb),
+        }
+    }
+}
+
+impl std::str::FromStr for BelowSetting {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "default" {
+            return Ok(Self::Default);
+        }
+        let Ok(gb) = s.parse::<f64>() else {
+            return Err(format!(
+                "`{s}` is not a number of GB: give one from 0 (off) to {MAX_BELOW_GB}, or `default`"
+            ));
+        };
+        match below_refused(gb) {
+            Some(why) => Err(why.trim_start_matches("slot: ").to_string()),
+            None => Ok(Self::At(gb)),
+        }
+    }
+}
+
+/// Whether a queued or running job that builds into `target_dir` and runs
+/// in `cwd` keeps target directory `dir`: it builds into it, or it runs in
+/// the checkout that holds it (the directory above `dir`, or below that).
+pub fn job_keeps(dir: &Path, target_dir: &Path, cwd: &Path) -> bool {
+    target_dir == dir || runs_in_checkout(dir, cwd)
+}
+
+/// Whether `cwd` lies in the checkout of target directory `dir`.
+fn runs_in_checkout(dir: &Path, cwd: &Path) -> bool {
+    !cwd.as_os_str().is_empty() && dir.parent().is_some_and(|c| cwd.starts_with(c))
 }
 
 /// The mark as `slot status` and the journal name it: `40.0 GB`, or
@@ -280,23 +449,25 @@ pub struct Candidate {
 }
 
 /// Target directories eligible now, least recently built first: not
-/// built within `min_idle` of `now_ms`, not of a named repository in
-/// `busy_repos` and not in `busy_dirs`.
+/// built within `min_idle` of `now_ms`, not in `busy_dirs` (the target
+/// directories of queued and running jobs) and not in the checkout of one
+/// of `busy_cwds` (their working directories, [`job_keeps`]). Another
+/// directory of the same repository may go.
 #[allow(clippy::implicit_hasher)]
 pub fn candidates(
     seen: &HashMap<PathBuf, (String, i64)>,
-    busy_repos: &HashSet<String>,
     busy_dirs: &HashSet<PathBuf>,
+    busy_cwds: &HashSet<PathBuf>,
     now_ms: i64,
     min_idle: Duration,
 ) -> Vec<Candidate> {
     let idle_ms = i64::try_from(min_idle.as_millis()).unwrap_or(i64::MAX);
     let mut v: Vec<Candidate> = seen
         .iter()
-        .filter(|(p, (repo, last))| {
+        .filter(|(p, (_, last))| {
             now_ms - *last >= idle_ms
-                && (repo.is_empty() || !busy_repos.contains(repo))
                 && !busy_dirs.contains(*p)
+                && !busy_cwds.iter().any(|c| runs_in_checkout(p, c))
         })
         .map(|(p, (repo, last))| Candidate {
             path: p.clone(),
@@ -774,11 +945,47 @@ mod tests {
             PathBuf::from("/w/dir/target"),
             ("dir".to_string(), now - 80 * h),
         );
-        let busy: HashSet<String> = ["busy".to_string()].into();
+        let cwds: HashSet<PathBuf> = [PathBuf::from("/w/busy/crates/a")].into();
         let dirs: HashSet<PathBuf> = [PathBuf::from("/w/dir/target")].into();
-        let c = candidates(&seen, &busy, &dirs, now, Duration::from_secs(7200));
+        let c = candidates(&seen, &dirs, &cwds, now, Duration::from_secs(7200));
         let names: Vec<&str> = c.iter().map(|c| c.repo.as_str()).collect();
         assert_eq!(names, ["old", "mid"]);
+    }
+
+    /// A job keeps the target directory it builds into and the one of the
+    /// checkout it runs in; another checkout of the same repository, idle,
+    /// may go.
+    #[test]
+    fn a_job_keeps_its_own_checkout_and_target_dir_not_its_whole_repository() {
+        let main = PathBuf::from("/w/repo/target");
+        let tree = PathBuf::from("/w/trees/repo-a/target");
+        let idle = PathBuf::from("/w/trees/repo-b/target");
+        let shared = PathBuf::from("/w/shared/repo-c");
+        let seen = HashMap::from([
+            (main.clone(), ("repo".to_string(), 1)),
+            (tree.clone(), ("repo".to_string(), 1)),
+            (idle.clone(), ("repo".to_string(), 1)),
+            (shared.clone(), ("repo".to_string(), 1)),
+        ]);
+        let dirs = HashSet::from([shared.clone()]);
+        let cwds = HashSet::from([PathBuf::from("/w/trees/repo-a"), PathBuf::from("/w/repo")]);
+        let left: Vec<PathBuf> = candidates(&seen, &dirs, &cwds, 2, Duration::ZERO)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(
+            left,
+            std::slice::from_ref(&idle),
+            "only the idle checkout's goes"
+        );
+        assert!(job_keeps(&main, Path::new(""), Path::new("/w/repo/src")));
+        assert!(job_keeps(&shared, &shared, Path::new("/elsewhere")));
+        assert!(!job_keeps(&idle, &tree, Path::new("/w/trees/repo-a")));
+        assert!(
+            !job_keeps(&idle, Path::new(""), Path::new("/w/trees/repo-bb")),
+            "a sibling whose name starts the same is another checkout"
+        );
+        assert!(!job_keeps(&idle, Path::new(""), Path::new("")));
     }
 
     #[test]
@@ -789,12 +996,72 @@ mod tests {
             (active.clone(), (String::new(), 1)),
             (idle.clone(), (String::new(), 1)),
         ]);
-        let busy_repos = HashSet::from([String::new()]);
         let busy_dirs = HashSet::from([active]);
 
-        let candidates = candidates(&seen, &busy_repos, &busy_dirs, 2, Duration::ZERO);
+        let candidates = candidates(&seen, &busy_dirs, &HashSet::new(), 2, Duration::ZERO);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, idle);
+    }
+
+    /// The mark set at run time wins over `--evict-below`, 0 turns eviction
+    /// off, `default` forgets it, and the disk hold still raises it.
+    #[test]
+    fn the_run_time_mark_replaces_the_option_and_the_disk_hold_still_raises_it() {
+        assert_eq!(below(None, 40 * GB), 40 * GB, "unset: the option");
+        assert_eq!(below(Some(100.0), 40 * GB), 100 * GB);
+        assert_eq!(below(Some(0.0), 40 * GB), 0, "0 is off");
+        assert_eq!(below(Some(10.0), 0), 10 * GB, "on over an option of 0");
+        assert_eq!(mark(below(Some(30.0), 40 * GB), 50 * GB), 50 * GB);
+        assert_eq!(mark(below(Some(0.0), 40 * GB), 50 * GB), 0);
+        let v = BelowView::of(Some(100.0), 40 * GB, 25 * GB);
+        assert_eq!(v.floor, 100 * GB);
+        assert_eq!(
+            v.render(),
+            "eviction starts below 100.0 GB free (set with `slot evict-below`; \
+             `--evict-below` is 40.0 GB)\n"
+        );
+        assert_eq!(
+            BelowView::of(None, 40 * GB, 50 * GB).render(),
+            "eviction starts below 50.0 GB free, raised from 40.0 GB to the disk hold's mark \
+             (`--min-free-disk`) (`--evict-below`)\n"
+        );
+        assert_eq!(
+            BelowView::of(Some(0.0), 40 * GB, 25 * GB).render(),
+            "eviction is off (set with `slot evict-below`; `--evict-below` is 40.0 GB)\n"
+        );
+    }
+
+    #[test]
+    fn the_argument_of_evict_below_is_gb_or_default() {
+        assert_eq!("100".parse(), Ok(BelowSetting::At(100.0)));
+        assert_eq!("2.5".parse(), Ok(BelowSetting::At(2.5)));
+        assert_eq!("0".parse(), Ok(BelowSetting::At(0.0)));
+        assert_eq!("default".parse(), Ok(BelowSetting::Default));
+        assert_eq!(BelowSetting::Default.value(), None);
+        assert_eq!(BelowSetting::At(7.0).value(), Some(7.0));
+        for bad in ["-1", "100001", "NaN", "inf", "ten", "", "off"] {
+            assert!(bad.parse::<BelowSetting>().is_err(), "{bad:?}");
+        }
+        assert!(
+            "100001"
+                .parse::<BelowSetting>()
+                .unwrap_err()
+                .contains("over the most")
+        );
+        let setting = |body: &str| {
+            serde_json::from_str::<BelowRequest>(body)
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.setting())
+        };
+        assert_eq!(setting(r#"{"evict_below_gb":100}"#), Ok(Some(100.0)));
+        assert_eq!(setting(r#"{"evict_below_gb":null}"#), Ok(None));
+        for bad in [
+            "{}",
+            r#"{"evict_below_gb":-1}"#,
+            r#"{"evict_below_gb":"9"}"#,
+        ] {
+            assert!(setting(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

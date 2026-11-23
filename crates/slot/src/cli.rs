@@ -102,6 +102,9 @@ pub enum Cmd {
     /// Show or set the limit on build processes per job: with it a job's
     /// compilers run on a bound of the job's own, not on slots of the pool.
     JobParallel(JobParallelArgs),
+    /// Show or set the eviction mark: the free space below which the daemon
+    /// deletes idle Cargo target directories, without a restart.
+    EvictBelow(EvictBelowArgs),
     /// Show or set the CPU limit: the start of a queued job is held while
     /// the pool's jobs and the compile cache use more CPUs than a mark.
     CpuLimit(CpuLimitArgs),
@@ -231,8 +234,10 @@ pub struct ServeArgs {
     /// least recently built first, until it has 10 GB more. The mark is
     /// `--min-free-disk` when that is larger, so eviction runs whenever jobs
     /// wait for disk; a job that starts to wait makes it look at once.
-    /// Directories of a repository with a queued or running job, or built in
-    /// the last 2 h, are kept. 0 turns it off, whatever `--min-free-disk` is.
+    /// A directory a queued or running job builds into or whose checkout
+    /// it runs in, one built in the last 2 h, and one a process uses are
+    /// kept. 0 turns it off, whatever `--min-free-disk` is. `slot
+    /// evict-below` replaces this mark at run time.
     #[arg(long, default_value_t = 40.0, value_name = "GB")]
     pub evict_below: f64,
     /// Only report in the journal and `slot status` which target
@@ -554,6 +559,24 @@ impl AdmissionArgs {
         };
         (req != crate::shares::Request::default()).then_some(req)
     }
+}
+
+/// `slot evict-below` arguments. Without any, prints the mark in force and
+/// where it comes from.
+#[derive(Debug, Clone, Args)]
+pub struct EvictBelowArgs {
+    /// Free space, GB, below which eviction deletes idle target
+    /// directories, from 0 (eviction off) to 100000; `default` forgets the
+    /// mark and `serve --evict-below` applies again. It replaces
+    /// `--evict-below` and is raised to `--min-free-disk` when that is
+    /// larger; the disk hold itself does not change. Eviction looks at
+    /// once. The mark is kept in `limits.json` in the state directory and
+    /// holds across reloads and restarts.
+    #[arg(value_name = "GB|default")]
+    pub mark: Option<crate::evict::BelowSetting>,
+    /// The daemon's web address.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
 }
 
 /// `slot job-parallel` arguments. Without any, prints the value in force.
@@ -888,6 +911,30 @@ mod tests {
         assert!(args(&["soon"]).is_err());
         assert!(args(&["10m", "--max", "off"]).is_err());
         assert!(args(&["10m", "--max", "0"]).is_err());
+    }
+
+    #[test]
+    fn evict_below_takes_gb_or_default() {
+        use crate::evict::BelowSetting;
+        let mark = |args: &[&str]| {
+            let mut argv = vec!["evict-below"];
+            argv.extend(args);
+            parse(&argv).map(|cli| {
+                let Cmd::EvictBelow(a) = cli.command else {
+                    panic!("not evict-below")
+                };
+                a.mark
+            })
+        };
+        assert_eq!(mark(&[]).unwrap(), None, "prints the mark in force");
+        assert_eq!(mark(&["100"]).unwrap(), Some(BelowSetting::At(100.0)));
+        assert_eq!(mark(&["0"]).unwrap(), Some(BelowSetting::At(0.0)));
+        assert_eq!(mark(&["default"]).unwrap(), Some(BelowSetting::Default));
+        for bad in [&["-1"][..], &["200000"], &["lots"], &["1", "2"]] {
+            assert!(mark(bad).is_err(), "{bad:?}");
+        }
+        let cli = parse(&["evict-below", "80", "--http", "127.0.0.1:9"]).unwrap();
+        assert!(matches!(cli.command, Cmd::EvictBelow(ref a) if a.http == "127.0.0.1:9"));
     }
 
     #[test]
