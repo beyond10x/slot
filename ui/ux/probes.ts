@@ -49,6 +49,17 @@ const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
  * again in a second page that only merges the result, took about two thirds of a state's time.
  */
 export async function axeSerious(page: Page): Promise<string[]> {
+  // A row that fades in is checked once it is in: axe measured its colour mid-transition and saw
+  // too little contrast in the 0.31.0 release gate. Endless animations (lanes, pulses) are not
+  // waited for.
+  await page.waitForFunction(
+    () =>
+      document
+        .getAnimations()
+        .every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity),
+    null,
+    { timeout: 5000 },
+  );
   const run = (): Promise<string[] | null> =>
     page.evaluate(async (tags) => {
       const inPage = (window as unknown as { axe?: typeof axe }).axe;
