@@ -10,6 +10,14 @@ export const ALWAYS_VISIBLE: Array<[string, string]> = [
   ['connection state', '[data-ux-region="connection"]'],
 ];
 
+/** The same on the cluster start page: its connection mark and headline numbers. */
+export const ALWAYS_VISIBLE_CLUSTER: Array<[string, string]> = [
+  ['connection state', '[data-ux-region="connection"]'],
+  ['running jobs', '[data-ux-region="running"]'],
+  ['queue length', '[data-ux-region="queue"]'],
+  ['CPUs in use', '[data-ux-region="cpus"]'],
+];
+
 /** Fallbacks for a page without region marks: the header and its slider. */
 const LEGACY: Array<[string, string]> = [
   ['header', 'header'],
@@ -60,6 +68,7 @@ export async function axeSerious(page: Page): Promise<string[]> {
 
 export async function probe(page: Page): Promise<Probe> {
   const marked = (await page.locator('[data-ux-region]').count()) > 0;
+  const cluster = (await page.locator('[data-ux-view="cluster"]').count()) > 0;
   const layout = await page.evaluate(
     ({ always, allowed }) => {
       const vw = window.innerWidth;
@@ -145,7 +154,7 @@ export async function probe(page: Page): Promise<Probe> {
         words_in_view: words,
       };
     },
-    { always: marked ? ALWAYS_VISIBLE : LEGACY, allowed: SCROLL_ALLOWED },
+    { always: cluster ? ALWAYS_VISIBLE_CLUSTER : marked ? ALWAYS_VISIBLE : LEGACY, allowed: SCROLL_ALLOWED },
   );
   return { ...layout, axe_serious: await axeSerious(page) };
 }
