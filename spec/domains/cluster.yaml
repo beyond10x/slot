@@ -1,0 +1,1250 @@
+# The compute cluster of build nodes: what a cluster is, what a node is, where a worktree builds,
+# and on which node a job ran. Design: docs/design/remote-pool.md (cited as "§ n").
+#
+# Topology. The cluster has one endpoint: the daemon every session already calls. It holds the
+# queue, the job log and the web view, and it places worktrees on nodes. A node is a pool of
+# slots on one machine: the local node is part of the endpoint's own machine (half its CPUs by
+# the operator's decision of 2026-11-23); a remote node is a machine with its own daemon, usually
+# an ephemeral cloud host. `Federation` (several daemons as peers) is named and not built:
+# OpenCluster refuses it.
+domain: slot.cluster
+
+summary: A cluster of build nodes behind one endpoint daemon, the placement of worktrees on them, and the node each job ran on.
+
+naming:
+  wire: cluster
+  display: Cluster
+
+types:
+  - name: slot.cluster.ClusterName
+    kind: newtype
+    of: String
+    naming:
+      summary: The name of a cluster, one per endpoint daemon.
+
+  - name: slot.cluster.NodeName
+    kind: newtype
+    of: String
+    naming:
+      summary: The name of a node, unique in its cluster (for example the name given to `slot node add`).
+
+  - name: slot.cluster.WorktreeId
+    kind: newtype
+    of: String
+    alphabet: "0123456789abcdef"
+    naming:
+      summary: The workspace id of a worktree, the first 8 bytes of SHA-256 of `hostname:repo-root` in hex (§ 2.1 identify).
+
+  # UNMAPPED: § 3.2 rule 3 and § 7.5 name the opt-in `slot host allow <repository>`, and nothing
+  # in the design or the code says what identifies a repository there: its root path on the
+  # workstation, its origin URL, or a name. Typed as text until the owner decides.
+  - name: slot.cluster.RepositoryKey
+    kind: newtype
+    of: String
+    naming:
+      summary: The key a repository is opted in under.
+
+  - name: slot.cluster.JobId
+    kind: newtype
+    of: Integer
+    naming:
+      summary: The id of a job in the endpoint's job log.
+
+  - name: slot.cluster.Topology
+    kind: enum
+    variants: [Hub, Federation]
+    naming:
+      summary: How the cluster is shaped. Hub, one endpoint daemon with local and remote nodes, is built; Federation, several daemons as peers, is named and refused.
+
+  - name: slot.cluster.NodeKind
+    kind: enum
+    variants: [Local, Remote]
+    naming:
+      summary: Local is part of the endpoint's machine and is reached without ssh; Remote has its own daemon, reached over ssh (§ 3).
+
+  - name: slot.cluster.GoneReason
+    kind: enum
+    variants: [Drained, Lost, Deadline, RefusedAtJoin, Reclaimed]
+    naming:
+      summary: Why a node left. Lost is three missed polls or three failed syncs in a row (§ 3.4); Reclaimed is a spot reclaim (§ 3.5).
+
+  - name: slot.cluster.JobEnd
+    kind: enum
+    variants: [Exited, Cancelled, NodeLost]
+    naming:
+      summary: How a job ended. NodeLost is a job whose node left while it ran; its rerun is a new job (§ 3.5).
+
+entities:
+  - name: slot.cluster.Cluster
+    naming:
+      summary: The cluster behind one endpoint daemon. It owns the registry of its nodes (§ 3.4, hosts.json in the endpoint's state directory).
+    identity:
+      name: cluster_id
+      type: slot.cluster.ClusterName
+    fields:
+      - name: topology
+        type: slot.cluster.Topology
+    relations:
+      - name: nodes
+        kind: owns
+        target: slot.cluster.Node
+        cardinality: many
+        via: cluster_id
+    lifecycle:
+      initial: Open
+      states:
+        - {name: Open, summary: "The endpoint takes jobs and nodes."}
+      terminal: [Open]
+
+  - name: slot.cluster.Node
+    naming:
+      summary: A pool of slots on one machine that runs the cluster's jobs. A remote node has a lease that ends at its deadline.
+    identity:
+      name: node_id
+      type: slot.cluster.NodeName
+    fields:
+      - name: cluster_id
+        type: slot.cluster.ClusterName
+      - name: kind
+        type: slot.cluster.NodeKind
+      - name: cpus
+        type: Integer
+        summary: "CPUs the node gives the cluster. On the local node the share of `[node.local]`, half the machine's CPUs by default."
+      - name: slots
+        type: Integer
+        summary: The node's capacity in slots (jobserver tokens of its pool).
+      - name: memory_gib
+        type: Integer
+      - name: disk_gib
+        type: Integer
+        summary: Disk for mirrors and target directories.
+      - name: max_worktrees
+        type: Optional<Integer>
+        summary: The most worktrees placed on a remote node at once (§ 3.2 rule 5). Absent on the local node, which takes no placements.
+      - name: slots_in_use
+        type: Integer
+        summary: Slots held by running jobs, as the last poll read them.
+      - name: running_jobs
+        type: Integer
+      - name: queued_jobs
+        type: Integer
+      - name: cpu_busy_milli
+        type: Optional<Integer>
+        summary: CPUs busy over the last poll interval, in thousandths of a CPU; the web view draws its 60-second line from these.
+      - name: memory_used_mib
+        type: Optional<Integer>
+        summary: Memory in use on the node, as the last poll read it.
+      - name: disk_free_gib
+        type: Optional<Integer>
+        summary: Free disk where the node keeps mirrors and target directories, as the last poll read it.
+      - name: slot_version
+        type: String
+        summary: The slot version the node must run; a remote node with another version is refused at join (§ 3.4).
+      - name: ssh
+        type: Optional<String>
+        summary: The ssh command that reaches a remote node.
+      - name: location
+        type: Optional<String>
+      - name: machine_type
+        type: Optional<String>
+      - name: machine
+        type: Optional<slot.provisioning.RequestKey>
+      - name: price_per_hour_cents
+        type: Optional<Integer>
+      - name: joined_at
+        type: Optional<Timestamp>
+      - name: deadline
+        type: Optional<Timestamp>
+        summary: The end of a remote node's lease. The node stops itself at it whatever the endpoint does (§ 7.3 step 1, § 8.7).
+      - name: gone_reason
+        type: Optional<slot.cluster.GoneReason>
+      - name: left_at
+        type: Optional<Timestamp>
+        summary: When the node became Gone; the web view prices a cloud node from joined_at to left_at, or to now while it lives.
+    relations:
+      - name: placements
+        kind: owns
+        target: slot.cluster.Placement
+        cardinality: many
+        via: node_id
+      # A remote node launched through a provider is the machine of its request key
+      # (slot.provisioning); one added by hand has none.
+      - name: launched_as
+        kind: references
+        target: slot.provisioning.Machine
+        cardinality: one
+        via: machine
+    invariants:
+      - cpus > 0
+      - slots > 0
+      - memory_gib > 0
+      - disk_gib > 0
+      - slots_in_use >= 0
+      - slots_in_use <= slots
+      - running_jobs >= 0
+      - queued_jobs >= 0
+      - any: [kind == Remote, not defined(deadline)]
+      - any: [kind == Local, defined(deadline)]
+    lifecycle:
+      initial: Joining
+      states:
+        - {name: Joining, summary: "Registered; the endpoint has not yet seen the node answer with the expected version and clock."}
+        - {name: Ready, summary: "Takes new placements and new jobs."}
+        - {name: Draining, summary: "Takes no new placement and no new job; running jobs finish."}
+        - {name: Gone, summary: "Left the cluster; its placements have ended."}
+      terminal: [Gone]
+      transitions:
+        - {name: admit, from: [Joining], to: Ready, summary: "The node answered with the expected version, a clock within 1 s and an open admission (§ 7.4)."}
+        - {name: refuse, from: [Joining], to: Gone, summary: "Refused at join for another version or a clock more than 1 s off (§ 3.4)."}
+        - {name: drain, from: [Joining, Ready], to: Draining, summary: "On `slot node drain`, at the deadline minus the longest run limit, or on a spot notice (§ 7.4)."}
+        - {name: leave, from: [Joining, Ready, Draining], to: Gone, summary: "Drained and idle, lost, reclaimed or past its deadline."}
+
+  - name: slot.cluster.Placement
+    naming:
+      summary: The endpoint's decision that a worktree builds on a remote node, kept for the node's life (§ 3.2). A worktree has at most one placement; the local node takes none.
+    identity:
+      name: placement_id
+      type: Uuid
+    fields:
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: worktree_id
+        type: slot.cluster.WorktreeId
+      - name: repository
+        type: slot.cluster.RepositoryKey
+    relations:
+      # Read from § 3.2: rule 3 (the repository is not opted in) is applied before rule 4 (the
+      # worktree has a placement), so a placement outlives the opt-in it was made under; its jobs
+      # then run on the local node.
+      - name: opt_in
+        kind: references
+        target: slot.cluster.Repository
+        cardinality: one
+        via: repository
+    lifecycle:
+      initial: Placed
+      states:
+        - {name: Placed, summary: "Jobs of the worktree run on the node."}
+      terminal: [Placed]
+
+  - name: slot.cluster.Repository
+    naming:
+      summary: A repository the operator opted in for remote nodes. The opt-in is the endpoint's state, not a file in the repository (§ 3.2 rule 3).
+    identity:
+      name: repository
+      type: slot.cluster.RepositoryKey
+    fields: []
+    lifecycle:
+      initial: Allowed
+      states:
+        - {name: Allowed, summary: "Its worktrees may be placed on remote nodes."}
+      terminal: [Allowed]
+
+  - name: slot.cluster.Job
+    naming:
+      summary: One command run through the cluster, and the node it ran on (§ 3.7).
+    identity:
+      name: job_id
+      type: slot.cluster.JobId
+    fields:
+      - name: node_id
+        type: slot.cluster.NodeName
+        summary: The node the job is queued on or ran on.
+      - name: worktree_id
+        type: slot.cluster.WorktreeId
+      - name: tokens
+        type: Integer
+      - name: fell_back
+        type: Boolean
+        summary: True when the job was meant for a remote node and was queued on the local node after its sync or start failed (§ 3.5).
+      - name: rerun_of
+        type: Optional<slot.cluster.JobId>
+        summary: The job this one runs again after its node was lost (§ 3.5).
+      - name: ended
+        type: Optional<slot.cluster.JobEnd>
+      - name: exit_code
+        type: Optional<Integer>
+      - name: sync_ms
+        type: Optional<Integer>
+      - name: fetch_ms
+        type: Optional<Integer>
+        summary: Time spent bringing fetched files back, when the job named any (§ 3.7, § 9.5).
+      - name: remote_id
+        type: Optional<Integer>
+        summary: The job's id in the remote node's own job log, not an id of this log (§ 3.7).
+    relations:
+      # A job is a line of the endpoint's job log and outlives the node it ran on (§ 3.4, § 7.4 stop).
+      - name: node
+        kind: references
+        target: slot.cluster.Node
+        cardinality: one
+        via: node_id
+      # § 3.5 and § 3.7: a rerun after a lost node is a new job naming the first attempt.
+      - name: first_attempt
+        kind: references
+        target: slot.cluster.Job
+        cardinality: one
+        via: rerun_of
+      # UNMAPPED: § 3.5 allows "one rerun after a lost host" and nothing says whether a rerun
+      # whose node is lost too is rerun again, so how many reruns one job may have is open.
+    invariants:
+      - tokens > 0
+    lifecycle:
+      initial: Queued
+      states:
+        - {name: Queued, summary: "Waits on its node."}
+        - {name: Running, summary: "Holds its slots on its node."}
+        - {name: Ended, summary: "Exited, cancelled, or lost with its node."}
+      terminal: [Ended]
+      transitions:
+        - {name: start, from: [Queued], to: Running}
+        - {name: end, from: [Running], to: Ended}
+        - {name: withdraw, from: [Queued], to: Ended, summary: "Cancelled before it started."}
+
+actors:
+  - name: slot.cluster.Operator
+    naming:
+      display: Operator
+      summary: The person who runs the machine and decides what the cluster spends.
+    may:
+      - slot.cluster.AddRemoteNode
+      - slot.cluster.SetNodeCapacity
+      - slot.cluster.DrainNode
+      - slot.cluster.RemoveNode
+      - slot.cluster.AllowRepository
+      - slot.cluster.DisallowRepository
+      - slot.cluster.PlaceWorktree
+      - slot.cluster.UnplaceWorktree
+
+  - name: slot.cluster.Endpoint
+    naming:
+      display: Endpoint daemon
+      summary: The daemon every session calls; it schedules, polls nodes and keeps the job log.
+    may:
+      - slot.cluster.OpenCluster
+      - slot.cluster.AddLocalNode
+      - slot.cluster.AdmitNode
+      - slot.cluster.RecordNodeState
+      - slot.cluster.DrainNode
+      - slot.cluster.MarkNodeGone
+      - slot.cluster.PlaceWorktree
+      - slot.cluster.SubmitJob
+      - slot.cluster.StartJob
+      - slot.cluster.EndJob
+      - slot.cluster.WithdrawJob
+      - slot.cluster.FallBackJob
+
+  - name: slot.cluster.Session
+    naming:
+      display: Session
+      summary: A caller of `slot <command>` on the endpoint's machine.
+    may:
+      - slot.cluster.WithdrawJob
+
+errors:
+  - name: slot.cluster.TopologyNotBuilt
+    summary: The topology is named and not built; only Hub is.
+    fields:
+      - name: topology
+        type: slot.cluster.Topology
+  - name: slot.cluster.ClusterNameTaken
+    summary: A cluster of that name exists.
+    fields: []
+  - name: slot.cluster.NodeNameTaken
+    summary: A node of that name exists.
+    fields: []
+  - name: slot.cluster.LocalNodeExists
+    summary: The cluster has its local node already.
+    fields: []
+  - name: slot.cluster.InvalidCapacity
+    summary: A capacity is not a positive number.
+    fields: []
+  - name: slot.cluster.DeadlinePassed
+    summary: A remote node's deadline is not in the future.
+    fields: []
+  - name: slot.cluster.NodeNotFound
+    summary: No node of that name exists.
+    fields: []
+  - name: slot.cluster.NodeStateConflict
+    summary: The node is not in a state this command acts from, so nothing changed.
+    fields:
+      - name: state
+        type: slot.cluster.Node.State
+  - name: slot.cluster.NodeIsGone
+    summary: The node has left the cluster.
+    fields: []
+  - name: slot.cluster.NodeNotGone
+    summary: Only a node that has left can be removed from the registry.
+    fields: []
+  - name: slot.cluster.CapacityBelowUse
+    summary: The new capacity is below the slots the node's running jobs hold.
+    fields: []
+  - name: slot.cluster.ReportExceedsCapacity
+    summary: A poll reported more slots in use than the node has; the report is not taken.
+    fields: []
+  - name: slot.cluster.RepositoryAlreadyAllowed
+    summary: The repository is opted in already.
+    fields: []
+  - name: slot.cluster.RepositoryNotAllowed
+    summary: The repository is not opted in; its worktrees build on the local node.
+    fields: []
+  - name: slot.cluster.LocalNodeTakesNoPlacement
+    summary: A worktree without a placement builds on the local node; placements are for remote nodes.
+    fields: []
+  - name: slot.cluster.NodeNotReady
+    summary: The node is not Ready, so it takes no new placement and no new job.
+    fields: []
+  - name: slot.cluster.LeaseTooShort
+    summary: The node's deadline is less than the longest run limit (30 minutes) away (§ 3.2 rules 4 and 5).
+    fields: []
+  - name: slot.cluster.WorktreeAlreadyPlaced
+    summary: The worktree has a placement; a worktree is placed on at most one node.
+    fields: []
+  - name: slot.cluster.NotPlaced
+    summary: No placement has that id.
+    fields: []
+  - name: slot.cluster.WorktreePlacedElsewhere
+    summary: The worktree is placed on another node; its jobs are not spread across nodes.
+    fields: []
+  - name: slot.cluster.TokensExceedNode
+    summary: The job asks for more slots than the node has.
+    fields: []
+  - name: slot.cluster.JobNotFound
+    summary: No job has that id.
+    fields: []
+  - name: slot.cluster.JobStateConflict
+    summary: The job is not in a state this command acts from, so nothing changed.
+    fields:
+      - name: state
+        type: slot.cluster.Job.State
+  - name: slot.cluster.NotTheLocalNode
+    summary: A job falls back only to the local node.
+    fields: []
+
+commands:
+  - name: slot.cluster.OpenCluster
+    naming:
+      wire: open-cluster
+      display: Open the cluster
+      summary: The endpoint daemon starts and opens its cluster.
+    input:
+      - name: cluster_id
+        type: slot.cluster.ClusterName
+      - name: topology
+        type: slot.cluster.Topology
+    outcomes:
+      - name: topology-not-built
+        when: topology == Federation
+        error: slot.cluster.TopologyNotBuilt
+        payload:
+          slot.cluster.TopologyNotBuilt: {topology: input.topology}
+      - name: name-taken
+        when_related: {entity: slot.cluster.Cluster, where: cluster_id == input.cluster_id, exists: true}
+        error: slot.cluster.ClusterNameTaken
+      - name: opened
+        creates: slot.cluster.Cluster
+        instance: cluster_id
+        sets: {topology: input.topology}
+        emits: [slot.cluster.ClusterOpened]
+        payload:
+          slot.cluster.ClusterOpened: {cluster_id: input.cluster_id, topology: input.topology}
+
+  # Hub topology: the endpoint adds nodes only to the one cluster it opened at start, so no
+  # command checks that the named cluster exists. A topology with several clusters (Federation)
+  # adds that refusal.
+  - name: slot.cluster.AddLocalNode
+    naming:
+      wire: add-local-node
+      display: Add the local node
+      summary: "A share of the endpoint machine joins the cluster as its local node, Ready at once. The share is `[node.local]` of the host configuration (slot.hostconfig); without one it is half the machine's CPUs (operator's decision of 2026-11-23)."
+    input:
+      - name: cluster_id
+        type: slot.cluster.ClusterName
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: cpus
+        type: Integer
+      - name: slots
+        type: Integer
+      - name: memory_gib
+        type: Integer
+      - name: disk_gib
+        type: Integer
+      - name: slot_version
+        type: String
+    outcomes:
+      - name: invalid-capacity
+        when: {any: [cpus <= 0, slots <= 0, memory_gib <= 0, disk_gib <= 0]}
+        error: slot.cluster.InvalidCapacity
+      - name: name-taken
+        when_related: {entity: slot.cluster.Node, where: node_id == input.node_id, exists: true}
+        error: slot.cluster.NodeNameTaken
+      - name: local-exists
+        when_related: {entity: slot.cluster.Node, where: {all: [cluster_id == input.cluster_id, kind == Local]}, exists: true}
+        error: slot.cluster.LocalNodeExists
+      - name: added
+        creates: slot.cluster.Node
+        into: Ready
+        instance: node_id
+        sets:
+          cluster_id: input.cluster_id
+          kind: Local
+          cpus: input.cpus
+          slots: input.slots
+          memory_gib: input.memory_gib
+          disk_gib: input.disk_gib
+          slots_in_use: 0
+          running_jobs: 0
+          queued_jobs: 0
+          slot_version: input.slot_version
+          joined_at: {generated: true}
+        emits: [slot.cluster.NodeAdded]
+        payload:
+          slot.cluster.NodeAdded: {node_id: input.node_id, cluster_id: input.cluster_id, kind: Local}
+
+  - name: slot.cluster.AddRemoteNode
+    naming:
+      wire: add-remote-node
+      display: Add a remote node
+      summary: "Register a remote node, started by hand or by `slot node up`; it is Joining until the endpoint admits it."
+    input:
+      - name: cluster_id
+        type: slot.cluster.ClusterName
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: ssh
+        type: String
+      - name: cpus
+        type: Integer
+      - name: slots
+        type: Integer
+      - name: memory_gib
+        type: Integer
+      - name: disk_gib
+        type: Integer
+      - name: max_worktrees
+        type: Integer
+      - name: slot_version
+        type: String
+      - name: deadline
+        type: Timestamp
+      - name: location
+        type: Optional<String>
+      - name: machine_type
+        type: Optional<String>
+      - name: machine
+        type: Optional<slot.provisioning.RequestKey>
+      - name: price_per_hour_cents
+        type: Optional<Integer>
+    outcomes:
+      - name: invalid-capacity
+        when: {any: [cpus <= 0, slots <= 0, memory_gib <= 0, disk_gib <= 0, max_worktrees < 0]}
+        error: slot.cluster.InvalidCapacity
+      - name: deadline-passed
+        when: deadline <= now
+        error: slot.cluster.DeadlinePassed
+      - name: name-taken
+        when_related: {entity: slot.cluster.Node, where: node_id == input.node_id, exists: true}
+        error: slot.cluster.NodeNameTaken
+      - name: added
+        creates: slot.cluster.Node
+        instance: node_id
+        sets:
+          cluster_id: input.cluster_id
+          kind: Remote
+          ssh: input.ssh
+          cpus: input.cpus
+          slots: input.slots
+          memory_gib: input.memory_gib
+          disk_gib: input.disk_gib
+          max_worktrees: input.max_worktrees
+          slots_in_use: 0
+          running_jobs: 0
+          queued_jobs: 0
+          slot_version: input.slot_version
+          deadline: input.deadline
+          location: input.location
+          machine_type: input.machine_type
+          machine: input.machine
+          price_per_hour_cents: input.price_per_hour_cents
+        emits: [slot.cluster.NodeAdded]
+        payload:
+          slot.cluster.NodeAdded: {node_id: input.node_id, cluster_id: input.cluster_id, kind: Remote}
+
+  - name: slot.cluster.AdmitNode
+    naming:
+      wire: admit-node
+      display: Admit a node
+      summary: "The first answer of a joining node's `state` poll: the version and the clock decide (§ 3.4, § 7.4)."
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: reported_version
+        type: String
+      - name: clock_skew_ms
+        type: Integer
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NodeNotFound
+      - name: other-version
+        when_subject: {predicate: slot_version != input.reported_version}
+        moves: slot.cluster.Node.refuse
+        instance: node_id
+        sets: {gone_reason: RefusedAtJoin}
+        emits: [slot.cluster.NodeGone]
+        payload:
+          slot.cluster.NodeGone: {node_id: input.node_id, reason: RefusedAtJoin}
+      - name: clock-off
+        when: {any: [clock_skew_ms > 1000, clock_skew_ms < -1000]}
+        moves: slot.cluster.Node.refuse
+        instance: node_id
+        sets: {gone_reason: RefusedAtJoin}
+        emits: [slot.cluster.NodeGone]
+        payload:
+          slot.cluster.NodeGone: {node_id: input.node_id, reason: RefusedAtJoin}
+      - name: admitted
+        moves: slot.cluster.Node.admit
+        instance: node_id
+        sets: {joined_at: {generated: true}}
+        emits: [slot.cluster.NodeAdmitted]
+        payload:
+          slot.cluster.NodeAdmitted: {node_id: input.node_id}
+      - name: wrong-state
+        wrong_state: true
+        error: slot.cluster.NodeStateConflict
+        payload:
+          slot.cluster.NodeStateConflict: {state: {subject: state}}
+
+  - name: slot.cluster.RecordNodeState
+    naming:
+      wire: record-node-state
+      display: Record a node's state
+      summary: One answer of the 5-second poll of a node (§ 3.4).
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: slots_in_use
+        type: Integer
+      - name: running_jobs
+        type: Integer
+      - name: queued_jobs
+        type: Integer
+      - name: cpu_busy_milli
+        type: Optional<Integer>
+      - name: memory_used_mib
+        type: Optional<Integer>
+      - name: disk_free_gib
+        type: Optional<Integer>
+    outcomes:
+      - name: negative
+        when: {any: [slots_in_use < 0, running_jobs < 0, queued_jobs < 0]}
+        error: slot.cluster.ReportExceedsCapacity
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NodeNotFound
+      - name: gone
+        when_subject: {predicate: state == Gone}
+        error: slot.cluster.NodeIsGone
+      - name: exceeds-capacity
+        when_subject: {predicate: slots < input.slots_in_use}
+        error: slot.cluster.ReportExceedsCapacity
+      - name: recorded
+        updates: slot.cluster.Node
+        instance: node_id
+        sets:
+          slots_in_use: input.slots_in_use
+          running_jobs: input.running_jobs
+          queued_jobs: input.queued_jobs
+          cpu_busy_milli: input.cpu_busy_milli
+          memory_used_mib: input.memory_used_mib
+          disk_free_gib: input.disk_free_gib
+        emits: [slot.cluster.NodeStateRecorded]
+        payload:
+          slot.cluster.NodeStateRecorded:
+            node_id: input.node_id
+            slots_in_use: input.slots_in_use
+            running_jobs: input.running_jobs
+            queued_jobs: input.queued_jobs
+
+  - name: slot.cluster.SetNodeCapacity
+    naming:
+      wire: set-node-capacity
+      display: Set a node's capacity
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: cpus
+        type: Integer
+      - name: slots
+        type: Integer
+      - name: memory_gib
+        type: Integer
+      - name: disk_gib
+        type: Integer
+    outcomes:
+      - name: invalid-capacity
+        when: {any: [cpus <= 0, slots <= 0, memory_gib <= 0, disk_gib <= 0]}
+        error: slot.cluster.InvalidCapacity
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NodeNotFound
+      - name: gone
+        when_subject: {predicate: state == Gone}
+        error: slot.cluster.NodeIsGone
+      - name: below-use
+        when_subject: {predicate: slots_in_use > input.slots}
+        error: slot.cluster.CapacityBelowUse
+      - name: set
+        updates: slot.cluster.Node
+        instance: node_id
+        sets:
+          cpus: input.cpus
+          slots: input.slots
+          memory_gib: input.memory_gib
+          disk_gib: input.disk_gib
+        emits: [slot.cluster.NodeCapacitySet]
+        payload:
+          slot.cluster.NodeCapacitySet: {node_id: input.node_id, slots: input.slots}
+
+  # Draining ends the node's placements: § 3.2 rule 4 sends a placed worktree's jobs only to a
+  # Ready node, and § 3.5 (deadline row) says "placements end". Running jobs finish on the node.
+  - name: slot.cluster.DrainNode
+    naming:
+      wire: drain-node
+      display: Drain a node
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NodeNotFound
+      - name: draining
+        moves: slot.cluster.Node.drain
+        instance: node_id
+        emits: [slot.cluster.NodeDraining]
+        payload:
+          slot.cluster.NodeDraining: {node_id: input.node_id}
+        affects:
+          - entity: slot.cluster.Placement
+            where: node_id == input.node_id
+            deletes: slot.cluster.Placement
+      - name: wrong-state
+        wrong_state: true
+        error: slot.cluster.NodeStateConflict
+        payload:
+          slot.cluster.NodeStateConflict: {state: {subject: state}}
+
+  - name: slot.cluster.MarkNodeGone
+    naming:
+      wire: mark-node-gone
+      display: Mark a node gone
+      summary: The node left; its placements end and its worktrees build on the local node (§ 3.4, § 3.5).
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: reason
+        type: slot.cluster.GoneReason
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NodeNotFound
+      - name: gone
+        moves: slot.cluster.Node.leave
+        instance: node_id
+        sets: {gone_reason: input.reason, left_at: {generated: true}}
+        emits: [slot.cluster.NodeGone]
+        payload:
+          slot.cluster.NodeGone: {node_id: input.node_id, reason: input.reason}
+        affects:
+          - entity: slot.cluster.Placement
+            where: node_id == input.node_id
+            deletes: slot.cluster.Placement
+      - name: wrong-state
+        wrong_state: true
+        error: slot.cluster.NodeStateConflict
+        payload:
+          slot.cluster.NodeStateConflict: {state: {subject: state}}
+
+  - name: slot.cluster.RemoveNode
+    naming:
+      wire: remove-node
+      display: Remove a node
+      summary: Take a node that has left out of the registry. Its jobs stay in the job log.
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NodeNotFound
+      - name: not-gone
+        when_subject: {predicate: state != Gone}
+        error: slot.cluster.NodeNotGone
+      - name: removed
+        deletes: slot.cluster.Node
+        instance: node_id
+        emits: [slot.cluster.NodeRemoved]
+        payload:
+          slot.cluster.NodeRemoved: {node_id: input.node_id}
+
+  - name: slot.cluster.AllowRepository
+    naming:
+      wire: allow-repository
+      display: Opt a repository in
+    input:
+      - name: repository
+        type: slot.cluster.RepositoryKey
+    outcomes:
+      - name: already
+        when_related: {entity: slot.cluster.Repository, where: repository == input.repository, exists: true}
+        error: slot.cluster.RepositoryAlreadyAllowed
+      - name: allowed
+        creates: slot.cluster.Repository
+        instance: repository
+        emits: [slot.cluster.RepositoryAllowed]
+        payload:
+          slot.cluster.RepositoryAllowed: {repository: input.repository}
+
+  - name: slot.cluster.DisallowRepository
+    naming:
+      wire: disallow-repository
+      display: Opt a repository out
+      summary: Its worktrees build on the local node from the next job; placements made under the opt-in are kept and unused (§ 3.2 rule 3 before rule 4).
+    input:
+      - name: repository
+        type: slot.cluster.RepositoryKey
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.RepositoryNotAllowed
+      - name: disallowed
+        deletes: slot.cluster.Repository
+        instance: repository
+        emits: [slot.cluster.RepositoryDisallowed]
+        payload:
+          slot.cluster.RepositoryDisallowed: {repository: input.repository}
+
+  # LIMIT: § 3.2 rule 5 places a worktree only while the node holds fewer than its
+  # `max_worktrees`. A row-set count compares with a literal, not with a field of the named node,
+  # so the bound is not expressed here; the daemon enforces it and its tests name it.
+  - name: slot.cluster.PlaceWorktree
+    naming:
+      wire: place-worktree
+      display: Place a worktree on a node
+      summary: The worktree's jobs run on this remote node from now on, for the node's life (§ 3.2).
+    input:
+      - name: worktree_id
+        type: slot.cluster.WorktreeId
+      - name: repository
+        type: slot.cluster.RepositoryKey
+      - name: node_id
+        type: slot.cluster.NodeName
+    outcomes:
+      - name: no-node
+        when_related: {via: input.node_id, exists: false}
+        error: slot.cluster.NodeNotFound
+      - name: not-allowed
+        when_related: {via: input.repository, exists: false}
+        error: slot.cluster.RepositoryNotAllowed
+      - name: local-node
+        when_related: {via: input.node_id, predicate: kind == Local}
+        error: slot.cluster.LocalNodeTakesNoPlacement
+      - name: not-ready
+        when_related: {via: input.node_id, predicate: state != Ready}
+        error: slot.cluster.NodeNotReady
+      - name: lease-too-short
+        when_related: {via: input.node_id, predicate: deadline < now + 30m}
+        error: slot.cluster.LeaseTooShort
+      - name: already-placed
+        when_related: {entity: slot.cluster.Placement, where: worktree_id == input.worktree_id, exists: true}
+        error: slot.cluster.WorktreeAlreadyPlaced
+      - name: placed
+        creates: slot.cluster.Placement
+        instance: placement_id
+        sets:
+          node_id: input.node_id
+          worktree_id: input.worktree_id
+          repository: input.repository
+        emits: [slot.cluster.WorktreePlaced]
+        payload:
+          slot.cluster.WorktreePlaced:
+            placement_id: {generated: true}
+            worktree_id: input.worktree_id
+            node_id: input.node_id
+
+  - name: slot.cluster.UnplaceWorktree
+    naming:
+      wire: unplace-worktree
+      display: Unplace a worktree
+      summary: The worktree's next job runs on the local node, or is placed again.
+    input:
+      - name: placement_id
+        type: Uuid
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.NotPlaced
+      - name: unplaced
+        deletes: slot.cluster.Placement
+        instance: placement_id
+        emits: [slot.cluster.WorktreeUnplaced]
+        payload:
+          slot.cluster.WorktreeUnplaced: {placement_id: input.placement_id}
+
+  # Stickiness: a job of a placed worktree is queued only on the node of its placement.
+  - name: slot.cluster.SubmitJob
+    naming:
+      wire: submit-job
+      display: Submit a job
+      summary: The endpoint queues a job on the node it chose; a placed worktree's job goes to its placement's node.
+    input:
+      - name: node_id
+        type: slot.cluster.NodeName
+      - name: worktree_id
+        type: slot.cluster.WorktreeId
+      - name: tokens
+        type: Integer
+      - name: rerun_of
+        type: Optional<slot.cluster.JobId>
+    outcomes:
+      - name: bad-tokens
+        when: tokens <= 0
+        error: slot.cluster.TokensExceedNode
+      - name: no-node
+        when_related: {via: input.node_id, exists: false}
+        error: slot.cluster.NodeNotFound
+      - name: not-ready
+        when_related: {via: input.node_id, predicate: state != Ready}
+        error: slot.cluster.NodeNotReady
+      - name: too-many-tokens
+        when_related: {via: input.node_id, predicate: slots < input.tokens}
+        error: slot.cluster.TokensExceedNode
+      - name: placed-elsewhere
+        when_related:
+          entity: slot.cluster.Placement
+          where: {all: [worktree_id == input.worktree_id, node_id != input.node_id]}
+          exists: true
+        error: slot.cluster.WorktreePlacedElsewhere
+      - name: queued
+        creates: slot.cluster.Job
+        instance: job_id
+        sets:
+          node_id: input.node_id
+          worktree_id: input.worktree_id
+          tokens: input.tokens
+          fell_back: false
+          rerun_of: input.rerun_of
+        emits: [slot.cluster.JobQueued]
+        payload:
+          slot.cluster.JobQueued:
+            job_id: {generated: true}
+            node_id: input.node_id
+            worktree_id: input.worktree_id
+
+  - name: slot.cluster.StartJob
+    naming:
+      wire: start-job
+      display: Start a job
+    input:
+      - name: job_id
+        type: slot.cluster.JobId
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.JobNotFound
+      - name: started
+        moves: slot.cluster.Job.start
+        instance: job_id
+        emits: [slot.cluster.JobStarted]
+        payload:
+          slot.cluster.JobStarted: {job_id: input.job_id}
+      - name: wrong-state
+        wrong_state: true
+        error: slot.cluster.JobStateConflict
+        payload:
+          slot.cluster.JobStateConflict: {state: {subject: state}}
+
+  - name: slot.cluster.EndJob
+    naming:
+      wire: end-job
+      display: End a job
+    input:
+      - name: job_id
+        type: slot.cluster.JobId
+      - name: how
+        type: slot.cluster.JobEnd
+      - name: exit_code
+        type: Optional<Integer>
+      - name: sync_ms
+        type: Optional<Integer>
+      - name: fetch_ms
+        type: Optional<Integer>
+      - name: remote_id
+        type: Optional<Integer>
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.JobNotFound
+      - name: ended
+        moves: slot.cluster.Job.end
+        instance: job_id
+        sets:
+          ended: input.how
+          exit_code: input.exit_code
+          sync_ms: input.sync_ms
+          fetch_ms: input.fetch_ms
+          remote_id: input.remote_id
+        emits: [slot.cluster.JobEnded]
+        payload:
+          slot.cluster.JobEnded: {job_id: input.job_id, how: input.how}
+      - name: wrong-state
+        wrong_state: true
+        error: slot.cluster.JobStateConflict
+        payload:
+          slot.cluster.JobStateConflict: {state: {subject: state}}
+
+  - name: slot.cluster.WithdrawJob
+    naming:
+      wire: withdraw-job
+      display: Cancel a queued job
+    input:
+      - name: job_id
+        type: slot.cluster.JobId
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.JobNotFound
+      - name: withdrawn
+        moves: slot.cluster.Job.withdraw
+        instance: job_id
+        sets: {ended: Cancelled}
+        emits: [slot.cluster.JobEnded]
+        payload:
+          slot.cluster.JobEnded: {job_id: input.job_id, how: Cancelled}
+      - name: wrong-state
+        wrong_state: true
+        error: slot.cluster.JobStateConflict
+        payload:
+          slot.cluster.JobStateConflict: {state: {subject: state}}
+
+  # § 3.1 and § 3.5: a sync that fails, or a job that never starts on its remote node, is queued
+  # on the local node with its first enqueue time. The only move of a job between nodes.
+  - name: slot.cluster.FallBackJob
+    naming:
+      wire: fall-back-job
+      display: Fall a job back to the local node
+    input:
+      - name: job_id
+        type: slot.cluster.JobId
+      - name: local_node_id
+        type: slot.cluster.NodeName
+    outcomes:
+      - name: unknown
+        unknown_instance: true
+        error: slot.cluster.JobNotFound
+      - name: started
+        when_subject: {predicate: state != Queued}
+        error: slot.cluster.JobStateConflict
+        payload:
+          slot.cluster.JobStateConflict: {state: {subject: state}}
+      - name: no-node
+        when_related: {via: input.local_node_id, exists: false}
+        error: slot.cluster.NodeNotFound
+      - name: not-local
+        when_related: {via: input.local_node_id, predicate: kind != Local}
+        error: slot.cluster.NotTheLocalNode
+      - name: fell-back
+        updates: slot.cluster.Job
+        instance: job_id
+        sets:
+          node_id: input.local_node_id
+          fell_back: true
+        emits: [slot.cluster.JobFellBack]
+        payload:
+          slot.cluster.JobFellBack: {job_id: input.job_id, node_id: input.local_node_id}
+
+events:
+  - name: slot.cluster.ClusterOpened
+    fields:
+      - {name: cluster_id, type: slot.cluster.ClusterName}
+      - {name: topology, type: slot.cluster.Topology}
+  - name: slot.cluster.NodeAdded
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: cluster_id, type: slot.cluster.ClusterName}
+      - {name: kind, type: slot.cluster.NodeKind}
+  - name: slot.cluster.NodeStateRecorded
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: slots_in_use, type: Integer}
+      - {name: running_jobs, type: Integer}
+      - {name: queued_jobs, type: Integer}
+  - name: slot.cluster.NodeAdmitted
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+  - name: slot.cluster.NodeCapacitySet
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: slots, type: Integer}
+  - name: slot.cluster.NodeDraining
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+  - name: slot.cluster.NodeGone
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: reason, type: slot.cluster.GoneReason}
+  - name: slot.cluster.NodeRemoved
+    fields:
+      - {name: node_id, type: slot.cluster.NodeName}
+  - name: slot.cluster.RepositoryAllowed
+    fields:
+      - {name: repository, type: slot.cluster.RepositoryKey}
+  - name: slot.cluster.RepositoryDisallowed
+    fields:
+      - {name: repository, type: slot.cluster.RepositoryKey}
+  - name: slot.cluster.WorktreePlaced
+    fields:
+      - {name: placement_id, type: Uuid}
+      - {name: worktree_id, type: slot.cluster.WorktreeId}
+      - {name: node_id, type: slot.cluster.NodeName}
+  - name: slot.cluster.WorktreeUnplaced
+    fields:
+      - {name: placement_id, type: Uuid}
+  - name: slot.cluster.JobQueued
+    fields:
+      - {name: job_id, type: slot.cluster.JobId}
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: worktree_id, type: slot.cluster.WorktreeId}
+  - name: slot.cluster.JobStarted
+    fields:
+      - {name: job_id, type: slot.cluster.JobId}
+  - name: slot.cluster.JobEnded
+    fields:
+      - {name: job_id, type: slot.cluster.JobId}
+      - {name: how, type: slot.cluster.JobEnd}
+  - name: slot.cluster.JobFellBack
+    fields:
+      - {name: job_id, type: slot.cluster.JobId}
+      - {name: node_id, type: slot.cluster.NodeName}
+
+views:
+  - name: slot.cluster.ClusterStatus
+    source: slot.cluster.Cluster
+    consistency: read_your_writes
+    naming:
+      wire: status
+      display: Cluster status
+    fields:
+      - {name: cluster_id, type: slot.cluster.ClusterName}
+      - {name: topology, type: slot.cluster.Topology}
+      - {name: state, type: slot.cluster.Cluster.State}
+
+  # The node list of `slot node list`, `GET /api/nodes` and the cluster view of the web UI: each
+  # node's specs, lifetime and load.
+  - name: slot.cluster.NodeList
+    source: slot.cluster.Node
+    consistency: read_your_writes
+    naming:
+      wire: nodes
+      display: Nodes
+    fields: &node_fields
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: cluster_id, type: slot.cluster.ClusterName}
+      - {name: kind, type: slot.cluster.NodeKind}
+      - {name: state, type: slot.cluster.Node.State}
+      - {name: cpus, type: Integer}
+      - {name: slots, type: Integer}
+      - {name: slots_in_use, type: Integer}
+      - {name: memory_gib, type: Integer}
+      - {name: disk_gib, type: Integer}
+      - {name: max_worktrees, type: Optional<Integer>}
+      - {name: running_jobs, type: Integer}
+      - {name: queued_jobs, type: Integer}
+      - {name: slot_version, type: String}
+      - {name: cpu_busy_milli, type: Optional<Integer>}
+      - {name: memory_used_mib, type: Optional<Integer>}
+      - {name: disk_free_gib, type: Optional<Integer>}
+      - {name: location, type: Optional<String>}
+      - {name: machine_type, type: Optional<String>}
+      - {name: price_per_hour_cents, type: Optional<Integer>}
+      - {name: joined_at, type: Optional<Timestamp>}
+      - {name: deadline, type: Optional<Timestamp>}
+      - {name: gone_reason, type: Optional<slot.cluster.GoneReason>}
+      - {name: left_at, type: Optional<Timestamp>}
+
+  - name: slot.cluster.NodeDetail
+    source: slot.cluster.Node
+    consistency: read_your_writes
+    params:
+      - {name: node_id, type: slot.cluster.NodeName}
+    filter: node_id == param.node_id
+    naming:
+      wire: node
+      display: Node
+    fields: *node_fields
+
+  - name: slot.cluster.Placements
+    source: slot.cluster.Placement
+    consistency: read_your_writes
+    naming:
+      wire: placements
+      display: Placements
+    fields: &placement_fields
+      - {name: placement_id, type: Uuid}
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: worktree_id, type: slot.cluster.WorktreeId}
+      - {name: repository, type: slot.cluster.RepositoryKey}
+
+  - name: slot.cluster.PlacementsOnNode
+    source: slot.cluster.Placement
+    consistency: read_your_writes
+    params:
+      - {name: node_id, type: slot.cluster.NodeName}
+    filter: node_id == param.node_id
+    naming:
+      wire: node-placements
+      display: Placements on a node
+    fields: *placement_fields
+
+  - name: slot.cluster.Repositories
+    source: slot.cluster.Repository
+    consistency: read_your_writes
+    naming:
+      wire: repositories
+      display: Opted-in repositories
+    fields:
+      - {name: repository, type: slot.cluster.RepositoryKey}
+
+  - name: slot.cluster.Jobs
+    source: slot.cluster.Job
+    consistency: read_your_writes
+    naming:
+      wire: jobs
+      display: Jobs
+    fields: &job_fields
+      - {name: job_id, type: slot.cluster.JobId}
+      - {name: node_id, type: slot.cluster.NodeName}
+      - {name: worktree_id, type: slot.cluster.WorktreeId}
+      - {name: state, type: slot.cluster.Job.State}
+      - {name: tokens, type: Integer}
+      - {name: fell_back, type: Boolean}
+      - {name: rerun_of, type: Optional<slot.cluster.JobId>}
+      - {name: ended, type: Optional<slot.cluster.JobEnd>}
+      - {name: exit_code, type: Optional<Integer>}
+      - {name: sync_ms, type: Optional<Integer>}
+      - {name: fetch_ms, type: Optional<Integer>}
+      - {name: remote_id, type: Optional<Integer>}
+
+  # The node filter of the web UI's job views reads this view.
+  - name: slot.cluster.JobsOnNode
+    source: slot.cluster.Job
+    consistency: read_your_writes
+    params:
+      - {name: node_id, type: slot.cluster.NodeName}
+    filter: node_id == param.node_id
+    naming:
+      wire: node-jobs
+      display: Jobs on a node
+    fields: *job_fields

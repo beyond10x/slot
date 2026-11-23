@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<!-- Design asset: the cluster start page the operator approved on 2026-11-23. Simulated data, generic names.
+     Two scheduling rules in its simulation are not adopted (marked NOT ADOPTED below). -->
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>slot · cluster (draft, simulated data)</title>
+<style>
+:root, [data-theme='light'] {
+  --fg: #1a1a1a; --mute: #5c5c5c; --line: #d4d4d4; --rule: #e9e9e9; --bg: #fff; --panel: #f6f6f6; --panel2: #eef0f3;
+  --hover: #f2f4f7; --sel: #e2ecfa; --ink: #3d3d3d; --accent: #1f5fbf; --bad: #b00000; --ok: #1e7e34; --warn: #a94300;
+  --ctl: #8a8a8a; --cell: #e3e5e8; --track: #e3e5e8;
+  --rust: #D55E00; --go: #0072B2; --node: #9a7d00; --other: #7a7a7a; --queue: #b0548a;
+  --draft-bg: #ffe08a; --draft-fg: #3a2a00;
+  --mono: ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+[data-theme='dark'] {
+  --fg: #e6e9ed; --mute: #9aa5b1; --line: #2c343e; --rule: #20262e; --bg: #0e1115; --panel: #151a20; --panel2: #1b2129;
+  --hover: #1c232c; --sel: #1d2a3d; --ink: #c9d1d9; --accent: #6ea8fe; --bad: #ff7b72; --ok: #56d364; --warn: #f0a04b;
+  --ctl: #5b6673; --cell: #222a33; --track: #252d37;
+  --rust: #ef7a3c; --go: #56B4E9; --node: #F0E442; --other: #a0a8b0; --queue: #CC79A7;
+  --draft-bg: #ffd666; --draft-fg: #2a1f00;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; font: 14px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); overflow-x: hidden;
+  transition: background-color .3s, color .3s; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.app { display: grid; grid-template-rows: 56px auto minmax(0, 1fr); height: 100vh; min-height: 620px; }
+.mono { font-family: var(--mono); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* Header: name, headline numbers, theme, draft mark. */
+header.top { display: flex; align-items: center; gap: 18px; padding: 0 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+.brand { display: flex; flex-direction: column; line-height: 18px; flex: none; }
+.brand .name { font-size: 17px; font-weight: 700; letter-spacing: .2px; }
+.brand .name i { font-style: normal; font-weight: 400; color: var(--mute); }
+.brand .sub { font-size: 12px; color: var(--mute); white-space: nowrap; }
+.conn { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 5px; vertical-align: 1px;
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); animation: beat 2s infinite; }
+@keyframes beat { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+.kpis { display: flex; gap: 6px; margin: 0; flex: 1; min-width: 0; justify-content: center; }
+.kpi { padding: 3px 12px; border-left: 1px solid var(--line); min-width: 0; }
+.kpi:first-child { border-left: 0; }
+.kpi dt { font-size: 12px; line-height: 15px; color: var(--mute); white-space: nowrap; }
+.kpi dd { margin: 0; font-size: 17px; line-height: 23px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kpi dd small { font-size: 12px; font-weight: 400; color: var(--mute); margin-left: 3px; }
+.kpi .meter { display: block; height: 3px; margin-top: 1px; border-radius: 2px; background: var(--track); overflow: hidden; }
+.kpi .meter i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .6s ease; }
+.right { display: flex; align-items: center; gap: 10px; flex: none; }
+.btn { min-height: 26px; padding: 0 9px; border: 1px solid var(--ctl); border-radius: 5px; background: transparent; cursor: pointer;
+  font-size: 13px; white-space: nowrap; }
+.btn:hover { background: var(--hover); }
+.draft { padding: 3px 9px; border-radius: 5px; background: var(--draft-bg); color: var(--draft-fg); font-size: 12px; font-weight: 700;
+  white-space: nowrap; background-image: repeating-linear-gradient(135deg, transparent 0 8px, rgb(0 0 0 / 6%) 8px 16px); }
+
+/* The diagram: endpoint, channel, nodes; one canvas over all of it for lanes and moving jobs. */
+.diagram { position: relative; display: grid; grid-template-columns: 262px 124px minmax(0, 1fr);
+  height: clamp(330px, calc(100vh - 56px - 304px), 404px); padding: 10px 14px 8px; }
+#flow { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
+.endpoint { position: relative; display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); padding: 9px 10px 8px; }
+.ehead { display: flex; align-items: baseline; gap: 8px; line-height: 20px; }
+.ehead b { font-size: 14px; }
+.ehead span { font-size: 12px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.esub { font-size: 12px; color: var(--mute); line-height: 17px; margin-bottom: 6px; white-space: nowrap; }
+.esub b { color: var(--fg); font-weight: 600; }
+.qlist { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.qchip { position: absolute; left: 0; right: 0; top: 0; height: 34px; display: grid; grid-template-columns: 3px 8px minmax(0, 1fr) auto;
+  grid-template-rows: 17px 15px; column-gap: 6px; align-items: center; padding: 1px 7px 0 0;
+  border-radius: 5px; background: var(--panel2); font-size: 12px; line-height: 17px; white-space: nowrap; overflow: hidden;
+  transition: transform .45s cubic-bezier(.2,.8,.2,1), opacity .35s; }
+.qchip .wt { grid-row: 1 / 3; align-self: stretch; margin-top: -1px; }
+.qchip .td { width: 8px; height: 8px; border-radius: 2px; }
+.qchip .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.qchip .age { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.qchip .meta { grid-column: 3 / 5; color: var(--mute); font-size: 11.5px; line-height: 15px; overflow: hidden; text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums; }
+.qchip.re { box-shadow: inset 0 0 0 1px var(--warn); }
+.qchip.leaving { opacity: 0; }
+.qchip.entering { opacity: 0; }
+.qchip.dim { opacity: .28; }
+.qmore { position: absolute; left: 0; right: 0; bottom: 0; height: 20px; font-size: 12px; color: var(--mute); text-align: center;
+  background: linear-gradient(to bottom, transparent, var(--panel) 40%); }
+.qempty { color: var(--mute); font-size: 12px; padding: 4px 0; }
+.efoot { display: flex; align-items: flex-end; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--mute); line-height: 15px; }
+.efoot canvas { flex: 1; height: 26px; min-width: 0; }
+.efoot b { color: var(--fg); font-weight: 600; }
+
+.nodes { display: grid; grid-template-rows: repeat(3, minmax(0, 1fr)); gap: 8px; min-width: 0; }
+.bay { position: relative; min-width: 0; min-height: 0; }
+.node, .ghost { position: absolute; inset: 0; border-radius: 10px; transition: opacity .6s, border-color .4s, background-color .4s, box-shadow .3s; }
+.node { display: flex; flex-direction: column; border: 1px solid var(--line); background: var(--panel); padding: 7px 12px 8px; cursor: pointer;
+  outline-offset: 2px; }
+.node:hover { border-color: var(--ctl); }
+.node[aria-pressed='true'] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 24px -6px color-mix(in srgb, var(--accent) 60%, transparent); }
+.node.dim { opacity: .38; }
+.node.draining { border-style: dashed; border-color: var(--warn); }
+.node.joining { border-style: dashed; border-color: var(--accent); }
+.node.enter { opacity: 0; }
+.ghost { display: flex; align-items: center; justify-content: center; gap: 10px; border: 1px dashed var(--line); color: var(--mute); font-size: 13px; }
+.ghost.hide { opacity: 0; pointer-events: none; }
+.nhead { display: flex; align-items: center; gap: 8px; height: 22px; white-space: nowrap; min-width: 0; }
+.nname { font-weight: 700; font-size: 14px; }
+.tag { font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--ctl); color: var(--mute); line-height: 16px; }
+.pill { font-size: 12px; padding: 0 8px; border-radius: 9px; line-height: 18px; font-weight: 600; }
+.pill.ready { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.pill.draining { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.pill.joining { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+.spec { font-size: 12px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ncount { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; flex: none; }
+.ncount b { color: var(--fg); font-weight: 600; }
+.ncount .f { color: var(--bad); font-weight: 600; }
+.nbody { flex: 1; display: grid; grid-template-columns: 271px minmax(80px, 1fr) 138px 158px 60px; gap: 16px; align-items: center; min-height: 0;
+  margin-top: 4px; }
+.slots { display: grid; grid-template-columns: repeat(16, 14px); gap: 3px; align-content: center; }
+.cell { width: 14px; height: 14px; border-radius: 3px; background: var(--cell); position: relative;
+  transition: background-color .45s, opacity .6s, box-shadow .9s, transform .3s; }
+.cell.busy { background: var(--c); }
+.cell.pop { transform: scale(1.25); }
+.cell.flash-ok { box-shadow: 0 0 0 2px var(--ok); }
+.cell.flash-bad { box-shadow: 0 0 0 2px var(--bad); }
+.node.draining .cell:not(.busy) { background: repeating-linear-gradient(135deg, var(--cell) 0 3px, transparent 3px 6px); }
+.node.joining .cell { opacity: .15; }
+.node.joining .cell.up { opacity: 1; }
+.spark { position: relative; height: 100%; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+.spark .lab { font-size: 12px; color: var(--mute); line-height: 15px; white-space: nowrap; }
+.spark .lab b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.spark canvas { width: 100%; height: 44px; display: block; margin-top: 3px; }
+.bars { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--mute); line-height: 15px; }
+.bars b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.bar { height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 2px; }
+.bar i { display: block; height: 100%; width: 0; border-radius: 3px; transition: width .8s ease, background-color .4s; }
+.bar.mem i { background: var(--queue); }
+.bar.disk i { background: var(--accent); }
+.wts { font-size: 12px; line-height: 16px; min-width: 0; color: var(--fg); }
+.wts .h { color: var(--mute); }
+.wts div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: opacity .4s; }
+.wts i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
+.life { display: flex; flex-direction: column; align-items: center; gap: 1px; font-size: 11px; color: var(--mute); line-height: 13px; white-space: nowrap; }
+.life svg { width: 52px; height: 52px; display: block; }
+.life .trk { stroke: var(--track); }
+.life .arc { transition: stroke-dashoffset .9s linear, stroke .4s; }
+.life text { font: 600 10.5px var(--mono); fill: var(--fg); }
+.life .spin { transform-origin: 26px 26px; animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* The job list. */
+.jobs { display: flex; flex-direction: column; min-height: 0; padding: 0 14px 6px; }
+.jhead { display: flex; align-items: center; gap: 12px; height: 30px; flex: none; }
+.jhead h2 { margin: 0; font-size: 13px; font-weight: 400; color: var(--mute); white-space: nowrap; }
+.jhead h2 .name { font-size: 14px; font-weight: 700; color: var(--fg); }
+.jhead .sum { font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.jhead .sum b { color: var(--fg); font-weight: 600; }
+.legend { margin-left: auto; display: flex; gap: 14px; font-size: 12px; color: var(--mute); white-space: nowrap; }
+.legend span::before { content: ''; display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; background: var(--c); vertical-align: -1px; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 4px 0 10px; border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--fg); font-size: 12px; white-space: nowrap;
+  transition: opacity .3s, transform .3s; }
+.fchip[hidden] { display: none; }
+.fchip button { border: 0; background: transparent; cursor: pointer; min-width: 22px; min-height: 22px; border-radius: 11px; font-size: 13px; padding: 0 6px; }
+.fchip button:hover { background: var(--hover); }
+.fchip kbd { font: 11px var(--mono); color: var(--mute); }
+.jgrid { --cols: 62px 104px 70px minmax(150px, 1.15fr) 100px minmax(180px, 2.4fr) 54px 84px 70px; }
+.jcols, .jrow { display: grid; grid-template-columns: var(--cols); column-gap: 10px; align-items: center; padding: 0 8px; }
+.jcols { height: 22px; font-size: 12px; color: var(--mute); border-bottom: 1px solid var(--line); flex: none; }
+.jcols .r, .jrow .r { text-align: right; }
+.jrows { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.jrow { position: absolute; left: 0; right: 0; top: 0; height: 28px; border-bottom: 1px solid var(--rule); font-size: 13px; white-space: nowrap;
+  transition: transform .5s cubic-bezier(.2,.8,.2,1), opacity .4s, background-color 1.2s; }
+.jrow > * { overflow: hidden; text-overflow: ellipsis; }
+.jrow.entering { opacity: 0; }
+.jrow.leaving { opacity: 0; transition: transform .5s ease-in, opacity .2s; }
+.jrow.hl { background: color-mix(in srgb, var(--accent) 14%, transparent); transition: transform .5s cubic-bezier(.2,.8,.2,1), opacity .4s, background-color 0s; }
+.jrow .id { color: var(--mute); font-variant-numeric: tabular-nums; }
+.jrow .cmd { font-family: var(--mono); font-size: 12.5px; }
+.jrow .wt i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.jrow .tool i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.jrow .nd { color: var(--mute); }
+.jrow .num { font-variant-numeric: tabular-nums; }
+.st { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+.st i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.st.queued { color: var(--queue); } .st.queued i { background: var(--queue); }
+.st.running { color: var(--accent); } .st.running i { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+.st.ok { color: var(--ok); } .st.ok i { background: var(--ok); }
+.st.failed { color: var(--bad); } .st.failed i { background: var(--bad); }
+.st.requeued { color: var(--warn); } .st.requeued i { background: var(--warn); }
+@keyframes blink { 50% { opacity: .3; } }
+.run { position: relative; }
+.run .pb { position: absolute; left: 0; right: 0; bottom: -4px; height: 2px; background: var(--track); border-radius: 1px; overflow: hidden; }
+.run .pb i { display: block; height: 100%; background: var(--accent); transition: width .3s linear; }
+.run .pb.over i { background: var(--warn); }
+
+@media (max-width: 1330px) {
+  .diagram { grid-template-columns: 244px 104px minmax(0, 1fr); }
+  .nbody { grid-template-columns: 271px minmax(70px, 1fr) 124px 140px 56px; gap: 12px; }
+  .kpi { padding: 3px 9px; }
+  .jgrid { --cols: 60px 100px 66px minmax(140px, 1.1fr) 96px minmax(160px, 2.4fr) 52px 80px 64px; }
+  .legend { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; }
+  .qchip, .jrow, .cell, .node, .ghost, .bar i, .life .arc, .kpi .meter i { transition-property: opacity, background-color !important; }
+  .cell.pop { transform: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <span class="name">slot <i>cluster</i></span>
+      <span class="sub"><span class="conn" aria-hidden="true"></span>endpoint workstation · :7411</span>
+    </div>
+    <dl class="kpis">
+      <div class="kpi"><dt>running</dt><dd id="k-run">0</dd></div>
+      <div class="kpi"><dt>queued</dt><dd id="k-q">0</dd></div>
+      <div class="kpi"><dt>wait p90</dt><dd id="k-wait">0</dd></div>
+      <div class="kpi"><dt>CPUs in use / available</dt><dd id="k-cpu">0</dd><span class="meter"><i id="k-cpu-m"></i></span></div>
+      <div class="kpi"><dt>cache hits, 24 h</dt><dd id="k-cache">0</dd></div>
+      <div class="kpi"><dt>cloud cost so far</dt><dd id="k-cost">0</dd></div>
+    </dl>
+    <div class="right">
+      <button class="btn" id="theme" type="button" aria-pressed="false">Light theme</button>
+      <span class="draft" title="Design draft. Every number on this page comes from a small simulation in the page itself.">Draft — simulated data</span>
+    </div>
+  </header>
+
+  <section class="diagram" id="diagram" aria-label="Cluster">
+    <div class="endpoint" id="endpoint">
+      <div class="ehead"><b>Endpoint</b><span>queue · scheduler · job log</span></div>
+      <div class="esub" id="esub"></div>
+      <div class="qlist" id="qlist" aria-label="Queue"></div>
+      <div class="efoot"><span id="efoot"></span><canvas id="qspark" aria-hidden="true"></canvas></div>
+    </div>
+    <div aria-hidden="true"></div>
+    <div class="nodes" id="nodes">
+      <div class="bay" id="bay0"></div>
+      <div class="bay" id="bay1"></div>
+      <div class="bay" id="bay2"></div>
+    </div>
+    <canvas id="flow" aria-hidden="true"></canvas>
+  </section>
+
+  <section class="jobs jgrid" aria-label="Jobs">
+    <div class="jhead">
+      <h2><span class="name" id="jtitle">Jobs</span> newest first</h2>
+      <span class="sum" id="jsum"></span>
+      <span class="fchip" id="fchip" hidden>node <b id="fname"></b><kbd>Esc</kbd><button type="button" id="fclear" aria-label="Clear the node filter">✕</button></span>
+      <span class="legend" aria-hidden="true">
+        <span style="--c: var(--rust)">rust</span><span style="--c: var(--go)">go</span><span style="--c: var(--node)">node</span><span style="--c: var(--other)">other</span>
+      </span>
+    </div>
+    <div class="jcols"><span>job</span><span>state</span><span>tool</span><span>worktree</span><span>node</span><span>command</span><span class="r">wait</span><span class="r">run</span><span class="r">CPU</span></div>
+    <div class="jrows" id="jrows"></div>
+  </section>
+</div>
+
+<script>
+'use strict';
+/* ---------- environment ---------- */
+const mq = matchMedia('(prefers-reduced-motion: reduce)');
+let reduce = mq.matches;
+mq.addEventListener('change', e => { reduce = e.matches; });
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+let C = {};
+function readColors() {
+  for (const k of ['rust', 'go', 'node', 'other', 'queue', 'accent', 'ok', 'bad', 'warn', 'mute', 'line', 'fg', 'track', 'bg'])
+    C[k] = css('--' + k);
+  C.dark = document.documentElement.dataset.theme === 'dark';
+}
+
+/* ---------- seeded randomness: the same draft every load ---------- */
+function mulberry32(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const rnd = mulberry32(7411);
+const pick = a => a[Math.floor(rnd() * a.length)];
+function gauss() { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+function pickW(obj) { let s = 0; for (const k in obj) s += obj[k]; let r = rnd() * s; for (const k in obj) { r -= obj[k]; if (r <= 0) return k; } return Object.keys(obj)[0]; }
+
+/* ---------- the model ---------- */
+const TOOLS = {
+  rust: { cmds: ['cargo nextest run -p {c}', 'cargo clippy --workspace -D warnings', 'cargo build -p {c}', 'cargo test --doc -p {c}', 'task check'], slots: [2, 4, 4, 8, 8], med: 20, sig: .6 },
+  go: { cmds: ['go test ./...', 'go vet ./...', 'go build ./cmd/...'], slots: [2, 4, 4], med: 10, sig: .5 },
+  node: { cmds: ['pnpm vitest run --maxWorkers=4', 'pnpm build', 'npx playwright test --workers=2'], slots: [4, 2, 2], med: 13, sig: .5 },
+  other: { cmds: ['task docs', 'make -C docs', 'shellcheck scripts/*.sh'], slots: [1, 1, 2], med: 5, sig: .5 },
+};
+const WTS = [
+  { id: 'repo-a/feature-x', tools: { rust: 1 }, c: 'core', w: 1.3, fail: .05 },
+  { id: 'repo-b/cluster-view', tools: { rust: .5, node: .5 }, c: 'app', w: 1.0, fail: .04 },
+  { id: 'repo-c/cache-fix', tools: { rust: 1 }, c: 'synth', w: 1.0, fail: .14 },
+  { id: 'repo-d/loop-v2', tools: { go: 1 }, w: .9, fail: .05 },
+  { id: 'repo-e/slice-3', tools: { go: .8, other: .2 }, w: .7, fail: .06 },
+  { id: 'repo-f/search-ui', tools: { node: 1 }, w: .9, fail: .05 },
+  { id: 'repo-g/xtask-port', tools: { rust: .9, other: .1 }, c: 'xtask', w: .6, fail: .05 },
+  { id: 'repo-h/main', tools: { rust: 1 }, c: 'core', w: .5, fail: .03 },
+  { id: 'repo-i/ledger', tools: { rust: 1 }, c: 'ledger', w: .6, fail: .04 },
+  { id: 'repo-j/main', tools: { other: 1 }, w: .4, fail: .02 },
+];
+WTS.forEach((w, i) => { w.hue = Math.round(200 + i * 36) % 360; });
+const wtById = Object.fromEntries(WTS.map(w => [w.id, w]));
+const wtColor = (w, a = 1) => `hsl(${w.hue} ${C.dark ? '62%' : '55%'} ${C.dark ? '64%' : '42%'} / ${a})`;
+
+const WARM = 90;            // seconds simulated before the first frame
+let simT = 0;
+const DRAIN = 40;           // a cloud node stops taking jobs this long before its deadline
+function mkNode(o) {
+  return Object.assign({ state: 'ready', cells: [], running: new Set(), done: 0, failed: 0, cpu: 0, mem: 0, hist: [], els: null,
+    joinStart: 0, readyAt: 0, goneAt: 0 }, o, { cells: new Array(o.slots).fill(null) });
+}
+const nodes = [
+  mkNode({ id: 'workstation', kind: 'local', spec: '10 of 20 cores · 16 slots · 32 GiB', cores: 10, slots: 16, memTotal: 32, memBase: 5.5,
+    diskTotal: 1.8, diskFree: 0.64, bay: 0, done: 2140, failed: 61 }),
+  mkNode({ id: 'cloud-a', kind: 'cloud', spec: '64 vCPU · 128 GiB · 3.8 TB NVMe · €2.72/h', cores: 64, slots: 64, memTotal: 128, memBase: 3,
+    diskTotal: 3.8, diskFree: 3.12, eur: 2.72, lease: 4 * 3600, deadline: WARM + 2 * 3600 + 13 * 60 + 5, bay: 1, done: 384, failed: 9 }),
+  mkNode({ id: 'cloud-b', kind: 'cloud', spec: '32 vCPU · 64 GiB · 1.9 TB NVMe · €1.36/h', cores: 32, slots: 32, memTotal: 64, memBase: 2.5,
+    diskTotal: 1.9, diskFree: 1.41, eur: 1.36, lease: 3600, deadline: WARM + 44, bay: 2, done: 212, failed: 7 }),
+];
+nodes.forEach(n => { if (n.kind === 'cloud') n.joinedAt = n.deadline - n.lease; });
+const gone = [];             // cloud nodes that left, for the cost
+let pendingJoin = null;
+const sticky = new Map();    // worktree id -> node id
+const queue = [];
+const jobs = [];             // newest last, bounded
+const byId = new Map();
+const waits = [];
+let nextId = 48210;
+let qHist = [];
+let cache = 0.386;
+
+function submit(w) {
+  const tool = pickW(w.tools), T = TOOLS[tool];
+  const k = Math.floor(rnd() * T.cmds.length);
+  const j = { id: nextId++, wt: w.id, tool, cmd: T.cmds[k].replace('{c}', w.c || 'core'), slots: T.slots[k % T.slots.length],
+    dur: Math.max(2, T.med * Math.exp(T.sig * gauss())), p90: T.med * Math.exp(T.sig * 1.28),
+    submit: simT, start: 0, end: 0, node: null, cells: [], cpu: 0, cpuSum: 0, state: 'queued', u: .55 + rnd() * .45,
+    f: .6 + rnd() * 1.4, ph: rnd() * 6, mem: 0, requeued: false, failP: w.fail, changed: simT, arrived: true };
+  j.mem = j.slots * (0.5 + rnd() * 1.1);
+  queue.push(j); jobs.push(j); byId.set(j.id, j);
+  if (jobs.length > 600) { const old = jobs.shift(); if (old.state !== 'queued' && old.state !== 'running') byId.delete(old.id); }
+  return j;
+}
+function freeCount(n) { let f = 0; for (const c of n.cells) if (c === null) f++; return f; }
+function stickyCount(n) { let k = 0; for (const v of sticky.values()) if (v === n.id) k++; return k; }
+function homeFor(w) {
+  const cur = sticky.get(w);
+  const n = cur && nodes.find(x => x.id === cur);
+  if (n && (n.state === 'ready' || n.state === 'joining')) return n;
+  let best = null, bs = -1e9;
+  for (const x of nodes) {
+    if (x.state !== 'ready' && x.state !== 'joining') continue;
+    const s = x.slots / (1 + stickyCount(x)) * (0.6 + freeCount(x) / x.slots);
+    if (s > bs) { bs = s; best = x; }
+  }
+  if (best) { if (cur && cur !== best.id) lanesMoved.push({ wt: w, from: cur, t: performance.now() }); sticky.set(w, best.id); }
+  return best;
+}
+const events = [];           // for the view: placed, finished, requeued
+const lanesMoved = [];
+function place(j, n) {
+  const idx = [];
+  for (let i = 0; i < n.cells.length && idx.length < j.slots; i++) if (n.cells[i] === null) idx.push(i);
+  for (const i of idx) n.cells[i] = j.id;
+  j.cells = idx; j.node = n.id; j.lastNode = n.id; j.state = 'running'; j.start = simT; j.changed = simT;
+  n.running.add(j.id);
+  waits.push(simT - j.submit); if (waits.length > 160) waits.shift();
+  events.push({ type: 'place', j, n });
+}
+function release(j, n) { for (const i of j.cells) if (n.cells[i] === j.id) n.cells[i] = null; n.running.delete(j.id); }
+function finish(j, n) {
+  release(j, n);
+  j.end = simT; j.state = rnd() < j.failP ? 'failed' : 'ok'; j.changed = simT;
+  if (j.state === 'ok') n.done++; else n.failed++;
+  if (j.tool === 'rust') n.diskFree = Math.max(0.05, n.diskFree - 0.0015 * j.slots);
+  cache = Math.min(.46, Math.max(.33, cache + (rnd() - .48) * .0016));
+  events.push({ type: 'finish', j, n, cells: j.cells.slice() });
+}
+function requeue(j, n) {
+  release(j, n);
+  events.push({ type: 'requeue', j, n, cells: j.cells.slice() });
+  j.state = 'queued'; j.requeued = true; j.node = null; j.cells = []; j.cpu = 0; j.changed = simT; j.submit = simT;
+  queue.unshift(j);
+}
+let lastSec = -1;
+function tick(dt) {
+  simT += dt;
+  // node lifecycle
+  for (const n of nodes) {
+    if (n.kind !== 'cloud') continue;
+    if (n.state === 'ready' && n.deadline - simT <= DRAIN) n.state = 'draining';
+    if (n.state === 'draining' && simT >= n.deadline) {
+      for (const id of [...n.running]) requeue(byId.get(id), n);
+      n.state = 'gone'; n.goneAt = simT;
+      for (const [w, v] of sticky) if (v === n.id) { lanesMoved.push({ wt: w, from: n.id, t: performance.now() }); sticky.delete(w); }
+      gone.push({ eur: n.eur, joinedAt: n.joinedAt, end: n.deadline });
+      pendingJoin = { at: simT + 4, bay: n.bay };
+    }
+    if (n.state === 'joining' && simT >= n.readyAt) {
+      n.state = 'ready';
+      // NOT ADOPTED (open question in the cluster epic): a node that joins takes idle worktrees from the fullest node.
+      // It contradicts the operator's stickiness per worktree; the spec places a worktree once and keeps it there.
+      const busyWt = new Set(); for (const x of nodes) for (const id of x.running) busyWt.add(byId.get(id).wt);
+      const fullest = nodes.filter(x => x !== n && x.state === 'ready').sort((a, b) => stickyCount(b) - stickyCount(a))[0];
+      if (fullest) {
+        const idle = WTS.filter(w => sticky.get(w.id) === fullest.id && !busyWt.has(w.id)).slice(0, 3);
+        const take = idle.length ? idle : WTS.filter(w => sticky.get(w.id) === fullest.id).slice(-2);
+        for (const w of take) { lanesMoved.push({ wt: w.id, from: fullest.id, t: performance.now() }); sticky.set(w.id, n.id); }
+      }
+    }
+  }
+  if (pendingJoin && simT >= pendingJoin.at) {
+    const i = nodes.findIndex(x => x.bay === pendingJoin.bay);
+    const n = mkNode({ id: 'cloud-c', kind: 'cloud', spec: '48 vCPU · 96 GiB · 2.8 TB NVMe · €2.04/h', cores: 48, slots: 48, memTotal: 96,
+      memBase: 2, diskTotal: 2.8, diskFree: 2.79, eur: 2.04, lease: 4 * 3600, bay: pendingJoin.bay, state: 'joining' });
+    n.joinStart = simT; n.readyAt = simT + 8; n.joinedAt = simT; n.deadline = simT + n.lease;
+    nodes[i] = n; pendingJoin = null;
+  }
+  // arrivals: a slow wave of load, and now and then a gate run that submits several jobs at once
+  const rate = 0.85 * (0.5 + 0.5 * Math.sin(simT * 2 * Math.PI / 80)) + 0.15;
+  if (rnd() < rate * dt) { const w = WTS[pickW(Object.fromEntries(WTS.map((w, i) => [i, w.w])))]; submit(w); }
+  if (rnd() < 0.06 * dt) { const w = pick(WTS); const k = 3 + Math.floor(rnd() * 3); for (let i = 0; i < k; i++) submit(w); }
+  // placement: every worktree stays on its node; the first job that does not fit holds its node's free slots (no starvation)
+  const held = new Set();
+  for (let i = 0; i < queue.length; i++) {
+    const j = queue[i];
+    let n = homeFor(j.wt);
+    // NOT ADOPTED (open question in the cluster epic): a worktree whose node stays full for 12 s moves to a freer node.
+    // It contradicts the operator's stickiness per worktree; only a node that leaves ends a placement.
+    if (n && freeCount(n) < j.slots && simT - j.submit > 12) {
+      const m = nodes.find(x => x !== n && x.state === 'ready' && freeCount(x) >= x.slots / 2);
+      if (m) { lanesMoved.push({ wt: j.wt, from: n.id, t: performance.now() }); sticky.set(j.wt, m.id); n = m; }
+    }
+    if (!n || n.state !== 'ready' || held.has(n.id)) continue;
+    if (freeCount(n) >= j.slots) { place(j, n); queue.splice(i, 1); i--; }
+    else held.add(n.id);
+  }
+  // running jobs: CPU rises and falls
+  for (const n of nodes) {
+    let cpu = 0, mem = n.memBase;
+    for (const id of [...n.running]) {
+      const j = byId.get(id);
+      const util = Math.min(1, j.u * (0.72 + 0.28 * Math.sin(simT * j.f + j.ph)));
+      j.cpu = j.slots * util; j.cpuSum += j.cpu * dt;
+      cpu += j.cpu; mem += j.mem * Math.min(1, (simT - j.start) / 3 + .3);
+      if (simT - j.start >= j.dur) finish(j, n);
+    }
+    n.cpu = Math.min(n.cores, cpu); n.mem = Math.min(n.memTotal * .97, mem);
+    if (n.diskFree < n.diskTotal * .2 && rnd() < .02) n.diskFree += n.diskTotal * .18; // eviction
+  }
+  const sec = Math.floor(simT);
+  if (sec !== lastSec) {
+    lastSec = sec;
+    for (const n of nodes) { n.hist.push(n.cpu); if (n.hist.length > 62) n.hist.shift(); }
+    qHist.push(queue.length); if (qHist.length > 62) qHist.shift();
+  }
+}
+function p90(a) { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[Math.floor(.9 * (s.length - 1))]; }
+function cost() {
+  let e = 0;
+  for (const g of gone) e += g.eur * (g.end - g.joinedAt) / 3600;
+  for (const n of nodes) if (n.kind === 'cloud' && n.state !== 'gone') e += n.eur * (Math.min(simT, n.deadline) - n.joinedAt) / 3600;
+  return e;
+}
+function burn() { let e = 0; for (const n of nodes) if (n.kind === 'cloud' && n.state !== 'gone') e += n.eur; return e; }
+
+/* ---------- formatting ---------- */
+const fmtDur = s => { s = Math.max(0, Math.round(s)); if (s < 60) return s + ' s'; const m = Math.floor(s / 60); return m + ':' + String(s % 60).padStart(2, '0'); };
+const fmtClock = s => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+const fmtTB = t => t >= 1 ? t.toFixed(2) + ' TB' : Math.round(t * 1000) + ' GB';
+
+/* ---------- view: nodes ---------- */
+let filter = null;
+function buildNode(n) {
+  const bay = $('bay' + n.bay);
+  const el = document.createElement('div');
+  el.className = 'node enter';
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.setAttribute('aria-pressed', 'false');
+  el.dataset.id = n.id;
+  el.innerHTML = `
+    <div class="nhead"><span class="nname">${n.id}</span><span class="tag">${n.kind}</span><span class="pill"></span>
+      <span class="spec">${n.spec}</span><span class="ncount"></span></div>
+    <div class="nbody">
+      <div class="slots" aria-hidden="true">${'<i class="cell"></i>'.repeat(n.slots)}</div>
+      <div class="spark"><span class="lab"></span><canvas></canvas></div>
+      <div class="bars"><div><span class="ml"></span><div class="bar mem"><i></i></div></div><div><span class="dl"></span><div class="bar disk"><i></i></div></div></div>
+      <div class="wts"></div>
+      <div class="life"></div>
+    </div>`;
+  bay.appendChild(el);
+  const q = s => el.querySelector(s);
+  n.els = { el, pill: q('.pill'), count: q('.ncount'), cells: [...el.querySelectorAll('.cell')], lab: q('.spark .lab'), spark: q('.spark canvas'),
+    ml: q('.ml'), dl: q('.dl'), mem: q('.bar.mem i'), disk: q('.bar.disk i'), wts: q('.wts'), life: q('.life'), slotsEl: q('.slots'),
+    shown: new Array(n.slots).fill(null), lifeKey: '' };
+  el.addEventListener('click', () => setFilter(filter === n.id ? null : n.id));
+  el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setFilter(filter === n.id ? null : n.id); } });
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('enter')));
+}
+function ghost(bay, html) {
+  let g = bay.querySelector('.ghost');
+  if (!g) { g = document.createElement('div'); g.className = 'ghost hide'; bay.appendChild(g); requestAnimationFrame(() => requestAnimationFrame(() => g.classList.remove('hide'))); }
+  g.innerHTML = html;
+  return g;
+}
+function lifeSVG(frac, color, label, spin) {
+  const r = 22, c = 2 * Math.PI * r;
+  return `<svg viewBox="0 0 52 52" aria-hidden="true"><circle class="trk" cx="26" cy="26" r="${r}" fill="none" stroke-width="5"/>
+    <g ${spin ? 'class="spin"' : ''}><circle class="arc" cx="26" cy="26" r="${r}" fill="none" stroke="${color}" stroke-width="5" stroke-linecap="round"
+    stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${(c * (1 - frac)).toFixed(2)}" transform="rotate(-90 26 26)"/></g>
+    <text x="26" y="29.5" text-anchor="middle">${label}</text></svg>`;
+}
+function renderNodes() {
+  for (const n of nodes) {
+    const bay = $('bay' + n.bay);
+    if (n.state === 'gone') {
+      if (n.els) {
+        const el = n.els.el; el.classList.add('enter'); el.style.pointerEvents = 'none';
+        setTimeout(() => el.remove(), 700); n.els = null;
+        if (filter === n.id) setFilter(null);
+      }
+      const nextIn = pendingJoin ? Math.max(0, pendingJoin.at - simT) : 0;
+      ghost(bay, `<b>${n.id}</b> left at its deadline · ${n.done} jobs · €${(n.eur * n.lease / 3600).toFixed(2)} ·
+        <span>cloud-c requested, joins in ${Math.ceil(nextIn)} s</span>`);
+      continue;
+    }
+    const g = bay.querySelector('.ghost');
+    if (g && !g.classList.contains('hide')) { g.classList.add('hide'); setTimeout(() => g.remove(), 700); }
+    if (!n.els) buildNode(n);
+    const E = n.els;
+    E.el.classList.toggle('draining', n.state === 'draining');
+    E.el.classList.toggle('joining', n.state === 'joining');
+    E.el.classList.toggle('dim', !!filter && filter !== n.id);
+    E.el.setAttribute('aria-pressed', String(filter === n.id));
+    const busy = n.slots - freeCount(n);
+    E.el.setAttribute('aria-label', `${n.id}, ${n.kind} node, ${n.state}, ${n.spec}, ${busy} of ${n.slots} slots busy. Press to show only this node.`);
+    E.pill.className = 'pill ' + n.state;
+    E.pill.textContent = n.state === 'joining' ? (simT - n.joinStart < 3 ? 'joining · booting' : simT - n.joinStart < 6 ? 'joining · syncing toolchains' : 'joining · warming cache')
+      : n.state === 'draining' ? 'draining · no new jobs' : 'ready';
+    E.count.innerHTML = `slots <b>${busy}</b>/${n.slots} · <b>${n.done.toLocaleString('en')}</b> done · <span class="f">${n.failed} failed</span>`;
+    // cells
+    const now = performance.now();
+    for (let i = 0; i < n.slots; i++) {
+      const id = n.cells[i], cell = E.cells[i];
+      if (n.state === 'joining') cell.classList.toggle('up', i < n.slots * Math.min(1, (simT - n.joinStart) / 7.5));
+      const j = id !== null ? byId.get(id) : null;
+      const visible = j && !(j.arriveAt > now);
+      if (visible) {
+        cell.classList.add('busy');
+        cell.style.setProperty('--c', C[j.tool]);
+        cell.style.opacity = (0.6 + 0.4 * Math.min(1, j.cpu / j.slots)).toFixed(2);
+        if (E.shown[i] !== id) { cell.classList.add('pop'); setTimeout(() => cell.classList.remove('pop'), 260); }
+        E.shown[i] = id;
+      } else if (id === null) {
+        if (E.shown[i] !== null) {
+          const was = byId.get(E.shown[i]);
+          const cls = was && was.state === 'failed' ? 'flash-bad' : was && was.state === 'ok' ? 'flash-ok' : null;
+          if (cls) { cell.classList.add(cls); setTimeout(() => cell.classList.remove(cls), 700); }
+        }
+        cell.classList.remove('busy'); cell.style.opacity = ''; E.shown[i] = null;
+      }
+    }
+    E.lab.innerHTML = `CPU <b>${n.cpu.toFixed(1)}</b> of ${n.cores} · 60 s`;
+    E.ml.innerHTML = `memory <b>${Math.round(n.mem)}</b> / ${n.memTotal} GiB`;
+    E.mem.style.width = (100 * n.mem / n.memTotal).toFixed(1) + '%';
+    E.dl.innerHTML = `disk free <b>${fmtTB(n.diskFree)}</b>`;
+    E.disk.style.width = (100 * n.diskFree / n.diskTotal).toFixed(1) + '%';
+    E.disk.style.backgroundColor = n.diskFree < n.diskTotal * .2 ? C.warn : '';
+    // worktrees that live here
+    const here = WTS.filter(w => sticky.get(w.id) === n.id);
+    const key = here.map(w => w.id).join(',');
+    if (E.wtKey !== key) {
+      E.wtKey = key;
+      const show = here.length > 3 ? here.slice(0, 2) : here;
+      E.wts.innerHTML = `<div class="h">${here.length ? here.length + ' worktree' + (here.length > 1 ? 's' : '') + ' placed here' : 'no worktree placed yet'}</div>` +
+        show.map(w => `<div title="${w.id}"><i style="background:${wtColor(w)}"></i>${w.id}</div>`).join('') +
+        (here.length > 3 ? `<div class="h" title="${here.slice(2).map(w => w.id).join(', ')}">+${here.length - 2} more</div>` : '');
+    }
+    // lifetime
+    let life;
+    if (n.kind === 'local') life = { key: 'local', html: `<svg viewBox="0 0 52 52" aria-hidden="true"><circle cx="26" cy="26" r="22" fill="none" stroke="${C.line}" stroke-width="5" stroke-dasharray="3 4"/><text x="26" y="29.5" text-anchor="middle">∞</text></svg><span>no deadline</span>` };
+    else if (n.state === 'joining') { const p = Math.min(1, (simT - n.joinStart) / 8); life = { key: 'j' + Math.floor(p * 20), html: lifeSVG(Math.max(.08, p), C.accent, Math.round(p * 100) + '%', !reduce) + '<span>joining</span>' }; }
+    else {
+      const left = n.deadline - simT, frac = Math.max(0, left / n.lease);
+      const col = n.state === 'draining' ? C.warn : frac < .25 ? C.warn : C.ok;
+      life = { key: 'l' + Math.floor(left) + n.state, html: lifeSVG(frac, col, left >= 3600 ? fmtClock(left).slice(0, -3) : fmtClock(left), false) +
+        `<span>${left >= 3600 ? 'h:mm left' : 'left'} of ${n.lease / 3600} h</span>` };
+    }
+    if (E.lifeKey !== life.key) {
+      E.lifeKey = life.key;
+      const arc = E.life.querySelector('.arc');
+      if (arc && life.key[0] === 'l' && E.life.dataset.mode === 'l') {
+        // keep the element so the arc moves smoothly
+        const r = 22, c = 2 * Math.PI * r, left = n.deadline - simT, frac = Math.max(0, left / n.lease);
+        arc.setAttribute('stroke-dashoffset', (c * (1 - frac)).toFixed(2));
+        arc.setAttribute('stroke', n.state === 'draining' || frac < .25 ? C.warn : C.ok);
+        E.life.querySelector('text').textContent = left >= 3600 ? fmtClock(left).slice(0, -3) : fmtClock(left);
+      } else { E.life.innerHTML = life.html; E.life.dataset.mode = life.key[0]; }
+    }
+  }
+}
+
+/* ---------- view: queue ---------- */
+const QH = 37;
+const chips = new Map();
+function renderQueue() {
+  const list = $('qlist');
+  const h = list.clientHeight;
+  const cap = Math.max(1, Math.floor((h - 20) / QH));
+  const show = queue.slice(0, queue.length > cap + 0 ? cap : cap + 1);
+  const ids = new Set(show.map(j => j.id));
+  for (const [id, el] of chips) if (!ids.has(id)) {
+    chips.delete(id);
+    const j = byId.get(id);
+    el.classList.add('leaving');
+    if (j && j.state === 'running') el.style.transform += ' translateX(40px)';
+    setTimeout(() => el.remove(), 400);
+  }
+  show.forEach((j, i) => {
+    let el = chips.get(j.id);
+    const w = wtById[j.wt];
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'qchip entering' + (j.requeued ? ' re' : '');
+      el.innerHTML = `<span class="wt" style="background:${wtColor(w)}"></span><span class="td" style="background:${C[j.tool]}"></span>
+        <span class="name">${j.wt}</span><span class="age"></span><span class="meta"></span>`;
+      el.style.transform = `translateY(${i * QH - 10}px)`;
+      list.appendChild(el); chips.set(j.id, el);
+      requestAnimationFrame(() => requestAnimationFrame(() => { el.classList.remove('entering'); el.style.transform = `translateY(${el._y}px)`; }));
+    }
+    el._y = i * QH;
+    if (!el.classList.contains('entering')) el.style.transform = `translateY(${i * QH}px)`;
+    el.querySelector('.age').textContent = fmtDur(simT - j.submit);
+    const home = sticky.get(j.wt);
+    el.querySelector('.meta').textContent = `${j.slots} slot${j.slots > 1 ? 's' : ''} · ${home ? 'stays on ' + home : 'not placed yet'}${j.requeued ? ' · requeued' : ''}`;
+    el.classList.toggle('dim', !!filter && home !== filter);
+    el.title = `#${j.id} ${j.cmd} · ${j.wt} · ${j.slots} slots${home ? ' · stays on ' + home : ''}`;
+  });
+  let more = list.querySelector('.qmore');
+  const rest = queue.length - show.length;
+  if (rest > 0) { if (!more) { more = document.createElement('div'); more.className = 'qmore'; list.appendChild(more); } more.textContent = `+${rest} more queued`; }
+  else if (more) more.remove();
+  let empty = list.querySelector('.qempty');
+  if (!queue.length) { if (!empty) { empty = document.createElement('div'); empty.className = 'qempty'; empty.textContent = 'Queue empty: every job has a slot.'; list.appendChild(empty); } }
+  else if (empty) empty.remove();
+  const oldest = queue.length ? Math.max(...queue.map(j => simT - j.submit)) : 0;
+  $('esub').innerHTML = `scheduler places by worktree · <b>${nodes.filter(n => n.state !== 'gone').length}</b> nodes`;
+  $('efoot').innerHTML = `queue, 60 s<br><b>${queue.length}</b> queued · oldest <b>${fmtDur(oldest)}</b>`;
+}
+
+/* ---------- view: jobs ---------- */
+const RH = 28;
+const rows = new Map();
+function jobVisible(j) {
+  if (!filter) return true;
+  if (j.state === 'queued') return sticky.get(j.wt) === filter;
+  return j.lastNode === filter;
+}
+function stateHTML(j) {
+  const s = j.state === 'queued' && j.requeued ? 'requeued' : j.state;
+  return `<span class="st ${s}"><i></i>${s}</span>`;
+}
+function renderJobs() {
+  const box = $('jrows');
+  const cap = Math.max(1, Math.floor(box.clientHeight / RH));
+  const list = [];
+  for (let i = jobs.length - 1; i >= 0 && list.length < cap; i--) if (jobVisible(jobs[i])) list.push(jobs[i]);
+  const ids = new Set(list.map(j => j.id));
+  // a row pushed off the end slides out below the list's edge
+  for (const [id, el] of rows) if (!ids.has(id)) {
+    rows.delete(id); el.classList.add('leaving'); el.style.transform = `translateY(${box.clientHeight + 4}px)`; setTimeout(() => el.remove(), 500);
+  }
+  list.forEach((j, i) => {
+    let el = rows.get(j.id);
+    const w = wtById[j.wt];
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'jrow entering';
+      el.innerHTML = `<span class="id">${j.id}</span><span class="stc"></span><span class="tool"><i style="background:${C[j.tool]}"></i>${j.tool}</span>
+        <span class="wt" title="${j.wt}"><i style="background:${wtColor(w)}"></i>${j.wt}</span><span class="nd"></span>
+        <span class="cmd" title="${j.cmd}">${j.cmd}</span><span class="r num wa"></span><span class="r num run"></span><span class="r num cp"></span>`;
+      el.style.transform = `translateY(${i * RH - 12}px)`;
+      box.appendChild(el); rows.set(j.id, el);
+      el._state = j.state;
+      requestAnimationFrame(() => requestAnimationFrame(() => { el.classList.remove('entering'); el.style.transform = `translateY(${el._y}px)`; }));
+    }
+    el._y = i * RH;
+    if (!el.classList.contains('entering')) el.style.transform = `translateY(${i * RH}px)`;
+    if (el._state !== j.state) { el._state = j.state; el.classList.add('hl'); setTimeout(() => el.classList.remove('hl'), 60); }
+    el.querySelector('.stc').innerHTML = stateHTML(j);
+    el.querySelector('.nd').textContent = j.node || j.lastNode || (sticky.get(j.wt) ? '→ ' + sticky.get(j.wt) : '–');
+    const wait = j.state === 'queued' ? simT - j.submit : j.start - j.submit;
+    el.querySelector('.wa').textContent = fmtDur(wait);
+    const run = j.state === 'running' ? simT - j.start : j.state === 'queued' ? null : j.end - j.start;
+    const rc = el.querySelector('.run');
+    if (run === null) rc.textContent = '';
+    else if (j.state === 'running') {
+      const p = Math.min(1, run / j.p90);
+      rc.innerHTML = `${fmtDur(run)}<span class="pb ${run > j.p90 ? 'over' : ''}" title="against the p90 of earlier runs"><i style="width:${(p * 100).toFixed(0)}%"></i></span>`;
+    } else rc.textContent = fmtDur(run);
+    el.querySelector('.cp').textContent = j.state === 'running' ? j.cpu.toFixed(1) + ' / ' + j.slots
+      : j.state === 'queued' ? '×' + j.slots : (j.cpuSum / Math.max(1, j.end - j.start)).toFixed(1) + ' avg';
+  });
+  const running = jobs.filter(j => j.state === 'running' && (!filter || j.node === filter)).length;
+  const fin = jobs.filter(j => (j.state === 'ok' || j.state === 'failed') && simT - j.end < 300 && (!filter || j.lastNode === filter));
+  const failed = fin.filter(j => j.state === 'failed').length;
+  $('jtitle').textContent = filter ? 'Jobs on ' + filter : 'Jobs';
+  $('jsum').innerHTML = `<b>${running}</b> running · <b>${fin.length}</b> finished in 5 min, <b style="color:var(--bad)">${failed}</b> failed`;
+}
+
+/* ---------- headline numbers, tweened ---------- */
+const kpi = {
+  run: { el: $('k-run'), v: 0, t: 0, f: v => Math.round(v) + '<small>jobs</small>' },
+  q: { el: $('k-q'), v: 0, t: 0, f: v => Math.round(v) + '<small>jobs</small>' },
+  wait: { el: $('k-wait'), v: 0, t: 0, f: v => (v < 60 ? v.toFixed(1) + '<small>s</small>' : fmtDur(v)) },
+  cpu: { el: $('k-cpu'), v: 0, t: 0, cap: 0, f: v => v.toFixed(1) + `<small>/ ${kpi.cpu.cap}</small>` },
+  cache: { el: $('k-cache'), v: 0, t: 0, f: v => (v * 100).toFixed(1) + '<small>%</small>' },
+  cost: { el: $('k-cost'), v: 0, t: 0, f: v => '€' + v.toFixed(2) + `<small>€${burn().toFixed(2)}/h</small>` },
+};
+function kpiTargets() {
+  kpi.run.t = jobs.filter(j => j.state === 'running').length;
+  kpi.q.t = queue.length;
+  kpi.wait.t = p90(waits);
+  kpi.cpu.t = nodes.reduce((s, n) => s + (n.state === 'ready' || n.state === 'draining' ? n.cpu : 0), 0);
+  kpi.cpu.cap = nodes.reduce((s, n) => s + (n.state === 'ready' || n.state === 'draining' ? n.cores : 0), 0);
+  kpi.cache.t = cache + 0.004 * Math.sin(simT / 9);
+  kpi.cost.t = cost();
+  $('k-cpu-m').style.width = (100 * kpi.cpu.t / Math.max(1, kpi.cpu.cap)).toFixed(1) + '%';
+}
+function kpiFrame(dt) {
+  const a = reduce ? 1 : 1 - Math.exp(-dt / 220);
+  for (const k in kpi) {
+    const o = kpi[k];
+    o.v += (o.t - o.v) * a;
+    const s = o.f(o.v);
+    if (s !== o.last) { o.el.innerHTML = s; o.last = s; }
+  }
+}
+
+/* ---------- the canvas: worktree lanes and moving jobs ---------- */
+const flow = $('flow'), fx = flow.getContext('2d');
+const diagram = $('diagram');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = window.devicePixelRatio || 1;
+  W = diagram.clientWidth; H = diagram.clientHeight;
+  flow.width = W * DPR; flow.height = H * DPR;
+  fx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+new ResizeObserver(resize).observe(diagram);
+function rel(el) { const a = el.getBoundingClientRect(), b = diagram.getBoundingClientRect(); return { x: a.left - b.left, y: a.top - b.top, w: a.width, h: a.height }; }
+function cellCenter(n, i) {
+  if (!n.els) return null;
+  const r = rel(n.els.cells[i]);
+  return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+}
+function laneGeom(wtId, nodeId) {
+  const ep = rel($('endpoint'));
+  const n = nodes.find(x => x.id === nodeId);
+  if (!n || !n.els) return null;
+  const g = rel(n.els.slotsEl);
+  const here = WTS.filter(w => sticky.get(w.id) === nodeId);
+  let k = here.findIndex(w => w.id === wtId); if (k < 0) k = 0;
+  const all = WTS.findIndex(w => w.id === wtId);
+  const y0 = ep.y + ep.h * 0.5 + (all - (WTS.length - 1) / 2) * 9;
+  const y1 = g.y + g.h / 2 + (k - (here.length - 1) / 2) * Math.min(9, g.h / Math.max(1, here.length));
+  return { x0: ep.x + ep.w, y0, x1: g.x - 6, y1 };
+}
+function bez(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  return { x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
+           y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y };
+}
+function sampleLane(L, steps = 24) {
+  const mx = (L.x0 + L.x1) / 2, pts = [];
+  for (let s = 0; s <= steps; s++) pts.push(bez({ x: L.x0, y: L.y0 }, { x: mx, y: L.y0 }, { x: mx, y: L.y1 }, { x: L.x1, y: L.y1 }, s / steps));
+  return pts;
+}
+function polyLen(pts) { let l = 0; for (let i = 1; i < pts.length; i++) l += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y); return l; }
+function atLen(pts, d) {
+  for (let i = 1; i < pts.length; i++) {
+    const s = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    if (d <= s) { const t = s ? d / s : 0; return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t }; }
+    d -= s;
+  }
+  return pts[pts.length - 1];
+}
+const particles = [], ripples = [];
+const ease = t => t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+function onEvents() {
+  const now = performance.now();
+  while (events.length) {
+    const ev = events.shift();
+    if (ev.type === 'place') {
+      const chip = chips.get(ev.j.id);
+      const L = laneGeom(ev.j.wt, ev.n.id);
+      const mid = Math.floor(ev.j.cells.length / 2);
+      const end = cellCenter(ev.n, ev.j.cells[mid] ?? 0);
+      if (reduce || !L || !end) { ev.j.arriveAt = 0; continue; }
+      const ep = rel($('endpoint'));
+      let start;
+      if (chip) { const r = rel(chip); start = { x: r.x + r.w - 4, y: r.y + r.h / 2 }; }
+      else { const q = rel($('qlist')); start = { x: q.x + q.w - 6, y: q.y + 8 }; }  // placed at once: it leaves from the head of the queue
+      const pts = [start, ...sampleLane(L), end];
+      const len = polyLen(pts);
+      const dur = Math.min(1500, Math.max(650, len / 0.6));
+      ev.j.arriveAt = now + dur;
+      particles.push({ pts, len, t0: now, dur, color: C[ev.j.tool], r: 2.6 + Math.sqrt(ev.j.slots) * 1.2, node: ev.n.id, j: ev.j, kind: 'place' });
+    } else if (ev.type === 'finish') {
+      if (reduce) continue;
+      const c = cellCenter(ev.n, ev.cells[Math.floor(ev.cells.length / 2)] ?? 0);
+      if (c) ripples.push({ x: c.x, y: c.y, t0: now + 0, dur: ev.j.state === 'failed' ? 1100 : 700, color: ev.j.state === 'failed' ? C.bad : C.ok,
+        max: ev.j.state === 'failed' ? 26 : 10 + ev.j.slots * 1.5, node: ev.n.id });
+    } else if (ev.type === 'requeue') {
+      if (reduce) continue;
+      const c = cellCenter(ev.n, ev.cells[0] ?? 0);
+      const ep = rel($('endpoint')), q = rel($('qlist'));
+      if (!c) continue;
+      const end = { x: q.x + q.w - 10, y: q.y + 10 };
+      const mx = (ep.x + ep.w + c.x) / 2, pts = [];
+      for (let s = 0; s <= 28; s++) pts.push(bez(c, { x: mx, y: c.y - 40 }, { x: mx, y: end.y - 40 }, end, s / 28));
+      particles.push({ pts, len: polyLen(pts), t0: now, dur: 1300, color: C.warn, r: 4, node: ev.n.id, j: ev.j, kind: 'requeue' });
+    }
+  }
+}
+let dashOff = 0;
+const laneAlpha = new Map();
+function drawFlow(now, dt) {
+  fx.clearRect(0, 0, W, H);
+  // lanes: one per worktree, from the endpoint to the node it stays on; the dashes move with the CPU the worktree uses there
+  const cpuBy = new Map();
+  for (const n of nodes) for (const id of n.running) { const j = byId.get(id); cpuBy.set(j.wt, (cpuBy.get(j.wt) || 0) + j.cpu); }
+  dashOff += reduce ? 0 : dt;
+  for (const w of WTS) {
+    const nid = sticky.get(w.id);
+    if (!nid) continue;
+    const L = laneGeom(w.id, nid);
+    if (!L) continue;
+    const key = w.id + '>' + nid;
+    let a = laneAlpha.get(key) ?? 0;
+    a += (1 - a) * Math.min(1, dt / 600); laneAlpha.set(key, a);
+    const cpu = cpuBy.get(w.id) || 0;
+    const dim = filter && filter !== nid ? .12 : 1;
+    const mx = (L.x0 + L.x1) / 2;
+    fx.beginPath(); fx.moveTo(L.x0, L.y0); fx.bezierCurveTo(mx, L.y0, mx, L.y1, L.x1, L.y1);
+    fx.lineWidth = 1.2 + Math.min(2.2, cpu / 6);
+    fx.strokeStyle = wtColor(w, (0.16 + Math.min(.4, cpu / 30)) * a * dim);
+    fx.setLineDash([]); fx.stroke();
+    if (cpu > 0.2) {
+      fx.setLineDash([3, 9]);
+      fx.lineDashOffset = -(dashOff * (0.004 + cpu / 900)) % 1200;
+      fx.strokeStyle = wtColor(w, 0.75 * a * dim);
+      fx.lineWidth = 1.6;
+      fx.stroke();
+      fx.setLineDash([]);
+    }
+    // the port where the lane meets the node
+    fx.beginPath(); fx.arc(L.x1, L.y1, 2.5, 0, Math.PI * 2); fx.fillStyle = wtColor(w, .9 * a * dim); fx.fill();
+  }
+  // lanes of worktrees that just moved to another node fade from the old one
+  for (let i = lanesMoved.length - 1; i >= 0; i--) {
+    const m = lanesMoved[i], age = (now - m.t) / 1400;
+    if (age > 1) { lanesMoved.splice(i, 1); continue; }
+    const n = nodes.find(x => x.id === m.from);
+    if (!n || !n.els) continue;
+    const ep = rel($('endpoint')), g = rel(n.els.slotsEl);
+    const L = { x0: ep.x + ep.w, y0: ep.y + ep.h / 2, x1: g.x - 6, y1: g.y + g.h / 2 }, mx = (L.x0 + L.x1) / 2;
+    fx.beginPath(); fx.moveTo(L.x0, L.y0); fx.bezierCurveTo(mx, L.y0, mx, L.y1, L.x1, L.y1);
+    fx.strokeStyle = wtColor(wtById[m.wt], .5 * (1 - age)); fx.lineWidth = 2; fx.setLineDash([2, 5]); fx.stroke(); fx.setLineDash([]);
+  }
+  // moving jobs
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    const t = (now - p.t0) / p.dur;
+    if (t >= 1) { particles.splice(i, 1); continue; }
+    const dim = filter && filter !== p.node ? .12 : 1;
+    for (let k = 6; k >= 0; k--) {
+      const tt = Math.max(0, t - k * 0.018);
+      const pos = atLen(p.pts, ease(tt) * p.len);
+      const head = k === 0;
+      fx.beginPath();
+      fx.arc(pos.x, pos.y, head ? p.r : p.r * (1 - k / 8), 0, Math.PI * 2);
+      fx.globalAlpha = (head ? 1 : 0.28 * (1 - k / 7)) * dim;
+      fx.fillStyle = p.color;
+      if (head && C.dark) { fx.shadowColor = p.color; fx.shadowBlur = 10; }
+      fx.fill();
+      fx.shadowBlur = 0;
+    }
+    fx.globalAlpha = 1;
+  }
+  // finished jobs: a ring at the slot they left, green for ok, red for failed
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const r = ripples[i], t = (now - r.t0) / r.dur;
+    if (t >= 1) { ripples.splice(i, 1); continue; }
+    if (t < 0) continue;
+    const dim = filter && filter !== r.node ? .12 : 1;
+    fx.beginPath(); fx.arc(r.x, r.y, 4 + r.max * ease(t), 0, Math.PI * 2);
+    fx.strokeStyle = r.color; fx.globalAlpha = (1 - t) * .9 * dim; fx.lineWidth = 2; fx.stroke(); fx.globalAlpha = 1;
+  }
+}
+
+/* ---------- sparklines ---------- */
+function spark(cv, hist, max, color, frac) {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  if (cv.width !== Math.round(w * DPR)) { cv.width = Math.round(w * DPR); cv.height = Math.round(h * DPR); }
+  const g = cv.getContext('2d');
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.clearRect(0, 0, w, h);
+  g.strokeStyle = C.line; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, h - .5); g.lineTo(w, h - .5); g.stroke();
+  if (hist.length < 2) return;
+  const n = 60, step = w / (n - 1), off = reduce ? 0 : frac * step;
+  const pts = [];
+  for (let i = 0; i < hist.length; i++) {
+    const x = w - (hist.length - 1 - i) * step - off + step;
+    pts.push([Math.min(w, x), h - 2 - (h - 4) * Math.min(1, hist[i] / max)]);
+  }
+  g.beginPath(); g.moveTo(pts[0][0], h);
+  for (const [x, y] of pts) g.lineTo(x, y);
+  g.lineTo(pts[pts.length - 1][0], h); g.closePath();
+  const gr = g.createLinearGradient(0, 0, 0, h);
+  gr.addColorStop(0, color + (C.dark ? '66' : '44')); gr.addColorStop(1, color + '08');
+  g.fillStyle = gr; g.fill();
+  g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y));
+  g.strokeStyle = color; g.lineWidth = 1.5; g.stroke();
+  const [lx, ly] = pts[pts.length - 1];
+  g.beginPath(); g.arc(Math.min(w - 3, lx), ly, 2.5, 0, Math.PI * 2); g.fillStyle = color; g.fill();
+}
+function hex(c) { // computed colours may come back as rgb()
+  if (c.startsWith('#')) return c.length === 4 ? '#' + [...c.slice(1)].map(x => x + x).join('') : c;
+  const m = c.match(/\d+/g); return m ? '#' + m.slice(0, 3).map(x => (+x).toString(16).padStart(2, '0')).join('') : '#888888';
+}
+
+/* ---------- filter ---------- */
+function setFilter(id) {
+  filter = id;
+  $('fchip').hidden = !id;
+  $('fname').textContent = id || '';
+  for (const el of rows.values()) el.remove();   // a new filter is a new list: rows fade in, nothing slides across
+  rows.clear();
+  renderAll();
+}
+$('fclear').addEventListener('click', () => { const n = nodes.find(x => x.id === filter); setFilter(null); n && n.els && n.els.el.focus(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && filter) setFilter(null); });
+
+/* ---------- theme ---------- */
+const themeBtn = $('theme');
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  themeBtn.textContent = t === 'dark' ? 'Light theme' : 'Dark theme';
+  themeBtn.setAttribute('aria-pressed', String(t === 'light'));
+  readColors();
+  for (const n of nodes) if (n.els) { n.els.wtKey = null; n.els.lifeKey = ''; }
+  for (const el of chips.values()) el.remove(); chips.clear();
+  for (const el of rows.values()) el.remove(); rows.clear();
+  renderAll();
+}
+themeBtn.addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+/* ---------- loop ---------- */
+function renderAll() { renderNodes(); renderQueue(); renderJobs(); kpiTargets(); }
+readColors();
+for (let i = 0; i < WARM * 4; i++) tick(0.25);
+events.length = 0; lanesMoved.length = 0;
+for (const j of jobs) j.arriveAt = 0;
+renderAll();
+for (const k in kpi) kpi[k].v = kpi[k].t;
+const TICK = 250;
+let acc = 0, last = performance.now();
+function frame(now) {
+  const dt = Math.min(100, now - last); last = now;
+  acc += dt;
+  while (acc >= TICK) {
+    acc -= TICK;
+    tick(TICK / 1000);
+    onEvents();          // capture chip positions before the queue re-renders
+    renderAll();
+  }
+  const frac = acc / TICK * 0.25 + (simT % 1);
+  for (const n of nodes) if (n.els) spark(n.els.spark, n.hist, n.cores, hex(C.accent), (simT % 1) + acc / 1000);
+  spark($('qspark'), qHist, Math.max(8, ...qHist), hex(C.queue), (simT % 1) + acc / 1000);
+  drawFlow(now, dt);
+  kpiFrame(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(t => { last = t; resize(); requestAnimationFrame(frame); });
+</script>
+</body>
+</html>

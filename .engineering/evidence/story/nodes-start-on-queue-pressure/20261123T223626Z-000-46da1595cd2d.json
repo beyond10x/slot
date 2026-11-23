@@ -1,0 +1,14 @@
+{
+  "at": "2026-11-23T22:36:26Z",
+  "actor": "human:timo",
+  "artifact": "story:nodes-start-on-queue-pressure",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:compute-cluster-design-round-1",
+    "review": "review-result:compute-cluster-design-round-1",
+    "outcome": "fixed"
+  }
+}
