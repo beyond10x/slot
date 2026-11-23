@@ -530,8 +530,10 @@ change it (`{"admission": "shares", "floor": 4, "max": 48, "pressure_max": 60, "
 `shares` while it is on. A daemon older than the setting answers 404 on `/api/admission`, for
 every method.
 
-Not built: a CPU weight per job (a cgroup of its own per job) needs the service's cgroup to be
-delegated, which needs root.
+### Not built yet
+
+A CPU weight per job (a cgroup of its own per job) needs the service's cgroup to be delegated,
+which needs root.
 
 ## Freeing disk space
 
