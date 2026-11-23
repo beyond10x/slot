@@ -253,10 +253,13 @@ API. Writing tokens into the live jobserver FIFO by hand is a last resort for a 
 
 ## Open work
 
-Done: 0.1.0 to 0.24.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
-admission by disk and memory, headroom and call mode, headroom of the machine, slots named by the
-job (`--tokens`), the web view with each project's share of the pool (`slot usage`), remote mode, the gate for builds in a sandbox, handover on reload, lost-token
-recovery, and eviction of local target directories (deletes by default, `evict.json` sets a dry run).
+Done: 0.1.0 to 0.25.0 (`CHANGELOG.md`): one jobserver pool with a queue ordered by job priority,
+passing within a level for short jobs and whole-pool requests, admission by disk and memory,
+holds on the host's CPUs, admission by share (off by default), run-time limit, build processes
+per job, headroom and call mode, headroom of the machine, slots named by the job (`--tokens`),
+the web view with each project's share of the pool (`slot usage`), remote mode, the gate for
+builds in a sandbox, handover on reload, lost-token recovery, and eviction of local target
+directories (deletes by default, `evict.json` sets a dry run).
 
 Open, one line each, with where the design lives. A session starts with (e).
 

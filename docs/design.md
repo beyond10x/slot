@@ -398,7 +398,7 @@ Ideas, none built yet:
 
 1. Keep sccache on: the rust toolchain could warn in the job output when a job sets
    `RUSTC_WRAPPER` empty while sccache is configured. The warning is built
-   (`sccache::cache_warnings`, unreleased); it does not ask whether sccache is configured.
+   (`sccache::cache_warnings`, 0.20.0); it does not ask whether sccache is configured.
 2. One profile per worktree: warn when the same target directory sees jobs with different
    `CARGO_PROFILE_*` values, since each one builds a full dependency tree.
 3. A workspace-hack crate (`cargo-hakari`) in workspaces with many `-p` selections collapses the
@@ -499,7 +499,7 @@ content type (a cross-site form post cannot send one without a CORS preflight, w
 does not answer) and an `Origin` that is absent or the daemon's own `http://127.0.0.1:<port>` or
 `http://localhost:<port>`.
 
-### 13.2 Headroom of the machine (unreleased)
+### 13.2 Headroom of the machine (0.16.0)
 
 Need: the operator means the headroom as headroom of the machine. Measured on a 20-CPU
 workstation at 45 %: the machine ran 93 to 99 % busy. `slot.service` used 6 to 7 CPUs, inside
@@ -1372,7 +1372,7 @@ is not attributed at the start), so `starting` is low for such a job until the m
   daemon's sccache children that serve pool jobs under the compile cache instead of the job, and
   `shown` of a starting job would no longer come from the same ticks as the figure.
 
-## 25. Passing in the queue: whole-pool requests and short jobs (unreleased)
+## 25. Passing in the queue: whole-pool requests and short jobs (0.25.0)
 
 Two measurements on one 20-CPU host, both on 2026-11-22.
 
@@ -1466,7 +1466,7 @@ when empty; the handover carries them in the job and recomputes them.
   when it ends before the running jobs do. The prediction is missing for 44.5 % of the jobs, and a
   bound in time needs none.
 
-## 26. Admission by share (unreleased)
+## 26. Admission by share (0.25.0)
 
 **The problem.** A slot is a promise of one CPU that most jobs do not keep. A test job that
 sleeps on a socket holds its slot at 0 CPU, and a `cargo build` of a workspace that asked for 4

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.25.0 — 2026-11-23
 
 - The host's busy CPUs no longer read more than the host has. The daemon divided the CPU time
   between two `/proc` scans by the time between two ticks of its 1-second clock; under load the
