@@ -32,6 +32,16 @@ pub struct Limits {
     pub min_free_disk: u64,
 }
 
+/// CPUs one run used and when it ended, Unix ms.
+type CoresRun = (f64, i64);
+
+/// Wall time of one run that ended ok, ms, and its CPU seconds.
+type OkRun = (u64, f64);
+
+/// A run with less than this share of the median CPU seconds of its
+/// command's ok runs was served from a cache: it is no best run.
+const CACHE_HIT_FRACTION: f64 = 0.5;
+
 /// Peak memory of earlier jobs.
 #[derive(Debug, Default)]
 pub struct History {
@@ -39,8 +49,12 @@ pub struct History {
     by_toolchain: HashMap<String, VecDeque<u64>>,
     /// Run times of jobs that ended on their own (ok or failed), ms.
     runtime: HashMap<(String, Vec<String>), VecDeque<u64>>,
-    /// CPUs those jobs used over their run: CPU seconds over run time.
-    cores: HashMap<(String, Vec<String>), VecDeque<f64>>,
+    /// CPUs those jobs used over their run: CPU seconds over run time
+    /// (with the compilers a compile cache server ran for them), and the
+    /// run's end, Unix ms.
+    cores: HashMap<(String, Vec<String>), VecDeque<CoresRun>>,
+    /// The runs that ended ok, for the best earlier run of a command.
+    ok_runs: HashMap<(String, Vec<String>), VecDeque<OkRun>>,
 }
 
 fn p90(v: &VecDeque<u64>) -> u64 {
@@ -68,6 +82,16 @@ impl History {
             if r.len() > KEEP_PER_COMMAND {
                 r.pop_front();
             }
+            if j.state == crate::types::JobState::Ok {
+                let o = self
+                    .ok_runs
+                    .entry((j.repo.clone(), j.argv.clone()))
+                    .or_default();
+                o.push_back(((j.ended_ms - j.started_ms) as u64, j.cpu_s));
+                if o.len() > KEEP_PER_COMMAND {
+                    o.pop_front();
+                }
+            }
             // A run under a second says little about the CPUs a job takes.
             let ms = j.ended_ms - j.started_ms;
             if ms >= 1000 {
@@ -75,7 +99,7 @@ impl History {
                     .cores
                     .entry((j.repo.clone(), j.argv.clone()))
                     .or_default();
-                c.push_back(j.cpu_s * 1000.0 / ms as f64);
+                c.push_back((j.cpu_s * 1000.0 / ms as f64, j.ended_ms));
                 if c.len() > KEEP_PER_COMMAND {
                     c.pop_front();
                 }
@@ -119,9 +143,33 @@ impl History {
             .cores
             .get(&(repo.to_string(), argv.to_vec()))
             .filter(|v| v.len() >= 3)?;
-        let mut s: Vec<f64> = v.iter().copied().collect();
+        let mut s: Vec<f64> = v.iter().map(|(c, _)| *c).collect();
         s.sort_by(f64::total_cmp);
         Some(s[s.len() / 2])
+    }
+
+    /// The share of the CPUs a command asks for by share at `now_ms`, from
+    /// the same runs as [`History::expected_cores`]
+    /// ([`crate::shares::predict`]); `None` with fewer than 3.
+    pub fn predicted_share(&self, repo: &str, argv: &[String], now_ms: i64) -> Option<f64> {
+        let v = self.cores.get(&(repo.to_string(), argv.to_vec()))?;
+        let runs: Vec<(f64, i64)> = v.iter().copied().collect();
+        crate::shares::predict(&runs, now_ms)
+    }
+
+    /// The best earlier run a slowdown is measured against, ms: the
+    /// shortest of the kept runs of a command that ended ok and were not
+    /// served from a cache (at least [`CACHE_HIT_FRACTION`] of the median
+    /// CPU seconds of those runs).
+    pub fn best_runtime(&self, repo: &str, argv: &[String]) -> Option<u64> {
+        let runs = self.ok_runs.get(&(repo.to_string(), argv.to_vec()))?;
+        let mut cpu: Vec<f64> = runs.iter().map(|r| r.1).collect();
+        cpu.sort_by(f64::total_cmp);
+        let median = *cpu.get(cpu.len() / 2)?;
+        runs.iter()
+            .filter(|r| r.1 >= CACHE_HIT_FRACTION * median)
+            .map(|r| r.0)
+            .min()
     }
 
     /// Expected peak memory of a job, bytes.
@@ -261,6 +309,10 @@ mod tests {
             collected: 0,
             ahead: false,
             queue_class: None,
+            share: None,
+            share_used: None,
+            lent_s: 0.0,
+            admission: crate::shares::Mode::Slots,
         }
     }
 
@@ -423,5 +475,57 @@ mod tests {
             "the median of 4.0, 3.0 and 0.5 CPUs"
         );
         assert_eq!(h.expected_cores("b", &argv), None, "another repository");
+    }
+
+    /// A rust job's record counts the compilers the compile cache server
+    /// ran for it in its CPU seconds, so its share counts them too.
+    #[test]
+    fn a_share_comes_from_the_runs_with_their_compile_cache_work_and_their_age() {
+        let mut h = History::default();
+        let argv = vec!["cargo".to_string(), "build".to_string()];
+        let mut j = job("a", "cargo build", "rust", 0);
+        assert_eq!(h.predicted_share("a", &argv, 0), None);
+        assert_eq!(h.best_runtime("a", &argv), None);
+        for (cpu_s, ms) in [(20.0, 10_000), (16.0, 8_000), (30.0, 15_000)] {
+            j.cpu_s = cpu_s;
+            j.compile_server_cpu_s = cpu_s / 2.0;
+            j.ended_ms = j.started_ms + ms;
+            h.record(&j);
+        }
+        let share = h.predicted_share("a", &argv, j.ended_ms).unwrap();
+        assert!((share - 2.3).abs() < 1e-9, "2 CPUs plus 15 %: {share}");
+        assert_eq!(h.best_runtime("a", &argv), Some(8_000));
+        assert_eq!(h.predicted_share("b", &argv, 0), None, "another repository");
+    }
+
+    /// The best earlier run a slowdown is measured against is a run that
+    /// ended ok and did the command's usual work: a failed run that ended
+    /// early and a run served from a cache (under half the median CPU
+    /// seconds of the command's ok runs) would make every later run look
+    /// slow.
+    #[test]
+    fn the_best_run_is_an_ok_run_that_was_not_served_from_a_cache() {
+        let mut h = History::default();
+        let argv = vec!["cargo".to_string(), "test".to_string()];
+        let mut j = job("a", "cargo test", "rust", 0);
+        for (cpu_s, ms) in [(20.0, 10_000), (16.0, 8_000), (30.0, 15_000)] {
+            j.cpu_s = cpu_s;
+            j.ended_ms = j.started_ms + ms;
+            h.record(&j);
+        }
+        j.cpu_s = 2.0;
+        j.ended_ms = j.started_ms + 2_000;
+        h.record(&j);
+        assert_eq!(h.best_runtime("a", &argv), Some(8_000), "a cache hit");
+        j.state = JobState::Failed;
+        j.cpu_s = 12.0;
+        j.ended_ms = j.started_ms + 3_000;
+        h.record(&j);
+        assert_eq!(h.best_runtime("a", &argv), Some(8_000), "a failed run");
+        j.state = JobState::Ok;
+        j.cpu_s = 15.0;
+        j.ended_ms = j.started_ms + 7_000;
+        h.record(&j);
+        assert_eq!(h.best_runtime("a", &argv), Some(7_000));
     }
 }

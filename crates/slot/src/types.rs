@@ -163,12 +163,40 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub queue_class: Option<u8>,
+    /// The share of the CPUs the job asked for while admission is by share
+    /// (`slot admission shares`): predicted from earlier runs of the same
+    /// command, or the slots its client named. Absent with admission by
+    /// slots and from a daemon without shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub share: Option<f64>,
+    /// CPUs the job used over the last 5 s while it runs, and over its
+    /// whole run once it ended; with `share` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub share_used: Option<f64>,
+    /// CPU-seconds of its share the job lent to the queue while it used
+    /// almost no CPU; with `share` only.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub lent_s: f64,
+    /// How the job was admitted when it started: by share it held no
+    /// slot, and it is charged and counted by share until it ends, also
+    /// after a switch back to slots. Absent by slots and from a daemon
+    /// without shares.
+    #[serde(default, skip_serializing_if = "crate::shares::Mode::is_slots")]
+    pub admission: crate::shares::Mode,
 }
 
 // serde hands `skip_serializing_if` a reference.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero(n: &u32) -> bool {
     *n == 0
+}
+
+// serde hands `skip_serializing_if` a reference.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_f64(n: &f64) -> bool {
+    *n == 0.0
 }
 
 /// Live numbers of one running job.
@@ -394,6 +422,12 @@ pub struct State {
     #[serde(default)]
     #[ts(type = "number")]
     pub tokens_unaccounted_since_ms: i64,
+    /// Admission by CPU share (`slot admission shares`): the budget, the
+    /// free share and what idle jobs lend. Absent with admission by slots
+    /// and from a daemon without shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub shares: Option<crate::shares::View>,
 }
 
 /// One message on `GET /api/events`.
@@ -464,6 +498,12 @@ pub enum Event {
         /// Machine base: at the floor and still over the target.
         #[serde(default)]
         over_target: bool,
+        /// Admission by CPU share: the budget, the free share and what idle
+        /// jobs lend. Absent with admission by slots and from a daemon
+        /// without shares.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        shares: Option<crate::shares::View>,
     },
 }
 

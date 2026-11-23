@@ -213,6 +213,21 @@ slot cpu-limit [OPTIONS] [CPUs|off]
 - `--floor`: Jobs that may always run, whatever the host's CPUs do, from 1; 4 until one is named. `off` forgets it
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
+### `slot admission`
+
+Show or set how queued jobs are admitted: by slots of the pool, or by a share of the CPUs while that share is free
+
+```text
+slot admission [OPTIONS] [shares|slots]
+```
+
+- `<MODE>`: `slots`, the default: a job holds slots of the pool while it runs, and the pool's size bounds how many run. `shares`: a job asks for a share of the CPUs, predicted from earlier runs of the same command (`--tokens N` asks for N), holds no slot of its own and starts while that share is free in a budget that follows how much slower than their best the jobs run, never above the pool's CPU quota. The pool's slots then bound the build processes inside the jobs, as many as the budget has CPUs. Kept in `limits.json` in the state directory; holds across reloads and restarts
+- `--floor`: By share: jobs that run whatever the share says, from 1; 4 until one is named
+- `--max`: By share: the most jobs that run at once, at least the floor; 48 until one is named
+- `--pressure`: By share: CPU pressure of the host (`some avg10` of `/proc/pressure/cpu`, percent) over which only jobs predicted to run 5 s or less start; 60 until one is named
+- `--min-budget`: By share: the least CPUs the budget falls to, at least 1; half the host's CPUs until one is named, and never under the shares of the floor's running jobs
+- `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
 ### `slot cancel`
 
 Cancel a queued or running job you submitted; a running job's processes get SIGTERM, then SIGKILL after 5 s

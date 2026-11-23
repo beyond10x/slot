@@ -139,6 +139,27 @@ fn median(v: &mut [f64]) -> f64 {
     }
 }
 
+/// Pool seconds charged to `job` for the `run_ms` of its run (which ends at
+/// `end`) inside the window: its slots times that time; by share its share
+/// times that time, less the CPU-seconds it lent while it used almost
+/// nothing, in the same proportion. The job that ran on a loan pays its own
+/// share. A job is charged by the admission it started under, also when
+/// the admission changed while it ran.
+fn charged_s(job: &Job, end: i64, run_ms: i64) -> f64 {
+    let ran_s = run_ms as f64 / 1000.0;
+    match job
+        .share
+        .filter(|_| job.admission == crate::shares::Mode::Shares)
+    {
+        Some(share) => {
+            let whole_ms = (end - job.started_ms).max(1);
+            let lent = job.lent_s * run_ms as f64 / whole_ms as f64;
+            (ran_s * share - lent).max(0.0)
+        }
+        None => ran_s * f64::from(job.tokens.max(1)),
+    }
+}
+
 /// Aggregates the job log `log` over `[from_ms, to_ms)`. Lines that do not
 /// parse and jobs that never started are skipped; a running job (no end) is
 /// counted up to `to_ms`.
@@ -169,7 +190,7 @@ pub fn aggregate(
         if run_ms == 0 && !started_in {
             continue;
         }
-        let slot_s = run_ms as f64 / 1000.0 * f64::from(job.tokens.max(1));
+        let slot_s = charged_s(&job, end, run_ms);
         let (key, unverified) = group(&job, by, project);
         for acc in [groups.entry(key.clone()).or_default(), &mut total] {
             acc.row.slot_s += slot_s;
@@ -351,6 +372,10 @@ mod tests {
             collected: 0,
             ahead: false,
             queue_class: None,
+            share: None,
+            share_used: None,
+            lent_s: 0.0,
+            admission: crate::shares::Mode::Slots,
         };
         serde_json::to_string(&j).unwrap()
     }
@@ -403,6 +428,58 @@ mod tests {
         assert!((r.wait_s - 13.0).abs() < 1e-9);
         assert!((r.wait_p50_s - 3.0).abs() < 1e-9);
         assert!((r.wait_max_s - 9.0).abs() < 1e-9);
+    }
+
+    /// By share a job is charged its share for its run, less what it lent
+    /// while it used almost nothing; the job that started on what it lent
+    /// is charged its own share. Clipped to the window like slot time.
+    #[test]
+    fn by_share_a_job_is_charged_its_share_less_what_it_lent() {
+        let with = |line: String, share: f64, lent_s: f64| {
+            let mut j: Job = serde_json::from_str(&line).unwrap();
+            j.share = Some(share);
+            j.lent_s = lent_s;
+            j.admission = crate::shares::Mode::Shares;
+            serde_json::to_string(&j).unwrap()
+        };
+        let log = [
+            with(
+                job(1, "lender", "p", "s", 4, (0, 1_000, 61_000), 1.0),
+                2.0,
+                90.0,
+            ),
+            with(
+                job(2, "borrower", "p", "s", 1, (0, 11_000, 41_000), 30.0),
+                1.5,
+                0.0,
+            ),
+            job(3, "slots", "p", "s", 2, (0, 1_000, 11_000), 1.0),
+        ]
+        .join("\n");
+        let u = aggregate(log.as_bytes(), 0, 61_000, By::Repo, &mut none);
+        let row = |k: &str| u.rows.iter().find(|r| r.key == k).unwrap().slot_s;
+        assert!((row("lender") - (120.0 - 90.0)).abs() < 1e-9, "{u:?}");
+        assert!((row("borrower") - 45.0).abs() < 1e-9);
+        assert!((row("slots") - 20.0).abs() < 1e-9, "by slots unchanged");
+        let half = aggregate(log.as_bytes(), 0, 31_000, By::Repo, &mut none);
+        let lender = half.rows.iter().find(|r| r.key == "lender").unwrap();
+        assert!(
+            (lender.slot_s - (60.0 - 45.0)).abs() < 1e-9,
+            "half the run, half the loan: {lender:?}"
+        );
+        // A job that started by slots and ran on after admission switched
+        // to shares carries a share in its record; it is charged its slots.
+        let mut spanned: Job =
+            serde_json::from_str(&job(4, "spanned", "p", "s", 2, (0, 1_000, 11_000), 1.0)).unwrap();
+        spanned.share = Some(0.5);
+        let u = aggregate(
+            serde_json::to_string(&spanned).unwrap().as_bytes(),
+            0,
+            61_000,
+            By::Repo,
+            &mut none,
+        );
+        assert!((u.rows[0].slot_s - 20.0).abs() < 1e-9, "{u:?}");
     }
 
     #[test]

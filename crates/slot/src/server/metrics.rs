@@ -308,6 +308,10 @@ mod tests {
             collected: 0,
             ahead: false,
             queue_class: None,
+            share: None,
+            share_used: None,
+            lent_s: 0.0,
+            admission: crate::shares::Mode::Slots,
         }
     }
 

@@ -55,6 +55,12 @@ fn main() -> ExitCode {
                 print!("{}", slot::status::render_cpu_limit(&v));
                 0
             }),
+        Cmd::Admission(args) => {
+            slot::status::admission(&args.http, args.request().as_ref()).map(|v| {
+                print!("{}", slot::status::render_admission(&v));
+                0
+            })
+        }
         Cmd::Cancel(args) => Ok(client::cancel(args.id, &Settings::from_env())),
         Cmd::Sessions(args) => {
             let r = slot::sessions::report(&args.http, args.window, args.min_cores);

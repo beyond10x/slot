@@ -115,6 +115,8 @@ fn ts_types() -> String {
         OutsideOwner::decl(),
         slot::evict::Eviction::decl(),
         slot::evict::Report::decl(),
+        slot::shares::Mode::decl(),
+        slot::shares::View::decl(),
         State::decl(),
         slot::usage::By::decl(),
         slot::usage::UsageRow::decl(),
