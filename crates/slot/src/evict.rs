@@ -518,7 +518,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         std::fs::create_dir_all(target.join("debug")).unwrap();
-        let bin = target.join("debug/pause");
+        // A multi-call coreutils picks its tool by name: keep `sleep`.
+        let bin = target.join("debug/sleep");
         std::fs::copy("/bin/sleep", &bin).unwrap();
         let mut child = Command::new(&bin).arg("30").spawn().unwrap();
         // Until the child has called exec, its executable is this test's.
