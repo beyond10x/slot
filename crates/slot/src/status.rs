@@ -683,6 +683,23 @@ fn served_class(j: &Job) -> u8 {
     j.queue_class.unwrap_or(if j.ahead { 1 } else { 2 })
 }
 
+/// `spill: N jobs to <node>`, one line per node that runs jobs this
+/// daemon handed it. Those jobs have a local id (above 0) and a node.
+fn spill_lines(s: &State) -> String {
+    use std::fmt::Write as _;
+    let mut by: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for j in &s.active {
+        if j.id > 0 && j.node != crate::types::LOCAL_NODE && !j.node.is_empty() {
+            *by.entry(j.node.as_str()).or_default() += 1;
+        }
+    }
+    let mut out = String::new();
+    for (n, c) in by {
+        let _ = writeln!(out, "spill: {c} jobs to {n}");
+    }
+    out
+}
+
 /// The pool line, then one line per queued or running job, queued first,
 /// in the order they get slots: by level, then the job's place in its
 /// level, then arrival.
@@ -745,6 +762,7 @@ pub fn render(s: &State) -> String {
     if let Some(l) = lost_line(s) {
         out.push_str(&l);
     }
+    out.push_str(&spill_lines(s));
     let w = &s.sccache;
     if w.enabled && (w.servers > 0 || w.refills > 0) {
         out.push_str(&sccache_line(w, s.now_ms));
@@ -802,6 +820,29 @@ mod tests {
             admission: crate::shares::Mode::Slots,
             node: String::new(),
         }
+    }
+
+    #[test]
+    fn status_counts_the_jobs_handed_to_each_node() {
+        let mut s: State = serde_json::from_value(serde_json::json!({
+            "host": "h", "cores": 1, "tokens": 1, "free": 1, "active": [], "done": [],
+            "now_ms": 1, "toolchains": [],
+        }))
+        .unwrap();
+        let on = |id, node: &str| {
+            let mut j = job(id, JobState::Running, 1);
+            j.node = node.into();
+            j
+        };
+        // Two handed to node-1, one local, one the node runs of its own.
+        s.active = vec![
+            on(1, "node-1"),
+            on(2, "node-1"),
+            on(3, crate::types::LOCAL_NODE),
+            on(-7, "node-1"),
+        ];
+        assert_eq!(spill_lines(&s), "spill: 2 jobs to node-1\n");
+        assert!(render(&s).contains("spill: 2 jobs to node-1\n"));
     }
 
     #[test]

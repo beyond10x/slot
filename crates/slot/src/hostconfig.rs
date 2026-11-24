@@ -44,6 +44,17 @@ pub struct RemoteNodeTable {
     /// The node's machine type.
     #[serde(default)]
     pub machine_type: Option<String>,
+    /// Whether the daemon hands queued local jobs to the node; `true`
+    /// when absent.
+    #[serde(default)]
+    pub spill: Option<bool>,
+}
+
+/// What the file says about handing local jobs to remote nodes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpillConf {
+    /// Seconds a job waits in the local queue before it may go to a node.
+    pub after_s: u64,
 }
 
 /// The whole file (`slot.hostconfig.ClusterFile`). Every table is closed:
@@ -63,6 +74,10 @@ pub struct ClusterFile {
     /// `[remote.<name>]`.
     #[serde(default)]
     pub remote: BTreeMap<String, RemoteNodeTable>,
+    /// Seconds a job waits in the local queue before it may go to a
+    /// remote node; 0 when absent.
+    #[serde(default)]
+    pub spill_after_s: Option<u64>,
 }
 
 /// A remote node of the file, checked.
@@ -93,7 +108,16 @@ impl RemoteNode {
 
 /// Parses the file's text into its remote nodes, in name order.
 pub fn parse(text: &str) -> Result<Vec<RemoteNode>, String> {
+    parse_all(text).map(|(nodes, _)| nodes)
+}
+
+/// Parses the file's text into its remote nodes, in name order, and its
+/// spill settings.
+pub fn parse_all(text: &str) -> Result<(Vec<RemoteNode>, SpillConf), String> {
     let file: ClusterFile = toml::from_str(text).map_err(|e| e.to_string())?;
+    let spill = SpillConf {
+        after_s: file.spill_after_s.unwrap_or(0),
+    };
     let mut out = Vec::new();
     for (name, table) in file.remote {
         if name.is_empty() || name == crate::types::LOCAL_NODE {
@@ -112,14 +136,20 @@ pub fn parse(text: &str) -> Result<Vec<RemoteNode>, String> {
         }
         out.push(RemoteNode { name, ssh, table });
     }
-    Ok(out)
+    Ok((out, spill))
 }
 
 /// Reads the file at `path`: no file is no remote node.
 pub fn load(path: &Path) -> Result<Vec<RemoteNode>, String> {
+    load_all(path).map(|(nodes, _)| nodes)
+}
+
+/// Reads the file at `path` with its spill settings: no file is no
+/// remote node.
+pub fn load_all(path: &Path) -> Result<(Vec<RemoteNode>, SpillConf), String> {
     match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(text) => parse_all(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }

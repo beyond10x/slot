@@ -10,7 +10,10 @@ mod metrics;
 pub mod nodes;
 pub mod priority;
 mod ring;
+pub mod spill;
 mod upgrade;
+
+use spill::Ran;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -267,6 +270,8 @@ struct TokenMemo {
     surplus: Option<usize>,
 }
 
+// Each flag is a fact of its own that the queue and the sampler read alone.
+#[allow(clippy::struct_excessive_bools)]
 struct Live {
     job: Job,
     pid: Option<i32>,
@@ -315,6 +320,8 @@ struct Live {
     /// It claimed its start: with admission by share it holds no slot, so
     /// `held` does not tell a job that is about to start from a queued one.
     claimed: bool,
+    /// It may go to a remote node ([`spill`]) and has not been there.
+    spillable: bool,
 }
 
 impl Live {
@@ -1312,7 +1319,7 @@ impl Server {
             let s = Arc::clone(self);
             tokio::spawn(async move {
                 let _keep = keep;
-                let done = s.supervise(id, pid, &tx, gone).await;
+                let done = s.supervise(id, pid, &tx, gone, false).await;
                 drop(tx);
                 s.end_conn(conn, done.is_some()).await;
             });
@@ -1379,6 +1386,7 @@ impl Server {
                     // by slots it asked for its slots.
                     share: r.job.share.unwrap_or(f64::from(r.job.tokens.max(1))),
                     claimed: true,
+                    spillable: false,
                     job: r.job,
                     pid: Some(r.pid),
                     held: r.held,
@@ -1936,6 +1944,7 @@ impl Server {
                     overdue: watch::Sender::new(false),
                     share,
                     claimed: false,
+                    spillable: false,
                 },
             );
             (id, share)
@@ -1998,7 +2007,21 @@ impl Server {
         // another job may be compiling into.
         let shares_target = target_dir.is_some() && crate::cargo_lock::compiles(&shown);
         let mut told_target = false;
+        // Whether the job may go to a remote node of the cluster file.
+        let mut may_spill = self.spill_eligible(id, &req);
         let held = loop {
+            if may_spill && let Some(t) = self.spill_pick(id) {
+                match self
+                    .run_spilled(id, &req, &cwd, t, &tx, gone.clone(), &out)
+                    .await?
+                {
+                    Ran::Requeue => {
+                        may_spill = false;
+                        continue;
+                    }
+                    Ran::Finished => return Some(()),
+                }
+            }
             if !self.admission_open(gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
             }
@@ -2058,6 +2081,12 @@ impl Server {
                     }
                     () = tokio::time::sleep(self.cfg.target_poll), if shares_target => {
                         if self.target_wait(id, false).is_some() {
+                            break true;
+                        }
+                    }
+                    // A node has room for it: it leaves the queue and goes.
+                    () = tokio::time::sleep(spill::TICK), if may_spill => {
+                        if self.spill_due(id) && self.remotes.has_room(now_ms()) {
                             break true;
                         }
                     }
@@ -2315,7 +2344,7 @@ impl Server {
             let _ = tx.send(Frame::Start { id, target_dir });
         }
         self.publish(id);
-        let done = self.supervise(id, pid, &tx, gone).await;
+        let done = self.supervise(id, pid, &tx, gone, false).await.map(drop);
         if done.is_some()
             && let Some(ws) = &req.workspace
         {
@@ -2335,7 +2364,8 @@ impl Server {
         pid: i32,
         tx: &mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
-    ) -> Option<()> {
+        requeue: bool,
+    ) -> Option<Ran> {
         let s = Arc::clone(self);
         let wait = tokio::task::spawn_blocking(move || s.reap(id, pid));
         tokio::pin!(wait);
@@ -2408,6 +2438,8 @@ impl Server {
                 msg: None,
                 note_wait: false,
             }
+        } else if requeue && exited.code == spill::INFRA_EXIT {
+            return Some(Ran::Requeue);
         } else {
             End {
                 state: if exited.code == 0 {
@@ -2422,7 +2454,7 @@ impl Server {
                 note_wait: true,
             }
         };
-        self.finish(id, tx, end).ok()
+        self.finish(id, tx, end).ok().map(|()| Ran::Finished)
     }
 
     /// Waits for job `id`'s process to exit, reads its CPU time while it is
@@ -2783,7 +2815,10 @@ impl Server {
             }
             let job = live.job.clone();
             g.metrics.record(&job);
-            g.memory.record(&job);
+            // A job that ran on a node says nothing of this machine.
+            if job.node == LOCAL_NODE {
+                g.memory.record(&job);
+            }
             record_target(&mut g.targets, &job);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');

@@ -246,6 +246,11 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
             }
             Err(e) => format!("{e:#}"),
         };
+        // A job the daemon handed to a node goes back to the daemon's queue.
+        if std::env::var_os(crate::server::spill::SPILLED_ENV).is_some_and(|v| !v.is_empty()) {
+            eprintln!("slot: remote build on {host} did not start ({why})");
+            return crate::server::spill::INFRA_EXIT;
+        }
         eprintln!(
             "slot: remote build on {host} did not start ({why}); running it on this machine's daemon"
         );
