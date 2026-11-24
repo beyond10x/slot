@@ -85,10 +85,11 @@ pub fn repo_key(top: &Path) -> String {
         },
         |u| normalize_url(&u),
     );
-    hex16(&name)
+    digest16(&name)
 }
 
-fn hex16(s: &str) -> String {
+/// The first 8 bytes of SHA-256 of `s`, as 16 hex digits.
+pub fn digest16(s: &str) -> String {
     use std::fmt::Write as _;
     Sha256::digest(s.as_bytes())
         .iter()

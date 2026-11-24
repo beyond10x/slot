@@ -18,6 +18,10 @@
 - Every remote sync prints one line with its bytes and seconds, for example `slot: synced to
   buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`.
 
+- Two clients of one worktree on one workstation sync it one after the other: the second waits
+  for the first (a `flock` in the runtime directory, at most `SLOT_SYNC_LIMIT`) and its line says
+  how long. Two rsyncs into one mirror at once had ended one of them with exit 23.
+
 ## 0.30.0 — 2026-11-23
 
 - `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction

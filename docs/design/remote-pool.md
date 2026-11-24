@@ -408,7 +408,9 @@ Each sync also prints `slot: synced to <host> in <s> s, <n> bytes sent[, <k> sib
 base]`, the bytes from rsync's `--stats`. And a sync is bounded: rsync's read and written bytes
 (`/proc/<pid>/io`) are sampled every 100 ms; no change for `SLOT_SYNC_STALL` (60 s) or a run past
 `SLOT_SYNC_LIMIT` (5 min) kills rsync and its ssh, and the job goes to the local daemon as for a
-failed sync. A killed rsync never leads to `slot proxy` on the host.
+failed sync. A killed rsync never leads to `slot proxy` on the host. Two clients of one worktree on one
+workstation sync one after the other (a `flock` per worktree and host in the runtime directory):
+phase 0 saw two rsyncs into one mirror at once end one of them with exit 23.
 
 The target directory seeding of § 4.5 is unchanged: it still copies the newest target directory
 of the same repository name by reflink.

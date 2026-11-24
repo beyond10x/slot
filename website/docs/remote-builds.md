@@ -61,7 +61,8 @@ current directory.
    filter that applies every `.gitignore`, and excludes for `.git` and the toolchain's output
    directories (`/target/`). Uncommitted changes are included. Over a persistent ssh connection
    a rerun only sends the changed files. The client prints one line per sync, for example
-   `slot: synced to buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`.
+   `slot: synced to buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`. Two calls
+   from one worktree sync one after the other; the second waits for the first.
 3. **Siblings.** Before the sync the client asks the server for other mirrors of the same
    repository (same `origin` URL, so every worktree and clone of it). rsync gets up to four of
    them as `--copy-dest`: a file the new mirror lacks is copied on the server when a sibling has

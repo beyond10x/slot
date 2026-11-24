@@ -69,6 +69,8 @@ pub struct Synced {
     pub elapsed: Duration,
     /// Sibling mirrors rsync could copy from.
     pub siblings: usize,
+    /// How long it waited for another sync of the same worktree.
+    pub waited: Duration,
 }
 
 impl Synced {
@@ -83,10 +85,63 @@ impl Synced {
             1 => ", 1 sibling mirror as base".to_string(),
             n => format!(", {n} sibling mirrors as base"),
         };
+        let waited = if self.waited >= Duration::from_millis(100) {
+            format!(
+                ", after {:.1} s waiting for another sync of this worktree",
+                self.waited.as_secs_f64()
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "slot: synced to {host} in {:.1} s, {bytes}{sib}",
+            "slot: synced to {host} in {:.1} s, {bytes}{sib}{waited}",
             self.elapsed.as_secs_f64()
         )
+    }
+}
+
+/// How often a sync that waits for another one of its worktree tries again.
+const LOCK_POLL: Duration = Duration::from_millis(200);
+
+/// The right to sync one worktree to one server; dropping it lets the next
+/// client of that worktree sync.
+#[derive(Debug)]
+pub struct SyncLock {
+    _held: nix::fcntl::Flock<std::fs::File>,
+}
+
+/// Waits until no other client on this machine syncs mirror `id` to `host`,
+/// for at most `wait`, and holds that until the returned lock is dropped.
+/// Two rsyncs into one mirror at once ended one of them with exit 23
+/// (partial transfer). The lock is a `flock` on a file in `dir`.
+pub fn lock_workspace(dir: &Path, host: &str, id: &str, wait: Duration) -> Result<SyncLock> {
+    use nix::errno::Errno;
+    use nix::fcntl::{Flock, FlockArg};
+    std::fs::create_dir_all(dir).map_err(|e| anyhow!("{}: {e}", dir.display()))?;
+    let path = dir.join(format!("slot-sync-{id}-{}.lock", mirror::digest16(host)));
+    let deadline = Instant::now() + wait;
+    loop {
+        let f = std::fs::File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+        match Flock::lock(f, FlockArg::LockExclusiveNonblock) {
+            Ok(held) => return Ok(SyncLock { _held: held }),
+            Err((_, Errno::EWOULDBLOCK)) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    LOCK_POLL.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err((_, Errno::EWOULDBLOCK)) => {
+                bail!(
+                    "another sync of this worktree ran longer than {} s",
+                    wait.as_secs()
+                )
+            }
+            Err((_, e)) => bail!("lock {}: {e}", path.display()),
+        }
     }
 }
 
@@ -221,6 +276,10 @@ fn ask_siblings(r: &Remote<'_>, id: &str, key: &str, wait: Duration) -> Option<V
 /// Syncs the checkout at `top` to mirror `id` on the server, with the
 /// toolchain's `excludes`, within `b`.
 pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
+    let asked = Instant::now();
+    let _lock = crate::paths::runtime_dir()
+        .map(|dir| lock_workspace(&dir, r.host, id, b.limit))
+        .transpose()?;
     let t0 = Instant::now();
     let deadline = t0 + b.limit;
     let key = mirror::repo_key(top);
@@ -267,6 +326,7 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         bytes: siblings.as_ref().and_then(|_| stats_bytes_sent(&out)),
         elapsed: t0.elapsed(),
         siblings: siblings.map_or(0, |s| s.len()),
+        waited: t0.duration_since(asked),
     })
 }
 
@@ -288,10 +348,22 @@ mod tests {
             bytes: Some(4096),
             elapsed: Duration::from_millis(1250),
             siblings: 2,
+            waited: Duration::ZERO,
         };
         assert_eq!(
             s.line("node"),
             "slot: synced to node in 1.2 s, 4096 bytes sent, 2 sibling mirrors as base"
+        );
+        let after = Synced {
+            waited: Duration::from_millis(3400),
+            ..s.clone()
+        };
+        assert!(
+            after
+                .line("node")
+                .ends_with(", after 3.4 s waiting for another sync of this worktree"),
+            "{}",
+            after.line("node")
         );
         let old = Synced {
             bytes: None,
@@ -303,6 +375,29 @@ mod tests {
             "{}",
             old.line("node")
         );
+    }
+
+    #[test]
+    fn one_sync_of_a_worktree_to_a_server_runs_at_a_time() {
+        let d = tempfile::tempdir().unwrap();
+        let held = lock_workspace(d.path(), "node", "00aa", Duration::from_secs(1)).unwrap();
+        let t0 = Instant::now();
+        let second = lock_workspace(d.path(), "node", "00aa", Duration::from_millis(300));
+        assert!(second.is_err(), "a second sync ran beside the first");
+        assert!(t0.elapsed() >= Duration::from_millis(300), "it waited");
+        assert!(lock_workspace(d.path(), "other", "00aa", Duration::ZERO).is_ok());
+        assert!(lock_workspace(d.path(), "node", "00bb", Duration::ZERO).is_ok());
+        let waiter = {
+            let dir = d.path().to_path_buf();
+            std::thread::spawn(move || {
+                let t = Instant::now();
+                lock_workspace(&dir, "node", "00aa", Duration::from_secs(10)).map(|_| t.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(400));
+        drop(held);
+        let waited = waiter.join().unwrap().unwrap();
+        assert!(waited >= Duration::from_millis(300), "{waited:?}");
     }
 
     #[test]
