@@ -1,5 +1,5 @@
 import { computed, reactive, shallowReactive, shallowRef, triggerRef } from 'vue';
-import type { CacheMinute, Event, HostCensus, Job, LiveJob, Node, SharesView, State } from './generated/types.ts';
+import type { CacheMinute, Event, HostCensus, Job, LiveJob, Node, SharesView, State, Usage } from './generated/types.ts';
 import { MINUTE_MS, cachePoint, cacheWindow, latestMinute, parseCacheDay, parseCacheHistory } from './lib/cache.ts';
 import { LOCAL, hostCpuOf, localFromState, parseNodes } from './lib/cluster.ts';
 import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './lib/history.ts';
@@ -10,6 +10,7 @@ import { familyOrder, hostSample } from './lib/host.ts';
 import type { HostSample } from './lib/host.ts';
 import { isActive, jobId, jobKey } from './lib/job.ts';
 import { SparkBuffer } from './lib/spark.ts';
+import { usageUrl } from './lib/usage.ts';
 import type { Point } from './lib/spark.ts';
 
 export type { Sample } from './lib/history.ts';
@@ -367,6 +368,20 @@ export async function start(): Promise<void> {
   store.ready = true;
   // The daemon adds a minute of compiler calls each minute, and no event says so.
   setInterval(() => void loadCache(), MINUTE_MS);
+  void loadSessionTitles().catch(() => undefined);
+  setInterval(() => void loadSessionTitles().catch(() => undefined), 5 * MINUTE_MS);
+}
+
+/**
+ * Titles the daemon resolved for the sessions of the last 24 hours (`api/usage` grouped by session): the job tables name a job's
+ * session by them, also a session that no census of this page named. A title from a census stands.
+ */
+async function loadSessionTitles(): Promise<void> {
+  const res = await fetch(usageUrl('24h', 'session', new Date()));
+  if (!res.ok) return;
+  const u = (await res.json()) as Usage;
+  if (u.by !== 'session' || !Array.isArray(u.rows)) return;
+  for (const r of u.rows) if (r.key && r.title && !sessionTitles.has(r.key)) sessionTitles.set(r.key, r.title);
 }
 
 /**

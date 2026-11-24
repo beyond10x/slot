@@ -632,6 +632,18 @@
         "value": 0,
         "tolerance": 0
       }
+    },
+    "cluster-queue-empty": {
+      "gates.problems": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "nodes-busy": {
+      "gates.problems": {
+        "value": 0,
+        "tolerance": 0
+      }
     }
   }
 }

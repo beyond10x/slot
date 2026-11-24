@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { fmtDur } from '../lib/format.ts';
-import { sessionName } from '../lib/host.ts';
-import { checkoutLabel, cmdText, idLabel, jobKey, jobName, waitS } from '../lib/job.ts';
+import { sessionHover, sessionName } from '../lib/host.ts';
+import { checkoutLabel, cmdText, jobKey, waitS } from '../lib/job.ts';
 import { level, levelText, servedQueue, waitReasonText } from '../lib/queue.ts';
 import { shareCell } from '../lib/shares.ts';
 import { jobs, select, sessionTitles, store } from '../store.ts';
+import JobIdCell from './JobIdCell.vue';
 import RepoName from './RepoName.vue';
 import ToolDot from './ToolDot.vue';
 
@@ -42,10 +43,10 @@ const rows = computed(() => {
       <template v-for="r in rows" :key="r.id">
         <tr :class="{ sel: store.selected === r.id, lead: !!r.why }" @click="select(r.id)">
           <td class="c-lead num">#{{ r.pos }}</td>
-          <td><button type="button" class="jobid" :aria-label="`output of job ${jobName(r.job)}`" @click.stop="select(r.id, $event)">{{ idLabel(r.job) }}</button></td>
+          <JobIdCell :job="r.job" @open="select(r.id, $event)" />
           <td class="c-tool" :title="r.job.toolchain"><ToolDot :name="r.job.toolchain" /></td>
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
-          <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
+          <td class="session h-b" :title="sessionHover(r.job.session, r.session)">{{ r.session }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
           <td class="c-state" :class="{ muted: r.normal }" :title="r.levelTitle || undefined">{{ r.level }}</td>
           <td class="num" :title="r.slots.title || undefined">{{ r.slots.text }}</td>

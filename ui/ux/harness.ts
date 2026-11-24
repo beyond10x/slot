@@ -132,7 +132,9 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
     ? r.fulfill({ json: sc.cacheHistory }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/cache-day', (r) => sc.cacheDay
     ? r.fulfill({ json: sc.cacheDay }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
-  await page.route('**/api/usage**', (r) => r.fulfill({ json: sc.usage ?? EMPTY_USAGE }));
+  await page.route('**/api/usage**', (r) => r.fulfill({
+    json: (new URL(r.request().url()).searchParams.get('by') === 'session' ? sc.usageSessions : undefined) ?? sc.usage ?? EMPTY_USAGE,
+  }));
   await page.route('**/api/nodes', (r) => sc.nodes
     ? r.fulfill({ json: sc.nodes }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/limits', async (r) => {

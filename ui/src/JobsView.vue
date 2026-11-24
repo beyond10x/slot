@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch, watchEffect } from 'vue';
 import { fmtDur } from './lib/format.ts';
-import { jobKey, newestRunning } from './lib/job.ts';
+import { jobKey, newestRunning, remoteNode } from './lib/job.ts';
 import { queueHeading, servedQueue, waitStats } from './lib/queue.ts';
 import { jobs, select, store } from './store.ts';
 import HeaderBar from './components/HeaderBar.vue';
@@ -30,10 +30,19 @@ const waits = computed(() => {
   const dur = (v: number | null): string => (v === null ? '–' : fmtDur(v));
   return { n: w.n, median: dur(w.p50), p90: dur(w.p90), gaveUp: w.gaveUp };
 });
+/** Running jobs: all of them, those on build nodes (one node by name, else how many), and those on this host, whose cores alone are measured here. */
 const running = computed(() => {
   let n = 0;
-  for (const j of jobs.values()) if (j.state === 'running') n++;
-  return { n };
+  const away = new Map<string, number>();
+  for (const j of jobs.values()) {
+    if (j.state !== 'running') continue;
+    n++;
+    const node = remoteNode(j);
+    if (node) away.set(node, (away.get(node) ?? 0) + 1);
+  }
+  const remote = [...away.values()].reduce((a, k) => a + k, 0);
+  const where = away.size === 1 ? [...away.keys()][0] : `${away.size} build nodes`;
+  return { n, remote, where, here: n - remote };
 });
 
 watch(
@@ -59,8 +68,12 @@ watchEffect(() => {
       <TrendCharts />
       <section class="tables">
         <SectionHead text="Running" />
-        <p class="sum">
-          <b>{{ running.n }}</b> {{ running.n === 1 ? 'job uses' : 'jobs use' }} <b>{{ store.jobCores.toFixed(1) }}</b> cores
+        <p v-if="running.remote" class="sum">
+          <b>{{ running.n }}</b> {{ running.n === 1 ? 'job' : 'jobs' }}: <b>{{ running.remote }}</b> on {{ running.where }},
+          <b>{{ running.here }}</b> on this host use <b>{{ store.jobCores.toFixed(1) }}</b> cores
+        </p>
+        <p v-else class="sum">
+          <b>{{ running.n }}</b> {{ running.n === 1 ? 'job uses' : 'jobs use' }} <b>{{ store.jobCores.toFixed(1) }}</b> cores of this host
         </p>
         <ActiveTable />
         <SectionHead :text="queueTitle" />
@@ -70,14 +83,14 @@ watchEffect(() => {
         </p>
         <p v-else class="sum">no job finished in the last 60 min</p>
         <QueueTable />
-        <SectionHead text="Finished" />
+        <SectionHead text="Finished: newest first, on this host and its build nodes" />
         <DoneTable />
       </section>
       <HostPanel />
       <section>
         <SectionHead text="Timeline: one bar per job. Pale part: waiting for a slot. Click a bar for its output." />
         <TimelineChart />
-        <SectionHead text="Cores in use: slot jobs (by toolchain) and whole host; below: jobs waiting for a slot" />
+        <SectionHead text="Cores in use on this host: slot jobs (by toolchain) and the whole host; below: jobs waiting for a slot" />
         <CoresChart />
         <div class="legend">
           <ToolDot v-for="n in store.toolchains" :key="n" :name="n" />
@@ -86,7 +99,7 @@ watchEffect(() => {
         </div>
       </section>
       <section>
-        <SectionHead text="Share of the pool: slot time (run time × slots held) and CPU per project, repository or session" />
+        <SectionHead text="Share of the pool on this host: slot time (run time × slots held) and CPU per project, repository or session; jobs of build nodes are not counted" />
         <UsageTable />
       </section>
     </div>
