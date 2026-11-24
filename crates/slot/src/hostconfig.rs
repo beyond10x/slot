@@ -1,25 +1,44 @@
 //! The host configuration file, `cluster.toml` (`slot.hostconfig` of the
 //! specification): read by the daemon at start. Of its tables this module
 //! uses `[remote.<name>]`, the remote nodes the daemon polls; `[node]`,
-//! `[provider.*]` and `[template.*]` are accepted and not yet used.
+//! `[provider.*]` and `[template.*]` are accepted and not yet used. The
+//! client reads `never_sync_file` from it (`never_sync.rs`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+/// slot's configuration directory: `$XDG_CONFIG_HOME/slot`, else
+/// `~/.config/slot`.
+pub fn config_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map_or_else(
+            || {
+                std::env::var_os("HOME")
+                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
+                    .join(".config")
+            },
+            PathBuf::from,
+        );
+    base.join("slot")
+}
+
 /// Default path: `$XDG_CONFIG_HOME/slot/cluster.toml`, else
 /// `~/.config/slot/cluster.toml`.
 pub fn default_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
-        || {
-            std::env::var_os("HOME")
-                .map_or_else(|| PathBuf::from("."), PathBuf::from)
-                .join(".config")
-        },
-        PathBuf::from,
-    );
-    base.join("slot").join("cluster.toml")
+    config_dir().join("cluster.toml")
+}
+
+/// The host configuration file a client reads: `SLOT_CLUSTER_FILE`, else
+/// [`default_path`]; `None` for `off`.
+pub fn client_path() -> Option<PathBuf> {
+    match std::env::var_os("SLOT_CLUSTER_FILE").filter(|v| !v.is_empty()) {
+        Some(v) if v == "off" => None,
+        Some(v) => Some(PathBuf::from(v)),
+        None => Some(default_path()),
+    }
 }
 
 /// One `[remote.<name>]` table (`slot.hostconfig.RemoteNodeTable`).
@@ -78,6 +97,10 @@ pub struct ClusterFile {
     /// remote node; 0 when absent.
     #[serde(default)]
     pub spill_after_s: Option<u64>,
+    /// The never-sync list of remote mode (`never_sync.rs`), an absolute
+    /// path; `$XDG_CONFIG_HOME/slot/remote-deny` when absent.
+    #[serde(default)]
+    pub never_sync_file: Option<String>,
 }
 
 /// A remote node of the file, checked.
@@ -102,6 +125,15 @@ impl RemoteNode {
                 .unwrap_or_else(|| "slot".to_string()),
         );
         argv.push("state".to_string());
+        argv
+    }
+
+    /// The command that runs the `output` step on the node: the kept
+    /// output of its job `id` from chunk `from` on.
+    pub fn output_command(&self, id: i64, from: u64) -> Vec<String> {
+        let mut argv = self.state_command();
+        argv.pop();
+        argv.extend(["output".to_string(), id.to_string(), from.to_string()]);
         argv
     }
 }
@@ -194,6 +226,10 @@ ssh = "ssh build-2.example"
         assert_eq!(
             nodes[1].state_command(),
             ["ssh", "build-2.example", "slot", "state"]
+        );
+        assert_eq!(
+            nodes[1].output_command(7, 12),
+            ["ssh", "build-2.example", "slot", "output", "7", "12"]
         );
     }
 

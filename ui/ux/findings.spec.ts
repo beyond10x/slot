@@ -3,9 +3,9 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 import { open } from './harness.ts';
 import type { Opened } from './harness.ts';
-import { SCENARIOS } from './scenarios.ts';
+import { NODE16, QUIET_SESSION, SCENARIOS, clusterNodeFacts, nodeJobOutput } from './scenarios.ts';
 import type { Scenario } from './scenarios.ts';
-import { VIEWPORTS, vpName } from './viewports.ts';
+import { CLUSTER_GATING, VIEWPORTS, vpName } from './viewports.ts';
 
 const GATING = VIEWPORTS.filter((v) => v.gating);
 
@@ -48,11 +48,11 @@ test('UXF-018 busy-failed @ 960x1080: a job at the bottom of the window stays in
 test('UXF-019 busy-failed: the header counts the failed jobs of the last 60 min and opens the newest one', async ({ page, baseURL }) => {
   const run = await start(page, baseURL, 'busy-failed');
   const failed = page.locator('header').getByRole('button', { name: /^failed \d+ \(60 min\)/ });
-  await expect(failed).toHaveAccessibleName('failed 1 (60 min): output of job 37, the newest failed job');
+  await expect(failed).toHaveAccessibleName('failed 1 (60 min), 1 test: output of job 37, the newest failed job');
   await run.step();
   await run.step();
-  await expect(failed).toHaveText('failed 2 (60 min)');
-  await expect(failed).toHaveAccessibleName('failed 2 (60 min): output of job 42, the newest failed job');
+  await expect(failed).toHaveText('failed 2 (60 min) 2 test');
+  await expect(failed).toHaveAccessibleName('failed 2 (60 min), 2 test: output of job 42, the newest failed job');
   await failed.focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('aside')).toContainText('error[E0308]');
@@ -437,3 +437,170 @@ for (const name of ['busy-failed', 'cluster-remote']) {
     expect(await negativeIds(page), 'no job is named by a negative number').toEqual([]);
   });
 }
+
+/** The cluster page of `clusterNodeFacts` at the first gating size. */
+async function nodeFacts(page: Page, baseURL: string | undefined): Promise<{ local: Locator; node: Locator }> {
+  await page.setViewportSize({ width: GATING[0].width, height: GATING[0].height });
+  await open(page, baseURL ?? '/', clusterNodeFacts());
+  return { local: page.locator('[data-node="local"]'), node: page.locator('[data-node="build-1d"]') };
+}
+
+test('UXF-039 cluster-node-facts: the lease ring counts to the poweroff the node reports, red while the cluster file says otherwise', async ({ page, baseURL }) => {
+  const { node } = await nodeFacts(page, baseURL);
+  await expect(node.locator('.life text')).toHaveText(/^(2:00|1:59)$/);
+  const lease = node.locator('[data-lease-mismatch]');
+  await expect(lease).toHaveText(/^file /);
+  await expect(lease).toHaveAttribute('aria-label', /^the node powers off at .*, the cluster file says /);
+  const [border, bad] = await node.evaluate((el) => {
+    const probe = document.createElement('i');
+    probe.style.color = 'var(--bad)';
+    el.append(probe);
+    const red = getComputedStyle(probe).color;
+    probe.remove();
+    return [getComputedStyle(el).borderTopColor, red];
+  });
+  expect(border, 'the card is marked in the colour of a fault').toBe(bad);
+});
+
+test('UXF-040 cluster-node-facts: cloud cost counts from the node\'s boot, past the stale deadline', async ({ page, baseURL }) => {
+  await nodeFacts(page, baseURL);
+  await expect(page.locator('.kpi.cost dd')).toContainText('44.76');
+});
+
+test('UXF-041 cluster-node-facts: each card counts its own node\'s finished jobs over the same windows', async ({ page, baseURL }) => {
+  const { local, node } = await nodeFacts(page, baseURL);
+  await expect(node.locator('[data-counts]')).toContainText(/60 min 1,700 done, 120 failed .* today 7,566 done, 1,378 failed/);
+  await expect(local.locator('[data-counts]')).toContainText(/60 min 40 done, 3 failed .* today 300 done, 20 failed/);
+});
+
+test('UXF-042 cluster-node-facts: failures are split by cause on the cards', async ({ page, baseURL }) => {
+  const { node } = await nodeFacts(page, baseURL);
+  await expect(node.locator('[data-fail-causes]')).toHaveText('failed: 110 test · 2 timeout · 8 infra');
+});
+
+test('UXF-042 busy-failed: the header splits the failed jobs by cause', async ({ page, baseURL }) => {
+  await start(page, baseURL, 'busy-failed');
+  await expect(page.locator('header [data-fail-causes]')).toHaveText('1 test');
+});
+
+test('UXF-043 cluster-node-facts: the local card shows the whole host\'s CPUs and load, not only the pool\'s', async ({ page, baseURL }) => {
+  const { local, node } = await nodeFacts(page, baseURL);
+  await expect(local.locator('[data-host]')).toHaveText('whole host 4.1 of 20 CPUs · load 5.3');
+  await expect(node.locator('[data-host]')).toHaveText('whole host 29.5 of 64 CPUs · load 31.2');
+});
+
+test('UXF-044 node-job-output: the output of a node\'s job is shown in the pane', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: GATING[0].width, height: GATING[0].height });
+  await open(page, baseURL ?? '/', nodeJobOutput());
+  await page.getByRole('button', { name: 'output of job 7089 on build-1d', exact: true }).first().click();
+  const pane = page.locator('aside');
+  await expect(pane).toContainText('test lease::renews ... FAILED on the node');
+  await expect(pane).not.toContainText('stays on that node');
+  await expect(pane).not.toContainText('output not available');
+});
+
+for (const size of GATING) {
+  test(`UXF-050 nodes-busy @ ${vpName(size)}: a node job's id and its node stand in the job cell, clear of the tool cell`, async ({ page, baseURL }) => {
+    await start(page, baseURL, 'nodes-busy', size);
+    for (const heading of ['Running', 'Queue', 'Finished']) {
+      const got = await tableOf(page, heading).evaluate((table, node) => {
+        const problems: string[] = [];
+        let rows = 0;
+        for (const b of table.querySelectorAll('tbody button.jobid')) {
+          if (!(b.getAttribute('aria-label') ?? '').endsWith(` on ${node}`)) continue;
+          rows++;
+          const cell = b.closest('td') as HTMLElement;
+          const tool = cell.nextElementSibling as HTMLElement;
+          const id = b.textContent?.trim() ?? '';
+          const edge = Math.min(cell.getBoundingClientRect().right, tool.getBoundingClientRect().left) + 0.5;
+          // Every box in the cell, and the id's own text, end before the tool cell; a text cut with an ellipsis ends with its box.
+          const range = document.createRange();
+          range.selectNodeContents(b);
+          const boxes = [...cell.querySelectorAll('*')].map((el) => [el.tagName.toLowerCase(), el.getBoundingClientRect()] as const);
+          for (const [what, r] of [...boxes, ['the id text', range.getBoundingClientRect()] as const]) {
+            if (r.width > 0 && r.right > edge) problems.push(`${id}: ${what} runs ${Math.round(r.right - edge)}px into the tool column`);
+          }
+          const said = cell.innerText;
+          if (!said.includes(id)) problems.push(`${id}: the id is not shown`);
+          const titled = [cell, ...cell.querySelectorAll('[title]')].some((e) => (e.getAttribute('title') ?? '').includes(node));
+          if (!said.includes(node.slice(0, 8)) || !titled) problems.push(`${id}: the cell does not name the node`);
+        }
+        return { rows, problems };
+      }, NODE16);
+      expect(got.rows, `${heading}: rows of node jobs`).toBeGreaterThan(0);
+      expect(got.problems, heading).toEqual([]);
+    }
+  });
+}
+
+test('UXF-051 nodes-busy: a number of this host alone says so, and Finished lists the node jobs that ended last', async ({ page, baseURL }) => {
+  await start(page, baseURL, 'nodes-busy');
+  await expect(page.locator('[data-ux-region="slots"]')).toContainText('this host');
+  await expect(page.getByRole('heading', { name: /^Cores: used/ })).toContainText('this host');
+  await expect(page.getByRole('heading', { name: /^Share of the pool/ })).toContainText('this host');
+  const sum = page.getByRole('heading', { name: /^Running/ }).locator('xpath=following-sibling::p[1]');
+  await expect(sum).toContainText(`4 on ${NODE16}`);
+  await expect(sum).toContainText(/2 on this host use \d+\.\d cores/);
+  const finished = tableOf(page, 'Finished');
+  await expect(finished.getByRole('button').first()).toHaveAccessibleName(`output of job 1234505 on ${NODE16}`);
+  await expect(finished.getByRole('button', { name: new RegExp(` on ${NODE16}$`) })).toHaveCount(6);
+});
+
+test('UXF-052 nodes-busy and cluster-queue-empty: a job\'s session is its title wherever the daemon knows one, and a job without one says so', async ({ page, baseURL }) => {
+  await start(page, baseURL, 'nodes-busy');
+  const row = (id: number): Locator =>
+    tableOf(page, 'Running').getByRole('row').filter({ has: page.getByRole('button', { name: `output of job ${id} on ${NODE16}`, exact: true }) });
+  await expect(row(1234567).getByRole('cell', { name: QUIET_SESSION.title, exact: true })).toBeVisible();
+  await expect(row(1234568).getByRole('cell', { name: 'no session', exact: true })).toBeVisible();
+  await page.unrouteAll();
+  await start(page, baseURL, 'cluster-queue-empty');
+  const list = page.getByRole('table', { name: 'Jobs, newest first' });
+  await expect(list.getByRole('columnheader', { name: 'session', exact: true })).toHaveCount(1);
+  const listed = (id: number): Locator => list.getByRole('row').filter({ has: page.getByRole('button', { name: `output of job ${id} on ${NODE16}`, exact: true }) });
+  await expect(listed(1234567).getByRole('cell', { name: QUIET_SESSION.title, exact: true })).toBeVisible();
+  await expect(listed(1234568).getByRole('cell', { name: 'no session', exact: true })).toBeVisible();
+});
+
+for (const size of CLUSTER_GATING) {
+  test(`UXF-053 @ ${vpName(size)}: the start page stacks; nothing in its header overlaps, every node name and card is shown in full`, async ({ page, baseURL }) => {
+    for (const name of ['cluster-remote', 'cluster-queue-empty']) {
+      await start(page, baseURL, name, size);
+      await expect(page.locator('.node')).toHaveCount(2);
+      await page.waitForTimeout(100);
+      const got = await page.evaluate(() => {
+        const meet = (a: DOMRect, b: DOMRect): boolean =>
+          a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+        const header = document.querySelector('header.top') as HTMLElement;
+        const parts = [header.querySelector('h1'), ...header.querySelectorAll('.kpi'), header.querySelector('nav')].filter((e): e is Element => !!e);
+        const overlaps: string[] = [];
+        parts.forEach((a, i) => parts.slice(i + 1).forEach((b) => {
+          if (meet(a.getBoundingClientRect(), b.getBoundingClientRect())) overlaps.push(`${a.textContent?.trim().slice(0, 20)} / ${b.textContent?.trim().slice(0, 20)}`);
+        }));
+        const cut = [...header.querySelectorAll<HTMLElement>('.kpi, h1 > span')].filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent?.trim());
+        const names = [...document.querySelectorAll<HTMLElement>('.node .nname')].filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent);
+        const cards: string[] = [];
+        for (const card of document.querySelectorAll<HTMLElement>('.node')) {
+          const c = card.getBoundingClientRect();
+          if (c.left < 0 || c.right > innerWidth + 0.5) cards.push(`${card.dataset.node} outside the window`);
+          for (const el of card.querySelectorAll('*')) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && r.right > c.right + 0.5) cards.push(`${card.dataset.node}: ${el.tagName.toLowerCase()}.${el.getAttribute('class') ?? ''} past the card`);
+          }
+        }
+        return { hscroll: document.documentElement.scrollWidth - innerWidth, overlaps, cut, names, cards: cards.slice(0, 5) };
+      });
+      expect(got, name).toEqual({ hscroll: 0, overlaps: [], cut: [], names: [], cards: [] });
+      await page.unrouteAll();
+    }
+  });
+}
+
+test('UXF-054 cluster-queue-empty: with no job queued the endpoint panel says where the jobs run', async ({ page, baseURL }) => {
+  await start(page, baseURL, 'cluster-queue-empty');
+  const ep = page.locator('.endpoint');
+  await expect(ep).toContainText('Queue empty');
+  const line = (name: string): Locator => ep.getByRole('listitem').filter({ hasText: name });
+  await expect(line('workstation')).toContainText('2 running');
+  await expect(line(NODE16)).toContainText('4 running');
+  await expect(line(NODE16)).toContainText('5/51 slots');
+});

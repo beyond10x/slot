@@ -1,7 +1,7 @@
 import { computed, reactive, shallowReactive, shallowRef, triggerRef } from 'vue';
-import type { CacheMinute, Event, HostCensus, Job, LiveJob, Node, SharesView, State } from './generated/types.ts';
+import type { CacheMinute, Event, HostCensus, Job, LiveJob, Node, SharesView, State, Usage } from './generated/types.ts';
 import { MINUTE_MS, cachePoint, cacheWindow, latestMinute, parseCacheDay, parseCacheHistory } from './lib/cache.ts';
-import { LOCAL, cpuOf, localFromState, parseNodes } from './lib/cluster.ts';
+import { LOCAL, hostCpuOf, localFromState, parseNodes } from './lib/cluster.ts';
 import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './lib/history.ts';
 import type { RecordedBucket, Sample, Tick } from './lib/history.ts';
 import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
@@ -10,6 +10,7 @@ import { familyOrder, hostSample } from './lib/host.ts';
 import type { HostSample } from './lib/host.ts';
 import { isActive, jobId, jobKey } from './lib/job.ts';
 import { SparkBuffer } from './lib/spark.ts';
+import { usageUrl } from './lib/usage.ts';
 import type { Point } from './lib/spark.ts';
 
 export type { Sample } from './lib/history.ts';
@@ -125,7 +126,7 @@ export const cacheDay = shallowRef<CacheMinute | undefined>(undefined);
 export const apiNodes = shallowRef<Node[] | null>(null);
 /** Free space the eviction saw last, bytes: the local node's disk from a daemon without `api/nodes`. */
 const evictFree = shallowRef(0);
-/** Not reactive: busy CPUs per node over the last 60 s, read by the node cards' canvases. */
+/** Not reactive: busy CPUs of each node's whole machine over the last 60 s, read by the node cards' canvases. */
 export const nodeSparks = new SparkBuffer<string>(62_000);
 
 /** Every node the start page shows: the daemon's answer, or the local node from the state alone. */
@@ -158,7 +159,7 @@ async function loadNodes(force = false): Promise<void> {
   if (!list) return;
   apiNodes.value = list;
   const at = now();
-  for (const n of list) nodeSparks.push(n.node_id, at, cpuOf(n));
+  for (const n of list) nodeSparks.push(n.node_id, at, hostCpuOf(n));
 }
 
 /** Server time estimate, ms. */
@@ -270,8 +271,8 @@ async function loadExactHistory(): Promise<void> {
     }
   }
   noteFamilies(ticks);
-  // The local node's CPU line starts with the jobs' cores of the last minute; the answers of `api/nodes` follow it.
-  nodeSparks.seed(LOCAL, ticks.map((t) => ({ t: t.t, v: t.job_cores })));
+  // The local node's CPU line, the whole host's, starts with the last minute of ticks; the answers of `api/nodes` follow it.
+  nodeSparks.seed(LOCAL, ticks.map((t) => ({ t: t.t, v: t.sys_cpu * store.cores })));
   noteTitles(ticks);
   for (const [id, pts] of jobPts) if (live.has(id)) sparks.seed(id, pts);
   const current = new Set((census.value?.sessions ?? []).map((s) => s.session));
@@ -367,6 +368,20 @@ export async function start(): Promise<void> {
   store.ready = true;
   // The daemon adds a minute of compiler calls each minute, and no event says so.
   setInterval(() => void loadCache(), MINUTE_MS);
+  void loadSessionTitles().catch(() => undefined);
+  setInterval(() => void loadSessionTitles().catch(() => undefined), 5 * MINUTE_MS);
+}
+
+/**
+ * Titles the daemon resolved for the sessions of the last 24 hours (`api/usage` grouped by session): the job tables name a job's
+ * session by them, also a session that no census of this page named. A title from a census stands.
+ */
+async function loadSessionTitles(): Promise<void> {
+  const res = await fetch(usageUrl('24h', 'session', new Date()));
+  if (!res.ok) return;
+  const u = (await res.json()) as Usage;
+  if (u.by !== 'session' || !Array.isArray(u.rows)) return;
+  for (const r of u.rows) if (r.key && r.title && !sessionTitles.has(r.key)) sessionTitles.set(r.key, r.title);
 }
 
 /**

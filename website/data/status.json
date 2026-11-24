@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.34.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.35.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -232,6 +232,27 @@
       "label": "Fetch once",
       "status": "shipped",
       "detail": "The node runs cargo fetch once per new Cargo.lock, then every job builds offline (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Node cards read the node",
+      "status": "shipped",
+      "detail": "A node reports its scheduled poweroff, its boot, the whole machine's CPU and load, and its finished jobs by cause; the card counts the lease to that poweroff and the cost from that boot (0.35.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Output of a node's job",
+      "status": "shipped",
+      "detail": "The web view streams the output of a job that runs on a node, read through the node's restricted ssh command (0.35.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Never-sync list and credential names in the binary",
+      "status": "shipped",
+      "detail": "A tree under a listed prefix never leaves the machine, however slot is called; a variable whose name looks like a credential never crosses; links that leave the tree are sent as links (0.35.0).",
       "href": "/docs/remote-builds"
     },
     {

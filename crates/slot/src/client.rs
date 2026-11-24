@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 use crate::artifacts;
+use crate::never_sync;
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
@@ -199,15 +200,39 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let CheckoutInfo {
         top,
+        git_dirs,
         repo,
         checkout,
     } = checkout_info(&cwd);
     let mut req = new_request(argv, s, repo, checkout);
+    // The never-sync list holds whatever `SLOT_HOST` says: its reason also
+    // keeps the daemon from handing the job to a node.
+    let never = never_sync::of_job(&never_sync::Job {
+        cwd: &cwd,
+        top: top.as_deref(),
+        git_dirs: &git_dirs,
+        argv,
+    });
+    if let Some(reason) = &never {
+        req.local_reason.clone_from(reason);
+    }
     if let Some(dir) = crate::gate::dir_from_env() {
         local_fields(&mut req, &cwd);
         return crate::gate::submit(&dir, &req);
     }
-    if let Some(host) = remote_host(&mut req, s, || listed_local(top.as_deref(), argv)) {
+    if let (Some(reason), Some(host), false) = (&never, &s.host, s.here) {
+        if std::env::var_os(crate::server::spill::SPILLED_ENV).is_some_and(|v| !v.is_empty()) {
+            eprintln!("slot: {reason}: the tree is not synced to {host}");
+            return crate::server::spill::INFRA_EXIT;
+        }
+        eprintln!("slot: {reason}: the tree is not synced to {host}; running on this machine");
+    }
+    let host = if never.is_some() {
+        None
+    } else {
+        remote_host(&mut req, s, || listed_local(top.as_deref(), argv))
+    };
+    if let Some(host) = host {
         let plan = artifacts::plan(argv);
         if let Some(p) = &plan {
             req.argv.clone_from(&p.argv);
@@ -677,6 +702,9 @@ pub fn git_info(cwd: &Path) -> (Option<PathBuf>, Option<String>) {
 #[derive(Default)]
 struct CheckoutInfo {
     top: Option<PathBuf>,
+    /// The git directory and the common one (they differ in a linked
+    /// worktree).
+    git_dirs: Vec<PathBuf>,
     repo: Option<String>,
     checkout: Option<Checkout>,
 }
@@ -734,6 +762,7 @@ fn checkout_info(cwd: &Path) -> CheckoutInfo {
     };
     CheckoutInfo {
         top: Some(top.to_path_buf()),
+        git_dirs: vec![git_dir.to_path_buf(), common.to_path_buf()],
         repo,
         checkout,
     }
@@ -842,10 +871,17 @@ fn remote(
     } else {
         String::new()
     };
-    for (k, v) in std::env::vars() {
-        if (tc.client_env(&k) && !toolchain::credential(&k)) || s.extra_env.contains(&k) {
-            req.env.push(format!("{k}={v}"));
-        }
+    let (sent, held) = toolchain::remote_env(
+        std::env::vars(),
+        |k| tc.client_env(k),
+        |k| s.extra_env.contains(k),
+    );
+    req.env.extend(sent);
+    if !held.is_empty() {
+        eprintln!(
+            "slot: not sent to {host}, the names look like a credential: {}",
+            held.join(", ")
+        );
     }
     req.workspace = Some(Workspace {
         id,
@@ -949,17 +985,17 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
                 started = true;
                 match collector.as_deref_mut() {
                     Some(c) => {
-                        let _ = stdout.write_all(&c.push(b.as_bytes()));
+                        write_out(&mut stdout, &c.push(b.as_bytes()));
                     }
                     None => {
-                        let _ = stdout.write_all(b.as_bytes());
+                        write_out(&mut stdout, b.as_bytes());
                     }
                 }
                 let _ = stdout.flush();
             }
             Ok(Frame::Err { b }) => {
                 started = true;
-                let _ = stderr.write_all(b.as_bytes());
+                write_out(&mut stderr, b.as_bytes());
             }
             Ok(Frame::Start { target_dir, .. }) => {
                 started = true;
@@ -971,7 +1007,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
             Ok(Frame::Exit { code }) => {
                 drop(writer);
                 if let Some(c) = collector.as_deref_mut() {
-                    let _ = stdout.write_all(&c.finish());
+                    write_out(&mut stdout, &c.finish());
                     let _ = stdout.flush();
                 }
                 return Ended::Exit(code);
@@ -984,7 +1020,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
         }
     }
     if let Some(c) = collector {
-        let _ = stdout.write_all(&c.finish());
+        write_out(&mut stdout, &c.finish());
         let _ = stdout.flush();
     }
     if let Some(sig) = signalled() {
@@ -993,9 +1029,77 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
     Ended::Lost { started }
 }
 
+/// Writes all of `buf`, also to a pipe that another process sharing it made
+/// non-blocking (a test runner or bundler in the same pipeline): on
+/// `WouldBlock` it waits briefly and writes the rest. `write_all` gives up
+/// there, and the rest of the block was lost while later lines arrived.
+fn write_fully<W: Write>(w: &mut W, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match w.write(buf) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// [`write_fully`], then a flush that also waits out `WouldBlock`.
+fn write_out<W: Write>(w: &mut W, buf: &[u8]) {
+    if write_fully(w, buf).is_err() {
+        return;
+    }
+    loop {
+        match w.flush() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pipe another process made non-blocking: takes at most 3 bytes per
+    /// call and answers every second call with `WouldBlock`.
+    struct Choppy {
+        got: Vec<u8>,
+        calls: usize,
+    }
+
+    impl Write for Choppy {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls.is_multiple_of(2) {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = buf.len().min(3);
+            self.got.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_to_a_non_blocking_pipe_arrives_whole() {
+        let text = b"test lease::renews ... ok\nSummary [ 1.2s] 40 tests run: 40 passed\n";
+        let mut w = Choppy {
+            got: Vec::new(),
+            calls: 0,
+        };
+        write_fully(&mut w, text).unwrap();
+        assert_eq!(w.got, text);
+    }
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
 

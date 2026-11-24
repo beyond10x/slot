@@ -9,8 +9,18 @@ type Named = { id: number; node?: string; from_node?: boolean };
 /** What names one job in the page: its id, with the node for a node's own row, whose ids may repeat a local one. */
 export const jobKey = (j: Named): string => (j.from_node ? `${j.node}/${jobId(j)}` : String(jobId(j)));
 
+/** Where the output of the job named `key` ([`jobKey`]) streams from: this daemon, which reads a node's own job from that node. */
+export function outputUrl(key: string): string {
+  const at = key.lastIndexOf('/');
+  if (at < 0) return `api/jobs/${key}/output`;
+  return `api/jobs/${key.slice(at + 1)}/output?node=${encodeURIComponent(key.slice(0, at))}`;
+}
+
 /** The id a person reads in a table cell. */
 export const idLabel = (j: Named): string => String(jobId(j));
+
+/** The build node a job runs or ran on; empty for this host (`local`, or no node in an older job log line). */
+export const remoteNode = (j: { node?: string }): string => (j.node && j.node !== 'local' ? j.node : '');
 
 /** The job named in words: `7089 on build-1d` for a node's own job, the id alone for this daemon's. */
 export const jobName = (j: Named): string => (j.from_node ? `${jobId(j)} on ${j.node}` : String(jobId(j)));
@@ -63,13 +73,16 @@ export const resultText = (j: Job): string => (j.state === 'failed' ? `failed ($
 /** The result as the output pane words it, with the exit code named: "failed (exit 101)", "ok (exit 0)", "cancelled". */
 export const resultLong = (j: Job): string => (j.state === 'cancelled' ? 'cancelled' : `${j.state} (exit ${j.exit})`);
 
-/** Active jobs by id ascending; the last `limit` finished jobs by id descending. */
+/**
+ * Active jobs by id ascending; the `limit` finished jobs that ended last, newest first, id descending on a tie. A node numbers
+ * its jobs on its own, so the id says nothing about when a node's job ended beside this host's.
+ */
 export function splitJobs(list: Iterable<Job>, limit = 60): { active: Job[]; done: Job[] } {
   const active: Job[] = [];
   const done: Job[] = [];
   for (const j of list) (isActive(j.state) ? active : done).push(j);
   active.sort((a, b) => jobId(a) - jobId(b));
-  done.sort((a, b) => jobId(b) - jobId(a));
+  done.sort((a, b) => Number(b.ended_ms) - Number(a.ended_ms) || jobId(b) - jobId(a));
   return { active, done: done.slice(0, limit) };
 }
 
