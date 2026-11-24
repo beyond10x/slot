@@ -217,7 +217,7 @@ root_name() {
 
 etc_binds() {
   echo "BindReadOnlyPaths=$STORE/rootfs/etc/ld.so.cache:/etc/ld.so.cache"
-  for e in $ETC_LIST; do echo "BindReadOnlyPaths=$STORE/rootfs/etc/$e:/etc/$e"; done
+  for e in $ETC_LIST $ETC_EXTRA; do echo "BindReadOnlyPaths=$STORE/rootfs/etc/$e:/etc/$e"; done
 }
 tokens() {
   if [ -n "$TOKENS" ]; then echo "$TOKENS"; else q_nproc; fi
@@ -719,13 +719,33 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
-  for e in $ETC_LIST; do
-    [ -e "$R/etc/$e" ] && continue
-    drift etc "/etc/$e missing (bind target)"
-    if fixing; then
-      if [ -d "$R$STORE/rootfs/etc/$e" ]; then mkdir -p "$R/etc/$e"; else : >"$R/etc/$e"; fi
-      changed etc "/etc/$e created"
+  # Each bound /etc entry needs a target of the same type as its copy from the workstation.
+  for e in $ETC_LIST $ETC_EXTRA; do
+    src=$R$STORE/rootfs/etc/$e
+    t=$R/etc/$e
+    if [ ! -e "$src" ]; then
+      [ -e "$t" ] && continue
+      drift etc "/etc/$e missing (bind target); made once push.sh has copied it"
+      fixing && echo "pending: etc: /etc/$e is made once push.sh has copied it" >&2
+      continue
     fi
+    if [ -d "$src" ]; then want=d; else want=f; fi
+    if [ -d "$t" ]; then got=d; elif [ -e "$t" ]; then got=f; else got=; fi
+    [ "$got" = "$want" ] && continue
+    drift etc "/etc/$e ${got:+is the wrong type}${got:-missing} (bind target)"
+    fixing || continue
+    if [ -n "$got" ]; then
+      if [ "$got" = f ] && [ ! -s "$t" ] && [ ! -L "$t" ]; then
+        rm -f "$t"
+      elif [ "$got" = d ] && rmdir "$t" 2>/dev/null; then
+        :
+      else
+        failed etc "/etc/$e is in use with another type; not replaced"
+        continue
+      fi
+    fi
+    if [ "$want" = d ]; then mkdir -p "$t"; else : >"$t"; fi
+    changed etc "/etc/$e created"
   done
 }
 

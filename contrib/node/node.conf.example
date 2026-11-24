@@ -15,3 +15,4 @@ PUSH_HOST=node-1-setup
 NODE_HOST=node-1
 NODE_RUN_DIR=/var/lib/builder/src/slot
 HOME_COPIES=.m2/repository
+ETC_EXTRA=java21-openjdk

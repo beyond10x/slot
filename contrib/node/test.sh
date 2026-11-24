@@ -28,6 +28,7 @@ SLOT_VERSION=0.36.0
 MIRROR_DIRS=.local/state/worktree .cache work
 GO_PRIVATE=git.example.org
 NODE_NAME=node-1
+ETC_EXTRA=java21-openjdk
 EOF
 }
 run() { NODE_TEST=1 NODE_ROOT=$1 sh "$P" "$2" "$W/node.conf" >"$W/out" 2>"$W/err"; }
@@ -65,12 +66,16 @@ st=$?
 grep -q '^pending: unit:slot-node.service' "$W/err" && ok "before the push, slot-node waits for the workstation /usr" || bad "no pending line: $(cat "$W/err")"
 run "$R" check
 grep -q '^drift: unit:slot-node.service: not active' "$W/out" && ok "before the push, check names slot-node" || bad "before the push: $(cat "$W/out")"
-# What push.sh brings from the workstation: its /usr and the compile cache server in it.
+# What push.sh brings from the workstation: its /usr with the compile cache server, and /etc entries.
 mkdir -p "$R/srv/slot/rootfs/usr/bin" && : >"$R/srv/slot/rootfs/usr/bin/sccache"
+for e in fonts ssl ca-certificates ld.so.conf.d java21-openjdk; do mkdir -p "$R/srv/slot/rootfs/etc/$e"; done
+for e in ld.so.cache localtime locale.conf nsswitch.conf ld.so.conf mime.types protocols services os-release; do : >"$R/srv/slot/rootfs/etc/$e"; done
 run "$R" apply
 run "$R" check
 st=$?
 if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "after apply: 0 drift"; else bad "after apply: exit $st, $(cat "$W/out")"; fi
+grep -qx 'BindReadOnlyPaths=/srv/slot/rootfs/etc/java21-openjdk:/etc/java21-openjdk' "$R/etc/systemd/system/slot-node.service" && ok "ETC_EXTRA is bound" || bad "ETC_EXTRA not bound"
+[ -d "$R/etc/java21-openjdk" ] && [ -f "$R/etc/localtime" ] && ok "bind targets have the type of their copy" || bad "bind target types"
 run "$R" apply
 grep -q '^changed: ' "$W/out" && bad "a second apply changed: $(grep '^changed: ' "$W/out" | head -3)" || ok "a second apply changes nothing"
 

@@ -31,6 +31,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `STORE`, `DISK_MODEL`, `EXTRA_PACKAGES`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, more packages, the name in messages |
 | `NODE_SSH`, `PUSH_HOST` | push | the ssh command and the host of the setup login |
 | `NODE_HOST`, `NODE_RUN_DIR` | push | the node's name for `SLOT_HOST` and a checkout to run the check job from |
+| `ETC_EXTRA` | both | more `/etc` entries jobs read from the workstation (a JDK links its config there) |
 | `RUST_TOOLCHAINS`, `HOME_COPIES`, `SKIP_BINS` | push | toolchains to copy (default: all), directories under the home to copy, cargo tools to leave out |
 
 ## A new node, or a node after a stop and start

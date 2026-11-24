@@ -65,7 +65,7 @@ if [ "$mode" = apply ]; then
     [ $((n % 6)) -eq 0 ] && wait
   done
   wait
-  for e in $ETC_LIST; do
+  for e in $ETC_LIST $ETC_EXTRA; do
     [ -e "/etc/$e" ] || continue
     if [ -d "/etc/$e" ] && [ ! -L "/etc/$e" ]; then
       rs -a --delete --mkpath -e "$NODE_SSH" "/etc/$e/" "$dst/rootfs/etc/$e/" || fails=$((fails + 1))
