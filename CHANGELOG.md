@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.34.0 — 2026-11-24
 
 - `slot --version` and a node's `slot_version` name a build that is not of its release tag:
   `0.34.0+g31e76f1`, with `.dirty` when tracked files changed. A build of the tag (or a CI run

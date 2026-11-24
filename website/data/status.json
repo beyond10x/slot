@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.33.1 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.34.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -214,6 +214,27 @@
       "href": "/docs/remote-builds#restrict-the-key-to-slot"
     },
     {
+      "area": "Remote",
+      "label": "Build nodes in the web view",
+      "status": "shipped",
+      "detail": "Each remote node of the host configuration shows in the cluster view with its jobs and lease; a node's job keeps the id its node gave it (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Same-path mirrors and products back",
+      "status": "shipped",
+      "detail": "A tree under the home syncs to its own path on the node, like a CI runner's checkout; a remote cargo build brings its products back into the local target directory (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Fetch once",
+      "status": "shipped",
+      "detail": "The node runs cargo fetch once per new Cargo.lock, then every job builds offline (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
       "area": "Configuration",
       "label": "Per-repository configuration",
       "status": "shipped",
@@ -233,6 +254,13 @@
       "status": "shipped",
       "detail": "slot gate lets a sandbox with no socket and no network queue its builds in the pool through FIFOs; the build runs in the sandbox (0.18.0).",
       "href": "/docs/agent-integration#builds-in-a-sandbox-the-gate"
+    },
+    {
+      "area": "Agents",
+      "label": "Gates whose steps call slot",
+      "status": "shipped",
+      "detail": "SLOT_ORCHESTRATOR=1 in front of task, make, just or a shell lets the Claude Code hook run the gate outside the pool while each step is its own pool job (0.34.0).",
+      "href": "/docs/claude-code-plugin"
     }
   ]
 }
