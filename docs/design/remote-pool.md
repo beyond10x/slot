@@ -92,9 +92,11 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | choose | `SLOT_HOST` in the caller's environment sends the command remote, unless `.slot.toml` lists it as `local` | `client.rs:137`, `:185-189`, `:303-318` |
 | identify | workspace id = first 8 bytes of SHA-256 of `hostname:repo-root`, so each worktree has its own mirror | `client.rs:571-577` |
 | siblings | before the push the client asks the host for mirrors of the same repository (normalized `origin` URL, `mirror.rs`) with `slot __siblings`; up to four go to rsync as `--copy-dest`, so a new mirror receives only what differs from them; a host without the step gets the plain push | `sync.rs`, `mirror.rs`, `shell.rs` |
+| never sync | before any route is chosen, whatever `SLOT_HOST` says: a job whose working directory, checkout root, git directories or a tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`) lies under a prefix of the never-sync list, or whose tree holds the home directory, stays local with `local_reason` `never sync: …`, which also keeps the daemon from handing it to a node (§ 8.4) | `never_sync.rs`, `client.rs` `run` |
+| pre-flight | `rsync -a --list-only` of the tree with the push's filters, through the same `rsync`: counts symlinks that leave the tree, and refuses the sync when that rsync would send such a link's target in place of the link | `sync.rs` `preflight` |
 | push | `rsync -a --checksum --delete --mkpath --filter=':- .gitignore' --exclude=/.git` plus the toolchain's excludes (`/target/` for rust, `/node_modules/` for node tests, none for go) to `<host>:<ws-root>/<id>/` | `sync.rs`, `toolchain.rs:222-224`, `:272-274`, `:375-377` |
 | ssh | default `ssh -o ControlMaster=auto -o ControlPersist=10m -o ControlPath=… -o ConnectTimeout=3`; `SLOT_SSH` replaces it, split on whitespace | `client.rs:115-135` |
-| environment | names the toolchain admits and that do not look like a credential, plus names in `SLOT_ENV` | `client.rs:635-639`, `toolchain.rs:163-176`, `:212-220` |
+| environment | names the toolchain admits plus names in `SLOT_ENV`, except names that look like a credential, which the client names on stderr | `client.rs` `remote`, `toolchain.rs` `credential`, `remote_env` |
 | run | `ssh <host> slot proxy` bridges to the host daemon's socket; the job starts from the host daemon's environment with the client's admitted names on top | `client.rs:645-662`, `server/mod.rs:1579-1590` |
 | command | the host runs `argv[0]` as the client sent it; a name with a slash is not looked up | `server/mod.rs:2088-2111`, `:4816-4819` |
 | caches | remote rust jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`, go jobs `GOCACHE=<cache-root>/go-build` | `toolchain.rs:203-210`, `:255-257`, `server/mod.rs:2029-2044` |
@@ -339,7 +341,7 @@ of the same worktree runs changes that job's sources under it, as an edit does t
 | gitignored build inputs | the `.gitignore` filter (`client.rs:620`) | in this repository `crates/slot/build.rs:23-36` embeds `ui/dist`, which `.gitignore` excludes, and writes a placeholder page when it is missing: a remote build of slot has no web UI | phase 2: the operator's opt-in names ignored paths to include |
 | rsync reads `.gitignore` by its own rules | `--filter=':- .gitignore'` treats each line as an rsync exclude | a `!keep` line does not re-include a file, so it is missing on the host; files ignored only by `.git/info/exclude` or the user's global ignore file are sent; a tracked file that matches an ignore line is not sent *(unverified: from rsync's filter rules, not run)* | pre-flight: compare `git ls-files --cached --others --exclude-standard` with `rsync --list-only` of the same tree. Phase 0 compared them on a tree of 10,540 files: the filter selected exactly git's list, 115,985,019 bytes both ways, so sending the git list with `--files-from` saves no bytes there and is not built; it stays the fix for a tree where the lists differ |
 | a nested `.git` | `--exclude=/.git` is anchored at the root | a clone inside the worktree crosses with its `.git/config`, which may hold a token in a remote URL | phase 1: `--exclude=.git` at every depth |
-| symlinks that leave the tree | `rsync -a` copies links as links | the link dangles on the host | pre-flight lists them; such repositories stay local |
+| symlinks that leave the tree | `rsync -a` copies links as links; the pre-flight (`sync.rs` `preflight`) counts them on the sync line and refuses a sync whose `rsync` would send their targets (a `PATH` wrapper with `--copy-unsafe-links`) | the link dangles on the host | the count names them; a repository that needs the target on the host stays local |
 | the command's absolute path | the shim sends `$real` (§ 2.3 item 6) | exit 127 on the host | phase 0: type `slot cargo …`. Phase 1: for a placed job the client sends the file name of `argv[0]` |
 | environment values that are workstation paths | every `RUST*` and `CARGO_*` name crosses but three (`toolchain.rs:213-219`): `RUSTC`, `RUSTC_WRAPPER`, `RUSTUP_HOME`, `CARGO_INSTALL_ROOT` when set | the host job looks for a path it does not have | phase 0: check `env` in the session. Phase 1: hold back a value that is a path under the caller's home |
 | the workstation's `~/.cargo/config.toml` (sccache wrapper, `debug = "line-tables-only"`, linker) | not part of any repository | the host builds with other settings | the host image writes the same file (§ 7.3). `target-cpu=native` must not be in it: a fetched binary could use instructions the workstation lacks |
@@ -813,13 +815,29 @@ To the host:
   each name it held back. It is best effort. The control that counts is the operator's opt-in
   per repository (§ 3.2 rule 3), given after reading the list of files (§ 9.1 step 1).
 - **The command line**, in full. A secret passed as an argument crosses.
-- **Environment names** the toolchain admits and that do not look like a credential
-  (`client.rs:635-639`). Names with `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`,
-  `_KEY` or `AUTH` stay (`toolchain.rs:163-176`), and so do `HOME`, every `AWS_*` name and
-  `CARGO_HOME`, which no toolchain admits (two tests, `toolchain.rs:740-777`). The value is not
-  inspected: a proxy or registry URL with a password in it crosses under a name such as
-  `CARGO_HTTP_PROXY` or `GOPROXY`. Phase 1 holds back a value that contains `://…:…@`. A name
-  in `SLOT_ENV` crosses whatever it looks like (`client.rs:636`); that is the caller's choice.
+- **Not the trees on the never-sync list.** A file of absolute path prefixes
+  (`never_sync_file` of `cluster.toml`, default `$XDG_CONFIG_HOME/slot/remote-deny`; `#`
+  comments) names trees that never leave the workstation. The client checks the job's working
+  directory, checkout root, git directories (a linked worktree's lie in its main repository)
+  and every tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`), on whole
+  path components, as written and with symlinks resolved; a tree that is `/`, the home
+  directory or above it counts too. A match keeps the job in the local pool with `local_reason`
+  `never sync: <prefix>`, and that reason keeps the daemon from spilling it; a spilled client
+  that meets a match sends the job back. The check is in the binary, so neither a preset
+  `SLOT_HOST`, nor a `--manifest-path` into a listed tree, nor a call that skips a wrapper gets
+  around it. An unreadable list keeps every job local (`never_sync.rs`, tests in
+  `crates/slot-cli/tests/remote_sync/safety.rs`).
+- **Symlinks as links.** A link that leaves the tree crosses as the link, never as its target,
+  and the sync line counts it. The pre-flight lists the tree with the same `rsync` first and
+  refuses the sync when that rsync would send a target in its place (`sync.rs` `preflight`).
+- **Environment names** the toolchain admits, plus names listed in `SLOT_ENV`, except names
+  that look like a credential (`toolchain.rs` `credential`, `remote_env`): a name that contains
+  `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASS`, `CREDENTIAL`, `_KEY`, `AUTH`, `SSH_` or
+  `AWS_SECRET`, or has `PAT`, `DSN` or `KEY` as a word between underscores. Such a name stays
+  even when `SLOT_ENV` lists it, and the client names each one on stderr, never its value.
+  `HOME`, every `AWS_*` name and `CARGO_HOME` stay too: no toolchain admits them. The value is
+  not inspected: a proxy or registry URL with a password in it crosses under a name such as
+  `CARGO_HTTP_PROXY` or `GOPROXY`. Phase 1 holds back a value that contains `://…:…@`.
 - **Identity**: the session id, `hostname:pid` of the caller and the worktree's absolute path
   (`client.rs:170-175`, `:640-644`). They end up in the host's job log.
 

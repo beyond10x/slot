@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 use crate::artifacts;
+use crate::never_sync;
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
@@ -199,15 +200,39 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let CheckoutInfo {
         top,
+        git_dirs,
         repo,
         checkout,
     } = checkout_info(&cwd);
     let mut req = new_request(argv, s, repo, checkout);
+    // The never-sync list holds whatever `SLOT_HOST` says: its reason also
+    // keeps the daemon from handing the job to a node.
+    let never = never_sync::of_job(&never_sync::Job {
+        cwd: &cwd,
+        top: top.as_deref(),
+        git_dirs: &git_dirs,
+        argv,
+    });
+    if let Some(reason) = &never {
+        req.local_reason.clone_from(reason);
+    }
     if let Some(dir) = crate::gate::dir_from_env() {
         local_fields(&mut req, &cwd);
         return crate::gate::submit(&dir, &req);
     }
-    if let Some(host) = remote_host(&mut req, s, || listed_local(top.as_deref(), argv)) {
+    if let (Some(reason), Some(host), false) = (&never, &s.host, s.here) {
+        if std::env::var_os(crate::server::spill::SPILLED_ENV).is_some_and(|v| !v.is_empty()) {
+            eprintln!("slot: {reason}: the tree is not synced to {host}");
+            return crate::server::spill::INFRA_EXIT;
+        }
+        eprintln!("slot: {reason}: the tree is not synced to {host}; running on this machine");
+    }
+    let host = if never.is_some() {
+        None
+    } else {
+        remote_host(&mut req, s, || listed_local(top.as_deref(), argv))
+    };
+    if let Some(host) = host {
         let plan = artifacts::plan(argv);
         if let Some(p) = &plan {
             req.argv.clone_from(&p.argv);
@@ -677,6 +702,9 @@ pub fn git_info(cwd: &Path) -> (Option<PathBuf>, Option<String>) {
 #[derive(Default)]
 struct CheckoutInfo {
     top: Option<PathBuf>,
+    /// The git directory and the common one (they differ in a linked
+    /// worktree).
+    git_dirs: Vec<PathBuf>,
     repo: Option<String>,
     checkout: Option<Checkout>,
 }
@@ -734,6 +762,7 @@ fn checkout_info(cwd: &Path) -> CheckoutInfo {
     };
     CheckoutInfo {
         top: Some(top.to_path_buf()),
+        git_dirs: vec![git_dir.to_path_buf(), common.to_path_buf()],
         repo,
         checkout,
     }
@@ -842,10 +871,17 @@ fn remote(
     } else {
         String::new()
     };
-    for (k, v) in std::env::vars() {
-        if (tc.client_env(&k) && !toolchain::credential(&k)) || s.extra_env.contains(&k) {
-            req.env.push(format!("{k}={v}"));
-        }
+    let (sent, held) = toolchain::remote_env(
+        std::env::vars(),
+        |k| tc.client_env(k),
+        |k| s.extra_env.contains(k),
+    );
+    req.env.extend(sent);
+    if !held.is_empty() {
+        eprintln!(
+            "slot: not sent to {host}, the names look like a credential: {}",
+            held.join(", ")
+        );
     }
     req.workspace = Some(Workspace {
         id,

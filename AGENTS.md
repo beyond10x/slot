@@ -38,7 +38,11 @@ what is specific to slot.
   `CARGO_BUILD_JOBS`: they would bypass the pool. With `slot job-parallel` on it sets
   `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` itself and leaves the pool's jobserver out of the job.
 - Remote mode forwards only variables a toolchain's `client_env` admits, plus names listed in
-  `SLOT_ENV`. Credentials never cross.
+  `SLOT_ENV`. Credentials never cross: a name that looks like one stays even when listed
+  (`toolchain::credential`).
+- Remote mode's safety rules live in the binary, not in a wrapper: the never-sync list
+  (`never_sync.rs`), the credential names, and symlinks sent as links (`sync::preflight`). The
+  list's content is host configuration; never write a listed path into source, a test or a doc.
 - After a normal exit the daemon does not kill the job's process group: a sccache server started
   by that job lives in it. On cancel the group is killed.
 
@@ -153,7 +157,8 @@ and a review were once started on 0.10.0 while `origin/main` was 0.19.0).
 Pass `--seed-target` (`worktree` 0.21.0 and later; `WORKTREE_SEED_TARGET=1` does the same): it
 copies the dependency artifacts of the repository's newest built checkout into the new tree's
 `target/`, so the first `cargo` call there does not compile every dependency again.
-Build with `CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0`, and finish the tree
+Build with `CARGO_INCREMENTAL=0` and the host's `debug` setting (no `CARGO_PROFILE_DEV_DEBUG`),
+and finish the tree
 with `worktree finish --discard-cache --archive` when the change is merged.
 
 ## Upgrading a running daemon

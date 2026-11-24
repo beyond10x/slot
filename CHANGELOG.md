@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+- A node reports what only it knows, in its row of `GET /api/nodes`: the machine's boot
+  (`booted_at`), the poweroff systemd has scheduled (`poweroff_at`), the CPUs busy on the whole
+  machine and its load (`host_cpu_milli`, `load1`; `/api/state` adds `host_busy_cores` and
+  `load1`), and the jobs it ended in the last 60 minutes and per hour of the last 25, by result
+  (`ended_hour`, `ended_hours`: `ok`, `test`, `timeout`, `infra`, `cancelled`), counted from its
+  whole job log. The web view's node cards show those counts for the last 60 minutes and today,
+  the same windows on every node (before: the local daemon's kept jobs against a node's last 30),
+  and the whole host's CPU and load (before: the pool's CPU only, 0.0 on a busy host). A remote
+  node's lease ring counts to its scheduled poweroff, and its card is red when that lies more
+  than 5 minutes from the deadline of the cluster file or when none is scheduled. The cloud cost
+  runs from the machine's boot to now (before: from the daemon's join to the deadline, so a node
+  that outlived a stale deadline cost nothing more). Failed jobs are split by cause in the header
+  and on the cards: test, timeout (124), infra (3, 125, 127). UXF-039 to UXF-043.
+- The output of a node's job opens in the web view: `GET /api/jobs/<id>/output?node=<name>` reads
+  it from the node with the new read-only `slot shell` step `slot output <id> [<from>]` (the node
+  daemon's `GET /api/jobs/<id>/output-tail?from=<n>`), every 2 s until the job ended. Before, the
+  pane said the output stayed on the node. UXF-044.
+- Web view with build nodes: a node job's cell holds its id (up to 7 digits) and its node on a
+  line below, clear of the tool column (UXF-050). Panels that count this host only say so ("slots
+  in use on this host", the Cores charts, "Share of the pool on this host"); the Running line
+  splits node jobs from this host's; Finished keeps the jobs that ended last, so a node's jobs
+  appear there (UXF-051). A job's session is its title wherever the daemon resolved one (also
+  from `api/usage` grouped by session), "no session" when it has none, and the cluster page's
+  job list has a session column (UXF-052). Below 1100 px the cluster page stacks instead of
+  scrolling sideways; the layout gates hold it at 800x600 and 1024x768 (UXF-053). With an empty
+  queue the endpoint panel lists each node's running jobs and busy slots (UXF-054).
+- Remote mode's safety rules are in the `slot` binary, so they hold however it is called (with
+  `SLOT_HOST` already set, through a wrapper or without one):
+  - The never-sync list: a file of absolute path prefixes (`never_sync_file` of `cluster.toml`,
+    default `$XDG_CONFIG_HOME/slot/remote-deny`, `#` comments). A job whose working directory,
+    checkout root, git directories or a tree an argument names (`--manifest-path`, `-C`, `--dir`,
+    `--directory`) lies under a listed prefix, or whose tree is `/` or holds the home directory,
+    is never synced: it runs in the local pool with `local_reason` `never sync: <prefix>`, which
+    also keeps the daemon from handing it to a node. Prefixes match whole path components, as
+    written and with symlinks resolved. An unreadable list keeps every job local.
+  - A variable whose name looks like a credential never crosses, even when `SLOT_ENV` lists it.
+    The list grew by `PASS`, `SSH_`, `AWS_SECRET` and the words `PAT`, `DSN` and `KEY`; the
+    client names each name it held back on stderr, never the value. Before, any name in
+    `SLOT_ENV` crossed.
+  - Symlinks stay links: before the sync the client lists the tree with the same `rsync`
+    (`--list-only`), counts links that leave the tree on the sync line (`2 symlinks leave the
+    tree (sent as links)`), and refuses the sync, running the job here, when that `rsync` would
+    send such a link's target in its place (a `PATH` wrapper with `--copy-unsafe-links`).
+
 ## 0.34.0 — 2026-11-24
 
 - `slot --version` and a node's `slot_version` name a build that is not of its release tag:
@@ -19,23 +65,6 @@
 - The daemon reads the host configuration file again when it changes, at the next node poll: a
   node's deadline, price, place and machine type follow the file without a restart. Before, a
   lease extended in the file kept showing the old deadline until the daemon restarted.
-- A node reports what only it knows, in its row of `GET /api/nodes`: the machine's boot
-  (`booted_at`), the poweroff systemd has scheduled (`poweroff_at`), the CPUs busy on the whole
-  machine and its load (`host_cpu_milli`, `load1`; `/api/state` adds `host_busy_cores` and
-  `load1`), and the jobs it ended in the last 60 minutes and per hour of the last 25, by result
-  (`ended_hour`, `ended_hours`: `ok`, `test`, `timeout`, `infra`, `cancelled`), counted from its
-  whole job log. The web view's node cards show those counts for the last 60 minutes and today,
-  the same windows on every node (before: the local daemon's kept jobs against a node's last 30),
-  and the whole host's CPU and load (before: the pool's CPU only, 0.0 on a busy host). A remote
-  node's lease ring counts to its scheduled poweroff, and its card is red when that lies more
-  than 5 minutes from the deadline of the cluster file or when none is scheduled. The cloud cost
-  runs from the machine's boot to now (before: from the daemon's join to the deadline, so a node
-  that outlived a stale deadline cost nothing more). Failed jobs are split by cause in the header
-  and on the cards: test, timeout (124), infra (3, 125, 127). UXF-039 to UXF-043.
-- The output of a node's job opens in the web view: `GET /api/jobs/<id>/output?node=<name>` reads
-  it from the node with the new read-only `slot shell` step `slot output <id> [<from>]` (the node
-  daemon's `GET /api/jobs/<id>/output-tail?from=<n>`), every 2 s until the job ended. Before, the
-  pane said the output stayed on the node. UXF-044.
 
 - `contrib/rustc-gate`, set as `rustc-wrapper`, refuses a compile outside a slot job (no
   `SLOT_JOB`) with exit 3 and the `slot run -- …` command that replaces it; `slot --local`,
