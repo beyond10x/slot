@@ -146,6 +146,93 @@ fn a_new_worktree_sends_only_what_differs_from_its_sibling_mirror() {
     eprintln!("first sync {full} bytes, the sibling's first sync {seeded} bytes, tree {tree}");
 }
 
+/// Writes `content` to `path` and gives it modification time `mtime`.
+fn write_at(path: &Path, content: &str, mtime: std::time::SystemTime) {
+    std::fs::write(path, content).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+}
+
+fn short_head(dir: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn a_file_changed_at_the_same_size_and_time_reaches_the_mirror() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let (a, _) = repository(t.path());
+    let ssh = forced_ssh(t.path(), &d, "");
+    let src = a.join("lib.rs");
+    std::fs::write(&src, "pub fn one() {}\n").unwrap();
+    let mtime = std::fs::metadata(&src).unwrap().modified().unwrap();
+
+    let first = remote_call(&d, &ssh, &a, &["cat", "lib.rs"]);
+    let err = String::from_utf8_lossy(&first.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        "pub fn one() {}\n",
+        "{err}"
+    );
+
+    write_at(&src, "pub fn two() {}\n", mtime);
+    let second = remote_call(&d, &ssh, &a, &["cat", "lib.rs"]);
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(second.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout),
+        "pub fn two() {}\n",
+        "the mirror kept the old content: {err}"
+    );
+    assert!(
+        err.contains(&format!(", at {} + 1 changed file", short_head(&a))),
+        "the line names the sources: {err}"
+    );
+    let log = std::fs::read_to_string(t.path().join("ssh.log")).unwrap();
+    let rsync = log.lines().find(|l| l.starts_with("rsync ")).unwrap();
+    let flags = rsync.split(' ').nth(2).unwrap();
+    assert!(
+        flags.split('.').next().unwrap().contains('c'),
+        "the server's rsync compares by content: {rsync}"
+    );
+}
+
+#[test]
+fn a_sibling_file_of_the_same_size_and_time_is_not_taken_for_the_worktrees() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let (a, b) = repository(t.path());
+    let ssh = forced_ssh(t.path(), &d, "");
+    std::fs::write(a.join("lib.rs"), "pub fn one() {}\n").unwrap();
+    let mtime = std::fs::metadata(a.join("lib.rs"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let first = remote_call(&d, &ssh, &a, &["cat", "lib.rs"]);
+    assert_eq!(first.status.code(), Some(0));
+
+    write_at(&b.join("lib.rs"), "pub fn two() {}\n", mtime);
+    let second = remote_call(&d, &ssh, &b, &["cat", "lib.rs"]);
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(second.status.code(), Some(0), "{err}");
+    assert!(err.contains("1 sibling mirror as base"), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout),
+        "pub fn two() {}\n",
+        "the sibling's file was taken: {err}"
+    );
+}
+
 #[test]
 fn a_server_without_the_sibling_step_gets_a_plain_sync() {
     let d = Daemon::start();

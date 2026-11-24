@@ -88,7 +88,7 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | choose | `SLOT_HOST` in the caller's environment sends the command remote, unless `.slot.toml` lists it as `local` | `client.rs:137`, `:185-189`, `:303-318` |
 | identify | workspace id = first 8 bytes of SHA-256 of `hostname:repo-root`, so each worktree has its own mirror | `client.rs:571-577` |
 | siblings | before the push the client asks the host for mirrors of the same repository (normalized `origin` URL, `mirror.rs`) with `slot __siblings`; up to four go to rsync as `--copy-dest`, so a new mirror receives only what differs from them; a host without the step gets the plain push | `sync.rs`, `mirror.rs`, `shell.rs` |
-| push | `rsync -a --delete --mkpath --filter=':- .gitignore' --exclude=/.git` plus the toolchain's excludes (`/target/` for rust, `/node_modules/` for node tests, none for go) to `<host>:<ws-root>/<id>/` | `sync.rs`, `toolchain.rs:222-224`, `:272-274`, `:375-377` |
+| push | `rsync -a --checksum --delete --mkpath --filter=':- .gitignore' --exclude=/.git` plus the toolchain's excludes (`/target/` for rust, `/node_modules/` for node tests, none for go) to `<host>:<ws-root>/<id>/` | `sync.rs`, `toolchain.rs:222-224`, `:272-274`, `:375-377` |
 | ssh | default `ssh -o ControlMaster=auto -o ControlPersist=10m -o ControlPath=… -o ConnectTimeout=3`; `SLOT_SSH` replaces it, split on whitespace | `client.rs:115-135` |
 | environment | names the toolchain admits and that do not look like a credential, plus names in `SLOT_ENV` | `client.rs:635-639`, `toolchain.rs:163-176`, `:212-220` |
 | run | `ssh <host> slot proxy` bridges to the host daemon's socket; the job starts from the host daemon's environment with the client's admitted names on top | `client.rs:645-662`, `server/mod.rs:1579-1590` |
@@ -97,7 +97,7 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | seed, evict | before a remote job queues, a new workspace's target directory is a reflink copy of the most recently used one of the same repository; least recently used ones are deleted over the budget or under the disk floor | `server/cache.rs:144-195`, `:201-205`, `server/mod.rs:1839-1841`, `:2337-2378` |
 | output | streamed line by line; the mirror path is rewritten to the client's repository path | `rewrite.rs:1-2`, `server/mod.rs:1627-1654`, `:1475-1494` |
 | fetch | after exit 0 only, each `--fetch PATH` is copied back with `rsync -a --mkpath`; `target/…` is read from the job's target directory, which the host reports in its `start` frame | `client.rs:194`, `:230-298`, `server/mod.rs:2143-2169` |
-| measure | one stderr line per sync: bytes sent (rsync `--stats`) and seconds | `sync.rs` |
+| measure | one stderr line per sync: bytes sent (rsync `--stats`), seconds, the checkout's `HEAD` and its count of changed files | `sync.rs` |
 | fallback | when the sync fails, stalls (no byte read or written for `SLOT_SYNC_STALL`, 60 s) or runs past `SLOT_SYNC_LIMIT` (5 min), or ssh cannot be started, the job goes to the local daemon with one stderr line; a stalled rsync is killed with its ssh | `client.rs:200-207`, `sync.rs` |
 | lost connection | `slot: connection to daemon lost`, exit 3, whether or not the job had started; the host cancels the job | `client.rs:190-192`, `:683-686`, design.md § 16 |
 | access | forced command `slot shell` accepts only the sync, the fetch, `slot proxy`, `slot cancel` and `slot __siblings` | `shell.rs:1-40`, `:143-164`, `:207-225` |
@@ -387,10 +387,11 @@ scheme, user, port and `.git`), so every clone and worktree of one repository sh
 an `origin` it hashes the workstation's name and the common git directory. The step writes the
 key to `<ws-root>/.repo-keys/<id>` and prints up to four other ids with the same key whose
 mirror exists, the most recently recorded first. rsync gets each as `--copy-dest=../<id>`: for a
-file missing in the new mirror it copies a sibling's file on the host when size and time match,
-and otherwise takes the sibling's file as the delta base. Worktrees checked out at different
-times differ in every file's time, so the second case is the common one; what crosses is the
-file list, block checksums and changed blocks. Measured by the test
+file missing in the new mirror it copies a sibling's file on the host when size and content
+match (`--checksum`; the time is then set from the worktree's file), and otherwise takes the
+sibling's file as the delta base. Before `--checksum` the copy needed size and time to match;
+worktrees checked out at different times differ in every file's time, so every file went the
+delta way. What crosses is the file list, block checksums and changed blocks. Measured by the test
 `a_new_worktree_sends_only_what_differs_from_its_sibling_mirror`: a worktree of a 2 MiB tree at
 the same commit as a synced sibling sent under 5 % of the tree.
 
@@ -404,8 +405,22 @@ the same commit as a synced sibling sent under 5 % of the tree.
   sends the plain push without `--copy-dest` and `--stats`, which that host would refuse too.
 - Eviction removes a mirror's key with the mirror (`server/cache.rs`).
 
+The push compares every file by content (`--checksum`), not by size and modification time.
+With rsync's quick check, a file changed at the same size and time was skipped, and a sibling's
+file of the same size and time was taken through `--copy-dest` as it was: the job built the old
+content and could pass. The tests `a_file_changed_at_the_same_size_and_time_reaches_the_mirror`
+and `a_sibling_file_of_the_same_size_and_time_is_not_taken_for_the_worktrees` hold it. The cost
+is reading every file on both sides. On a tree of 10,000 files (99 MB), a sync with nothing to
+send took 0.13 to 0.36 s by size and time and 0.33 to 0.68 s by content with the files in the
+page cache, and 2.6 to 30 s by content on a workstation at load 75 on 20 cores (local rsync into
+a local directory, 8 runs each); the stall watch below counts the reads, so a long checksum pass
+is not taken for a stall.
+
 Each sync also prints `slot: synced to <host> in <s> s, <n> bytes sent[, <k> sibling mirrors as
-base]`, the bytes from rsync's `--stats`. And a sync is bounded: rsync's read and written bytes
+base], at <commit> + <n> changed files`, the bytes from rsync's `--stats`, the commit from `git
+rev-parse --short HEAD`, the changed files as the lines of `git status --porcelain` (tracked
+changes and untracked files git does not ignore). Without git the line says that the sources
+are not named. And a sync is bounded: rsync's read and written bytes
 (`/proc/<pid>/io`) are sampled every 100 ms; no change for `SLOT_SYNC_STALL` (60 s) or a run past
 `SLOT_SYNC_LIMIT` (5 min) kills rsync and its ssh, and the job goes to the local daemon as for a
 failed sync. A killed rsync never leads to `slot proxy` on the host. Two clients of one worktree on one
