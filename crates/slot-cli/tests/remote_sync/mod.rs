@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use super::{Daemon, SLOT};
 
+mod safety;
+
 /// Files of the test repository and their size: 2 MiB that do not compress.
 const FILES: usize = 32;
 const FILE_BYTES: usize = 64 << 10;
@@ -106,6 +108,8 @@ fn remote_call_env(
     Command::new(SLOT)
         .args(argv)
         .env_remove("SLOT_REMOTE_SAME_PATH")
+        .env("XDG_CONFIG_HOME", d.dir.path().join("config"))
+        .env("SLOT_CLUSTER_FILE", "off")
         .envs(env.iter().copied())
         .current_dir(cwd)
         .env("SLOT_HOST", "node")

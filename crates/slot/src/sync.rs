@@ -10,6 +10,13 @@
 //! alone, and the sync line names the commit and the count of changed files
 //! it sent, so a job is not run on content the caller did not have.
 //!
+//! Symlinks stay links (`-a`): a link whose target lies outside the tree is
+//! sent as the link, never as the file it points to, and the sync line counts
+//! such links. Before any byte is sent, the tree is listed with the same
+//! rsync (`preflight`); when that rsync would send such a target in place of
+//! the link (a wrapper on `PATH` that adds `--copy-unsafe-links`), the sync is
+//! refused and the job runs on this machine.
+//!
 //! A sync is watched: when rsync neither reads nor writes for the stall
 //! window (`SLOT_SYNC_STALL`, 60 s), or runs past the bound
 //! (`SLOT_SYNC_LIMIT`, 5 min), it is killed and the caller runs the job on
@@ -108,6 +115,9 @@ pub struct Synced {
     pub waited: Duration,
     /// What the checkout held when it was synced.
     pub sources: Sources,
+    /// Symlinks synced whose target lies outside the tree: they go as
+    /// links, never as the file they point to.
+    pub outside_links: usize,
 }
 
 /// What the checkout held when it was synced, as git sees it.
@@ -194,8 +204,13 @@ impl Synced {
         } else {
             String::new()
         };
+        let links = match self.outside_links {
+            0 => String::new(),
+            1 => ", 1 symlink leaves the tree (sent as a link)".to_string(),
+            n => format!(", {n} symlinks leave the tree (sent as links)"),
+        };
         format!(
-            "slot: synced to {host} in {:.1} s, {bytes}{sib}{waited}, {}",
+            "slot: synced to {host} in {:.1} s, {bytes}{sib}{waited}{links}, {}",
             self.elapsed.as_secs_f64(),
             self.sources.words()
         )
@@ -418,16 +433,129 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
             .transpose()?,
         same_path::Kind::Tree => None,
     };
+    let deadline = Instant::now() + b.limit;
+    let filters: Vec<String> = same_path::filters(e.kind)
+        .iter()
+        .map(|f| (*f).to_string())
+        .collect();
+    preflight(&e.path, &filters, b, deadline)?;
     let path = e.path.display();
     let mut rsync = Command::new("rsync");
     rsync
         .args(["-a", "--delete", "--mkpath"])
-        .args(same_path::filters(e.kind))
+        .args(&filters)
         .arg("-e")
         .arg(r.ssh.join(" "))
         .arg(format!("{path}/"))
         .arg(format!("{}:{path}/", r.host));
-    run_watched(&mut rsync, b, Instant::now() + b.limit).map(drop)
+    run_watched(&mut rsync, b, deadline).map(drop)
+}
+
+/// The fields of one line of `rsync --list-only`: the type letter of its
+/// mode (`d`, `-`, `l`, …) and what follows the time: the path relative to
+/// the listed directory, and for a link ` -> ` and its target.
+fn list_entry(line: &str) -> Option<(char, &str)> {
+    let kind = line.chars().next()?;
+    let mut rest = line;
+    for _ in 0..4 {
+        rest = rest.trim_start_matches(' ');
+        rest = &rest[rest.find(' ')?..];
+    }
+    Some((kind, rest.strip_prefix(' ')?))
+}
+
+/// The path and target of a link entry `rest` of the listing of `root`:
+/// split at the ` -> ` after which the path is a symlink on disk, else at
+/// the first.
+fn split_link<'a>(root: &Path, rest: &'a str) -> Option<(&'a str, &'a str)> {
+    let splits: Vec<(&str, &str)> = rest
+        .match_indices(" -> ")
+        .map(|(i, _)| (&rest[..i], &rest[i + 4..]))
+        .collect();
+    splits
+        .iter()
+        .find(|(name, _)| {
+            root.join(name)
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+        })
+        .or_else(|| splits.first())
+        .copied()
+}
+
+/// Whether symlink `name` (relative to `root`) with target `target` points
+/// outside `root`: an absolute target not under it, or a relative one whose
+/// `..` climb above it.
+pub fn leaves_tree(root: &Path, name: &Path, target: &Path) -> bool {
+    use std::path::Component;
+    if target.is_absolute() {
+        let t = crate::never_sync::lexical(target);
+        return !(t.starts_with(root) || root.canonicalize().is_ok_and(|r| t.starts_with(r)));
+    }
+    let mut depth = name.parent().map_or(0, |p| {
+        p.components()
+            .filter(|c| matches!(c, Component::Normal(_)))
+            .count()
+    });
+    for c in target.components() {
+        match c {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// Lists what a sync of `src` with `filters` would send, with the rsync it
+/// runs (`--list-only`, nothing is copied), and counts the symlinks whose
+/// target lies outside `src`. Refuses, before any byte is sent, when that
+/// rsync would send the file such a link points to in place of the link (a
+/// wrapper on `PATH` that adds `--copy-links` or `--copy-unsafe-links`).
+pub fn preflight(src: &Path, filters: &[String], b: &Bounds, deadline: Instant) -> Result<usize> {
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-a", "-8", "--list-only"])
+        .args(filters)
+        .arg(format!("{}/", src.display()));
+    let out = run_watched(&mut rsync, b, deadline)?;
+    let mut outside = 0;
+    let mut followed = Vec::new();
+    for line in out.lines() {
+        let Some((kind, rest)) = list_entry(line) else {
+            continue;
+        };
+        if kind == 'l' {
+            if let Some((name, target)) = split_link(src, rest)
+                && leaves_tree(src, Path::new(name), Path::new(target))
+            {
+                outside += 1;
+            }
+            continue;
+        }
+        if rest == "." {
+            continue;
+        }
+        let p = src.join(rest);
+        if p.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::read_link(&p).is_ok_and(|t| leaves_tree(src, Path::new(rest), &t))
+        {
+            followed.push(rest.to_string());
+        }
+    }
+    if let Some(first) = followed.first() {
+        bail!(
+            "the rsync on PATH would send what {} symlink{} outside the tree point{} to \
+             ({first}{}): it adds --copy-links or --copy-unsafe-links; nothing was synced",
+            followed.len(),
+            if followed.len() == 1 { "" } else { "s" },
+            if followed.len() == 1 { "s" } else { "" },
+            if followed.len() > 1 { ", …" } else { "" },
+        );
+    }
+    Ok(outside)
 }
 
 /// Syncs the checkout at `top` to mirror `id` on the server, with the
@@ -443,26 +571,27 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         .transpose()?;
     let t0 = Instant::now();
     let deadline = t0 + b.limit;
-    let key = mirror::repo_key(top);
-    let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
-    let mut rsync = Command::new("rsync");
     // A same-path mirror keeps a linked worktree's `.git` file; the git
     // directories follow in syncs of their own (`sync_extra`).
-    rsync.args([
-        "-a",
-        "--checksum",
-        "--delete",
-        "--mkpath",
-        "--filter=:- .gitignore",
+    let mut filters = vec![
+        "--filter=:- .gitignore".to_string(),
         if r.same_path {
             "--exclude=/.git/"
         } else {
             "--exclude=/.git"
-        },
-    ]);
-    for x in excludes {
-        rsync.arg(format!("--exclude={x}"));
-    }
+        }
+        .to_string(),
+    ];
+    filters.extend(excludes.iter().map(|x| format!("--exclude={x}")));
+    let outside_links = preflight(top, &filters, b, deadline)?;
+    let key = mirror::repo_key(top);
+    let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
+    let mut rsync = Command::new("rsync");
+    // `-a` keeps every symlink a link: a link that leaves the tree is never
+    // sent as the file it points to.
+    rsync
+        .args(["-a", "--checksum", "--delete", "--mkpath"])
+        .args(&filters);
     if let Some(sibs) = &siblings {
         rsync.arg("--stats");
         for s in sibs {
@@ -483,6 +612,7 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         siblings: siblings.map_or(0, |s| s.len()),
         waited: t0.duration_since(asked),
         sources,
+        outside_links,
     })
 }
 
@@ -509,6 +639,7 @@ mod tests {
                 head: Some("1a2b3c4".into()),
                 changed: 3,
             },
+            outside_links: 0,
         };
         assert_eq!(
             s.line("node"),
@@ -561,6 +692,63 @@ mod tests {
             "{}",
             old.line("node")
         );
+    }
+
+    #[test]
+    fn a_link_leaves_the_tree_by_an_absolute_target_or_a_climb_above_it() {
+        let root = Path::new("/w/tree");
+        let leaves =
+            |name: &str, target: &str| leaves_tree(root, Path::new(name), Path::new(target));
+        assert!(leaves("a", "/etc/passwd"));
+        assert!(leaves("a", "/w/treeish/x"));
+        assert!(!leaves("a", "/w/tree/b/c"));
+        assert!(leaves("a", "../x"));
+        assert!(leaves("sub/a", "../../x"));
+        assert!(leaves("sub/a", "./../b/../../x"));
+        assert!(!leaves("sub/a", "../b"));
+        assert!(!leaves("sub/deeper/a", "../../b/./c"));
+        assert!(!leaves("a", "b/c"));
+    }
+
+    #[test]
+    fn a_listing_line_gives_its_type_and_path() {
+        assert_eq!(
+            list_entry("drwxr-xr-x          4,096 2026/11/24 12:34:41 ."),
+            Some(('d', "."))
+        );
+        assert_eq!(
+            list_entry("lrwxrwxrwx             15 2026/11/24 12:34:41 sub/up -> ../../f"),
+            Some(('l', "sub/up -> ../../f"))
+        );
+        assert_eq!(
+            list_entry("-rw-r--r--              2 2026/11/24 12:34:41  lead space"),
+            Some(('-', " lead space"))
+        );
+        assert_eq!(list_entry("total size is 0"), None);
+        let t = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("y", t.path().join("a -> b")).unwrap();
+        assert_eq!(split_link(t.path(), "a -> b -> y"), Some(("a -> b", "y")));
+        assert_eq!(split_link(t.path(), "c -> d"), Some(("c", "d")));
+    }
+
+    #[test]
+    fn the_preflight_counts_links_that_leave_the_tree_and_copies_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let tree = root.join("tree");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        std::fs::create_dir_all(tree.join("out")).unwrap();
+        std::fs::write(root.join("secret"), "s").unwrap();
+        std::fs::write(tree.join("sub/x"), "x").unwrap();
+        std::fs::write(tree.join(".gitignore"), "out/\n").unwrap();
+        std::os::unix::fs::symlink(root.join("secret"), tree.join("abs")).unwrap();
+        std::os::unix::fs::symlink("../../secret", tree.join("sub/up")).unwrap();
+        std::os::unix::fs::symlink("sub/x", tree.join("inside")).unwrap();
+        std::os::unix::fs::symlink("../../secret", tree.join("out/ignored")).unwrap();
+        let filters = ["--filter=:- .gitignore".to_string()];
+        let b = Bounds::default();
+        let n = preflight(&tree, &filters, &b, Instant::now() + b.limit).unwrap();
+        assert_eq!(n, 2, "abs and sub/up; inside stays inside, out/ is ignored");
     }
 
     #[test]

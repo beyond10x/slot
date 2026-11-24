@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Remote mode's safety rules are in the `slot` binary, so they hold however it is called (with
+  `SLOT_HOST` already set, through a wrapper or without one):
+  - The never-sync list: a file of absolute path prefixes (`never_sync_file` of `cluster.toml`,
+    default `$XDG_CONFIG_HOME/slot/remote-deny`, `#` comments). A job whose working directory,
+    checkout root, git directories or a tree an argument names (`--manifest-path`, `-C`, `--dir`,
+    `--directory`) lies under a listed prefix, or whose tree is `/` or holds the home directory,
+    is never synced: it runs in the local pool with `local_reason` `never sync: <prefix>`, which
+    also keeps the daemon from handing it to a node. Prefixes match whole path components, as
+    written and with symlinks resolved. An unreadable list keeps every job local.
+  - A variable whose name looks like a credential never crosses, even when `SLOT_ENV` lists it.
+    The list grew by `PASS`, `SSH_`, `AWS_SECRET` and the words `PAT`, `DSN` and `KEY`; the
+    client names each name it held back on stderr, never the value. Before, any name in
+    `SLOT_ENV` crossed.
+  - Symlinks stay links: before the sync the client lists the tree with the same `rsync`
+    (`--list-only`), counts links that leave the tree on the sync line (`2 symlinks leave the
+    tree (sent as links)`), and refuses the sync, running the job here, when that `rsync` would
+    send such a link's target in its place (a `PATH` wrapper with `--copy-unsafe-links`).
 - A node's job keeps the id its node gave it: `GET /api/state`, the job events, `slot status`
   and the web view show that positive id, with the node in `node` and `from_node: true`. Before,
   the daemon moved such ids below 0 (`-1000000007499`), and only two tables of the web view

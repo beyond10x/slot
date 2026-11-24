@@ -67,6 +67,13 @@ current directory.
    `slot: synced to buildbox in 0.4 s, 81234 bytes sent, at 1a2b3c4 + 3 changed files`:
    the commit checked out and the number of files `git status --porcelain` lists. Two calls
    from one worktree sync one after the other; the second waits for the first.
+   Symlinks stay links. A link whose target lies outside the tree is sent as the link, never as
+   the file it points to, so it dangles on the server unless the target exists there too; the
+   line counts such links: `2 symlinks leave the tree (sent as links)`. Before the sync, the
+   client lists the tree with the same `rsync` it syncs with (`--list-only`, nothing is sent).
+   If that `rsync` would send the target in place of such a link (a wrapper on `PATH` that adds
+   `--copy-links` or `--copy-unsafe-links`), the sync is refused and the job runs on this
+   machine's daemon (see [When the server is unreachable](#when-the-server-is-unreachable)).
 3. **Siblings.** Before the sync the client asks the server for other mirrors of the same
    repository (same `origin` URL, so every worktree and clone of it). rsync gets up to four of
    them as `--copy-dest`: a file the new mirror lacks is copied on the server when a sibling has
@@ -94,16 +101,58 @@ Only variables the job's toolchain admits cross to the server: for rust `CARGO_*
 `CARGO_TARGET_DIR`, `CARGO_HOME`, `CARGO_BUILD_JOBS`), `RUST*`, `NEXTEST_*`, `INSTA_*`; for go
 `GO*` (not the cache and path variables) and `CGO_ENABLED`; for all, terminal and locale variables.
 The full lists are on [Toolchains](toolchains.md). `HOME`, `AWS_*` and other variables no
-toolchain admits never cross. A name that contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`,
-`CREDENTIAL`, `_KEY` or `AUTH` never crosses through a toolchain's prefix either, so
-`CARGO_REGISTRY_TOKEN` and `CARGO_REGISTRIES_<name>_TOKEN` stay on the workstation (slot 0.6.0
-and older sent them).
+toolchain admits never cross.
 
 To forward more variables, list their names in `SLOT_ENV`, comma-separated:
 
 ```console
 export SLOT_ENV=DATABASE_URL,FEATURE_FLAGS
 ```
+
+A name that looks like a credential never crosses, whether a toolchain admits it or `SLOT_ENV`
+lists it: one that contains `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASS`, `CREDENTIAL`,
+`_KEY`, `AUTH`, `SSH_` or `AWS_SECRET`, or that has `PAT`, `DSN` or `KEY` as a word between
+underscores (`NPM_PAT`, `SENTRY_DSN`; not `PKG_CONFIG_PATH`). So `CARGO_REGISTRY_TOKEN` and
+`DB_PASS` stay on the workstation. The client names each one it held back on stderr, never the
+value:
+
+```text
+slot: not sent to buildbox, the names look like a credential: DB_PASS, NPM_PAT
+```
+
+slot 0.6.0 and older sent such names through a toolchain's prefix; releases before this one sent
+any name `SLOT_ENV` listed.
+
+## Trees that never leave this machine
+
+A file of path prefixes lists trees whose content is never synced to a server: one absolute path
+per line, `#` starts a comment. Its path is `never_sync_file` in the host configuration
+(`$XDG_CONFIG_HOME/slot/cluster.toml`), by default `$XDG_CONFIG_HOME/slot/remote-deny`:
+
+```text
+# customer data
+/srv/work/customer-a
+/srv/work/customer-b/
+```
+
+A job is never synced when one of these lies under a listed prefix: its working directory, its
+checkout's root, its checkout's git directories (a linked worktree's are in its main
+repository), or a tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`). The
+same holds for a tree that is `/`, the home directory or a directory above it. A prefix matches
+whole path components (`/srv/work/a` does not hold `/srv/work/ab`), on the paths as written and
+with their symlinks resolved.
+
+Such a job runs in this machine's pool with the reason `never sync: <prefix>` (`never sync: home
+directory`), which also keeps the daemon from handing it to a node. With `SLOT_HOST` set the
+client says so:
+
+```text
+slot: never sync: /srv/work/customer-a: the tree is not synced to buildbox; running on this machine
+```
+
+The check is in the `slot` binary, so it holds however the binary is called: with `SLOT_HOST`
+already set, through a wrapper or without one. A list file that cannot be read, or a host
+configuration that does not parse, keeps every job on this machine.
 
 ## ssh options
 

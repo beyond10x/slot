@@ -21,6 +21,7 @@ pub mod hostconfig;
 pub mod job_parallel;
 pub mod jobserver;
 pub mod mirror;
+pub mod never_sync;
 pub mod paths;
 pub mod policy;
 pub mod procstat;
