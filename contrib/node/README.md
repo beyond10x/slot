@@ -51,6 +51,34 @@ that replaced one, restart it when no job runs.
 A root channel that takes one script, such as SSM Run Command, gets it from
 `provision.sh bundle CONF apply` (or `check`): one script with the config inside.
 
+## A change of instance size
+
+A stop and start in another instance type of the same family, as run on 2026-11-24 from 64 to 32
+CPUs. The node's slots follow the CPUs found, so the config file does not change.
+
+1. Drain. On the workstation, set the node's `deadline` in `cluster.toml` to a time in the past
+   and turn off anything that sends every build to the node (an environment file that sets
+   `SLOT_HOST`); keep copies of both files. `systemctl --user reload slot`. Wait until the
+   node's `slot status` reads `0 running, 0 queued`.
+2. Save the node's job log: the files under the build user's `.local/state/slot` live on the
+   instance store and are lost at the stop. Copy them out through a node job's output.
+3. Both checks print `0 drift`. If a `push.sh apply` replaced an `/etc` file, restart
+   `slot-node` first (it is idle after step 1).
+4. Build the post-start scripts before the stop: `provision.sh bundle CONF apply --open`,
+   `bundle CONF apply` and `bundle CONF check`, from the commit that will run, with their
+   sha256 sums.
+5. At the provider: stop, change the type, start. The host keys are on the root volume, so only
+   the address changes; put it in the ssh config. A poweroff scheduled on the node lived in
+   `/run` and is gone.
+6. Run the steps of § A new node. The first `push.sh apply` copies everything again (4,582 s on
+   2026-11-24).
+7. A test job with `SLOT_HOST` set to the node: `slot status` there shows the new slot count, and
+   one build of a repository exits 0.
+8. Switch back: restore both files from step 1, with the new `price_per_hour_cents` from the
+   provider's price list, and `systemctl --user reload slot`.
+9. Schedule the poweroff at the lease end again, if the node has one: logind `ScheduleShutdown`
+   with `poweroff` and the time in microseconds, which is the call `shutdown -P` makes.
+
 ## What check compares
 
 `provision.sh check` reads and prints; it changes nothing. `apply` never restarts a running

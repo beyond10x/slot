@@ -382,6 +382,10 @@ Open, one line each, with where the design lives. A session starts with (e).
   belongs in `limits.json`. The eviction mark is there already (`slot evict-below`).
 - (ac) The compute cluster: several build nodes behind the local daemon, specified in `spec/`,
   designed in `docs/design/remote-pool.md`, planned in `epic:compute-cluster`.
+- (ad) A node's `price_per_hour_cents` in `cluster.toml` is typed by hand; after a change of
+  instance size it was halved, not read (2026-11-24):
+  `story:a-nodes-price-is-read-from-the-provider`. The resize procedure is in
+  `contrib/node/README.md` § A change of instance size.
 
 ## Never
 
