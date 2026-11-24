@@ -366,10 +366,14 @@ pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String
     Ok(format!("{mirror}/{path}"))
 }
 
-/// Same-path mode is on and `top` lies under this home
-/// (`same_path::applies`); any other tree goes to the workspace root.
+/// Same-path mode is on and `top` lies under the same-path root
+/// (`SLOT_REMOTE_SAME_PATH_ROOT`, by default this home; `same_path::applies`);
+/// any other tree goes to the workspace root.
 fn keeps_path(s: &Settings, top: &Path) -> bool {
-    s.same_path && same_path::applies(top, std::env::var_os("HOME").as_deref().map(Path::new))
+    let root = std::env::var_os("SLOT_REMOTE_SAME_PATH_ROOT")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("HOME"));
+    s.same_path && same_path::applies(top, root.as_deref().map(Path::new))
 }
 
 /// Copies every `--fetch` path back from `host` into the repository at

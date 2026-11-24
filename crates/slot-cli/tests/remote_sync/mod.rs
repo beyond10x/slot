@@ -96,6 +96,12 @@ fn remote_call(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
     remote_call_env(d, ssh, cwd, argv, &[])
 }
 
+/// The directory every test's tempdir lies in: the client keeps a tree's
+/// own path on the server only below its same-path root.
+fn temp_root() -> PathBuf {
+    std::env::temp_dir().canonicalize().unwrap()
+}
+
 fn remote_call_env(
     d: &Daemon,
     ssh: &Path,
@@ -106,6 +112,8 @@ fn remote_call_env(
     Command::new(SLOT)
         .args(argv)
         .env_remove("SLOT_REMOTE_SAME_PATH")
+        .env_remove("CARGO_TARGET_DIR")
+        .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
         .envs(env.iter().copied())
         .current_dir(cwd)
         .env("SLOT_HOST", "node")
@@ -803,6 +811,7 @@ fn a_same_path_cargo_build_uses_the_clients_target_dir() {
             .env("SLOT_REMOTE", SLOT)
             .env("SLOT_SOCKET", d.socket())
             .env("SLOT_REMOTE_SAME_PATH", "1")
+            .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
             .env("SLOT_SYNC_STALL", "20s")
             .env("SLOT_SYNC_LIMIT", "50s")
             .env_remove("SLOT_JOB")

@@ -6,7 +6,7 @@
   `0.34.0+g31e76f1`, with `.dirty` when tracked files changed. A build of the tag (or a CI run
   started for it) prints the bare version.
 - Same-path remote mode keeps a tree's own path on the server only for a tree under the client's
-  home; any other tree (a runner's work directory elsewhere) goes to the server's
+  home (`SLOT_REMOTE_SAME_PATH_ROOT` names another directory); any other tree (a runner's work directory elsewhere) goes to the server's
   workspace root. Before, the server's `slot shell` refused such a tree's sync (`rsync path … is
   outside`).
 - A node's job keeps the id its node gave it: `GET /api/state`, the job events, `slot status`
