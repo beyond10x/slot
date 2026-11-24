@@ -361,6 +361,7 @@ mod tests {
             compile_server_cpu_s: 0.0,
             peak_rss: 0,
             wait_reason: String::new(),
+            local_reason: String::new(),
             target_dir: String::new(),
             priority: crate::types::Priority::default(),
             promoted: false,

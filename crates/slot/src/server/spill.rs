@@ -88,30 +88,85 @@ fn set(env: &[String], key: &str) -> bool {
     get(env, key).is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// Set by a wrapper that keeps its job on this machine: the text is the
+/// job's `local_reason`, and the job is never handed to a node.
+pub const LOCAL_REASON_ENV: &str = "SLOT_LOCAL_REASON";
+
+/// The reason of a job whose caller asked for this machine
+/// (`SLOT_NO_REMOTE`, or a command `.slot.toml` lists as local).
+pub const LOCAL_REQUESTED: &str = "local requested";
+
+/// The reason of a job a node sent back with [`INFRA_EXIT`].
+pub const SENT_BACK: &str = "sent back by a node";
+
+/// The reason of a job that may go to a node but got slots here before
+/// one took it.
+pub const HERE_FIRST: &str = "slots free here first";
+
+/// The longest reason kept from a request.
+const REASON_MAX: usize = 200;
+
+/// The first non-empty line of `text`, trimmed and cut at [`REASON_MAX`]
+/// characters.
+pub fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .take(REASON_MAX)
+        .collect()
+}
+
+/// The reason the client named: the request's own, else `SLOT_LOCAL_REASON`.
+fn named(req: &Request) -> String {
+    let own = first_line(&req.local_reason);
+    if own.is_empty() {
+        first_line(get(&req.env, LOCAL_REASON_ENV).unwrap_or_default())
+    } else {
+        own
+    }
+}
+
 /// Why the job of `req` stays here, or `None` when it may go to a node:
-/// a nested job, one whose caller asked for this machine, and the ones
-/// that are no command of a caller here (a remote client's, a gate's
-/// hold, one a node sent back).
-pub fn refusal(req: &Request) -> Option<&'static str> {
+/// a nested job, one whose caller asked for this machine or named a
+/// reason, and the ones that are no command of a caller here (a remote
+/// client's, a gate's hold, one a node sent back).
+pub fn refusal(req: &Request) -> Option<String> {
     if req.workspace.is_some() {
-        return Some("a remote job");
+        return Some("remote job".into());
     }
     if req.hold_for.is_some() {
-        return Some("a gated job");
+        return Some("gated job".into());
     }
     if set(&req.env, super::JOB_ENV) {
-        return Some("a nested job");
+        return Some("nested job".into());
     }
     if set(&req.env, SPILLED_ENV) {
-        return Some("sent back by a node");
+        return Some(SENT_BACK.into());
+    }
+    let named = named(req);
+    if !named.is_empty() {
+        return Some(named);
     }
     if set(&req.env, "SLOT_NO_REMOTE") {
-        return Some("SLOT_NO_REMOTE is set");
+        return Some(LOCAL_REQUESTED.into());
     }
     if under_home_cache(req) {
-        return Some("under the caller's ~/.cache");
+        return Some("cache rule".into());
     }
     None
+}
+
+/// The `local_reason` a new job of `req` carries: with a node that takes
+/// jobs, why it stays here; without one only a reason its client named
+/// (a remote start that failed, `SLOT_LOCAL_REASON`).
+pub fn local_reason(req: &Request, spills: bool) -> String {
+    if spills {
+        refusal(req).unwrap_or_default()
+    } else {
+        named(req)
+    }
 }
 
 /// Whether the job's working directory or an argument lies under the
@@ -127,8 +182,7 @@ fn under_home_cache(req: &Request) -> bool {
         return false;
     }
     let cache = format!("{}/.cache/", home.trim_end_matches('/'));
-    format!("{}/", req.cwd).starts_with(&cache)
-        || req.argv.iter().any(|a| a.contains(&cache))
+    format!("{}/", req.cwd).starts_with(&cache) || req.argv.iter().any(|a| a.contains(&cache))
 }
 
 /// The spilled job's environment: the job's, with the node's `SLOT_HOST`,
@@ -264,6 +318,7 @@ impl Server {
                 eprintln!("slot: job {id}: node {}: {e}", t.name);
                 if let Some(l) = self.inner.lock().expect("server lock").active.get_mut(&id) {
                     l.spillable = false;
+                    l.job.local_reason = first_line(&format!("node {} not started: {e}", t.name));
                 }
                 return Some(Ran::Requeue);
             }
@@ -323,6 +378,7 @@ impl Server {
                     l.job.limit_s = None;
                     l.job.state = JobState::Queued;
                     l.job.node = LOCAL_NODE.to_string();
+                    l.job.local_reason = SENT_BACK.to_string();
                 }
             }
             let _ = tx.send(Frame::Info {
@@ -387,7 +443,7 @@ mod tests {
         }
     }
 
-    fn why(r: &Request) -> Option<&'static str> {
+    fn why(r: &Request) -> Option<String> {
         refusal(r)
     }
 
@@ -411,31 +467,65 @@ mod tests {
             r.env.push(kv.into());
             r
         };
-        assert_eq!(why(&with_env("SLOT_JOB=4")), Some("a nested job"));
-        assert_eq!(
-            why(&with_env("SLOT_SPILLED=1")),
-            Some("sent back by a node")
-        );
+        assert_eq!(why(&with_env("SLOT_JOB=4")), Some("nested job".into()));
+        assert_eq!(why(&with_env("SLOT_SPILLED=1")), Some(SENT_BACK.into()));
         assert_eq!(
             why(&with_env("SLOT_NO_REMOTE=1")),
-            Some("SLOT_NO_REMOTE is set")
+            Some(LOCAL_REQUESTED.into())
         );
         assert_eq!(why(&with_env("SLOT_NO_REMOTE=0")), None);
         let mut r = base.clone();
         r.cwd = "/w/.cache/scratch/s1/copy".into();
-        assert_eq!(why(&r), Some("under the caller's ~/.cache"));
+        assert_eq!(why(&r), Some("cache rule".into()));
         let mut r = base.clone();
         r.argv = vec!["sh".into(), "/w/.cache/scratch/s1/run.sh".into()];
-        assert_eq!(why(&r), Some("under the caller's ~/.cache"));
+        assert_eq!(why(&r), Some("cache rule".into()));
         let mut r = base.clone();
         r.cwd = "/w/work/repo".into();
         assert_eq!(why(&r), None);
         let mut r = base.clone();
         r.hold_for = Some(vec!["cargo".into()]);
-        assert_eq!(why(&r), Some("a gated job"));
+        assert_eq!(why(&r), Some("gated job".into()));
         let mut r = base.clone();
         r.workspace = Some(crate::proto::Workspace::default());
-        assert_eq!(why(&r), Some("a remote job"));
+        assert_eq!(why(&r), Some("remote job".into()));
+    }
+
+    #[test]
+    fn a_named_reason_keeps_the_job_here_and_is_its_local_reason() {
+        let base = req(&["cargo", "build"]);
+        let mut wrapped = base.clone();
+        wrapped.env.push("SLOT_LOCAL_REASON=cache rule".into());
+        wrapped.env.push("SLOT_NO_REMOTE=1".into());
+        assert_eq!(why(&wrapped), Some("cache rule".into()));
+        let mut generic = base.clone();
+        generic
+            .env
+            .push("SLOT_LOCAL_REASON=  needs the GPU here\nsecond line".into());
+        assert_eq!(why(&generic), Some("needs the GPU here".into()));
+        let mut empty = base.clone();
+        empty.env.push("SLOT_LOCAL_REASON=".into());
+        assert_eq!(why(&empty), None);
+        let mut failed = base.clone();
+        failed.local_reason = "sync failed: rsync exited 12\ndetail".into();
+        assert_eq!(why(&failed), Some("sync failed: rsync exited 12".into()));
+        // The request's own reason wins over the environment's; a nested
+        // job is named as one whatever it inherited.
+        failed.env.push("SLOT_LOCAL_REASON=other".into());
+        assert_eq!(why(&failed), Some("sync failed: rsync exited 12".into()));
+        failed.env.push("SLOT_JOB=3".into());
+        assert_eq!(why(&failed), Some("nested job".into()));
+        let mut long = base.clone();
+        long.local_reason = "x".repeat(500);
+        assert_eq!(why(&long).map(|s| s.len()), Some(REASON_MAX));
+
+        // Without a node that takes jobs only a named reason is kept.
+        let mut no_remote = base.clone();
+        no_remote.env.push("SLOT_NO_REMOTE=1".into());
+        assert_eq!(local_reason(&no_remote, true), LOCAL_REQUESTED);
+        assert_eq!(local_reason(&no_remote, false), "");
+        assert_eq!(local_reason(&generic, false), "needs the GPU here");
+        assert_eq!(local_reason(&base, true), "");
     }
 
     const FILE: &str = "spill_after_s = 5\n\

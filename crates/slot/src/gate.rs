@@ -204,6 +204,7 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         // process the daemon starts needs none.
         nofile: None,
         fetch_once: false,
+        local_reason: client.local_reason,
     }
 }
 

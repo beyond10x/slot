@@ -72,6 +72,12 @@ pub struct Request {
     /// daemon that predates it ignores it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fetch_once: bool,
+    /// Why the client sends the job to this machine's daemon when a remote
+    /// node is configured, such as `sync failed: …` after a remote start
+    /// failed. The daemon shows it as the job's `local_reason` and hands
+    /// such a job to no node. A daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_reason: String,
 }
 
 impl Request {

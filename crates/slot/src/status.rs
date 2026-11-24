@@ -547,6 +547,11 @@ pub(crate) fn secs(ms: i64) -> String {
     }
 }
 
+/// Whether job `j` runs or waits on this machine, not on a node.
+fn on_this_machine(j: &Job) -> bool {
+    j.node.is_empty() || j.node == crate::types::LOCAL_NODE
+}
+
 fn line(j: &Job, now: i64) -> String {
     let (state, since) = match j.state {
         JobState::Queued => ("queued", j.enqueued_ms),
@@ -593,6 +598,11 @@ fn line(j: &Job, now: i64) -> String {
             use std::fmt::Write as _;
             let _ = write!(s, ", holds {} of {}", j.collected, j.tokens);
         }
+    }
+    // The daemon names a reason only while a remote node is configured.
+    if on_this_machine(j) && !j.local_reason.is_empty() {
+        s.push_str("\n  local: ");
+        s.push_str(&j.local_reason);
     }
     if !j.wait_reason.is_empty() {
         s.push_str("\n       waiting: ");
@@ -803,6 +813,7 @@ mod tests {
             compile_server_cpu_s: 0.0,
             peak_rss: 0,
             wait_reason: String::new(),
+            local_reason: String::new(),
             target_dir: String::new(),
             priority: crate::types::Priority::Normal,
             promoted: false,
@@ -1367,6 +1378,57 @@ mod tests {
             lines[4].starts_with("#2 ") && lines[4].ends_with("cargo test"),
             "running: {out}"
         );
+    }
+
+    #[test]
+    fn a_local_job_names_why_it_did_not_go_to_a_node() {
+        let mut running = job(4, JobState::Running, 1);
+        running.node = crate::types::LOCAL_NODE.into();
+        running.local_reason = "sync failed: ssh: connection refused".into();
+        let mut queued = job(5, JobState::Queued, 1);
+        queued.local_reason = "cache rule".into();
+        queued.wait_reason = "memory: 1.0 GB free".into();
+        let mut on_node = job(6, JobState::Running, 1);
+        on_node.node = "node-1".into();
+        on_node.local_reason = "stale".into();
+        let plain = job(7, JobState::Running, 1);
+        let s = State {
+            tokens: 4,
+            limit: 4,
+            active: vec![
+                running.clone(),
+                queued.clone(),
+                on_node.clone(),
+                plain.clone(),
+            ],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out
+            .lines()
+            .filter(|l| !l.starts_with("spill:"))
+            .skip(1)
+            .collect();
+        let first = |j: &Job| line(j, 151_000).lines().next().unwrap().to_string();
+        assert_eq!(
+            lines,
+            [
+                first(&queued).as_str(),
+                "  local: cache rule",
+                "       waiting: memory: 1.0 GB free",
+                first(&running).as_str(),
+                "  local: sync failed: ssh: connection refused",
+                first(&on_node).as_str(),
+                first(&plain).as_str(),
+            ],
+            "{out}"
+        );
+        // A job record without the field reads as no reason.
+        let mut v = serde_json::to_value(&plain).unwrap();
+        v.as_object_mut().unwrap().remove("local_reason");
+        let j: Job = serde_json::from_value(v).unwrap();
+        assert_eq!(j.local_reason, "");
     }
 
     #[test]

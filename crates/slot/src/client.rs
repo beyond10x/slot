@@ -212,11 +212,11 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         local_fields(&mut req, &cwd);
         return crate::gate::submit(&dir, &req);
     }
-    if let Some(host) = s
-        .host
-        .as_ref()
-        .filter(|_| !listed_local(top.as_deref(), argv))
-    {
+    let listed = s.host.is_some() && listed_local(top.as_deref(), argv);
+    if listed {
+        req.local_reason = crate::server::spill::LOCAL_REQUESTED.into();
+    }
+    if let Some(host) = s.host.as_ref().filter(|_| !listed) {
         let plan = artifacts::plan(argv);
         if let Some(p) = &plan {
             req.argv.clone_from(&p.argv);
@@ -261,11 +261,23 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         req.argv = argv.to_vec();
         req.workspace = None;
         req.fetch_once = false;
+        req.local_reason = sync_failed(&why);
         local_fields(&mut req, &cwd);
         return submit_local(&s.socket, &req, &Waits::of(s));
     }
     local_fields(&mut req, &cwd);
     submit_local(&s.socket, &req, &Waits::of(s))
+}
+
+/// The `local_reason` of a job whose remote start failed with `why`:
+/// `sync failed: ` and the first line of the error.
+pub fn sync_failed(why: &str) -> String {
+    let first = crate::server::spill::first_line(why);
+    if first.is_empty() {
+        "sync failed".into()
+    } else {
+        format!("sync failed: {first}")
+    }
 }
 
 /// What only a daemon on this machine uses: the working directory, the whole
@@ -937,6 +949,19 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn a_failed_remote_start_names_its_first_error_line() {
+        assert_eq!(
+            sync_failed("rsync: connection unexpectedly closed\ncode 12"),
+            "sync failed: rsync: connection unexpectedly closed"
+        );
+        assert_eq!(
+            sync_failed("\n  ssh: timeout  \n"),
+            "sync failed: ssh: timeout"
+        );
+        assert_eq!(sync_failed(""), "sync failed");
+    }
 
     #[test]
     fn fetch_source_maps_target_to_the_job_target_dir() {

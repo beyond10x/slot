@@ -10,7 +10,7 @@ function job(id: number, over: Partial<Job> = {}): Job {
   return {
     id, argv: ['cargo', 'build'], cwd: '/w/ledger', repo: 'ledger', session: '', client: '', toolchain: 'rust', remote: false, tokens: 2,
     state: 'running', enqueued_ms: T - 10_000, started_ms: T - 5_000, ended_ms: 0, exit: 0, cpu_s: 0, compile_server_cpu_s: 0, peak_rss: 0,
-    wait_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
+    wait_reason: '', local_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
   } as Job;
 }
 

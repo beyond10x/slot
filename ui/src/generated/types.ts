@@ -185,6 +185,14 @@ lent_s?: number,
  */
 admission?: Admission, 
 /**
+ * Why the job runs on this machine while a remote node is configured:
+ * `local requested`, `cache rule`, `sync failed: …`, `nested job`,
+ * `gated job`, `remote job`, `sent back by a node`, `slots free here
+ * first` or the text of `SLOT_LOCAL_REASON`. Empty for a job that
+ * went to a node and without nodes.
+ */
+local_reason: string, 
+/**
  * Id of the node the job runs or ran on ([`Node::node_id`]): `local`
  * for every job of a daemon without remote nodes. Empty in a job-log
  * line written before nodes; the API shows such a job as `local`.
