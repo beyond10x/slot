@@ -479,6 +479,9 @@ fn remote_cargo(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET")
         .env_remove("CARGO_NET_OFFLINE")
+        // A forge runner sets CARGO_TERM_COLOR=always; the job gets it and
+        // cargo would colour the lines this test reads.
+        .env("CARGO_TERM_COLOR", "never")
         .stdin(Stdio::null())
         .output()
         .unwrap()
