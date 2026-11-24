@@ -259,6 +259,37 @@ three misses in a row the node is `Gone` (reason `Lost`) with its last row; the 
 it `Ready` again. A key of the file that the shape does not declare is refused, and the daemon
 then polls no node.
 
+## Hand queued jobs to a node
+
+A node of the host configuration file also takes jobs from the workstation's queue: while it is
+`Ready`, before its deadline and has free slots, the daemon hands it queued local jobs, oldest
+first, without a `SLOT_HOST` in the caller's environment. The job's process is then
+`slot run -- <command>` in remote mode, started by the daemon with the job's directory and
+environment and `SLOT_HOST`, `SLOT_SSH` and `SLOT_REMOTE` from the node's `ssh` line (its last
+word is the host, the words before it the ssh command) and `slot_path`, and
+`SLOT_REMOTE_SAME_PATH=1`: the node runs it at the same path as here. It holds no local slot;
+its output and exit code reach the caller as before, `slot status` prints `spill: N jobs to
+<node>`, and the job's record in `GET /api/state` has `node` set to the node. The node's own
+row of the same job appears beside it, with an id below 0.
+
+```toml
+spill_after_s = 0
+
+[remote.build-1]
+ssh = "ssh -o BatchMode=yes build-1.example"
+spill = true
+```
+
+- `spill` (default `true`): `false` keeps the node out of it.
+- `spill_after_s` (default 0): seconds a job waits in the local queue first.
+
+A node takes at most its free slots from its last answer, less the jobs handed to it in the last
+15 s, and none while it has a queue of its own. Every job goes but a job nested in another, one
+submitted with `slot --local` (which never reaches the daemon) or with `SLOT_NO_REMOTE=1` in its
+environment, a remote client's job and a gate's hold. When the client ends with exit 3 (the sync
+or ssh failed, or the connection to the node was lost) the job goes back to the local queue once
+and runs here. A command that itself exits 3 is run a second time here too.
+
 ## Security
 
 Build scripts and tests run arbitrary code on the server. slot assumes the workstation and the

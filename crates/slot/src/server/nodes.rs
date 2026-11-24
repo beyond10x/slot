@@ -88,22 +88,27 @@ pub fn state_step(http: &str) -> Result<String> {
 
 /// One remote node as the endpoint knows it.
 #[derive(Debug, Clone)]
-struct Entry {
-    conf: RemoteNode,
+pub(super) struct Entry {
+    pub(super) conf: RemoteNode,
     /// Its place in the file, for the id range of its jobs.
     index: usize,
-    row: Node,
+    pub(super) row: Node,
     misses: u32,
     active: Vec<Job>,
     done: Vec<Job>,
     /// Whether an answer came since the start.
     seen: bool,
+    /// When the daemon handed the node a local job, Unix ms; see
+    /// [`super::spill`].
+    pub(super) handed: Vec<i64>,
 }
 
 /// The remote nodes of the host configuration.
 #[derive(Debug, Default)]
 pub struct Remotes {
-    nodes: Mutex<Vec<Entry>>,
+    pub(super) nodes: Mutex<Vec<Entry>>,
+    /// The spill settings of the file.
+    pub spill: crate::hostconfig::SpillConf,
 }
 
 impl Remotes {
@@ -111,15 +116,17 @@ impl Remotes {
     /// path or no file. A file that does not parse is reported and gives
     /// none.
     pub fn load(path: Option<&Path>, cluster: &str) -> Self {
-        let confs = match path.map(crate::hostconfig::load) {
-            None => Vec::new(),
+        let (confs, spill) = match path.map(crate::hostconfig::load_all) {
+            None => Default::default(),
             Some(Ok(c)) => c,
             Some(Err(e)) => {
                 eprintln!("slot: cluster config: {e}");
-                Vec::new()
+                Default::default()
             }
         };
-        Self::new(confs, cluster)
+        let mut r = Self::new(confs, cluster);
+        r.spill = spill;
+        r
     }
 
     /// The nodes `confs`, each Joining.
@@ -141,11 +148,13 @@ impl Remotes {
                     active: Vec::new(),
                     done: Vec::new(),
                     seen: false,
+                    handed: Vec::new(),
                 }
             })
             .collect();
         Self {
             nodes: Mutex::new(nodes),
+            spill: crate::hostconfig::SpillConf::default(),
         }
     }
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Spill-over: the daemon hands every queued local job to a remote node of the host
+  configuration file while the node is Ready, before its deadline and has free slots by its last
+  answer (less the jobs handed to it in the last 15 s), oldest first. The job's process is
+  `slot run -- <command>` in remote mode with `SLOT_HOST`, `SLOT_SSH` and `SLOT_REMOTE` from the
+  node's `ssh` line and `slot_path` and `SLOT_REMOTE_SAME_PATH=1`; it holds no local slot, its
+  output and exit code pass through, and its record has `node` set. Exit 3 (sync, ssh or
+  connection failed) puts the job back in the local queue once. Keys: `spill` per node (default
+  `true`) and `spill_after_s` (default 0) at the top of the file. Never handed: nested jobs, `SLOT_NO_REMOTE=1` jobs, a
+  remote client's job and a gate's hold. `slot status` prints `spill: N jobs to <node>`.
+
 - The daemon shows remote build nodes: each `[remote.<name>]` table of the host configuration
   file (`$XDG_CONFIG_HOME/slot/cluster.toml`, `slot serve --cluster-file`, `SLOT_CLUSTER_FILE`)
   is polled every 5 s over ssh with the new read-only `slot shell` step `state`, which prints the
