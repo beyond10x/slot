@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.35.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.36.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -282,6 +282,41 @@
       "status": "shipped",
       "detail": "SLOT_ORCHESTRATOR=1 in front of task, make, just or a shell lets the Claude Code hook run the gate outside the pool while each step is its own pool job (0.34.0).",
       "href": "/docs/claude-code-plugin"
+    },
+    {
+      "area": "Observation",
+      "label": "Where a job's time went",
+      "status": "shipped",
+      "detail": "The job log records sync, copy-back, compile and test time of each job, and the node target directory a remote job used and where it was seeded from (0.36.0).",
+      "href": "/docs/how-it-works#job-log"
+    },
+    {
+      "area": "Remote",
+      "label": "Width on a node",
+      "status": "shipped",
+      "detail": "On a node, test threads and GOMAXPROCS follow the node's free cores; SLOT_WIDTH sets them (0.36.0).",
+      "href": "/docs/toolchains#width-on-a-node"
+    },
+    {
+      "area": "Remote",
+      "label": "Warm the node after a merge",
+      "status": "shipped",
+      "detail": "slot warm in a checkout of main builds the repository on the node at the lowest priority, so the next worktree starts from a warm target (0.36.0).",
+      "href": "/docs/remote-builds#warm-the-node-after-a-merge"
+    },
+    {
+      "area": "Remote",
+      "label": "Copy-back without pile-up",
+      "status": "shipped",
+      "detail": "After a copy-back the client removes older builds of the same targets; SLOT_NO_PRODUCTS=1 turns the copy-back off (0.36.0).",
+      "href": "/docs/remote-builds#binaries-and-test-binaries-come-back"
+    },
+    {
+      "area": "Remote",
+      "label": "Changed sources always rebuild",
+      "status": "shipped",
+      "detail": "The sync leaves the node its own file times and a seeded target never makes a changed source look built (0.36.0).",
+      "href": "/docs/remote-builds#target-directories-on-the-server"
     }
   ]
 }

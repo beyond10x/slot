@@ -369,6 +369,12 @@ follow.
   not reproduced; phase 0 step 7 tests it)*. If it reproduces: no seeding until fixed (a cache
   root without reflinks skips it, `server/cache.rs:172-184`); the fix drops the fingerprints
   of the workspace's own packages from a seed, so only dependency artifacts are reused.
+  *Reproduced in a test and fixed otherwise* (`tests/remote_sync/fresh.rs`): the sync keeps
+  the server's times (`--no-times`), and after a seed every source of the new mirror with the
+  sibling's bytes takes the sibling's time, every other one a time after every file of the copy
+  (`cache::align_sources`), so only crates whose sources differ are built again. The same
+  cause hit one tree without a seed: an edit made before a build of the old content on the
+  node, synced after it with the workstation's older time.
 - **Owners and modes.** Files arrive owned by the host's build user and keep their modes; a
   fetched file is owned by the caller. User ids need not match.
 

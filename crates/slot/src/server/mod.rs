@@ -161,6 +161,9 @@ pub struct Config {
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
     pub cache_budget: u64,
+    /// How a new workspace's target directory is copied from its sibling
+    /// (`--seed-copy`).
+    pub seed_copy: cache::SeedCopy,
     /// Eviction of local target directories under a disk floor.
     pub evict: crate::evict::Settings,
     /// Free bytes on the filesystem of a path, for the disk hold and
@@ -2714,8 +2717,9 @@ impl Server {
     /// Before a remote job of workspace `ws` (repository `repo`) queues:
     /// records the use, evicts least recently used target directories over
     /// the budget or the disk floor, and seeds a new workspace's target
-    /// directory by reflink. Says what it did on the job's stderr and in the
-    /// journal. Returns the workspace it seeded from, if it did.
+    /// directory by a copy (`--seed-copy`). Says what it did on the job's
+    /// stderr and in the journal. Returns the workspace it seeded from, if
+    /// it did.
     async fn prepare_cache(
         &self,
         ws: &str,
@@ -2731,13 +2735,14 @@ impl Server {
         // carries freshness records and build-script output made for that
         // tree, which cargo may take as fresh here. Such a job is not seeded.
         let same_path = !self.cfg.same_path_roots.is_empty();
+        let how = self.cfg.seed_copy;
         let Ok((gone, seeded)) = tokio::task::spawn_blocking(move || {
             cache.touch(&ws, &repo, now_ms());
             let gone = cache.evict(budget, floor, &busy);
             let seeded = if same_path {
                 Err("same-path workspace".to_string())
             } else {
-                cache.seed(&ws, &repo, &busy)
+                cache.seed(&ws, &repo, &busy, how)
             };
             (gone, seeded)
         })
@@ -2754,17 +2759,20 @@ impl Server {
             let _ = tx.send(Frame::Info { msg });
         }
         match seeded {
-            Ok((src, took)) => {
+            Ok(s) => {
                 let msg = format!(
-                    "slot: target directory seeded from workspace {src} by reflink in {:.1}s",
-                    took.as_secs_f64()
+                    "slot: target directory seeded from workspace {} by a copy in {:.1}s; \
+                     {} source file(s) differ from its sources and build again",
+                    s.from,
+                    s.took.as_secs_f64(),
+                    s.differ
                 );
                 eprintln!("{msg}");
                 let _ = tx.send(Frame::Info { msg });
-                Some(src)
+                Some(s.from)
             }
             Err(e) => {
-                if e.contains("reflink") {
+                if e.starts_with("no reflink copy") || e.starts_with("no copy") {
                     eprintln!("slot: target directory not seeded: {e}");
                 }
                 None

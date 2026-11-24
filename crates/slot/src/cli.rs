@@ -254,6 +254,14 @@ pub struct ServeArgs {
     /// kept. 0: no budget, only the disk floor evicts.
     #[arg(long, default_value_t = 0.0, value_name = "GB")]
     pub cache_budget: f64,
+    /// For remote clients: how the first job of a new worktree copies the
+    /// target directory of another worktree of the same repository.
+    /// `reflink`: only a reflink copy, none where the filesystem has no
+    /// reflinks (a byte copy of a large target directory can take longer
+    /// than the build it saves). `copy`: a reflink where the filesystem has
+    /// them, else a byte copy. Never hard links.
+    #[arg(long, value_enum, default_value_t = crate::server::cache::SeedCopy::Reflink)]
+    pub seed_copy: crate::server::cache::SeedCopy,
     /// When the filesystem of a local Cargo target directory has less free
     /// space than this, GB, delete target directories that jobs built into,
     /// least recently built first, until it has 10 GB more. The mark is
@@ -830,6 +838,7 @@ impl ServeArgs {
             cpu_bound_gap: std::time::Duration::from_millis(crate::cpu_limit::STARTING_MS as u64),
             cpu_pressure: None,
             cache_budget: gb_bytes(self.cache_budget),
+            seed_copy: self.seed_copy,
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
                 margin: 10 * crate::admission::GB,

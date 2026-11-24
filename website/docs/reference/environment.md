@@ -127,7 +127,7 @@ unknown, never 0.
 | `compile_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the start to the first test binary, as the job's output shows it: cargo's `Running …` or `Doc-tests …` line, nextest's `Starting N tests across …` line or cargo's JSON `build-finished` message; the whole run when no test binary ran |
 | `test_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the first test binary to the end; absent when no test binary ran |
 | `node_target_dir` | remote cargo | the target directory the job built into on the node |
-| `seeded_from` | remote cargo | what that directory held when the job queued: the workspace id of the sibling it was seeded from by reflink, `kept` (the build of an earlier job of the same tree) or `empty` |
+| `seeded_from` | remote cargo | what that directory held when the job queued: the workspace id of the sibling it was seeded from by a copy (reflink, or a byte copy with `slot serve --seed-copy copy`), `kept` (the build of an earlier job of the same tree) or `empty` |
 
 A node's record gets `sync_ms` and `sync_bytes` with the job's request. `back_ms` is measured
 after the job ended: the client sends it to the node in a second request, and the node appends

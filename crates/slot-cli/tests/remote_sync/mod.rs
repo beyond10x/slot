@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::{Daemon, SLOT};
 
+mod fresh;
 mod node_view;
 mod phases;
 mod safety;
