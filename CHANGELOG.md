@@ -11,6 +11,9 @@
   (`node.conf.example`). The node's slots follow the CPUs found. A unit rebuilds the instance
   store at boot, so a stop and start no longer leaves bind lines in `/etc/fstab` that point at
   an empty disk. `task check` runs `contrib/node/test.sh`.
+- `provision.sh apply` installs the slot release into the instance store and the build user's
+  home again, and reads every installed path back: a failed install exits 1 with a `failed:`
+  line instead of `changed:`.
 
 ## 0.36.0 — 2026-11-24
 
