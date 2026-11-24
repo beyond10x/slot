@@ -256,6 +256,24 @@ pub struct ServeArgs {
     /// `--upgrade-hold` rule instead.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub handover: bool,
+    /// Run every job in a sandbox (bubblewrap): the whole filesystem read-only
+    /// and in its own pid namespace; writable are only the job's checkout, its
+    /// target directory, a private /tmp and the download caches of cargo and Go.
+    /// Other workspaces, other jobs' target directories and the user's
+    /// runtime directory are hidden. Without a working `bwrap` the daemon
+    /// does not start.
+    #[arg(long)]
+    pub sandbox: bool,
+    /// One more path a sandboxed job may write, for example a package
+    /// manager's store; repeat for more.
+    #[arg(long, value_name = "PATH", requires = "sandbox")]
+    pub sandbox_write: Vec<PathBuf>,
+    /// With --sandbox: mount each job's checkout at /work/src and its target
+    /// directory at /work/target, so every worktree of a repository builds at
+    /// the same paths. The job then runs without a rustc wrapper: the compile
+    /// cache server outside the sandbox cannot read sources at those paths.
+    #[arg(long, requires = "sandbox")]
+    pub sandbox_fixed_paths: bool,
 }
 
 /// `slot proxy` options.
@@ -761,6 +779,14 @@ impl ServeArgs {
             disk_free: None,
             exec_shim: Some(PathBuf::from("/proc/self/exe")),
             handover: self.handover,
+            sandbox: if self.sandbox {
+                Some(crate::sandbox::Sandbox::find(
+                    self.sandbox_write.clone(),
+                    self.sandbox_fixed_paths,
+                )?)
+            } else {
+                None
+            },
         })
     }
 }

@@ -214,6 +214,12 @@ fn serve(args: &slot::cli::ServeArgs) -> Result<()> {
     let inherited = slot::server::handover::take_inherited();
     slot::server::handover::catch_hup()?;
     let cfg = args.config()?;
+    if let Some(s) = &cfg.sandbox {
+        eprintln!(
+            "slot: every job runs in a sandbox ({})",
+            s.bwrap().display()
+        );
+    }
     let rt = tokio_runtime()?;
     rt.block_on(async move {
         slot::server::Server::with_inherited(cfg, inherited)?

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.33.0 — 2026-11-24
+
+- `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is
+  read-only, in a pid and IPC namespace of the job's own. Writable are only the job's checkout
+  (its synced workspace, or the git checkout of a local job), its target directory, a private
+  `/tmp` (`TMPDIR=/tmp`), cargo's `registry/` and `git/` with their lock files, the Go caches and
+  each `--sandbox-write <path>`. Other workspaces, other jobs' target directories, the user's
+  runtime directory and the daemon's socket are hidden; the network is the host's. A job can no
+  longer delete, replace or install a program in `~/.cargo/bin`, `~/.rustup` or `/usr` that
+  another build needs. Without a `bwrap` that can create the sandbox the daemon does not start.
+  `SLOT_SANDBOX=bwrap` is set in the job. Off by default; meant first for build nodes
+  (`dnf install -y bubblewrap` in the boot script).
+
+- `slot serve --sandbox --sandbox-fixed-paths` mounts each job's checkout at `/work/src` and its
+  target directory at `/work/target`, so every worktree of a repository builds at the same paths
+  (`CARGO_MANIFEST_DIR`, the working directory, `CARGO_TARGET_DIR`). Off by default: such a job
+  runs without a rustc wrapper, because the compile cache server outside the sandbox cannot read
+  sources at those paths.
+
 ## 0.32.0 — 2026-11-24
 
 - Remote mode seeds a new worktree's mirror from its siblings. Before each sync the client asks
