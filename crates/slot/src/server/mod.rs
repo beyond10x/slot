@@ -13,6 +13,7 @@ mod ring;
 pub mod spill;
 mod tally;
 mod upgrade;
+mod warm;
 
 use tally::Tally;
 
@@ -475,6 +476,10 @@ struct Inner {
     /// in each, Unix ms: eviction keeps the target directories in the tree
     /// of one used in the last hour ([`crate::evict::TREE_KEEP`]).
     ran_in: HashMap<PathBuf, i64>,
+    /// Repositories and when a job of each last started here, Unix ms,
+    /// warm-ups left out: a merge warms only a repository that built here
+    /// in the last [`warm::WITHIN_MS`].
+    built: HashMap<String, i64>,
     /// Machine base: the cgroup readings and their averages.
     machine: machine::Monitor,
     /// Machine base: the numbers of the last tick.
@@ -569,6 +574,9 @@ pub struct Server {
     shares: Mutex<crate::shares::Settings>,
     /// When this process started, Unix ms.
     born_ms: i64,
+    /// Repositories with a warm-up queued or running in this process,
+    /// from the word of the merge to the job's end.
+    warming: Mutex<HashSet<String>>,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -679,6 +687,7 @@ impl Server {
         let mut memory = admission::History::default();
         let mut targets = HashMap::new();
         let mut ran_in = HashMap::new();
+        let mut built = HashMap::new();
         let mut tally = Tally::default();
         let started = (cfg.clock)();
         if let Ok(f) = File::open(&log_path) {
@@ -688,6 +697,7 @@ impl Server {
                     memory.record(&job);
                     record_target(&mut targets, &job);
                     record_ran(&mut ran_in, &job);
+                    warm::record_built(&mut built, &job);
                     tally.record(&job, started);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
@@ -770,6 +780,7 @@ impl Server {
                 handing_over: false,
                 targets,
                 ran_in,
+                built,
                 machine: machine::Monitor::default(),
                 machine_shown: machine::Shown::default(),
                 budget: crate::shares::Budget::new(cores, f64::from(cores)),
@@ -837,6 +848,7 @@ impl Server {
             )),
             shares: Mutex::new(saved.shares()),
             born_ms: now_ms(),
+            warming: Mutex::new(HashSet::new()),
         });
         server.apply_saved_admission();
         Ok(server)
@@ -1388,7 +1400,7 @@ impl Server {
     ) -> (
         mpsc::UnboundedSender<Frame>,
         watch::Receiver<bool>,
-        Option<watch::Sender<bool>>,
+        Option<Arc<watch::Sender<bool>>>,
     ) {
         let id = r.job.id;
         let (tx, gone, stop, keep) = if let Some(a) = conn {
@@ -1396,7 +1408,15 @@ impl Server {
         } else {
             let (tx, _rx) = mpsc::unbounded_channel();
             let (g, rx) = watch::channel(false);
-            (tx, rx, None, Some(g))
+            let g = Arc::new(g);
+            // Only the daemon stops it: a warm-up a job of a session
+            // preempts. No user may `slot cancel` it.
+            let stop = Stop {
+                uid: None,
+                gone: Arc::clone(&g),
+                frames: tx.clone(),
+            };
+            (tx, rx, Some(stop), Some(g))
         };
         let ring = Arc::new(Ring::from_tail(OUTPUT_KEEP, r.output));
         if let Some(at) = r.tests_at {
@@ -1587,6 +1607,7 @@ impl Server {
         let short = match (req.cancel, req.amend) {
             (Some(id), _) => Some(self.cancel(id, uid).await),
             (None, Some(a)) => Some(self.amend(a)),
+            (None, None) if req.warm => Some(self.warm(&req, uid)),
             (None, None) => None,
         };
         if let Some((code, msg)) = short {
@@ -1975,7 +1996,8 @@ impl Server {
             };
             let expect_rss = g.memory.expected(&req.repo, &shown, tc.name());
             let expect_cores = self.expected_cores(&g.memory, &req.repo, &shown);
-            let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
+            let (priority, promoted) =
+                self.level_of(&req.repo, req.priority, enqueued_ms, req.warm);
             let predicted_ms = g.memory.expected_runtime(&req.repo, &shown);
             // A client that names slots asks for that share: one of 0.21.0
             // and older knows no other way to ask.
@@ -2034,6 +2056,8 @@ impl Server {
                 node_target_dir: None,
                 seeded_from: None,
                 width: None,
+                warm: req.warm,
+                cancel_reason: String::new(),
             };
             g.active.insert(
                 id,
@@ -2198,6 +2222,10 @@ impl Server {
             // directory: once another job compiles there, or one that is
             // served before it queues for the directory, it leaves the
             // queue, so it gathers no slot it could not use.
+            // A job of a session that still waits for its slots a moment
+            // after it queued cancels the running warm-ups.
+            let preempt_at = tokio::time::Instant::now() + warm::PREEMPT_AFTER;
+            let mut preempted = req.warm;
             let in_use = loop {
                 tokio::select! {
                     () = waiter.ready() => break false,
@@ -2206,6 +2234,10 @@ impl Server {
                             self.pool.release(waiter.take_held());
                         }
                         return self.finish(id, &tx, cancelled).ok();
+                    }
+                    () = tokio::time::sleep_until(preempt_at), if !preempted => {
+                        preempted = true;
+                        self.preempt_warm(id);
                     }
                     () = tokio::time::sleep(self.cfg.target_poll), if shares_target => {
                         if self.target_wait(id, false).is_some() {
@@ -2501,7 +2533,17 @@ impl Server {
         {
             let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
             let ws = ws.id.clone();
-            tokio::task::spawn_blocking(move || cache.record_size(&ws));
+            // A warm-up that built leaves its target directory the most
+            // recently used of the repository: the one a new workspace is
+            // seeded from.
+            let warmed = req.warm && self.ended_ok(id);
+            let repo = req.repo.clone();
+            tokio::task::spawn_blocking(move || {
+                cache.record_size(&ws);
+                if warmed {
+                    cache.touch(&ws, &repo, now_ms());
+                }
+            });
         }
         done
     }
@@ -3005,6 +3047,7 @@ impl Server {
             }
             record_target(&mut g.targets, &job);
             record_ran(&mut g.ran_in, &job);
+            warm::record_built(&mut g.built, &job);
             g.tally.record(&job, job.ended_ms);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
@@ -3421,8 +3464,18 @@ impl Server {
     }
 
     /// The level a queued job of `repo` that asked for `own` and queued at
-    /// `enqueued_ms` is ordered by now, and whether it was promoted.
-    fn level_of(&self, repo: &str, own: Option<Priority>, enqueued_ms: i64) -> (Priority, bool) {
+    /// `enqueued_ms` is ordered by now, and whether it was promoted. A
+    /// warm-up is `low` whatever a rule says, and never promoted.
+    fn level_of(
+        &self,
+        repo: &str,
+        own: Option<Priority>,
+        enqueued_ms: i64,
+        warm: bool,
+    ) -> (Priority, bool) {
+        if warm {
+            return (Priority::Low, false);
+        }
         let now = (self.cfg.clock)();
         let waited = Duration::from_millis(u64::try_from(now - enqueued_ms).unwrap_or(0));
         let table = self.priority.lock().expect("priority lock");
@@ -3461,7 +3514,7 @@ impl Server {
     fn rerank(&self) {
         let changed: Vec<i64> = {
             let mut g = self.inner.lock().expect("server lock");
-            let queued: Vec<(i64, String, Option<Priority>, i64)> = g
+            let queued: Vec<(i64, String, Option<Priority>, i64, bool)> = g
                 .active
                 .values()
                 .filter(|l| l.job.state == JobState::Queued)
@@ -3471,12 +3524,13 @@ impl Server {
                         l.job.repo.clone(),
                         l.req.as_ref().and_then(|r| r.priority),
                         l.job.enqueued_ms,
+                        l.job.warm,
                     )
                 })
                 .collect();
             let mut changed = Vec::new();
-            for (id, repo, own, enqueued_ms) in queued {
-                let (level, promoted) = self.level_of(&repo, own, enqueued_ms);
+            for (id, repo, own, enqueued_ms, warm) in queued {
+                let (level, promoted) = self.level_of(&repo, own, enqueued_ms, warm);
                 let Some(l) = g.active.get_mut(&id) else {
                     continue;
                 };

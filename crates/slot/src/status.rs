@@ -844,6 +844,8 @@ mod tests {
             node_target_dir: None,
             seeded_from: None,
             width: None,
+            warm: false,
+            cancel_reason: String::new(),
         }
     }
 

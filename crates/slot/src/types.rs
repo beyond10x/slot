@@ -253,6 +253,17 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub width: Option<u32>,
+    /// A warm-up job (`slot warm`): started after a merge to `main` to
+    /// build that tree's tests into the target directory new worktrees of
+    /// its repository start from. It is queued at `low`, never promoted,
+    /// and cancelled when a job of a session waits for slots.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warm: bool,
+    /// Why the daemon cancelled the job, such as `preempted by job 12`;
+    /// empty when its client or `slot cancel` ended it, and for a job that
+    /// was not cancelled.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cancel_reason: String,
 }
 
 /// Id of the daemon's own machine as a node.

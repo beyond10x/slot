@@ -211,3 +211,67 @@ fn a_rust_job_with_an_empty_rustc_wrapper_is_warned_on_stderr_and_in_the_log() {
     assert!(line.contains("\"RUSTC_WRAPPER\":\"\""), "{line}");
     assert!(!line.contains("SLOT_SOCKET"), "{line}");
 }
+
+/// `slot warm` in a checkout: with `warm = false` in its `.slot.toml` it
+/// sends nothing; before a job of the repository built, the daemon starts
+/// none; after one, it answers at once and runs the checkout's `warm`
+/// command from the repository root as a warm-up at `low`.
+#[test]
+fn slot_warm_runs_the_warm_up_the_checkout_names() {
+    let d = Daemon::start();
+    let repo = d.dir.path().join("repo");
+    let sub = repo.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let git = |args: &[&str]| {
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args([
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "x"]);
+    let warm = |dir: &std::path::Path| {
+        let out = d.client(&[SLOT, "warm"]).current_dir(dir).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(0), "{err}");
+        err
+    };
+
+    std::fs::write(repo.join(".slot.toml"), "warm = false\n").unwrap();
+    let err = warm(&sub);
+    assert!(err.contains("switches the warm-up off"), "{err}");
+
+    std::fs::write(repo.join(".slot.toml"), "warm = \"touch warmed\"\n").unwrap();
+    let err = warm(&sub);
+    assert!(err.contains("not warmed"), "no job of it built yet: {err}");
+
+    let st = d
+        .client(&[SLOT, "true"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert_eq!(st.code(), Some(0));
+    let err = warm(&sub);
+    assert!(err.contains("warm-up of"), "{err}");
+    assert!(
+        wait_for(|| d.logged(&["touch", "warmed"]) == 1),
+        "warm-up not logged"
+    );
+    assert!(repo.join("warmed").exists(), "run from the repository root");
+    let log = std::fs::read_to_string(d.dir.path().join("state/jobs.jsonl")).unwrap();
+    let line = log.lines().last().unwrap();
+    assert!(line.contains("\"warm\":true"), "{line}");
+    assert!(line.contains("\"priority\":\"low\""), "{line}");
+    assert!(line.contains("\"state\":\"ok\""), "{line}");
+}

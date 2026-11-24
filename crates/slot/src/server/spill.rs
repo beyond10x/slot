@@ -215,9 +215,14 @@ pub fn child_env(env: &[String], t: &Target) -> Vec<String> {
         .collect()
 }
 
-/// The spilled job's command: `exe run [--timeout <s>] -- <argv>`.
+/// The spilled job's command: `exe run [--warm] [--timeout <s>] -- <argv>`.
+/// A warm-up stays one on the node: that daemon runs it without the
+/// client, at its lowest level.
 pub fn child_argv(exe: &Path, req: &Request) -> Vec<String> {
     let mut v = vec![exe.to_string_lossy().into_owned(), "run".into()];
+    if req.warm {
+        v.push("--warm".into());
+    }
     if let Some(t) = req.timeout_s {
         v.push("--timeout".into());
         v.push(t.to_string());
@@ -265,7 +270,8 @@ impl Server {
     }
 
     /// Whether job `id` has waited long enough and no older job that may
-    /// go waits for slots: the oldest goes first.
+    /// go waits for slots: the oldest goes first. A warm-up never holds a
+    /// job of a session back, and goes only when no such job waits.
     pub(super) fn spill_due(&self, id: i64) -> bool {
         let g = self.inner.lock().expect("server lock");
         let Some(l) = g.active.get(&id) else {
@@ -276,7 +282,9 @@ impl Server {
             && l.job.state == JobState::Queued
             && now_ms() - l.job.enqueued_ms >= after
             && !g.active.values().any(|o| {
-                o.job.id < id
+                o.job.id != id
+                    && (o.job.id < id || l.job.warm)
+                    && !o.job.warm
                     && o.spillable
                     && o.waiter.is_some()
                     && o.job.state == JobState::Queued
@@ -642,6 +650,21 @@ mod tests {
                 "cargo",
                 "build"
             ]
+        );
+        let mut w = req(&["cargo", "test", "--no-run"]);
+        w.warm = true;
+        assert_eq!(
+            child_argv(Path::new("/usr/bin/slot"), &w),
+            [
+                "/usr/bin/slot",
+                "run",
+                "--warm",
+                "--",
+                "cargo",
+                "test",
+                "--no-run"
+            ],
+            "a warm-up stays one on the node"
         );
     }
 }

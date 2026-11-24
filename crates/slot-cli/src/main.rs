@@ -21,6 +21,14 @@ fn main() -> ExitCode {
         Cmd::Exec(args) => Ok(args
             .nofile
             .exec(&args.arg0, &args.command[0], &args.command[1..])),
+        Cmd::Run(args) if args.warm => {
+            let mut s = Settings::from_env();
+            s.warm = true;
+            s.priority = Some(slot::types::Priority::Low);
+            s.timeout = args.timeout.or(cli.timeout);
+            Ok(client::run(&args.command, &s))
+        }
+        Cmd::Warm(args) => warm(args.dir.as_deref(), cli.timeout),
         Cmd::Run(args) => Ok(build(
             &args.command,
             cli.local,
@@ -125,6 +133,17 @@ fn build(
     s.priority = priority;
     s.timeout = timeout;
     client::run(argv, &s)
+}
+
+/// `slot warm [DIR]`: the warm-up of the checkout at `dir`, else of the
+/// working directory's.
+fn warm(dir: Option<&std::path::Path>, timeout: Option<u64>) -> Result<i32> {
+    if let Some(d) = dir {
+        std::env::set_current_dir(d).with_context(|| d.display().to_string())?;
+    }
+    let mut s = Settings::from_env();
+    s.timeout = timeout;
+    Ok(client::warm(&s))
 }
 
 /// `slot gate`: serves the gate directories until killed.

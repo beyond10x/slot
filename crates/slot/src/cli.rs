@@ -125,6 +125,17 @@ pub enum Cmd {
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
+    /// After a merge to `main`: build the tests of a checkout of `main` at
+    /// the lowest level, so the next worktree of the repository starts from
+    /// a built target directory.
+    ///
+    /// Run it in the checkout after it took the merge, for example from its
+    /// `post-merge` hook. It returns at once; the daemon runs `cargo test
+    /// --no-run`, or the `warm` command of the checkout's `.slot.toml`
+    /// (`warm = false` switches it off). The daemon starts one only for a
+    /// repository a job built on it in the last 24 hours, one at a time per
+    /// repository, and cancels it when a job of a session waits for slots.
+    Warm(WarmArgs),
     /// List agent sessions that build outside the pool, with their commands.
     Sessions(SessionsArgs),
     /// Show how the pool was shared: slot time, CPU time and queue wait per
@@ -407,9 +418,20 @@ pub struct RunArgs {
     /// How long the job may run, as `slot --timeout DURATION`.
     #[arg(long, value_name = "DURATION", value_parser = crate::run_limit::parse_duration)]
     pub timeout: Option<u64>,
+    /// Run the command as a warm-up (`slot warm`): set by a daemon that
+    /// hands a warm-up to a node.
+    #[arg(long, hide = true)]
+    pub warm: bool,
     /// The command and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+/// `slot warm` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct WarmArgs {
+    /// The checkout of `main` to build; the working directory without it.
+    pub dir: Option<PathBuf>,
 }
 
 /// `slot status` options.

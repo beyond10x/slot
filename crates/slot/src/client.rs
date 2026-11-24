@@ -80,6 +80,8 @@ fn handle_signals() {
 
 /// Client settings, read from `SLOT_*` variables.
 #[derive(Debug, Clone, Default)]
+// Each flag is a switch of its own that the client reads alone.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Settings {
     /// Remote ssh host; `None` = local daemon.
     pub host: Option<String>,
@@ -119,6 +121,10 @@ pub struct Settings {
     /// says, and carries the reason [`crate::server::spill::HERE`], so the
     /// daemon never hands it to a node.
     pub here: bool,
+    /// `slot warm`, or `slot run --warm` from a daemon that hands a warm-up
+    /// to a node: the daemon answers at once and runs the job without the
+    /// client, at its lowest level ([`Request::warm`]).
+    pub warm: bool,
 }
 
 /// A duration from variable `name`, or `default` with a line on stderr when
@@ -184,6 +190,7 @@ impl Settings {
             fallback: var("SLOT_LOCAL_FALLBACK").is_some_and(|v| v != "0"),
             same_path: var("SLOT_REMOTE_SAME_PATH").is_some_and(|v| v != "0"),
             here: false,
+            warm: false,
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
@@ -233,7 +240,12 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         remote_host(&mut req, s, || listed_local(top.as_deref(), argv))
     };
     if let Some(host) = host {
-        let plan = artifacts::plan(argv);
+        let plan = if s.warm {
+            // A warm-up builds for the node: nothing comes back.
+            None
+        } else {
+            artifacts::plan(argv)
+        };
         if let Some(p) = &plan {
             req.argv.clone_from(&p.argv);
         }
@@ -312,6 +324,7 @@ fn new_request(
         tokens: s.tokens,
         priority: s.priority,
         timeout_s: s.timeout,
+        warm: s.warm,
         local_reason: if s.here {
             crate::server::spill::HERE.into()
         } else {
@@ -603,6 +616,44 @@ fn listed_local(top: Option<&Path>, argv: &[String]) -> bool {
             false
         }
     }
+}
+
+/// `slot warm`: after a merge to `main`, asks the daemon to build the tests
+/// of the checkout that holds the working directory, at its lowest level,
+/// and returns without waiting for the build. The command is the checkout's
+/// `.slot.toml` `warm` entry, else [`repo_config::DEFAULT_WARM`]; `warm =
+/// false` sends nothing. The daemon's answer says whether it started one.
+pub fn warm(s: &Settings) -> i32 {
+    if nested() {
+        eprintln!("slot: no warm-up from inside a job");
+        return 2;
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(top) = checkout_info(&cwd).top else {
+        eprintln!("slot: {} is in no git checkout: no warm-up", cwd.display());
+        return 2;
+    };
+    let config = match RepoConfig::load(&top) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("slot: {e}");
+            return 2;
+        }
+    };
+    let Some(argv) = config.warm_argv() else {
+        eprintln!("slot: {} switches the warm-up off", repo_config::FILE);
+        return 0;
+    };
+    // From the repository root: the warm-up builds the whole workspace.
+    if let Err(e) = std::env::set_current_dir(&top) {
+        eprintln!("slot: {}: {e}", top.display());
+        return 2;
+    }
+    let mut s = s.clone();
+    s.warm = true;
+    s.priority = Some(crate::types::Priority::Low);
+    s.fetch.clear();
+    run(&argv, &s)
 }
 
 /// `slot cancel <id>`: asks the daemon to cancel job `id`. With `SLOT_HOST`
