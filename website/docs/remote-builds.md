@@ -187,13 +187,18 @@ Parallel cargo jobs on one server wait in turn on cargo's package-cache lock whi
 downloads crates. Before a cargo job that builds (`build`, `check`, `clippy`, `test`, `bench`,
 `doc`, `rustc`, `nextest`, `llvm-cov`), the server daemon compares the digest of the mirror's
 `Cargo.lock` with the one it recorded for that mirror. When they differ it runs
-`cargo fetch --locked` once, under a lock per repository, records the digest, and prints
-`slot: new Cargo.lock on this mirror: cargo fetch --locked took 2.1 s; its cargo jobs run
+`cargo fetch` once, under a lock per repository, records the digest, and prints
+`slot: new Cargo.lock on this mirror: cargo fetch took 2.1 s; its cargo jobs run
 offline`. Every such job of the mirror then runs with `CARGO_NET_OFFLINE=true`.
 
-A fetch that fails (a `Cargo.lock` that does not match `Cargo.toml`, an unreachable registry) or
-takes longer than 5 minutes sends the job back to this machine's daemon with
-`slot: remote build on <host> did not start (cargo fetch --locked failed …); running it on this
+Like cargo on your machine, the fetch updates a `Cargo.lock` that is out of date, for example
+after you add a path dependency. A job that passes `--locked` or `--frozen` itself gets
+`cargo fetch --locked` instead, so it fails on the server as it would locally.
+
+A fetch that fails (a `Cargo.toml` cargo cannot resolve, an unreachable registry, an out-of-date
+`Cargo.lock` under `--locked`) or takes longer than 5 minutes sends the job back to this
+machine's daemon with
+`slot: remote build on <host> did not start (cargo fetch failed …); running it on this
 machine's daemon`. A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
 need the network themselves (`cargo update`, `add`, `install`, `fetch`) run online.
 

@@ -551,7 +551,7 @@ fn a_second_job_with_the_same_lock_file_does_not_fetch_again() {
     assert_eq!(
         lines,
         [
-            "|fetch --locked",
+            "|fetch",
             "true|check",
             "true|build --message-format=json-render-diagnostics"
         ],
@@ -573,13 +573,12 @@ fn a_job_whose_fetch_fails_runs_on_this_machines_daemon() {
     let out = remote_cargo(&d, &ssh, &repo, &[cargo.to_str().unwrap(), "check"]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("cargo fetch --locked failed")
-            && err.contains("running it on this machine's daemon"),
+        err.contains("cargo fetch failed") && err.contains("running it on this machine's daemon"),
         "{err}"
     );
     let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
     let lines: Vec<&str> = log.lines().collect();
-    assert_eq!(lines, ["|fetch --locked", "|check"], "{err}");
+    assert_eq!(lines, ["|fetch", "|check"], "{err}");
 }
 
 /// A daemon and a fake ssh that admit same-path mirrors below `root`.

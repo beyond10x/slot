@@ -66,9 +66,12 @@
   admits a fetch of several paths, each under the workspace root or the cache's `target/`.
 
 - Fetch once: before a remote cargo job that builds, the server daemon runs
-  `cargo fetch --locked` in the mirror when its `Cargo.lock` digest differs from the one recorded
+  `cargo fetch` in the mirror when its `Cargo.lock` digest differs from the one recorded
   for that mirror (`<ws-root>/.cargo-fetch/<id>`), under a lock per repository, and then runs
-  the job with `CARGO_NET_OFFLINE=true`. Parallel jobs no longer wait on cargo's package-cache
+  the job with `CARGO_NET_OFFLINE=true`. Like cargo on the workstation, the fetch updates a
+  `Cargo.lock` that is out of date (a path dependency just added) instead of failing; a job
+  whose own options include `--locked` or `--frozen` gets `cargo fetch --locked`, so it fails
+  as it would locally. Parallel jobs no longer wait on cargo's package-cache
   lock while one of them downloads. A fetch that fails or runs over 5 minutes sends the job back
   to the client, which runs it on its own machine's daemon (a new `fallback` frame, sent only to
   a client whose request sets `fetch_once`).
