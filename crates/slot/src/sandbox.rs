@@ -22,6 +22,9 @@ use crate::toolchain;
 /// Set in a sandboxed job's environment, so a build can tell.
 pub const ENV: &str = "SLOT_SANDBOX";
 
+const TREE_WHY: &str =
+    "the job's checkout: a build writes generated files and Cargo.lock in its tree";
+
 /// One path a sandboxed job may write, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Writable {
@@ -74,14 +77,22 @@ pub struct Job<'a> {
 pub struct Sandbox {
     bwrap: PathBuf,
     extra: Vec<PathBuf>,
+    fixed: bool,
 }
+
+/// Where `--sandbox-fixed-paths` mounts a job's checkout.
+pub const FIXED_SRC: &str = "/work/src";
+/// Where `--sandbox-fixed-paths` mounts a job's target directory.
+pub const FIXED_TARGET: &str = "/work/target";
 
 impl Sandbox {
     /// The sandbox with `bwrap` from `PATH`, after a probe that it can
     /// create the namespaces a job needs. `extra` are more writable paths
-    /// (`--sandbox-write`). An error says why no job could run sandboxed:
+    /// (`--sandbox-write`). With `fixed` (`--sandbox-fixed-paths`) a job sees
+    /// its checkout at [`FIXED_SRC`] and its target directory at
+    /// [`FIXED_TARGET`], whatever their paths on the host. An error says why no job could run sandboxed:
     /// the daemon then refuses to start, it never runs a job without it.
-    pub fn find(extra: Vec<PathBuf>) -> Result<Self> {
+    pub fn find(extra: Vec<PathBuf>, fixed: bool) -> Result<Self> {
         let path = std::env::var("PATH").unwrap_or_default();
         let bwrap = std::env::split_paths(&path)
             .chain([PathBuf::from("/usr/bin")])
@@ -92,7 +103,11 @@ impl Sandbox {
                  (`dnf install bubblewrap`, `apt install bubblewrap`, `pacman -S bubblewrap`) \
                  or start without --sandbox",
             )?;
-        let s = Self { bwrap, extra };
+        let s = Self {
+            bwrap,
+            extra,
+            fixed,
+        };
         s.probe()?;
         Ok(s)
     }
@@ -100,7 +115,8 @@ impl Sandbox {
     /// Runs `true` in the namespaces and mounts every job gets.
     fn probe(&self) -> Result<()> {
         let out = Command::new(&self.bwrap)
-            .args(BASE)
+            .args(self.root())
+            .args(NAMESPACES)
             .args(["--tmpfs", "/tmp", "--", "true"])
             .output()
             .with_context(|| format!("--sandbox: run {}", self.bwrap.display()))?;
@@ -114,6 +130,12 @@ impl Sandbox {
             );
         }
         Ok(())
+    }
+
+    /// Whether a job sees its checkout and target directory at
+    /// [`FIXED_SRC`] and [`FIXED_TARGET`].
+    pub fn fixed(&self) -> bool {
+        self.fixed
     }
 
     /// The program the daemon starts in place of the job's own.
@@ -141,7 +163,7 @@ impl Sandbox {
             .map_or_else(|| checkout(job.cwd, &homes), Path::to_path_buf);
         w.push(Writable {
             path: tree,
-            why: "the job's checkout: a build writes generated files and Cargo.lock in its tree",
+            why: TREE_WHY,
             create: Create::No,
         });
         if let Some(t) = &job.target_dir {
@@ -251,7 +273,8 @@ impl Sandbox {
     pub fn wrap(&self, job: &Job<'_>, argv: Vec<String>) -> Vec<String> {
         let s = |p: &Path| p.to_string_lossy().into_owned();
         let mut a: Vec<String> = std::iter::once(s(&self.bwrap))
-            .chain(BASE.iter().map(|x| (*x).to_string()))
+            .chain(self.root())
+            .chain(NAMESPACES.iter().map(|x| (*x).to_string()))
             .collect();
         a.extend(["--tmpfs".into(), "/tmp".into()]);
         // Bound, then hidden, then the job's own bound again on top: a
@@ -279,8 +302,60 @@ impl Sandbox {
         if job.fifo.is_absolute() {
             a.extend(["--ro-bind-try".into(), s(job.fifo), s(job.fifo)]);
         }
-        a.extend(["--chdir".into(), s(job.cwd), "--".into()]);
+        let mut cwd = job.cwd.to_path_buf();
+        let tree = writable.first().filter(|w| w.why == TREE_WHY);
+        if let (true, Some(tree)) = (self.fixed, tree) {
+            a.extend(["--bind".into(), s(&tree.path), FIXED_SRC.into()]);
+            if let Ok(rel) = normalize(job.cwd).strip_prefix(&tree.path) {
+                cwd = Path::new(FIXED_SRC).join(rel);
+            }
+            if let Some(t) = writable
+                .iter()
+                .find(|w| Some(&w.path) == job.target_dir.as_ref())
+            {
+                a.extend(["--bind".into(), s(&t.path), FIXED_TARGET.into()]);
+                a.extend([
+                    "--setenv".into(),
+                    "CARGO_TARGET_DIR".into(),
+                    FIXED_TARGET.into(),
+                ]);
+            }
+            // The compile cache server runs outside the sandbox and reads
+            // sources by the path the job names: under /work it finds none.
+            for v in ["RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER"] {
+                a.extend(["--setenv".into(), v.into(), String::new()]);
+            }
+        }
+        a.extend(["--chdir".into(), s(&cwd), "--".into()]);
         a.extend(argv);
+        a
+    }
+
+    /// The read-only root. By default the host's `/`. With fixed paths a
+    /// tmpfs holding each entry of the host's `/` bound read-only (a
+    /// symbolic link as a link), so the sandbox can have a `/work` the host
+    /// does not.
+    fn root(&self) -> Vec<String> {
+        if !self.fixed {
+            return ["--ro-bind", "/", "/"].map(String::from).to_vec();
+        }
+        let skip = ["dev", "proc", "tmp", "work"];
+        let mut entries: Vec<_> = std::fs::read_dir("/")
+            .map(|d| d.flatten().collect())
+            .unwrap_or_default();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        let mut a = Vec::new();
+        for e in entries {
+            let name = e.file_name();
+            if skip.iter().any(|s| name == *s) {
+                continue;
+            }
+            let p = Path::new("/").join(&name).to_string_lossy().into_owned();
+            match std::fs::read_link(e.path()) {
+                Ok(to) => a.extend(["--symlink".into(), to.to_string_lossy().into_owned(), p]),
+                Err(_) => a.extend(["--ro-bind".into(), p.clone(), p]),
+            }
+        }
         a
     }
 
@@ -292,12 +367,9 @@ impl Sandbox {
     }
 }
 
-/// What every sandbox starts from: the root read-only, a fresh `/dev` and
-/// `/proc`, its own pid and IPC namespace.
-const BASE: &[&str] = &[
-    "--ro-bind",
-    "/",
-    "/",
+/// What every sandbox has after its root: a fresh `/dev` and `/proc`, its
+/// own pid and IPC namespace.
+const NAMESPACES: &[&str] = &[
     "--dev",
     "/dev",
     "--proc",
@@ -357,7 +429,51 @@ mod tests {
         Sandbox {
             bwrap: "/usr/bin/bwrap".into(),
             extra: extra.iter().map(PathBuf::from).collect(),
+            fixed: false,
         }
+    }
+
+    /// With fixed paths the root is the host's entries on a tmpfs, the
+    /// checkout and target directory are bound at /work, the job starts in
+    /// the same place under /work/src, its target directory and wrapper say
+    /// so, and the host's paths are still bound as before.
+    #[test]
+    fn with_fixed_paths_a_job_sees_its_tree_and_target_under_work() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(ws.join("abc/sub")).unwrap();
+        let e = env(&["HOME=/h"]);
+        let job = Job {
+            cwd: &ws.join("abc/sub"),
+            workspace: Some(&ws.join("abc")),
+            target_dir: Some(cache.join("target/abc")),
+            env: &e,
+            ws_root: &ws,
+            cache_root: &cache,
+            socket: Path::new("/run/s.sock"),
+            fifo: Path::new("/state/jobserver.fifo"),
+        };
+        let fixed = Sandbox {
+            fixed: true,
+            ..sandbox(&[])
+        };
+        let line = fixed.wrap(&job, env(&["cargo", "build"])).join(" ");
+        assert!(!line.contains("--ro-bind / /"), "{line}");
+        assert!(line.contains("--ro-bind /usr /usr"), "{line}");
+        assert!(!line.contains(" /proc /proc --dev") && line.contains("--proc /proc"));
+        assert!(line.contains(&format!("--bind {} /work/src", ws.join("abc").display())));
+        let target = cache.join("target/abc");
+        assert!(line.contains(&format!("--bind {} /work/target", target.display())));
+        assert!(line.contains(&format!("--bind-try {0} {0}", target.display())));
+        assert!(line.contains("--setenv CARGO_TARGET_DIR /work/target"));
+        assert!(line.contains("--setenv RUSTC_WRAPPER  --setenv CARGO_BUILD_RUSTC_WRAPPER "));
+        assert!(
+            line.ends_with("--chdir /work/src/sub -- cargo build"),
+            "{line}"
+        );
+        let plain = sandbox(&[]).wrap(&job, env(&["true"])).join(" ");
+        assert!(!plain.contains("/work"), "{plain}");
     }
 
     fn env(v: &[&str]) -> Vec<String> {

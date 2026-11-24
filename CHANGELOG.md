@@ -13,6 +13,12 @@
   `SLOT_SANDBOX=bwrap` is set in the job. Off by default; meant first for build nodes
   (`dnf install -y bubblewrap` in the boot script).
 
+- `slot serve --sandbox --sandbox-fixed-paths` mounts each job's checkout at `/work/src` and its
+  target directory at `/work/target`, so every worktree of a repository builds at the same paths
+  (`CARGO_MANIFEST_DIR`, the working directory, `CARGO_TARGET_DIR`). Off by default: such a job
+  runs without a rustc wrapper, because the compile cache server outside the sandbox cannot read
+  sources at those paths.
+
 ## 0.30.0 — 2026-11-23
 
 - `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction

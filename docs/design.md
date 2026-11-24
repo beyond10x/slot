@@ -1719,6 +1719,29 @@ checkout that holds the workspace root does not bring the other workspaces back.
   handover passes on).
 - `SLOT_SANDBOX=bwrap` in the job's environment says it is sandboxed.
 
+**Fixed paths** (`--sandbox-fixed-paths`, off by default). A compile cache keys a unit by what
+the compiler sees, and paths are part of it: the working directory, `CARGO_MANIFEST_DIR`, the
+target directory. Two worktrees of one repository differ in every one of these, so a unit built
+in one is built again in the other. With the option the job sees its checkout at `/work/src` and
+its target directory at `/work/target`, starts at its own directory under `/work/src`, and gets
+`CARGO_TARGET_DIR=/work/target`; every worktree of a repository then builds at the same paths.
+The host's paths stay bound as without it, and the output of a synced workspace's job is
+rewritten from `/work/src` to the client's root.
+
+- The root is then not `--ro-bind / /` but a tmpfs that holds each entry of the host's `/` bound
+  read-only (a symbolic link as a link), because a read-only `/` has no place to create `/work`
+  (`bwrap: Can't mkdir parents for /work/src: Read-only file system`). The tmpfs itself is
+  writable and private to the job; it is gone with it.
+- The job runs without a rustc wrapper (`RUSTC_WRAPPER` and `CARGO_BUILD_RUSTC_WRAPPER` set
+  empty). The compile cache server runs outside the sandbox: it reads the sources and runs
+  rustc by the paths the job names, and `/work/src` does not exist there. Measured 2026-11-24 by
+  hand against the host's server: a library crate at `/work/src` with `RUSTC_WRAPPER=sccache`
+  failed (`sccache … rustc` exited 254); a binary crate built, because sccache does not cache a
+  binary and runs rustc in the job. No test covers it: it needs a live server. A cache that
+  runs inside the job's sandbox would serve these paths; none is built, and no second server is
+  started. This departs from the workspace rule that every Rust build compiles through the
+  host's compile cache, which is why the option is off by default.
+
 **Build nodes.** Amazon Linux 2023 has no `bwrap` by default. The node boot script
 (`docs/design/remote-pool.md` § 7.3, step 3) installs it with the other packages:
 

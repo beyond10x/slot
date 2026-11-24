@@ -32,7 +32,7 @@ scope:
   path: website/docs/reference/environment.md
 - confidence: cited
   path: website/docs/remote-builds.md
-revision: 2
+revision: 4
 ---
 # Story: jobs run in a sandbox
 
@@ -59,6 +59,10 @@ revision: 2
 9. Docs: a `docs/design.md` section, a website page for the option, the line for the node boot
    script (`dnf install -y bubblewrap`), `CHANGELOG.md` under Unreleased, the CLI reference
    regenerated.
+10. With `--sandbox-fixed-paths` (off by default) a job sees its checkout at `/work/src` and its
+    target directory at `/work/target`: two worktrees of one repository build at the same paths
+    (working directory, `CARGO_MANIFEST_DIR`, `CARGO_TARGET_DIR`; daemon test under 60 s). The job
+    runs without a rustc wrapper, and the design says why.
 
 ## Outcome
 

@@ -220,6 +220,12 @@ A build that writes somewhere else (a package manager's store, a browser downloa
 `Read-only file system` until that path is named with `--sandbox-write`. Every path and its
 reason: the repository's `docs/design.md` § 27.
 
+With `--sandbox-fixed-paths` as well, a job sees its checkout at `/work/src` and its target
+directory at `/work/target` (`CARGO_TARGET_DIR=/work/target`), so every worktree of a repository
+builds at the same paths and `CARGO_MANIFEST_DIR` is the same in each. Off by default: the job
+then runs without a rustc wrapper, because the compile cache server outside the sandbox cannot
+read sources at those paths.
+
 ## Measured
 
 Against a 4-vCPU KVM guest on the workstation (numbers and method in the repository's

@@ -263,6 +263,12 @@ pub struct ServeArgs {
     /// manager's store; repeat for more.
     #[arg(long, value_name = "PATH", requires = "sandbox")]
     pub sandbox_write: Vec<PathBuf>,
+    /// With --sandbox: mount each job's checkout at /work/src and its target
+    /// directory at /work/target, so every worktree of a repository builds at
+    /// the same paths. The job then runs without a rustc wrapper: the compile
+    /// cache server outside the sandbox cannot read sources at those paths.
+    #[arg(long, requires = "sandbox")]
+    pub sandbox_fixed_paths: bool,
 }
 
 /// `slot proxy` options.
@@ -758,7 +764,10 @@ impl ServeArgs {
             exec_shim: Some(PathBuf::from("/proc/self/exe")),
             handover: self.handover,
             sandbox: if self.sandbox {
-                Some(crate::sandbox::Sandbox::find(self.sandbox_write.clone())?)
+                Some(crate::sandbox::Sandbox::find(
+                    self.sandbox_write.clone(),
+                    self.sandbox_fixed_paths,
+                )?)
             } else {
                 None
             },

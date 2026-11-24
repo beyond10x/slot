@@ -4820,7 +4820,7 @@ fn a_job_predicted_short_is_not_held_for_the_hosts_cpus() {
 /// The daemon's sandbox, or `None` with the reason printed where `bwrap` is
 /// missing or cannot create namespaces here.
 fn sandbox_or_skip(test: &str) -> Option<crate::sandbox::Sandbox> {
-    match crate::sandbox::Sandbox::find(Vec::new()) {
+    match crate::sandbox::Sandbox::find(Vec::new(), false) {
         Ok(s) => Some(s),
         Err(e) => {
             eprintln!("{test}: skipped: {e:#}");
@@ -4952,37 +4952,36 @@ fn a_sandboxed_local_job_cannot_delete_a_file_in_another_checkout() {
     assert!(f.root.join("mine/out.txt").exists());
 }
 
-/// `cargo build` of a crate of one file succeeds under `--sandbox`, with
-/// `HOME` and `CARGO_HOME` in temporary directories and the toolchain
-/// read-only, and its binary runs.
-#[test]
-fn cargo_builds_a_tiny_crate_in_the_sandbox() {
-    let Some(sandbox) = sandbox_or_skip("cargo_builds_a_tiny_crate_in_the_sandbox") else {
-        return;
-    };
-    let f = start_cfg(1, |c| c.sandbox = Some(sandbox));
-    let home = f.root.join("home");
-    std::fs::create_dir_all(home.join(".cargo")).unwrap();
-    let krate = f.root.join("tiny");
-    std::fs::create_dir_all(krate.join("src")).unwrap();
+/// A crate of one file at `dir`, whose binary prints where it was built
+/// from and where it runs.
+fn tiny_crate(dir: &Path) {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
-        krate.join("Cargo.toml"),
+        dir.join("Cargo.toml"),
         "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
     )
     .unwrap();
     std::fs::write(
-        krate.join("src/main.rs"),
-        "fn main() { println!(\"tiny ran\"); }\n",
+        dir.join("src/main.rs"),
+        "fn main() {\n    println!(\"tiny ran\");\n    \
+         println!(\"manifest={}\", env!(\"CARGO_MANIFEST_DIR\"));\n    \
+         println!(\"cwd={}\", std::env::current_dir().unwrap().display());\n}\n",
     )
     .unwrap();
-    // The toolchain stays where the caller has it; rustup finds it there.
+}
+
+/// The environment of a cargo job with `HOME` and `CARGO_HOME` under
+/// `root` and its target directory at `target`; the toolchain stays where
+/// the caller has it, and rustup finds it there.
+fn cargo_env(root: &Path, target: &Path) -> Vec<String> {
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
     let rustup = std::env::var("RUSTUP_HOME").ok().or_else(|| {
         std::env::var("HOME")
             .ok()
             .map(|h| format!("{h}/.rustup"))
             .filter(|p| Path::new(p).is_dir())
     });
-    let target = f.root.join("target");
     let mut env: Vec<String> = std::env::vars()
         .filter(|(k, _)| !k.starts_with("CARGO") && k != "RUSTC_WRAPPER")
         .map(|(k, v)| format!("{k}={v}"))
@@ -4998,16 +4997,73 @@ fn cargo_builds_a_tiny_crate_in_the_sandbox() {
         "CARGO_NET_OFFLINE=true".into(),
     ]);
     env.extend(rustup.map(|r| format!("RUSTUP_HOME={r}")));
-    let mut req = sh(
-        &krate,
-        "cargo build --quiet --offline && \"$CARGO_TARGET_DIR/debug/tiny\"",
-    );
-    req.env = env;
+    env
+}
+
+const BUILD_AND_RUN: &str = "cargo build --quiet --offline && \"$CARGO_TARGET_DIR/debug/tiny\" \
+                             && echo target=$CARGO_TARGET_DIR";
+
+/// `cargo build` of a crate of one file succeeds under `--sandbox`, with
+/// `HOME` and `CARGO_HOME` in temporary directories and the toolchain
+/// read-only, and its binary runs.
+#[test]
+fn cargo_builds_a_tiny_crate_in_the_sandbox() {
+    let Some(sandbox) = sandbox_or_skip("cargo_builds_a_tiny_crate_in_the_sandbox") else {
+        return;
+    };
+    let f = start_cfg(1, |c| c.sandbox = Some(sandbox));
+    let krate = f.root.join("tiny");
+    tiny_crate(&krate);
+    let target = f.root.join("target");
+    let mut req = sh(&krate, BUILD_AND_RUN);
+    req.env = cargo_env(&f.root, &target);
     let started = Instant::now();
     let r = run(&f, req);
     assert_eq!(r.code, 0, "{r:?}");
     assert!(r.out.contains("tiny ran"), "{r:?}");
     assert!(target.join("debug/tiny").exists());
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// With `--sandbox-fixed-paths` two worktrees of one repository build at
+/// the same paths: the job of each starts in /work/src, cargo builds into
+/// /work/target and `CARGO_MANIFEST_DIR` is the same; the binaries land in
+/// each worktree's own target directory on the host.
+#[test]
+fn with_fixed_paths_two_worktrees_build_at_the_same_paths() {
+    let Some(sandbox) = sandbox_or_skip("with_fixed_paths_two_worktrees_build_at_the_same_paths")
+    else {
+        return;
+    };
+    let fixed = crate::sandbox::Sandbox::find(Vec::new(), true).unwrap();
+    assert!(fixed.fixed() && !sandbox.fixed());
+    let f = start_cfg(1, |c| c.sandbox = Some(fixed));
+    let started = Instant::now();
+    let mut seen = Vec::new();
+    for wt in ["wt-a", "wt-b"] {
+        let tree = f.root.join(wt);
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        tiny_crate(&tree.join("tiny"));
+        let target = f.root.join(format!("target-{wt}"));
+        let mut req = sh(&tree.join("tiny"), BUILD_AND_RUN);
+        req.env = cargo_env(&f.root, &target);
+        let r = run(&f, req);
+        assert_eq!(r.code, 0, "{wt}: {r:?}");
+        assert!(target.join("debug/tiny").exists(), "{wt}: {r:?}");
+        seen.push(r.out);
+    }
+    assert_eq!(seen[0], seen[1]);
+    for want in [
+        "manifest=/work/src/tiny",
+        "cwd=/work/src/tiny",
+        "target=/work/target",
+    ] {
+        assert!(seen[0].lines().any(|l| l == want), "{want} in {}", seen[0]);
+    }
     assert!(
         started.elapsed() < Duration::from_secs(60),
         "{:?}",

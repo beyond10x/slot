@@ -2173,6 +2173,14 @@ impl Server {
                 .to_string_lossy()
                 .into_owned()
         });
+        // With fixed paths a synced workspace's job names its tree by the
+        // fixed path; its output is rewritten from there.
+        let from = match &self.cfg.sandbox {
+            Some(s) if s.fixed() && req.workspace.is_some() => {
+                crate::sandbox::FIXED_SRC.to_string()
+            }
+            _ => from,
+        };
         let pumps = self.start_pumps(pipes, &tx, &out, &(from, to));
         // The limit in force at the start is the job's: a later `slot
         // run-limit` changes the jobs that start after it.
