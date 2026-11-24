@@ -11,6 +11,67 @@
   `ui/src/generated/`; `task check` regenerates and compares them, and checks the spec with
   `ess ui check`.
 
+## 0.33.0 — 2026-11-24
+
+- `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is
+  read-only, in a pid and IPC namespace of the job's own. Writable are only the job's checkout
+  (its synced workspace, or the git checkout of a local job), its target directory, a private
+  `/tmp` (`TMPDIR=/tmp`), cargo's `registry/` and `git/` with their lock files, the Go caches and
+  each `--sandbox-write <path>`. Other workspaces, other jobs' target directories, the user's
+  runtime directory and the daemon's socket are hidden; the network is the host's. A job can no
+  longer delete, replace or install a program in `~/.cargo/bin`, `~/.rustup` or `/usr` that
+  another build needs. Without a `bwrap` that can create the sandbox the daemon does not start.
+  `SLOT_SANDBOX=bwrap` is set in the job. Off by default; meant first for build nodes
+  (`dnf install -y bubblewrap` in the boot script).
+
+- `slot serve --sandbox --sandbox-fixed-paths` mounts each job's checkout at `/work/src` and its
+  target directory at `/work/target`, so every worktree of a repository builds at the same paths
+  (`CARGO_MANIFEST_DIR`, the working directory, `CARGO_TARGET_DIR`). Off by default: such a job
+  runs without a rustc wrapper, because the compile cache server outside the sandbox cannot read
+  sources at those paths.
+
+## 0.32.0 — 2026-11-24
+
+- Remote mode seeds a new worktree's mirror from its siblings. Before each sync the client asks
+  the server for other mirrors of the same repository (same normalized `origin` URL), through a
+  new step `slot __siblings` that `slot shell` admits, and passes up to four of them to rsync as
+  `--copy-dest`: unchanged files are copied on the server, changed ones sent as deltas against the
+  sibling's. The first sync of a worktree used to send the whole tree; over a link of about
+  1 MB/s a 145 MB tree took more than 16 minutes. A server whose slot does not know the step gets
+  the plain sync. `slot shell` takes `--copy-dest` only as `../<id>` of a sync, and `--stats`.
+
+- A remote sync that reads and writes no byte for `SLOT_SYNC_STALL` (default 60 s), or runs
+  longer than `SLOT_SYNC_LIMIT` (default 5 min), is killed with its ssh, and the job runs on this
+  machine's daemon. An rsync killed from outside also sends the job to the local daemon. Before,
+  a sync over a stalled link held the job for as long as the link stayed open.
+
+- Every remote sync prints one line with its bytes and seconds, for example `slot: synced to
+  buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`.
+
+- Two clients of one worktree on one workstation sync it one after the other: the second waits
+  for the first (a `flock` in the runtime directory, at most `SLOT_SYNC_LIMIT`) and its line says
+  how long. Two rsyncs into one mirror at once had ended one of them with exit 23.
+
+## 0.31.1 — 2026-11-24
+
+- The UX gates' accessibility probe waits until every finite animation on the page has ended
+  before axe-core runs. The 0.31.0 release gate measured the colour of cluster-view rows while
+  they faded in and failed on contrast; 0.31.0 has no published release, and 0.31.1 carries its
+  changes.
+
+## 0.31.0 — 2026-11-24
+
+- The web UI opens on a cluster view: headline numbers, the queue, a card per node with its
+  slots, CPU over 60 s, memory, free disk and the checkouts with jobs on it, jobs moving from the
+  queue to their node, and the newest jobs with their node. Selecting a node shows only its
+  jobs; Escape shows all. A dark and a light theme; with reduced motion nothing moves but fades.
+  The job tables, charts and output are unchanged at `#jobs`, linked from both views.
+- `GET /api/nodes` answers one row per node in the names of the cluster specification
+  (`node_id`, `kind`, `state`, `cpus`, `slots`, `slots_in_use`, `memory_gib`, `disk_free_gib`,
+  `cpu_busy_milli`, `joined_at` and more); today the one row is the local machine. Every job in
+  `/api/state` and in the job log names its `node` (`local`). Against an older daemon the page
+  builds the local node from `/api/state`.
+
 ## 0.30.0 — 2026-11-23
 
 - `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction

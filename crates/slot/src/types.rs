@@ -185,6 +185,147 @@ pub struct Job {
     /// without shares.
     #[serde(default, skip_serializing_if = "crate::shares::Mode::is_slots")]
     pub admission: crate::shares::Mode,
+    /// Id of the node the job runs or ran on ([`Node::node_id`]): `local`
+    /// for every job of a daemon without remote nodes. Empty in a job-log
+    /// line written before nodes; the API shows such a job as `local`.
+    #[serde(default)]
+    pub node: String,
+}
+
+/// Id of the daemon's own machine as a node.
+pub const LOCAL_NODE: &str = "local";
+
+/// Where a node runs (`slot.cluster.NodeKind`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum NodeKind {
+    /// Part of the endpoint's machine, reached without ssh.
+    #[default]
+    Local,
+    /// A machine with its own daemon, reached over ssh.
+    Remote,
+}
+
+/// Lifecycle state of a node (`slot.cluster.Node.State`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum NodeState {
+    /// Registered; not yet seen answering with the expected version and
+    /// clock.
+    Joining,
+    /// Takes new placements and new jobs.
+    #[default]
+    Ready,
+    /// Takes no new placement and no new job; running jobs finish.
+    Draining,
+    /// Left the cluster.
+    Gone,
+}
+
+/// Why a node left (`slot.cluster.GoneReason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub enum GoneReason {
+    /// Drained and idle.
+    Drained,
+    /// Three missed polls or three failed syncs in a row.
+    Lost,
+    /// Past its deadline.
+    Deadline,
+    /// Refused at join for another version or a clock more than 1 s off.
+    RefusedAtJoin,
+    /// A spot reclaim.
+    Reclaimed,
+}
+
+/// One row of `GET /api/nodes` (`slot.cluster.NodeList`): a node's specs,
+/// lifetime and load. Names and units are the specification's; the answer
+/// is a bare array of rows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct Node {
+    /// Node name, unique in its cluster; `local` for the daemon's machine.
+    pub node_id: String,
+    /// The cluster, one per endpoint daemon: the daemon's host name.
+    pub cluster_id: String,
+    /// Where the node runs.
+    pub kind: NodeKind,
+    /// Lifecycle state.
+    pub state: NodeState,
+    /// CPUs the node gives the cluster.
+    pub cpus: u32,
+    /// Capacity in slots: the slots in circulation (the pool less the
+    /// headroom).
+    pub slots: u32,
+    /// Slots held by running jobs.
+    pub slots_in_use: u32,
+    /// Memory of the machine, GiB.
+    pub memory_gib: u32,
+    /// Disk for mirrors and target directories, GiB.
+    pub disk_gib: u32,
+    /// The most worktrees placed on a remote node at once; absent on the
+    /// local node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_worktrees: Option<u32>,
+    /// Running jobs.
+    pub running_jobs: u32,
+    /// Queued jobs.
+    pub queued_jobs: u32,
+    /// The slot version the node runs.
+    pub slot_version: String,
+    /// CPUs the pool's jobs and the compile cache used over the last 10 s,
+    /// in thousandths of a CPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cpu_busy_milli: Option<u32>,
+    /// Memory in use on the machine, MiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub memory_used_mib: Option<u32>,
+    /// Free disk where the node builds, GiB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub disk_free_gib: Option<u32>,
+    /// Where a remote machine runs (a provider region or a site).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub location: Option<String>,
+    /// The machine type of a remote machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub machine_type: Option<String>,
+    /// Price of a remote machine per hour, cents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub price_per_hour_cents: Option<u32>,
+    /// When the node joined, RFC 3339; the daemon's start for the local
+    /// node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub joined_at: Option<String>,
+    /// The end of a remote node's lease, RFC 3339; absent on the local
+    /// node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub deadline: Option<String>,
+    /// Why the node left; with `Gone` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gone_reason: Option<GoneReason>,
+    /// When the node left, RFC 3339; with `Gone` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub left_at: Option<String>,
+}
+
+/// Unix milliseconds as an RFC 3339 time in UTC, as the API's timestamps
+/// are written.
+pub fn rfc3339(ms: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+        .ok()
+        .and_then(|t| {
+            t.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .unwrap_or_default()
 }
 
 // serde hands `skip_serializing_if` a reference.
@@ -667,5 +808,39 @@ mod tests {
             "{line}"
         );
         assert_eq!(serde_json::from_str::<Job>(&line).unwrap(), j);
+    }
+
+    /// A job-log line written before nodes has no `node` and reads as "";
+    /// a node from a daemon that sends fewer fields reads with the rest at
+    /// their defaults.
+    #[test]
+    fn node_fields_default_when_absent() {
+        let old = r#"{"id":3,"argv":["true"],"cwd":"/w/tree","repo":"repo","session":"",
+            "client":"h:1","toolchain":"other","remote":false,"tokens":1,"state":"ok",
+            "enqueued_ms":1,"started_ms":2,"ended_ms":3,"exit":0,"cpu_s":0.0,
+            "compile_server_cpu_s":0.0,"peak_rss":0,"checkout":{"kind":"worktree","name":"fix"}}"#;
+        let j: Job = serde_json::from_str(old).unwrap();
+        assert_eq!(j.node, "");
+        let n: Node = serde_json::from_str(r#"{"node_id":"local","cpus":8}"#).unwrap();
+        assert_eq!(n.kind, NodeKind::Local);
+        assert_eq!(n.state, NodeState::Ready);
+        assert_eq!((n.cpus, n.slots, n.deadline.as_deref()), (8, 0, None));
+        let remote: Node = serde_json::from_str(
+            r#"{"node_id":"cloud-a","kind":"Remote","state":"Draining",
+            "deadline":"2026-11-23T12:00:00Z","price_per_hour_cents":272}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (remote.kind, remote.state, remote.price_per_hour_cents),
+            (NodeKind::Remote, NodeState::Draining, Some(272))
+        );
+        // The optional fields of the local node stay off the wire.
+        let line = serde_json::to_string(&n).unwrap();
+        assert!(
+            !line.contains("deadline") && !line.contains("location"),
+            "{line}"
+        );
+        assert!(line.contains(r#""kind":"Local","state":"Ready""#), "{line}");
+        assert_eq!(rfc3339(1_763_899_200_000), "2025-11-23T12:00:00Z");
     }
 }

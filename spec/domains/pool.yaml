@@ -102,6 +102,7 @@ entities:
       - {name: share_used, type: Optional<Binary64>, summary: "CPUs the job used, with share only."}
       - {name: lent_s, type: Optional<Binary64>, summary: "CPU-seconds of its share the job lent to the queue; absent when none."}
       - {name: admission, type: Optional<slot.pool.Admission>, summary: "How the job was admitted; absent by slots."}
+      - {name: node, type: String, summary: "The node the job runs or ran on: `local` for the daemon's own machine."}
     invariants:
       - tokens >= 0
     lifecycle:

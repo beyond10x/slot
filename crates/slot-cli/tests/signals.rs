@@ -1,6 +1,9 @@
 //! A client that gets a signal cancels its job and never sends it again,
 //! whether the job was running or still queued. Also here, on the same
-//! daemon harness: a warning of the daemon reaches the client's stderr.
+//! daemon harness: a warning of the daemon reaches the client's stderr, and
+//! remote mode syncs to a stand-in build server (`remote_sync`).
+
+mod remote_sync;
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

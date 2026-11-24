@@ -10,6 +10,14 @@ export const ALWAYS_VISIBLE: Array<[string, string]> = [
   ['connection state', '[data-ux-region="connection"]'],
 ];
 
+/** The same on the cluster start page: its connection mark and headline numbers. */
+export const ALWAYS_VISIBLE_CLUSTER: Array<[string, string]> = [
+  ['connection state', '[data-ux-region="connection"]'],
+  ['running jobs', '[data-ux-region="running"]'],
+  ['queue length', '[data-ux-region="queue"]'],
+  ['CPUs in use', '[data-ux-region="cpus"]'],
+];
+
 /** Fallbacks for a page without region marks: the header and its slider. */
 const LEGACY: Array<[string, string]> = [
   ['header', 'header'],
@@ -41,6 +49,17 @@ const AXE_TAGS = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
  * again in a second page that only merges the result, took about two thirds of a state's time.
  */
 export async function axeSerious(page: Page): Promise<string[]> {
+  // A row that fades in is checked once it is in: axe measured its colour mid-transition and saw
+  // too little contrast in the 0.31.0 release gate. Endless animations (lanes, pulses) are not
+  // waited for.
+  await page.waitForFunction(
+    () =>
+      document
+        .getAnimations()
+        .every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity),
+    null,
+    { timeout: 5000 },
+  );
   const run = (): Promise<string[] | null> =>
     page.evaluate(async (tags) => {
       const inPage = (window as unknown as { axe?: typeof axe }).axe;
@@ -60,6 +79,7 @@ export async function axeSerious(page: Page): Promise<string[]> {
 
 export async function probe(page: Page): Promise<Probe> {
   const marked = (await page.locator('[data-ux-region]').count()) > 0;
+  const cluster = (await page.locator('[data-ux-view="cluster"]').count()) > 0;
   const layout = await page.evaluate(
     ({ always, allowed }) => {
       const vw = window.innerWidth;
@@ -145,7 +165,7 @@ export async function probe(page: Page): Promise<Probe> {
         words_in_view: words,
       };
     },
-    { always: marked ? ALWAYS_VISIBLE : LEGACY, allowed: SCROLL_ALLOWED },
+    { always: cluster ? ALWAYS_VISIBLE_CLUSTER : marked ? ALWAYS_VISIBLE : LEGACY, allowed: SCROLL_ALLOWED },
   );
   return { ...layout, axe_serious: await axeSerious(page) };
 }

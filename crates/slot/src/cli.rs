@@ -70,8 +70,8 @@ pub enum Cmd {
     Serve(Box<ServeArgs>),
     /// Bridge stdin/stdout to the daemon's socket (remote clients run this over ssh).
     Proxy(ProxyArgs),
-    /// ssh forced command for a build server: runs only the sync, fetch,
-    /// proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`.
+    /// ssh forced command for a build server: runs only the sync, sibling,
+    /// fetch, proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`.
     Shell(ShellArgs),
     /// Serve gate directories: builds in a sandbox that can open FIFOs there,
     /// but cannot reach the daemon's socket, queue in the pool and run in
@@ -86,6 +86,11 @@ pub enum Cmd {
     /// place (same pid, same process group). Started by the daemon only.
     #[command(name = "__exec", hide = true)]
     Exec(ExecArgs),
+    /// The step a remote client runs on the build server before a sync:
+    /// records the mirror's repository and prints the sibling mirrors it
+    /// can copy from. Run by remote clients only.
+    #[command(name = "__siblings", hide = true)]
+    Siblings(SiblingsArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -251,6 +256,24 @@ pub struct ServeArgs {
     /// `--upgrade-hold` rule instead.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub handover: bool,
+    /// Run every job in a sandbox (bubblewrap): the whole filesystem read-only
+    /// and in its own pid namespace; writable are only the job's checkout, its
+    /// target directory, a private /tmp and the download caches of cargo and Go.
+    /// Other workspaces, other jobs' target directories and the user's
+    /// runtime directory are hidden. Without a working `bwrap` the daemon
+    /// does not start.
+    #[arg(long)]
+    pub sandbox: bool,
+    /// One more path a sandboxed job may write, for example a package
+    /// manager's store; repeat for more.
+    #[arg(long, value_name = "PATH", requires = "sandbox")]
+    pub sandbox_write: Vec<PathBuf>,
+    /// With --sandbox: mount each job's checkout at /work/src and its target
+    /// directory at /work/target, so every worktree of a repository builds at
+    /// the same paths. The job then runs without a rustc wrapper: the compile
+    /// cache server outside the sandbox cannot read sources at those paths.
+    #[arg(long, requires = "sandbox")]
+    pub sandbox_fixed_paths: bool,
 }
 
 /// `slot proxy` options.
@@ -320,6 +343,17 @@ pub struct ExecArgs {
     /// The program, a resolved path, and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<OsString>,
+}
+
+/// `slot __siblings` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct SiblingsArgs {
+    /// The workspace root the client syncs to.
+    pub ws_root: PathBuf,
+    /// The mirror's workspace id.
+    pub id: String,
+    /// The repository key.
+    pub key: String,
 }
 
 /// `slot run` arguments.
@@ -745,6 +779,14 @@ impl ServeArgs {
             disk_free: None,
             exec_shim: Some(PathBuf::from("/proc/self/exe")),
             handover: self.handover,
+            sandbox: if self.sandbox {
+                Some(crate::sandbox::Sandbox::find(
+                    self.sandbox_write.clone(),
+                    self.sandbox_fixed_paths,
+                )?)
+            } else {
+                None
+            },
         })
     }
 }

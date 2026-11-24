@@ -50,7 +50,8 @@ use crate::rewrite::Rewriter;
 use crate::run_limit;
 use crate::toolchain::{self, Context};
 use crate::types::{
-    Event, HeadroomBase, HostCensus, Job, JobState, LiveJob, Priority, SccacheWatch, State, Unit,
+    Event, HeadroomBase, HostCensus, Job, JobState, LOCAL_NODE, LiveJob, Node, NodeKind, NodeState,
+    Priority, SccacheWatch, State, Unit,
 };
 
 pub use ring::Ring;
@@ -164,6 +165,9 @@ pub struct Config {
     /// On reload, hand running and queued jobs to the new binary instead of
     /// waiting for an idle pool (`handover`); the bounded hold is the fallback.
     pub handover: bool,
+    /// Run every job in this sandbox (`slot serve --sandbox`); `None` runs
+    /// jobs as the daemon's user with its whole filesystem.
+    pub sandbox: Option<crate::sandbox::Sandbox>,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -1792,6 +1796,7 @@ impl Server {
                 share_used: None,
                 lent_s: 0.0,
                 admission: crate::shares::Mode::Slots,
+                node: LOCAL_NODE.to_string(),
             };
             g.active.insert(
                 id,
@@ -2054,6 +2059,28 @@ impl Server {
         env.push(format!("{JOB_ENV}={id}"));
 
         let mut argv = req.argv.clone();
+        // Inside the memory scope: `systemd-run` needs the user bus, which
+        // the sandbox hides.
+        if let Some(sandbox) = &self.cfg.sandbox {
+            env = crate::sandbox::Sandbox::env(env);
+            let workspace = req.workspace.as_ref().map(|w| self.cfg.ws_root.join(&w.id));
+            let target_dir = match &req.workspace {
+                Some(w) => Some(self.cfg.cache_root.join("target").join(&w.id)),
+                None => crate::evict::target_dir(&shown, &env, &cwd),
+            };
+            let job = crate::sandbox::Job {
+                cwd: &cwd,
+                workspace: workspace.as_deref(),
+                target_dir,
+                env: &env,
+                ws_root: &self.cfg.ws_root,
+                cache_root: &self.cfg.cache_root,
+                socket: &self.cfg.socket,
+                fifo: self.pool.path(),
+            };
+            sandbox.prepare(&job);
+            argv = sandbox.wrap(&job, argv);
+        }
         if let Some(mem) = &self.cfg.memory_max {
             let mut wrap: Vec<String> = [
                 "systemd-run",
@@ -2148,6 +2175,14 @@ impl Server {
                 .to_string_lossy()
                 .into_owned()
         });
+        // With fixed paths a synced workspace's job names its tree by the
+        // fixed path; its output is rewritten from there.
+        let from = match &self.cfg.sandbox {
+            Some(s) if s.fixed() && req.workspace.is_some() => {
+                crate::sandbox::FIXED_SRC.to_string()
+            }
+            _ => from,
+        };
         let pumps = self.start_pumps(pipes, &tx, &out, &(from, to));
         // The limit in force at the start is the job's: a later `slot
         // run-limit` changes the jobs that start after it.
@@ -4378,7 +4413,7 @@ impl Server {
         if j.state == JobState::Queued {
             (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
         }
-        j
+        on_local_node(j)
     }
 
     /// The `GET /api/jobs` list (view `slot.pool.Jobs` of `spec/`): every
@@ -4387,7 +4422,7 @@ impl Server {
     pub fn jobs(&self) -> Vec<Job> {
         let g = self.inner.lock().expect("server lock");
         let mut jobs = Self::active_jobs(&g);
-        jobs.extend(g.done.iter().rev().map(|d| d.job.clone()));
+        jobs.extend(g.done.iter().rev().map(|d| on_local_node(d.job.clone())));
         jobs
     }
 
@@ -4402,7 +4437,7 @@ impl Server {
             .iter()
             .rev()
             .find(|d| d.job.id == id)
-            .map(|d| d.job.clone())
+            .map(|d| on_local_node(d.job.clone()))
     }
 
     /// The `GET /api/state` snapshot.
@@ -4442,7 +4477,11 @@ impl Server {
                 .then_some(g.share_view),
             free: self.pool.free() as u32,
             active: Self::active_jobs(&g),
-            done: g.done.iter().map(|d| d.job.clone()).collect(),
+            done: g
+                .done
+                .iter()
+                .map(|d| on_local_node(d.job.clone()))
+                .collect(),
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),
             sccache: self.sccache.lock().expect("sccache lock").clone(),
@@ -4453,6 +4492,39 @@ impl Server {
                 .expect("upgrade lock")
                 .describe(Instant::now()),
         }
+    }
+
+    /// The `GET /api/nodes` answer: the daemon's own machine, the only node
+    /// until remote nodes join.
+    pub fn nodes(&self) -> Vec<Node> {
+        let now = now_ms();
+        let g = self.inner.lock().expect("server lock");
+        let cpu_busy = match self.cpu_figure(&g, now) {
+            cpu_limit::Figure::Busy(p) => p.counted(),
+            _ => 0.0,
+        };
+        let jobs: Vec<&Job> = g.active.values().map(|l| &l.job).collect();
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
+        // Eviction's last look; before one, the filesystem of the state.
+        let evicted = self.evict.lock().expect("evict lock").free;
+        let local = local_node(&LocalFacts {
+            cluster: &self.host,
+            cpus: self.cores,
+            slots: self.pool.limit() as u32,
+            memory: admission::parse_meminfo_total(&meminfo).unwrap_or(0),
+            available: admission::parse_meminfo(&meminfo).unwrap_or(0),
+            disk_total: admission::disk_total(&self.cfg.state_dir).unwrap_or(0),
+            disk_free: if evicted > 0 {
+                evicted
+            } else {
+                disk_free(&self.cfg.state_dir).unwrap_or(0)
+            },
+            joined_ms: self.born_ms,
+            cpu_busy,
+            jobs: &jobs,
+        });
+        vec![local]
     }
 
     fn output(&self, id: i64) -> Output {
@@ -4469,6 +4541,77 @@ impl Server {
 
     fn subscribe(&self) -> broadcast::Receiver<String> {
         self.events.subscribe()
+    }
+}
+
+/// A job as the API shows it: one of a job-log line written before nodes
+/// ran on the local node.
+fn on_local_node(mut j: Job) -> Job {
+    if j.node.is_empty() {
+        j.node = LOCAL_NODE.to_string();
+    }
+    j
+}
+
+/// What the daemon knows of its own machine, read for `GET /api/nodes`.
+struct LocalFacts<'a> {
+    cluster: &'a str,
+    cpus: u32,
+    slots: u32,
+    /// `MemTotal`, bytes.
+    memory: u64,
+    /// `MemAvailable`, bytes.
+    available: u64,
+    disk_total: u64,
+    disk_free: u64,
+    joined_ms: i64,
+    cpu_busy: f64,
+    /// Queued and running jobs.
+    jobs: &'a [&'a Job],
+}
+
+const GIB: u64 = 1 << 30;
+
+/// Bytes in whole GiB, rounded, as the API's sizes are given.
+fn whole_gib(b: u64) -> u32 {
+    u32::try_from((b + GIB / 2) / GIB).unwrap_or(u32::MAX)
+}
+
+/// The daemon's own machine as a node.
+fn local_node(f: &LocalFacts<'_>) -> Node {
+    let running = || f.jobs.iter().filter(|j| j.state == JobState::Running);
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    Node {
+        node_id: LOCAL_NODE.to_string(),
+        cluster_id: f.cluster.to_string(),
+        kind: NodeKind::Local,
+        state: NodeState::Ready,
+        cpus: f.cpus,
+        slots: f.slots,
+        slots_in_use: running().map(|j| j.tokens).sum::<u32>().min(f.slots),
+        memory_gib: whole_gib(f.memory),
+        disk_gib: whole_gib(f.disk_total),
+        max_worktrees: None,
+        running_jobs: count(running().count()),
+        queued_jobs: count(
+            f.jobs
+                .iter()
+                .filter(|j| j.state == JobState::Queued)
+                .count(),
+        ),
+        slot_version: env!("CARGO_PKG_VERSION").to_string(),
+        cpu_busy_milli: Some((f.cpu_busy.max(0.0) * 1000.0).round() as u32),
+        memory_used_mib: Some(
+            u32::try_from(f.memory.saturating_sub(f.available) >> 20).unwrap_or(u32::MAX),
+        ),
+        disk_free_gib: Some(whole_gib(f.disk_free)),
+        location: None,
+        machine_type: None,
+        price_per_hour_cents: None,
+        joined_at: Some(crate::types::rfc3339(f.joined_ms)),
+        deadline: None,
+        gone_reason: None,
+        left_at: None,
     }
 }
 

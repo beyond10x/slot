@@ -90,6 +90,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         disk_free: None,
         exec_shim: None,
         handover: true,
+        sandbox: None,
     }
 }
 
@@ -144,6 +145,92 @@ fn sh(cwd: &Path, script: &str) -> Request {
         cwd: cwd.to_string_lossy().into_owned(),
         ..Request::default()
     }
+}
+
+/// `GET /api/nodes` answers a bare array with the local machine as the one
+/// node: its CPUs, the slots in circulation, no deadline; every job of
+/// `/api/state` names that node.
+#[test]
+fn nodes_answers_the_local_machine_and_jobs_name_it() {
+    let f = start(2);
+    assert_eq!(run(&f, sh(&f.root, "true")).code, 0);
+    assert_eq!(run(&f, sh(&f.root, "exit 3")).code, 3);
+    let st = f.server.state();
+    assert_eq!(st.done.len(), 2);
+    assert!(
+        st.done.iter().all(|j| j.node == LOCAL_NODE),
+        "{:?}",
+        st.done
+    );
+    let server = Arc::clone(&f.server);
+    let (status, text) = answer(async move {
+        use axum::response::IntoResponse;
+        http::nodes(axum::extract::State(server))
+            .await
+            .into_response()
+    });
+    assert_eq!(status, 200, "{text}");
+    assert!(text.starts_with('['), "a bare array: {text}");
+    let v: Vec<Node> = serde_json::from_str(&text).unwrap();
+    assert_eq!(v.len(), 1, "{text}");
+    let n = &v[0];
+    assert_eq!(
+        (n.node_id.as_str(), n.kind, n.state),
+        ("local", NodeKind::Local, NodeState::Ready)
+    );
+    assert_eq!(
+        (n.slots, n.slots_in_use, n.running_jobs, n.queued_jobs),
+        (2, 0, 0, 0)
+    );
+    assert!(n.cpus >= 1);
+    assert_eq!(n.deadline, None);
+    assert!(
+        n.joined_at.as_deref().is_some_and(|t| t.ends_with('Z')),
+        "{text}"
+    );
+    assert_eq!(n.slot_version, env!("CARGO_PKG_VERSION"));
+    assert!(!text.contains("\"deadline\""), "{text}");
+}
+
+/// The local node counts the slots of its running jobs and its running and
+/// queued jobs, gives sizes in whole GiB and the CPU in thousandths; a
+/// job-log line without a node is shown on the local node.
+#[test]
+fn the_local_node_counts_jobs_slots_and_sizes() {
+    let job = |state: JobState, tokens: u32| Job {
+        tokens,
+        state,
+        ..serde_json::from_str::<Job>(
+            r#"{"id":1,"argv":["true"],"cwd":"/w","repo":"r","toolchain":"other",
+            "remote":false,"tokens":1,"state":"queued","enqueued_ms":1,"started_ms":0,
+            "ended_ms":0,"exit":0,"cpu_s":0.0,"compile_server_cpu_s":0.0,"peak_rss":0}"#,
+        )
+        .unwrap()
+    };
+    let a = job(JobState::Running, 4);
+    let b = job(JobState::Queued, 2);
+    let c = job(JobState::Running, 1);
+    let jobs = [&a, &b, &c];
+    let n = local_node(&LocalFacts {
+        cluster: "host",
+        cpus: 20,
+        slots: 16,
+        memory: 32 << 30,
+        available: 20 << 30,
+        disk_total: 1800 << 30,
+        disk_free: 604 << 30,
+        joined_ms: 1_763_899_200_000,
+        cpu_busy: 3.4567,
+        jobs: &jobs,
+    });
+    assert_eq!((n.slots_in_use, n.running_jobs, n.queued_jobs), (5, 2, 1));
+    assert_eq!((n.memory_gib, n.disk_gib), (32, 1800));
+    assert_eq!(n.memory_used_mib, Some(12 * 1024));
+    assert_eq!(n.disk_free_gib, Some(604));
+    assert_eq!(n.cpu_busy_milli, Some(3457));
+    assert_eq!(n.joined_at.as_deref(), Some("2025-11-23T12:00:00Z"));
+    assert_eq!(n.cluster_id, "host");
+    assert_eq!(on_local_node(a.clone()).node, LOCAL_NODE);
 }
 
 #[test]
@@ -642,6 +729,7 @@ fn history_survives_restart() {
         disk_free: None,
         exec_shim: None,
         handover: true,
+        sandbox: None,
     })
     .unwrap();
     let st = again.state();
@@ -4840,4 +4928,258 @@ fn the_job_routes_answer_as_the_spec_binds_them() {
     assert_eq!(&one, newest);
     let (status, text) = answer(http::job(state(), axum::extract::Path(newest.id + 100)));
     assert_eq!((status, text.as_str()), (404, ""));
+}
+
+/// The daemon's sandbox, or `None` with the reason printed where `bwrap` is
+/// missing or cannot create namespaces here.
+fn sandbox_or_skip(test: &str) -> Option<crate::sandbox::Sandbox> {
+    match crate::sandbox::Sandbox::find(Vec::new(), false) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("{test}: skipped: {e:#}");
+            None
+        }
+    }
+}
+
+/// A home directory with a toolchain in `.cargo/bin` and `.rustup`, the way
+/// a build server has one.
+fn fake_home(root: &Path) -> PathBuf {
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+    std::fs::create_dir_all(home.join(".rustup/toolchains")).unwrap();
+    std::fs::write(home.join(".cargo/bin/cargo"), "the toolchain\n").unwrap();
+    home
+}
+
+/// A job of a synced workspace under `--sandbox`: it writes its tree, its
+/// target directory and /tmp; it cannot add a program to `~/.cargo/bin`,
+/// replace one there, touch `~/.rustup`, or see another workspace, another
+/// job's target directory or the daemon's socket. Its jobserver works.
+#[test]
+fn a_sandboxed_workspace_job_writes_only_what_it_builds() {
+    let Some(sandbox) = sandbox_or_skip("a_sandboxed_workspace_job_writes_only_what_it_builds")
+    else {
+        return;
+    };
+    let f = start_cfg(2, |c| c.sandbox = Some(sandbox));
+    let home = fake_home(&f.root);
+    std::fs::create_dir_all(f.root.join("ws/mine")).unwrap();
+    std::fs::create_dir_all(f.root.join("ws/other")).unwrap();
+    std::fs::write(f.root.join("ws/other/keep"), "theirs\n").unwrap();
+    std::fs::create_dir_all(f.root.join("cache/target/other")).unwrap();
+    std::fs::write(f.root.join("cache/target/other/keep"), "theirs\n").unwrap();
+    let script = format!(
+        "w() {{ if ( eval \"$2\" ) 2>/dev/null; then echo \"$1=yes\"; else echo \"$1=no\"; fi; }}
+         w bin 'echo x > {home}/.cargo/bin/x'
+         w replace 'echo y > {home}/.cargo/bin/cargo'
+         w rustup 'mkdir {home}/.rustup/toolchains/evil'
+         w other_ws 'test -e {root}/ws/other/keep'
+         w other_target 'test -e {root}/cache/target/other/keep'
+         w socket 'test -S {sock}'
+         w tree 'echo t > built.txt'
+         w target 'echo t > \"$CARGO_TARGET_DIR/built.txt\"'
+         w tmp 'echo t > /tmp/x && echo t > \"$TMPDIR/y\"'
+         w registry 'echo t > {home}/.cargo/registry/x'
+         w fifo 'f=\"${{CARGO_MAKEFLAGS##*fifo:}}\"; test -p \"$f\" && test -w \"$f\"'
+         w pid1 'test \"$(cat /proc/1/comm)\" = bwrap'
+         echo sandbox=$SLOT_SANDBOX",
+        home = home.display(),
+        root = f.root.display(),
+        sock = f.socket.display(),
+    );
+    let req = Request {
+        argv: vec!["sh".into(), "-c".into(), script],
+        env: vec![
+            format!("HOME={}", home.display()),
+            format!("CARGO_HOME={}", home.join(".cargo").display()),
+        ],
+        workspace: Some(Workspace {
+            id: "mine".into(),
+            rel_cwd: ".".into(),
+            client_root: "/client".into(),
+        }),
+        ..Request::default()
+    };
+    let r = run(&f, req);
+    assert_eq!(r.code, 0, "{r:?}");
+    for want in [
+        "bin=no",
+        "replace=no",
+        "rustup=no",
+        "other_ws=no",
+        "other_target=no",
+        "socket=no",
+        "tree=yes",
+        "target=yes",
+        "tmp=yes",
+        "registry=yes",
+        "fifo=yes",
+        "pid1=yes",
+        "sandbox=bwrap",
+    ] {
+        assert!(r.out.lines().any(|l| l == want), "{want} in {r:?}");
+    }
+    assert!(!home.join(".cargo/bin/x").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join(".cargo/bin/cargo")).unwrap(),
+        "the toolchain\n"
+    );
+    assert!(f.root.join("ws/other/keep").exists());
+    assert!(f.root.join("ws/mine/built.txt").exists());
+    assert!(f.root.join("cache/target/mine/built.txt").exists());
+}
+
+/// A local job under `--sandbox` writes the checkout it runs in, and cannot
+/// delete a file in a checkout beside it, which it sees read-only.
+#[test]
+fn a_sandboxed_local_job_cannot_delete_a_file_in_another_checkout() {
+    let Some(sandbox) =
+        sandbox_or_skip("a_sandboxed_local_job_cannot_delete_a_file_in_another_checkout")
+    else {
+        return;
+    };
+    let f = start_cfg(1, |c| c.sandbox = Some(sandbox));
+    let home = fake_home(&f.root);
+    for repo in ["mine", "theirs"] {
+        std::fs::create_dir_all(f.root.join(repo).join(".git")).unwrap();
+        std::fs::create_dir_all(f.root.join(repo).join("src")).unwrap();
+    }
+    std::fs::write(f.root.join("theirs/src/main.rs"), "fn main() {}\n").unwrap();
+    let mut req = sh(
+        &f.root.join("mine/src"),
+        &format!(
+            "rm {0}/theirs/src/main.rs; echo rm=$?; echo t > ../out.txt; echo own=$?",
+            f.root.display()
+        ),
+    );
+    req.env = std::env::vars()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain([format!("HOME={}", home.display())])
+        .collect();
+    let r = run(&f, req);
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(r.out.contains("rm=1\n"), "{r:?}");
+    assert!(r.out.contains("own=0\n"), "{r:?}");
+    assert!(f.root.join("theirs/src/main.rs").exists());
+    assert!(f.root.join("mine/out.txt").exists());
+}
+
+/// A crate of one file at `dir`, whose binary prints where it was built
+/// from and where it runs.
+fn tiny_crate(dir: &Path) {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/main.rs"),
+        "fn main() {\n    println!(\"tiny ran\");\n    \
+         println!(\"manifest={}\", env!(\"CARGO_MANIFEST_DIR\"));\n    \
+         println!(\"cwd={}\", std::env::current_dir().unwrap().display());\n}\n",
+    )
+    .unwrap();
+}
+
+/// The environment of a cargo job with `HOME` and `CARGO_HOME` under
+/// `root` and its target directory at `target`; the toolchain stays where
+/// the caller has it, and rustup finds it there.
+fn cargo_env(root: &Path, target: &Path) -> Vec<String> {
+    let home = root.join("home");
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
+    let rustup = std::env::var("RUSTUP_HOME").ok().or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| format!("{h}/.rustup"))
+            .filter(|p| Path::new(p).is_dir())
+    });
+    let mut env: Vec<String> = std::env::vars()
+        .filter(|(k, _)| !k.starts_with("CARGO") && k != "RUSTC_WRAPPER")
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    env.extend([
+        format!("HOME={}", home.display()),
+        format!("CARGO_HOME={}", home.join(".cargo").display()),
+        format!("CARGO_TARGET_DIR={}", target.display()),
+        // A fixture of its own: no compile cache server for this child.
+        "RUSTC_WRAPPER=".into(),
+        "CARGO_BUILD_RUSTC_WRAPPER=".into(),
+        "CARGO_INCREMENTAL=0".into(),
+        "CARGO_NET_OFFLINE=true".into(),
+    ]);
+    env.extend(rustup.map(|r| format!("RUSTUP_HOME={r}")));
+    env
+}
+
+const BUILD_AND_RUN: &str = "cargo build --quiet --offline && \"$CARGO_TARGET_DIR/debug/tiny\" \
+                             && echo target=$CARGO_TARGET_DIR";
+
+/// `cargo build` of a crate of one file succeeds under `--sandbox`, with
+/// `HOME` and `CARGO_HOME` in temporary directories and the toolchain
+/// read-only, and its binary runs.
+#[test]
+fn cargo_builds_a_tiny_crate_in_the_sandbox() {
+    let Some(sandbox) = sandbox_or_skip("cargo_builds_a_tiny_crate_in_the_sandbox") else {
+        return;
+    };
+    let f = start_cfg(1, |c| c.sandbox = Some(sandbox));
+    let krate = f.root.join("tiny");
+    tiny_crate(&krate);
+    let target = f.root.join("target");
+    let mut req = sh(&krate, BUILD_AND_RUN);
+    req.env = cargo_env(&f.root, &target);
+    let started = Instant::now();
+    let r = run(&f, req);
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(r.out.contains("tiny ran"), "{r:?}");
+    assert!(target.join("debug/tiny").exists());
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// With `--sandbox-fixed-paths` two worktrees of one repository build at
+/// the same paths: the job of each starts in /work/src, cargo builds into
+/// /work/target and `CARGO_MANIFEST_DIR` is the same; the binaries land in
+/// each worktree's own target directory on the host.
+#[test]
+fn with_fixed_paths_two_worktrees_build_at_the_same_paths() {
+    let Some(sandbox) = sandbox_or_skip("with_fixed_paths_two_worktrees_build_at_the_same_paths")
+    else {
+        return;
+    };
+    let fixed = crate::sandbox::Sandbox::find(Vec::new(), true).unwrap();
+    assert!(fixed.fixed() && !sandbox.fixed());
+    let f = start_cfg(1, |c| c.sandbox = Some(fixed));
+    let started = Instant::now();
+    let mut seen = Vec::new();
+    for wt in ["wt-a", "wt-b"] {
+        let tree = f.root.join(wt);
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        tiny_crate(&tree.join("tiny"));
+        let target = f.root.join(format!("target-{wt}"));
+        let mut req = sh(&tree.join("tiny"), BUILD_AND_RUN);
+        req.env = cargo_env(&f.root, &target);
+        let r = run(&f, req);
+        assert_eq!(r.code, 0, "{wt}: {r:?}");
+        assert!(target.join("debug/tiny").exists(), "{wt}: {r:?}");
+        seen.push(r.out);
+    }
+    assert_eq!(seen[0], seen[1]);
+    for want in [
+        "manifest=/work/src/tiny",
+        "cwd=/work/src/tiny",
+        "target=/work/target",
+    ] {
+        assert!(seen[0].lines().any(|l| l == want), "{want} in {}", seen[0]);
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "{:?}",
+        started.elapsed()
+    );
 }

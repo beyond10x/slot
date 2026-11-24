@@ -312,6 +312,7 @@ mod tests {
             share_used: None,
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
+            node: String::new(),
         }
     }
 

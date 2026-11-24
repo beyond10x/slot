@@ -13,13 +13,16 @@
 //! - the sync: `rsync --server … . <ws-root>/<id>/`;
 //! - a fetch: `rsync --server --sender … . <path>` under the workspace root
 //!   or the cache root's `target/`;
-//! - `slot proxy` and `slot cancel <id>`, run by this binary whatever path
-//!   the client named.
+//! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
+//!   <key>`, run by this binary whatever path the client named; the
+//!   workspace root must be this server's.
 //!
 //! Anything else is refused with exit 126. rsync options are checked
 //! against a list that leaves out the ones that name other files or
 //! programs (`--rsync-path`, `-e`, `--log-file`, `--files-from`,
-//! `--write-batch` and the like).
+//! `--write-batch` and the like). The one that names a directory,
+//! `--copy-dest`, is taken only as `../<id>` of a sync, a sibling mirror
+//! under the workspace root.
 //!
 //! This narrows the key to slot's protocol: no shell, no port or agent
 //! forwarding (`restrict`), no file outside the two roots. It is not a
@@ -37,6 +40,13 @@ pub enum Plan {
     Proxy,
     /// Cancel job `id`.
     Cancel(i64),
+    /// Record mirror `id` under repository `key` and print its siblings.
+    Siblings {
+        /// Workspace id.
+        id: String,
+        /// Repository key.
+        key: String,
+    },
 }
 
 /// rsync long options a sync or fetch may carry.
@@ -59,6 +69,7 @@ const RSYNC_LONG: &[&str] = &[
     "--ignore-errors",
     "--force",
     "--inplace",
+    "--stats",
 ];
 
 /// rsync long options that take a value and may carry one.
@@ -157,6 +168,18 @@ pub fn plan(line: &str, home: &Path, ws_root: &Path, cache_root: &Path) -> Resul
                 .parse()
                 .map(Plan::Cancel)
                 .map_err(|_| format!("bad job id `{id}`")),
+            [c, root, id, key] if c == "__siblings" => {
+                if absolute(home, root)? != absolute(home, &ws_root.to_string_lossy())? {
+                    return Err(format!("`{root}` is not this server's workspace root"));
+                }
+                if !crate::mirror::valid_id(id) || !crate::mirror::valid_id(key) {
+                    return Err("bad workspace id or repository key".into());
+                }
+                Ok(Plan::Siblings {
+                    id: id.clone(),
+                    key: key.clone(),
+                })
+            }
             _ => Err(format!("`slot {}` is not a remote step", args.join(" "))),
         },
         _ => Err(format!("`{prog}` is not a remote step")),
@@ -175,11 +198,26 @@ fn rsync(
     let sender = args.iter().any(|a| a == "--sender");
     let mut paths = Vec::new();
     let mut dot = false;
-    for a in args {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         if dot {
             paths.push(a.as_str());
         } else if a == "." {
             dot = true;
+        } else if a == "--copy-dest" || a.starts_with("--copy-dest=") {
+            let value = match a.split_once('=') {
+                Some((_, v)) => Some(v),
+                None => it.next().map(String::as_str),
+            };
+            let sibling = value
+                .and_then(|v| v.strip_prefix("../"))
+                .map(|v| v.strip_suffix('/').unwrap_or(v));
+            if sender || !sibling.is_some_and(crate::mirror::valid_id) {
+                return Err(format!(
+                    "rsync `--copy-dest` takes only `../<id>` of a sync, not `{}`",
+                    value.unwrap_or("")
+                ));
+            }
         } else if let Some(long) = a.strip_prefix("--") {
             let name = long.split_once('=').map_or(long, |(n, _)| n);
             let full = format!("--{name}");
@@ -303,6 +341,49 @@ mod tests {
             "rsync --server . .local/state/slot/cache/target/x/",
             "rsync -logDtpre.iLsfxCIvu . .local/state/slot/ws/x/",
             "rsync --server . a b",
+        ] {
+            assert!(p(bad).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn a_sync_may_copy_from_sibling_mirrors_and_count_its_bytes() {
+        let sync = "rsync --server -logDtpre.iLsfxCIvu --delete --stats --copy-dest ../00aa --copy-dest=../00bb/ --mkpath . .local/state/slot/ws/0123abcd/";
+        assert!(matches!(p(sync), Ok(Plan::Rsync(_))), "{:?}", p(sync));
+        for bad in [
+            "rsync --server --copy-dest ../../.ssh . .local/state/slot/ws/x/",
+            "rsync --server --copy-dest /etc . .local/state/slot/ws/x/",
+            "rsync --server --copy-dest=00aa . .local/state/slot/ws/x/",
+            "rsync --server --copy-dest ../00aa/sub . .local/state/slot/ws/x/",
+            "rsync --server --copy-dest . .local/state/slot/ws/x/",
+            "rsync --server --sender --copy-dest ../00aa . .local/state/slot/ws/x/",
+            "rsync --server --link-dest ../00aa . .local/state/slot/ws/x/",
+            "rsync --server --compare-dest=../00aa . .local/state/slot/ws/x/",
+        ] {
+            assert!(p(bad).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn the_sibling_step_runs_only_on_this_servers_workspace_root() {
+        let ok = Plan::Siblings {
+            id: "0123abcd".into(),
+            key: "00ff".into(),
+        };
+        assert_eq!(
+            p("/srv/u/.local/bin/slot __siblings .local/state/slot/ws 0123abcd 00ff"),
+            Ok(ok.clone())
+        );
+        assert_eq!(
+            p("slot __siblings /srv/u/.local/state/slot/ws 0123abcd 00ff"),
+            Ok(ok)
+        );
+        for bad in [
+            "slot __siblings .ssh 0123abcd 00ff",
+            "slot __siblings .local/state/slot/ws ../x 00ff",
+            "slot __siblings .local/state/slot/ws 0123abcd ../00ff",
+            "slot __siblings .local/state/slot/ws 0123abcd",
+            "slot __siblings .local/state/slot/ws/../ws 0123abcd 00ff",
         ] {
             assert!(p(bad).is_err(), "accepted: {bad}");
         }

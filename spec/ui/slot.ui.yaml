@@ -148,6 +148,7 @@ pages:
               - {field: target_dir, label: target directory}
               - {field: session}
               - {field: client}
+              - {field: node}
           - name: scheduling
             label: scheduling
             fields:

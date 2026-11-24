@@ -60,13 +60,22 @@ current directory.
 2. **Sync.** rsync copies the repository to `<host>:<SLOT_WSROOT>/<id>/` with `--delete`, a
    filter that applies every `.gitignore`, and excludes for `.git` and the toolchain's output
    directories (`/target/`). Uncommitted changes are included. Over a persistent ssh connection
-   a rerun only sends the changed files.
-3. **Run.** `slot` starts `ssh <host> slot proxy`, which connects to the server daemon's socket.
+   a rerun only sends the changed files. The client prints one line per sync, for example
+   `slot: synced to buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`. Two calls
+   from one worktree sync one after the other; the second waits for the first.
+3. **Siblings.** Before the sync the client asks the server for other mirrors of the same
+   repository (same `origin` URL, so every worktree and clone of it). rsync gets up to four of
+   them as `--copy-dest`: a file the new mirror lacks is copied on the server when a sibling has
+   it unchanged, and a changed file is sent as a delta against the sibling's. The first sync of a
+   new worktree then sends what differs from its siblings, not the whole tree. A server whose
+   slot does not know the step gets the plain sync; the line then says the bytes were not
+   counted.
+4. **Run.** `slot` starts `ssh <host> slot proxy`, which connects to the server daemon's socket.
    The daemon runs the command in the mirror, in the same subdirectory you called it from.
-4. **Caches.** rust and other jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`; go and other
+5. **Caches.** rust and other jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`; go and other
    jobs get `GOCACHE=<cache-root>/go-build`. The cache root is `slot serve --cache-root`, by
    default `<state-dir>/cache` on the server.
-5. **Output.** Paths under the server's mirror in the output are rewritten to the local
+6. **Output.** Paths under the server's mirror in the output are rewritten to the local
    repository path, so `file:line` in compiler errors points at local files.
 
 `SLOT_WSROOT` on the workstation must name the directory the server daemon uses as `--ws-root`.
@@ -114,6 +123,12 @@ because the server disk is full), `slot` sends the job to this machine's daemon 
 then waits for slots in the local pool like any other. Before 0.8.0 it ran the command directly,
 outside the pool. If the connection drops while the job runs, `slot` prints `slot: connection to
 daemon lost` and exits with 3; the daemon cancels the job.
+
+A slow link gets the same treatment. A sync whose rsync reads and writes no byte for
+`SLOT_SYNC_STALL` (default 60 s), or that runs longer than `SLOT_SYNC_LIMIT` (default 5 min), is
+killed with its ssh, and the job goes to this machine's daemon with `(sync killed: no byte moved
+for 60 s)` or `(sync killed: ran over 300 s)` in the line above. An rsync that someone else
+kills ends the same way. The job is never sent to the server after a sync that did not finish.
 
 ## Target directories on the server
 
@@ -181,15 +196,52 @@ command="/usr/local/bin/slot shell",restrict ssh-ed25519 AAAA… workstation
 
 ssh then runs `slot shell` for every connection with that key, and it runs only the steps of
 remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
---sender` from the workspace root or the cache root's `target/`), `slot proxy` and `slot cancel
-<id>`. Anything else exits 126 with `slot shell: refused: …`. rsync options that name another
-file or program (`-e`, `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are
-refused, as are `..` in paths, shell operators and quotes that would expand. `restrict` turns off
+--sender` from the workspace root or the cache root's `target/`), `slot proxy`, `slot cancel
+<id>` and the sibling step (`slot __siblings` on the server's own workspace root). Anything else
+exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
+`--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and
+`--copy-dest` is taken only as `../<id>`, a sibling mirror in the workspace root. Also refused:
+`..` in paths, shell operators and quotes that would expand. `restrict` turns off
 port, agent and X11 forwarding and the terminal. Pass `--ws-root`, `--cache-root` or
 `--state-dir` to `slot shell` when `slot serve` uses other values.
 
 This narrows the key to slot's protocol. It is not a sandbox: a job is any command, so whoever
-holds the key can still run code on the server as that user through `slot proxy`.
+holds the key can still run code on the server as that user through `slot proxy`. What that code
+can write is what `--sandbox` below confines.
+
+### Run every job in a sandbox
+
+`slot serve --sandbox` runs each job under bubblewrap (`bwrap`), so one build cannot delete,
+replace or install a program another build needs, or change another build's tree:
+
+- The whole filesystem is read-only to the job: the home directory, `~/.rustup`, `~/.cargo/bin`,
+  `/usr`, `/usr/local`.
+- Writable: the job's workspace (or, for a local job, the git checkout it runs in), its target
+  directory, a private `/tmp` (`TMPDIR=/tmp`), cargo's `registry/` and `git/` with their lock
+  files, the Go build and module caches, and each path given with `--sandbox-write <path>`.
+- Hidden: the other workspaces, the other jobs' target directories, the user's runtime directory
+  with the user bus, and the daemon's socket.
+- The job has its own pid namespace: it sees and signals only its own processes.
+- The network is the host's: the compile cache server answers on TCP and cargo may fetch.
+- `SLOT_SANDBOX=bwrap` is set in the job's environment.
+
+Install bubblewrap first (`dnf install -y bubblewrap` on Amazon Linux and Fedora,
+`apt install bubblewrap`, `pacman -S bubblewrap`). Without a `bwrap` that can create the
+sandbox, `slot serve --sandbox` does not start; it never runs a job outside it.
+
+```sh
+slot serve --sandbox --sandbox-write /srv/pnpm-store
+```
+
+A build that writes somewhere else (a package manager's store, a browser download) fails with
+`Read-only file system` until that path is named with `--sandbox-write`. Every path and its
+reason: the repository's `docs/design.md` § 27.
+
+With `--sandbox-fixed-paths` as well, a job sees its checkout at `/work/src` and its target
+directory at `/work/target` (`CARGO_TARGET_DIR=/work/target`), so every worktree of a repository
+builds at the same paths and `CARGO_MANIFEST_DIR` is the same in each. Off by default: the job
+then runs without a rustc wrapper, because the compile cache server outside the sandbox cannot
+read sources at those paths.
 
 ## Measured
 

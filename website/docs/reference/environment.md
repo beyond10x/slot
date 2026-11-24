@@ -14,6 +14,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_WSROOT` | `.local/state/slot/ws` | workspace root on the remote host, relative to its home directory; must match the server's `--ws-root` |
 | `SLOT_REMOTE` | `slot` | the slot executable on the remote host |
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
+| `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job runs on this machine's daemon: seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
+| `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job runs on this machine's daemon; same format |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
 | `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`; by share (`slot admission shares`) the job asks for a share of N CPUs, at most the budget, and holds no slot. See [Toolchains](../toolchains.md#naming-the-slots) and [Admission by share](../how-it-works.md#admission-by-share). |
@@ -37,6 +39,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | variable | value |
 |---|---|
 | `SLOT_JOB` | the job id, used to attribute sccache CPU time to the job |
+| `SLOT_SANDBOX`, `TMPDIR` | `bwrap` and `/tmp` (a private tmpfs), for every job of a daemon started with [`slot serve --sandbox`](../remote-builds.md#run-every-job-in-a-sandbox) |
 | `MAKEFLAGS`, `CARGO_MAKEFLAGS` | `-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo`, for rust and other jobs; `fifo:<gate-dir>/jobserver.fifo` for a gated job; not set this way while `slot job-parallel` is on |
 | `CARGO_BUILD_JOBS`, `MAKEFLAGS` | only while [`slot job-parallel N`](../how-it-works.md#build-processes-per-job) is on, for every job: `<P>` and `-j<P>`, where P is N or the slots the job holds if those are more; `CARGO_MAKEFLAGS` and `MFLAGS` are then not set, and nothing names the pool's FIFO |
 | `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2); rust and other jobs, unless the caller set them |

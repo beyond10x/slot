@@ -1,6 +1,7 @@
 import { computed, reactive, shallowReactive, shallowRef, triggerRef } from 'vue';
-import type { CacheMinute, Event, HostCensus, Job, LiveJob, SharesView, State } from './generated/types.ts';
+import type { CacheMinute, Event, HostCensus, Job, LiveJob, Node, SharesView, State } from './generated/types.ts';
 import { MINUTE_MS, cachePoint, cacheWindow, latestMinute, parseCacheDay, parseCacheHistory } from './lib/cache.ts';
+import { LOCAL, cpuOf, localFromState, parseNodes } from './lib/cluster.ts';
 import { coresSample, mergeByT, parseHistory, parseRecordedHistory, recordedWindow } from './lib/history.ts';
 import type { RecordedBucket, Sample, Tick } from './lib/history.ts';
 import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
@@ -115,6 +116,46 @@ export const cacheChart = computed(() => {
 /** The compiler calls of the last 24 hours as `api/cache-day` answered last; undefined from a daemon that has no such path. */
 export const cacheDay = shallowRef<CacheMinute | undefined>(undefined);
 
+/** Nodes as `api/nodes` answered last; null from a daemon without the path (the page then builds the local node from the state). */
+export const apiNodes = shallowRef<Node[] | null>(null);
+/** Free space the eviction saw last, bytes: the local node's disk from a daemon without `api/nodes`. */
+const evictFree = shallowRef(0);
+/** Not reactive: busy CPUs per node over the last 60 s, read by the node cards' canvases. */
+export const nodeSparks = new SparkBuffer<string>(62_000);
+
+/** Every node the start page shows: the daemon's answer, or the local node from the state alone. */
+export const nodes = computed<Node[]>(() => {
+  if (apiNodes.value) return apiNodes.value;
+  void store.clock;
+  return [localFromState({
+    host: store.host, cores: store.cores, limit: store.limit, tokens: store.tokens, free: store.free, jobCores: store.jobCores,
+    diskFree: evictFree.value,
+  }, jobs.values())];
+});
+
+let nodesAt = -Infinity;
+let nodesMissing = false;
+
+/** Asks `api/nodes` at most once a second; a 404 (older daemon) stops asking until the page loads again. */
+async function loadNodes(force = false): Promise<void> {
+  if (nodesMissing) return;
+  const t = Date.now();
+  if (!force && t - nodesAt < 900) return;
+  nodesAt = t;
+  const res = await fetch('api/nodes');
+  if (res.status === 404) {
+    nodesMissing = true;
+    apiNodes.value = null;
+    return;
+  }
+  if (!res.ok) return;
+  const list = parseNodes(await res.json());
+  if (!list) return;
+  apiNodes.value = list;
+  const at = now();
+  for (const n of list) nodeSparks.push(n.node_id, at, cpuOf(n));
+}
+
 /** Server time estimate, ms. */
 export const now = (): number => Date.now() + skew;
 
@@ -149,6 +190,7 @@ async function loadState(): Promise<void> {
   store.shares = st.shares ?? null;
   store.free = st.free;
   store.toolchains = st.toolchains;
+  evictFree.value = st.evict?.free ?? 0;
   store.clock = now();
   for (const j of [...st.done, ...st.active]) jobs.set(jobId(j), j);
 }
@@ -171,6 +213,8 @@ function applyTick(m: Tick): void {
   store.jobCores = m.job_cores;
   store.sysCpu = m.sys_cpu;
   census.value = m.census;
+  if (!apiNodes.value) nodeSparks.push(LOCAL, m.t, m.job_cores);
+  void loadNodes().catch(() => undefined);
   live.clear();
   const ids = new Set<number>();
   for (const l of m.jobs) {
@@ -221,6 +265,8 @@ async function loadExactHistory(): Promise<void> {
     }
   }
   noteFamilies(ticks);
+  // The local node's CPU line starts with the jobs' cores of the last minute; the answers of `api/nodes` follow it.
+  nodeSparks.seed(LOCAL, ticks.map((t) => ({ t: t.t, v: t.job_cores })));
   noteTitles(ticks);
   for (const [id, pts] of jobPts) if (live.has(id)) sparks.seed(id, pts);
   const current = new Set((census.value?.sessions ?? []).map((s) => s.session));
@@ -262,9 +308,14 @@ async function loadHistory(): Promise<void> {
   store.historyLoaded = true;
 }
 
+/** Called with each job event, the job as it was before (undefined when new) and as it is now; the start page animates by it. */
+export const jobChanges = new Set<(before: Job | undefined, after: Job) => void>();
+
 function apply(m: Event): void {
   if (m.type === 'job') {
     const id = jobId(m.job);
+    const before = jobs.get(id);
+    for (const f of jobChanges) f(before, m.job);
     jobs.set(id, m.job);
     if (!isActive(m.job.state)) live.delete(id);
     return;
@@ -307,6 +358,7 @@ export async function start(): Promise<void> {
   }
   connect();
   await loadHistory().catch(() => undefined);
+  await loadNodes(true).catch(() => undefined);
   store.ready = true;
   // The daemon adds a minute of compiler calls each minute, and no event says so.
   setInterval(() => void loadCache(), MINUTE_MS);

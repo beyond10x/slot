@@ -25,6 +25,7 @@ const groups_summary: FieldGroup[] = [
     { field: "target_dir", label: "target directory" },
     { field: "session", label: "session" },
     { field: "client", label: "client" },
+    { field: "node", label: "node" },
   ] },
   { name: "scheduling", label: "scheduling", collapsed: false, fields: [
     { field: "toolchain", label: "tool" },

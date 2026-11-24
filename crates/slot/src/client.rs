@@ -20,13 +20,14 @@ use std::time::{Duration, Instant};
 
 use std::fmt::Write as _;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use sha2::{Digest, Sha256};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
+use crate::sync;
 use crate::toolchain;
 use crate::types::Checkout;
 
@@ -105,11 +106,30 @@ pub struct Settings {
     /// the command here, outside the pool, in place of exiting with
     /// [`NOT_RUN`].
     pub fallback: bool,
+    /// `SLOT_SYNC_STALL` and `SLOT_SYNC_LIMIT`: when a remote sync is
+    /// killed and the job runs on this machine's daemon instead.
+    pub sync: sync::Bounds,
+}
+
+/// A duration from variable `name`, or `default` with a line on stderr when
+/// it does not parse.
+fn duration_var(name: &str, default: Duration) -> Duration {
+    match std::env::var(name).ok().filter(|v| !v.is_empty()) {
+        None => default,
+        Some(v) => crate::run_limit::parse_duration(&v).map_or_else(
+            |e| {
+                eprintln!("slot: {name}: {e}; using {} s", default.as_secs());
+                default
+            },
+            Duration::from_secs,
+        ),
+    }
 }
 
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
-    /// `SLOT_ENV`, `SLOT_SOCKET` and `SLOT_LOCAL_FALLBACK`.
+    /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`
+    /// and `SLOT_SYNC_LIMIT`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
@@ -152,6 +172,10 @@ impl Settings {
             priority: None,
             timeout: None,
             fallback: var("SLOT_LOCAL_FALLBACK").is_some_and(|v| v != "0"),
+            sync: sync::Bounds {
+                stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
+                limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
+            },
         }
     }
 }
@@ -612,26 +636,14 @@ fn remote(
         .to_string_lossy()
         .into_owned();
     let tc = toolchain::for_argv(&req.argv, 1);
-    let mut rsync = Command::new("rsync");
-    rsync.args([
-        "-a",
-        "--delete",
-        "--mkpath",
-        "--filter=:- .gitignore",
-        "--exclude=/.git",
-    ]);
-    for x in tc.sync_excludes() {
-        rsync.arg(format!("--exclude={x}"));
-    }
-    rsync
-        .arg("-e")
-        .arg(s.ssh.join(" "))
-        .arg(format!("{}/", top.display()))
-        .arg(format!("{host}:{}/{id}/", s.ws_root));
-    let st = rsync.status().context("rsync")?;
-    if !st.success() {
-        bail!("rsync exited with {st}");
-    }
+    let target = sync::Remote {
+        host,
+        ssh: &s.ssh,
+        ws_root: &s.ws_root,
+        remote_slot: &s.remote_slot,
+    };
+    let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
+    eprintln!("{}", synced.line(host));
     for (k, v) in std::env::vars() {
         if (tc.client_env(&k) && !toolchain::credential(&k)) || s.extra_env.contains(&k) {
             req.env.push(format!("{k}={v}"));
