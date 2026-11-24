@@ -242,10 +242,27 @@ command="/usr/local/bin/slot shell --same-path-root /srv/u",restrict ssh-ed25519
 A tree outside those roots is refused: `slot shell` refuses the sync, so the job runs on this
 machine's daemon, and a daemon without the root ends the job with exit 2 and `not below a
 --same-path-root`. `<ws-root>/<id>` becomes a link to the tree, so the next worktree of the same
-repository is still seeded from it (`--copy-dest=<ws-root>/<id>`), and the target directory stays
-`<cache-root>/target/<id>`. With `--sandbox`, the tree is bound writable at its own path.
-Eviction deletes the link and the target directory, never the tree. Needs this release of slot
-on both machines.
+repository is still seeded from it (`--copy-dest=<ws-root>/<id>`). Eviction deletes the link,
+never the tree. Needs this release of slot on both machines.
+
+The job then runs as on a CI runner, with everything at the workstation's paths:
+
+- The tree, with uncommitted and untracked files that git does not ignore.
+- The git directory, synced at its own path, so `git` works in the job. For a linked worktree
+  that is the repository's common git directory, which holds the worktree's own; it is shared by
+  every worktree, so after the first sync only changes move. `*.lock` files stay behind.
+- The target directory: `CARGO_TARGET_DIR` when it is set here, else the one `cargo metadata`
+  names for the command's manifest (`--manifest-path driver/Cargo.toml` builds into
+  `driver/target`). The paths cargo prints, and `CARGO_BIN_EXE_*` in tests, are valid on both
+  machines, and a build's products come back to the same paths. It must lie below a
+  `--same-path-root` too.
+- A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
+  directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
+- A directory outside any git checkout (a scratch copy) is the tree itself.
+
+With `--sandbox`, the tree and the target directory are bound writable at their own paths; the
+git directory is read-only. Files the command names outside the tree are not synced: a job that
+reads them fails on the server.
 
 ## Tests that need local services
 

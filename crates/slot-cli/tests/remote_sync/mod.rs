@@ -581,3 +581,179 @@ fn a_job_whose_fetch_fails_runs_on_this_machines_daemon() {
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines, ["|fetch --locked", "|check"], "{err}");
 }
+
+/// A daemon and a fake ssh that admit same-path mirrors below `root`.
+fn same_path_node(root: &Path) -> (Daemon, PathBuf) {
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), root.as_os_str()]);
+    let ssh = forced_ssh_with(
+        root,
+        &d,
+        "",
+        &format!("--same-path-root {}", root.display()),
+    );
+    (d, ssh)
+}
+
+/// The rsync receivers `ssh.log` in `root` shows, by destination path.
+fn synced_paths(root: &Path) -> Vec<String> {
+    let log = std::fs::read_to_string(root.join("ssh.log")).unwrap();
+    log.lines()
+        .filter(|l| l.starts_with("rsync --server") && !l.contains("--sender"))
+        .filter_map(|l| l.rsplit(' ').next())
+        .map(String::from)
+        .collect()
+}
+
+/// Same-path: a linked worktree's job gets its repository's common git
+/// directory at its own path, and a working directory under an ignored
+/// path (`target/`) is synced on its own.
+#[test]
+fn a_same_path_job_carries_its_git_dir_and_ignored_cwd() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, b) = repository(&root);
+    let (d, ssh) = same_path_node(&root);
+    let cwd = b.join("target/scratch/cli");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &cwd,
+        &["sh", "-c", "pwd; git rev-parse --show-toplevel"],
+        SAME_PATH,
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\n{}\n", cwd.display(), b.display()),
+        "{err}"
+    );
+    let got = synced_paths(&root);
+    for want in [
+        format!("{}/", b.display()),
+        format!("{}/", a.join(".git").display()),
+        format!("{}/", cwd.display()),
+    ] {
+        assert!(got.contains(&want), "{want} not synced: {got:?}\n{err}");
+    }
+}
+
+/// Same-path: a directory outside any git checkout is the tree.
+#[test]
+fn a_same_path_job_outside_a_checkout_syncs_its_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (d, ssh) = same_path_node(&root);
+    let dir = root.join("copy");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("note.txt"), "here\n").unwrap();
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &dir,
+        &["sh", "-c", "pwd; cat note.txt"],
+        SAME_PATH,
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(!err.contains("this machine's daemon"), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\nhere\n", dir.display()),
+        "{err}"
+    );
+    assert!(
+        synced_paths(&root).contains(&format!("{}/", dir.display())),
+        "{err}"
+    );
+}
+
+/// Same-path: cargo builds into the client's own target directory, also
+/// for a nested workspace named with `--manifest-path`; the node's cache
+/// holds no target directory.
+#[test]
+fn a_same_path_cargo_build_uses_the_clients_target_dir() {
+    let t0 = Instant::now();
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (d, ssh) = same_path_node(&root);
+    let repo = tiny_crate(&root, "");
+    let driver = repo.join("driver");
+    std::fs::create_dir_all(driver.join("src")).unwrap();
+    std::fs::write(
+        driver.join("Cargo.toml"),
+        "[package]\nname = \"driver\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(driver.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        driver.join("Cargo.lock"),
+        "version = 3\n\n[[package]]\nname = \"driver\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    script(
+        &cargo,
+        &format!(
+            "echo \"$CARGO_TARGET_DIR|$*\" >> {log}\nexec {real} \"$@\"",
+            log = root.join("cargo.log").display(),
+            real = env!("CARGO"),
+        ),
+    );
+    let cargo = cargo.to_str().unwrap();
+    for argv in [
+        vec![cargo, "build"],
+        vec![cargo, "build", "--manifest-path", "driver/Cargo.toml"],
+    ] {
+        let out = Command::new(SLOT)
+            .args(&argv)
+            .current_dir(&repo)
+            .env("SLOT_HOST", "node")
+            .env("SLOT_SSH", &ssh)
+            .env("SLOT_WSROOT", d.dir.path().join("state/ws"))
+            .env("SLOT_REMOTE", SLOT)
+            .env("SLOT_SOCKET", d.socket())
+            .env("SLOT_REMOTE_SAME_PATH", "1")
+            .env("SLOT_SYNC_STALL", "20s")
+            .env("SLOT_SYNC_LIMIT", "50s")
+            .env_remove("SLOT_JOB")
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{argv:?}: {err}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    }
+    assert!(repo.join("target/debug/tiny").is_file());
+    assert!(driver.join("target/debug/driver").is_file());
+    let log = std::fs::read_to_string(root.join("cargo.log")).unwrap();
+    let dirs: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("|build"))
+        .filter_map(|l| l.split('|').next())
+        .collect();
+    assert_eq!(
+        dirs,
+        [
+            repo.join("target").to_str().unwrap(),
+            driver.join("target").to_str().unwrap()
+        ],
+        "{log}"
+    );
+    let node = d.dir.path().join("state/cache/target");
+    let built: Vec<_> = std::fs::read_dir(&node)
+        .map(|r| {
+            r.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(built.is_empty(), "built in the node's cache: {built:?}");
+    eprintln!("took {:?}", t0.elapsed());
+}

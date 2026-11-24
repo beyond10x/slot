@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::mirror;
+use crate::{mirror, same_path};
 
 /// Default stall window: a sync that moves no byte for this long is killed.
 pub const DEFAULT_STALL: Duration = Duration::from_secs(60);
@@ -311,41 +311,10 @@ fn ask_siblings(
         .then(|| ids.into_iter().take(mirror::MAX_SIBLINGS).collect())
 }
 
-/// Syncs the checkout at `top` to mirror `id` on the server, with the
-/// toolchain's `excludes`, within `b`.
-pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
-    let asked = Instant::now();
-    let _lock = crate::paths::runtime_dir()
-        .map(|dir| lock_workspace(&dir, r.host, id, b.limit))
-        .transpose()?;
-    let t0 = Instant::now();
-    let deadline = t0 + b.limit;
-    let key = mirror::repo_key(top);
-    let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
-    let mut rsync = Command::new("rsync");
-    rsync.args([
-        "-a",
-        "--delete",
-        "--mkpath",
-        "--filter=:- .gitignore",
-        "--exclude=/.git",
-    ]);
-    for x in excludes {
-        rsync.arg(format!("--exclude={x}"));
-    }
-    if let Some(sibs) = &siblings {
-        rsync.arg("--stats");
-        for s in sibs {
-            if let Some(d) = r.copy_dest(s) {
-                rsync.arg(format!("--copy-dest={d}"));
-            }
-        }
-    }
+/// Runs `rsync` with its stdout read, killed at a stall or at `deadline`;
+/// its stdout.
+fn run_watched(rsync: &mut Command, b: &Bounds, deadline: Instant) -> Result<String> {
     rsync
-        .arg("-e")
-        .arg(r.ssh.join(" "))
-        .arg(format!("{}/", top.display()))
-        .arg(format!("{}:{}/", r.host, r.dest(top, id)))
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped());
@@ -362,6 +331,76 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     if !st.success() {
         bail!("rsync exited with {st}");
     }
+    Ok(out)
+}
+
+/// Syncs `e` to its own path on the server, for a same-path job, within
+/// `b`. A git directory is shared by every worktree of its repository: one
+/// sync of it runs at a time on this machine.
+pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()> {
+    let _lock = match e.kind {
+        same_path::Kind::Git => crate::paths::runtime_dir()
+            .map(|dir| {
+                let id = format!("git{}", mirror::digest16(&e.path.to_string_lossy()));
+                lock_workspace(&dir, r.host, &id, b.limit)
+            })
+            .transpose()?,
+        same_path::Kind::Tree => None,
+    };
+    let path = e.path.display();
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-a", "--delete", "--mkpath"])
+        .args(same_path::filters(e.kind))
+        .arg("-e")
+        .arg(r.ssh.join(" "))
+        .arg(format!("{path}/"))
+        .arg(format!("{}:{path}/", r.host));
+    run_watched(&mut rsync, b, Instant::now() + b.limit).map(drop)
+}
+
+/// Syncs the checkout at `top` to mirror `id` on the server, with the
+/// toolchain's `excludes`, within `b`.
+pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
+    let asked = Instant::now();
+    let _lock = crate::paths::runtime_dir()
+        .map(|dir| lock_workspace(&dir, r.host, id, b.limit))
+        .transpose()?;
+    let t0 = Instant::now();
+    let deadline = t0 + b.limit;
+    let key = mirror::repo_key(top);
+    let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
+    let mut rsync = Command::new("rsync");
+    // A same-path mirror keeps a linked worktree's `.git` file; the git
+    // directories follow in syncs of their own (`sync_extra`).
+    rsync.args([
+        "-a",
+        "--delete",
+        "--mkpath",
+        "--filter=:- .gitignore",
+        if r.same_path {
+            "--exclude=/.git/"
+        } else {
+            "--exclude=/.git"
+        },
+    ]);
+    for x in excludes {
+        rsync.arg(format!("--exclude={x}"));
+    }
+    if let Some(sibs) = &siblings {
+        rsync.arg("--stats");
+        for s in sibs {
+            if let Some(d) = r.copy_dest(s) {
+                rsync.arg(format!("--copy-dest={d}"));
+            }
+        }
+    }
+    rsync
+        .arg("-e")
+        .arg(r.ssh.join(" "))
+        .arg(format!("{}/", top.display()))
+        .arg(format!("{}:{}/", r.host, r.dest(top, id)));
+    let out = run_watched(&mut rsync, b, deadline)?;
     Ok(Synced {
         bytes: siblings.as_ref().and_then(|_| stats_bytes_sent(&out)),
         elapsed: t0.elapsed(),

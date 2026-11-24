@@ -600,6 +600,7 @@ fn workspace_is_confined_and_paths_rewritten() {
             rel_cwd: ".".into(),
             client_root: String::new(),
             same_path: false,
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -612,6 +613,7 @@ fn workspace_is_confined_and_paths_rewritten() {
             rel_cwd: "../../..".into(),
             same_path: false,
             client_root: "/client".into(),
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -636,6 +638,7 @@ fn remote_job_gets_server_path_and_client_flags() {
             same_path: false,
             rel_cwd: ".".into(),
             client_root: "/c".into(),
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -1986,6 +1989,7 @@ fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
             id: "w1".into(),
             rel_cwd: ".".into(),
             client_root: "/c".into(),
+            ..Workspace::default()
         }),
         ..fake_build(&f.root, &target, "echo ran")
     };
@@ -4978,6 +4982,7 @@ fn a_sandboxed_workspace_job_writes_only_what_it_builds() {
             rel_cwd: ".".into(),
             client_root: "/client".into(),
             same_path: false,
+            ..Workspace::default()
         }),
         ..Request::default()
     };

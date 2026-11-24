@@ -28,6 +28,7 @@ pub mod proto;
 pub mod repo_config;
 pub mod rewrite;
 pub mod run_limit;
+pub mod same_path;
 pub mod sandbox;
 pub mod sccache;
 pub mod server;
