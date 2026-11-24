@@ -985,17 +985,17 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
                 started = true;
                 match collector.as_deref_mut() {
                     Some(c) => {
-                        let _ = stdout.write_all(&c.push(b.as_bytes()));
+                        write_out(&mut stdout, &c.push(b.as_bytes()));
                     }
                     None => {
-                        let _ = stdout.write_all(b.as_bytes());
+                        write_out(&mut stdout, b.as_bytes());
                     }
                 }
                 let _ = stdout.flush();
             }
             Ok(Frame::Err { b }) => {
                 started = true;
-                let _ = stderr.write_all(b.as_bytes());
+                write_out(&mut stderr, b.as_bytes());
             }
             Ok(Frame::Start { target_dir, .. }) => {
                 started = true;
@@ -1007,7 +1007,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
             Ok(Frame::Exit { code }) => {
                 drop(writer);
                 if let Some(c) = collector.as_deref_mut() {
-                    let _ = stdout.write_all(&c.finish());
+                    write_out(&mut stdout, &c.finish());
                     let _ = stdout.flush();
                 }
                 return Ended::Exit(code);
@@ -1020,7 +1020,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
         }
     }
     if let Some(c) = collector {
-        let _ = stdout.write_all(&c.finish());
+        write_out(&mut stdout, &c.finish());
         let _ = stdout.flush();
     }
     if let Some(sig) = signalled() {
@@ -1029,9 +1029,77 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
     Ended::Lost { started }
 }
 
+/// Writes all of `buf`, also to a pipe that another process sharing it made
+/// non-blocking (a test runner or bundler in the same pipeline): on
+/// `WouldBlock` it waits briefly and writes the rest. `write_all` gives up
+/// there, and the rest of the block was lost while later lines arrived.
+fn write_fully<W: Write>(w: &mut W, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match w.write(buf) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => buf = &buf[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// [`write_fully`], then a flush that also waits out `WouldBlock`.
+fn write_out<W: Write>(w: &mut W, buf: &[u8]) {
+    if write_fully(w, buf).is_err() {
+        return;
+    }
+    loop {
+        match w.flush() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            _ => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pipe another process made non-blocking: takes at most 3 bytes per
+    /// call and answers every second call with `WouldBlock`.
+    struct Choppy {
+        got: Vec<u8>,
+        calls: usize,
+    }
+
+    impl Write for Choppy {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls.is_multiple_of(2) {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = buf.len().min(3);
+            self.got.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_to_a_non_blocking_pipe_arrives_whole() {
+        let text = b"test lease::renews ... ok\nSummary [ 1.2s] 40 tests run: 40 passed\n";
+        let mut w = Choppy {
+            got: Vec::new(),
+            calls: 0,
+        };
+        write_fully(&mut w, text).unwrap();
+        assert_eq!(w.got, text);
+    }
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
 

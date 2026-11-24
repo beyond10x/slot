@@ -2,6 +2,10 @@
 
 ## 0.35.0 — 2026-11-24
 
+- A job's output reaches the caller whole when another process sharing the caller's stdout has
+  made it non-blocking (a test runner or bundler in the same pipeline). Before, the client gave up
+  on the first `EAGAIN` and the rest of that output block was lost mid-line while later lines
+  arrived.
 - A node reports what only it knows, in its row of `GET /api/nodes`: the machine's boot
   (`booted_at`), the poweroff systemd has scheduled (`poweroff_at`), the CPUs busy on the whole
   machine and its load (`host_cpu_milli`, `load1`; `/api/state` adds `host_busy_cores` and
