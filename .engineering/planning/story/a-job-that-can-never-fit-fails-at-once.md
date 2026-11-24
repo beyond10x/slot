@@ -7,7 +7,7 @@ title: A job predicted to need more memory than the host has fails at once with 
 relations:
 - serves: vision:O2
 - informed_by: story:admission-waits-for-memory
-revision: 2
+revision: 3
 ---
 # Story: a-job-that-can-never-fit-fails-at-once
 
@@ -24,8 +24,8 @@ A single runaway peak does not set the prediction for every later job with the s
 - One `cargo nextest run -E all()` in a mutation-testing copy ran 67 s and recorded `peak_rss`
   123.4 GB with 68 CPU-seconds and exit 100: a mutant that allocated until the host was full.
 - The next job with the same key (repository directory `copy` and the same argv) was queued for
-- A second job of the same key waited 16 min more until its owner stopped it; the owner could not bound it, since the client has no memory option.
   29 minutes and more with "the job needs about 123.4 GB and 4.0 GB stays free". It could never start.
+- A second job of the same key waited 16 min more until its owner stopped it; the owner could not bound it, since the client has no memory option.
 - Every mutation-testing copy is named `copy`, so all mutants of all repositories share one key.
 
 ## Recommendation
