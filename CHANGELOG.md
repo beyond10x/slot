@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- `contrib/node/` provisions a cloud build node and reports where a running one differs from it.
+  `provision.sh` (root on the node) sets up the instance store array, the job tmp filesystem,
+  the binds of the same-path mirror roots, packages, the build user, the units, the build key and
+  the slot release; `push.sh` (workstation) copies the workstation's `/usr`, `/etc` entries, rust
+  toolchains and cargo tools to the node. Both have `check` (one `drift:` line per difference,
+  exit 1) and `apply`. Everything private is in a config file outside the repository
+  (`node.conf.example`). The node's slots follow the CPUs found. A unit rebuilds the instance
+  store at boot, so a stop and start no longer leaves bind lines in `/etc/fstab` that point at
+  an empty disk. `task check` runs `contrib/node/test.sh`.
+
 ## 0.36.0 — 2026-11-24
 
 - Products copied back from a node no longer pile up in the local target directory. After a

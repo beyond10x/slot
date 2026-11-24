@@ -39,6 +39,11 @@ slot cargo test -p foo
 Jobs on the server start from the daemon's own environment (its `PATH`, `HOME` and toolchain
 installs), not from the workstation's. With the systemd unit, that is the unit's `PATH`.
 
+A cloud machine with NVMe instance storage (Amazon Linux 2023) can be set up by the scripts in
+[`contrib/node/`](https://github.com/beyond10x/slot/tree/main/contrib/node): `provision.sh` on
+the machine and `push.sh` on the workstation, both with a `check` that lists where the machine
+differs. Names, keys and paths come from a config file outside the repository.
+
 ## Use it from the workstation
 
 ```console
