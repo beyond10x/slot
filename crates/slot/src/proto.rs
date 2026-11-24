@@ -216,6 +216,10 @@ pub struct Workspace {
     /// `--same-path-root`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub same_path: bool,
+    /// A same-path job's target directory, the client's own absolute path
+    /// (below a `--same-path-root`); empty keeps cargo's default there.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_dir: String,
 }
 
 /// One server message.

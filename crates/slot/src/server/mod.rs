@@ -1703,23 +1703,54 @@ impl Server {
             return Ok(self.cfg.ws_root.join(&ws.id));
         }
         let root = Path::new(&ws.client_root);
-        let plain = root.is_absolute()
-            && root
-                .components()
-                .all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
-        if plain
-            && self
-                .cfg
-                .same_path_roots
-                .iter()
-                .any(|r| root.starts_with(r) && root != r)
-        {
+        if self.below_same_path_root(root) {
             return Ok(root.to_path_buf());
         }
         bail!(
             "same-path mirror `{}` is not below a --same-path-root of this server",
             ws.client_root
         )
+    }
+
+    /// Whether `p` is absolute, without `.` or `..`, and below one of the
+    /// `--same-path-root` directories.
+    fn below_same_path_root(&self, p: &Path) -> bool {
+        crate::same_path::plain(p)
+            && self
+                .cfg
+                .same_path_roots
+                .iter()
+                .any(|r| p.starts_with(r) && p != r)
+    }
+
+    /// A same-path job's own target directory (`Workspace::target_dir`),
+    /// which must lie below a `--same-path-root`; `None` when it names none.
+    fn same_path_target(&self, ws: &crate::proto::Workspace) -> Result<Option<PathBuf>> {
+        if !ws.same_path || ws.target_dir.is_empty() {
+            return Ok(None);
+        }
+        let t = Path::new(&ws.target_dir);
+        if self.below_same_path_root(t) {
+            return Ok(Some(t.to_path_buf()));
+        }
+        bail!(
+            "target directory `{}` is not below a --same-path-root of this server",
+            ws.target_dir
+        )
+    }
+
+    /// Where the job of workspace `ws` builds: `<cache>/target/<id>`, or a
+    /// same-path job's own target directory (else `target` in its tree).
+    fn job_target(&self, ws: &crate::proto::Workspace) -> PathBuf {
+        if ws.same_path {
+            if let Ok(Some(t)) = self.same_path_target(ws) {
+                return t;
+            }
+            if let Ok(t) = self.tree(ws) {
+                return t.join("target");
+            }
+        }
+        self.cfg.cache_root.join("target").join(&ws.id)
     }
 
     fn resolve(&self, req: &Request) -> Result<(PathBuf, String, String)> {
@@ -1734,6 +1765,7 @@ impl Server {
             bail!("bad workspace id");
         }
         let root = self.tree(ws)?;
+        self.same_path_target(ws)?;
         let mut cwd = root.clone();
         for c in Path::new(&ws.rel_cwd).components() {
             match c {
@@ -2188,6 +2220,14 @@ impl Server {
                 .unwrap_or_default(),
         };
         let mut env = tc.env(&ctx, base);
+        // A same-path job builds where the client would, so the paths cargo
+        // prints hold on both machines.
+        if let Some(ws) = req.workspace.as_ref().filter(|w| w.same_path) {
+            env = match self.same_path_target(ws) {
+                Ok(Some(t)) => toolchain::set(env, "CARGO_TARGET_DIR", &t.to_string_lossy()),
+                _ => toolchain::unset(env, &["CARGO_TARGET_DIR"]),
+            };
+        }
         // The bound in force at the start is the job's, like its run-time
         // limit: a later `slot job-parallel` changes the jobs that start
         // after it. With a bound the job gets no pool jobserver.
@@ -2205,7 +2245,7 @@ impl Server {
             env = crate::sandbox::Sandbox::env(env);
             let workspace = req.workspace.as_ref().and_then(|w| self.tree(w).ok());
             let target_dir = match &req.workspace {
-                Some(w) => Some(self.cfg.cache_root.join("target").join(&w.id)),
+                Some(w) => Some(self.job_target(w)),
                 None => crate::evict::target_dir(&shown, &env, &cwd),
             };
             let job = crate::sandbox::Job {
@@ -2308,12 +2348,7 @@ impl Server {
         // The process is reaped by pid (`reap`), here or after a handover.
         drop(child);
         let target_dir = req.workspace.as_ref().map_or_else(String::new, |w| {
-            self.cfg
-                .cache_root
-                .join("target")
-                .join(&w.id)
-                .to_string_lossy()
-                .into_owned()
+            self.job_target(w).to_string_lossy().into_owned()
         });
         // With fixed paths a synced workspace's job names its tree by the
         // fixed path; its output is rewritten from there.

@@ -28,6 +28,7 @@ use crate::artifacts;
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
+use crate::same_path;
 use crate::sync;
 use crate::toolchain;
 use crate::types::Checkout;
@@ -221,6 +222,9 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
             req.argv.clone_from(&p.argv);
         }
         req.fetch_once = crate::cargo_fetch::applies(argv);
+        // A same-path job outside any git checkout mirrors its working
+        // directory as the tree.
+        let top = top.or_else(|| s.same_path.then(|| cwd.clone()));
         let why = match remote(host, top.as_deref(), &cwd, &mut req, s) {
             Ok(c) => {
                 let mut collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
@@ -381,8 +385,13 @@ fn products_back(
     if rels.is_empty() {
         return code;
     }
-    let local =
-        artifacts::local_target(cwd, top, std::env::var("CARGO_TARGET_DIR").ok().as_deref());
+    // A same-path job built into the client's own target directory, at the
+    // same path on the server.
+    let local = if s.same_path {
+        PathBuf::from(&target_dir)
+    } else {
+        artifacts::local_target(cwd, top, std::env::var("CARGO_TARGET_DIR").ok().as_deref())
+    };
     let src = artifacts::Source {
         host,
         ssh: &s.ssh,
@@ -700,6 +709,41 @@ fn local(socket: &Path) -> Result<Conn> {
     })
 }
 
+/// Syncs what a same-path job needs beside its tree at `top`: the git
+/// directories (a failed sync is reported, and the job runs without
+/// them), and the working directory when the tree's sync left it out (a
+/// failed sync is the caller's error: the job could not start there).
+fn same_path_extras(
+    top: &Path,
+    cwd: &Path,
+    excludes: &[&str],
+    r: &sync::Remote<'_>,
+    s: &Settings,
+) -> Result<()> {
+    use same_path::{Extra, Kind};
+    for path in same_path::git_dirs(top) {
+        let e = Extra {
+            path,
+            kind: Kind::Git,
+        };
+        if let Err(err) = sync::sync_extra(&e, r, &s.sync) {
+            eprintln!(
+                "slot: git directory {} not synced: {err:#}",
+                e.path.display()
+            );
+        }
+    }
+    if same_path::cwd_ignored(top, cwd, excludes) {
+        let e = Extra {
+            path: cwd.to_path_buf(),
+            kind: Kind::Tree,
+        };
+        sync::sync_extra(&e, r, &s.sync)
+            .with_context(|| format!("sync of the working directory {}", cwd.display()))?;
+    }
+    Ok(())
+}
+
 fn remote(
     host: &str,
     top: Option<&Path>,
@@ -724,6 +768,19 @@ fn remote(
     };
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
+    let target_dir = if s.same_path {
+        same_path_extras(top, cwd, tc.sync_excludes(), &target, s)?;
+        same_path::target_dir(
+            &req.argv,
+            cwd,
+            top,
+            std::env::var("CARGO_TARGET_DIR").ok().as_deref(),
+        )
+        .map(|t| t.to_string_lossy().into_owned())
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
     for (k, v) in std::env::vars() {
         if (tc.client_env(&k) && !toolchain::credential(&k)) || s.extra_env.contains(&k) {
             req.env.push(format!("{k}={v}"));
@@ -734,6 +791,7 @@ fn remote(
         rel_cwd: rel,
         client_root: top.to_string_lossy().into_owned(),
         same_path: s.same_path,
+        target_dir,
     });
     let mut child: Child = Command::new(&s.ssh[0])
         .args(&s.ssh[1..])

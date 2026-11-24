@@ -25,9 +25,20 @@
   into the tree and compile-cache keys that include the working directory match. The server
   admits it only below a `--same-path-root DIR` given to `slot serve` and `slot shell`
   (`SLOT_SAME_PATH_ROOTS`, `:`-separated); outside them `slot shell` refuses the sync and the
-  daemon the job. `<ws-root>/<id>` links to the tree, so sibling seeding, eviction and the
-  target directory keep their ids; the sandbox binds the tree writable at its path. Without the
-  variable nothing changes.
+  daemon the job. `<ws-root>/<id>` links to the tree, so sibling seeding and eviction keep their
+  ids; the sandbox binds the tree writable at its path. Without the variable nothing changes.
+
+- A same-path job runs like a CI runner's: its tree with uncommitted and untracked files, its git
+  directory, its own target directory, at the client's paths. The git directory is synced at its
+  own path (for a linked worktree the repository's common one, which holds the worktree's; one
+  sync of it at a time, without `*.lock` files), so `git` works in the job. Cargo builds into the
+  client's target directory: `CARGO_TARGET_DIR` when the caller sets it, else the one
+  `cargo metadata` names for the command's manifest (`--manifest-path` included), never
+  `<cache-root>/target/<id>`; the paths cargo prints and `CARGO_BIN_EXE_*` hold on both machines,
+  and products come back to the same paths. A working directory under a path the sync leaves out
+  (`target/…`, a git-ignored directory) is synced on its own, with its `.gitignore` files and
+  without its `target/`. A directory outside any git checkout is the tree. The sandbox binds the
+  target directory writable.
 
 - A remote `cargo build`, `test`, `bench` or `rustc` brings its products back into the local
   target directory, at the same relative paths with modes and mtimes: every executable of the
