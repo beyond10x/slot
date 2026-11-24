@@ -60,15 +60,18 @@ for every shell, bash or zsh.
 
 What the shim sends through slot:
 
-- `cargo build`, `b`, `check`, `c`, `test`, `t`, `clippy`, `doc`, `d`, `bench`, `nextest`,
-  `install`, `rustc`, `llvm-cov`, `miri`; global flags such as `+nightly` or `--locked` before the
-  subcommand are skipped when finding it.
+- Every `cargo` subcommand that can compile: `build`, `check`, `test`, `clippy`, `nextest`,
+  `run`, aliases such as `cargo xtask` and external subcommands; global flags such as `+nightly`
+  or `--locked` before the subcommand are skipped when finding it. These run directly because
+  they compile nothing: `fmt`, `metadata`, `locate-project`, `pkgid`, `search`, `login`,
+  `logout`, `owner`, `yank`, `version`, `help`, `tree`, `update`, `generate-lockfile`, `fetch`,
+  `vendor`, `new`, `init`, `add`, `remove`, `clean`, `config`, `read-manifest`,
+  `verify-project`, `report`, `info`, and `mutants` (whose own builds start cargo by path).
 - `go build`, `test`, `vet`, `install`.
 - `ignite build`, `test`, `conformance`.
 - `make`, every target, when linked as `make`.
 
-Everything else runs directly: `cargo run`, `cargo fmt`, `cargo metadata`, `go run`, `go mod`,
-`ignite check`, `ignite run`. A
+Everything else runs directly: `go run`, `go mod`, `ignite check`, `ignite run`. A
 command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` does not queue its
 cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
 `PATH` the shim runs the real command.
@@ -154,7 +157,8 @@ a task runs large go builds, call `slot go …` inside the task instead.
 - **rust-analyzer and IDE checks.** They run cargo for metadata and `cargo check` on their own
   schedule. Put the shim on `PATH` for agent shells only, never for the editor.
 - **Long-running processes.** A server, a watcher or `cargo run` of a daemon holds its slot for as
-  long as it runs. Start those without `slot`.
+  long as it runs, and the pool ends it at its run-time limit. Build it through the shim
+  (`cargo build`) and start the binary from `target/` without `slot`.
 
 ## Tests that need local services
 

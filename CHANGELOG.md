@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The PATH shim (`contrib/slot-shim`) sends every `cargo` subcommand through slot except the ones
+  that compile nothing (`fmt`, `metadata`, `tree`, `update`, `clean`, `add`, … and `mutants`).
+  Before, `cargo run` and aliases such as `cargo xtask` compiled outside the pool.
+  `contrib/slot-shim.test.sh` checks the routing and runs in `task check`.
 - `slot --here <command>` keeps the job in this host's pool, never on a build node, for a step
   that needs this host's credentials while it runs (a clone, a fetch, a push): the client skips
   remote mode (`SLOT_HOST`) for the call and the job carries the reason `here: needs this host`.

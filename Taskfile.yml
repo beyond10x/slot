@@ -58,6 +58,7 @@ tasks:
     desc: Run the complete offline repository gate.
     cmds:
       - rustc --version
+      - sh contrib/slot-shim.test.sh
       - task: ui-check
       - task: ui
       - task: ui-ux
