@@ -21,9 +21,9 @@ scope:
   path: crates/slot-docs/tests
 revision: 10
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 2}
-- {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 3}
-- {from: "active", to: "implemented", at: "2026-11-22T20:50:26Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1}}}
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:42Z", actor: "agent:slot", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "agent:slot", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-22T20:50:26Z", actor: "agent:slot", revision: 10, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

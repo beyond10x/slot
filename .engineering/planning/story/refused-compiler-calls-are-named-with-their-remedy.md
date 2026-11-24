@@ -8,8 +8,8 @@ relations:
 - serves: vision:O6
 revision: 3
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-24T13:09:06Z", actor: "human:timo", revision: 2}
-- {from: "proposed", to: "active", at: "2026-11-24T13:09:06Z", actor: "human:timo", revision: 3}
+- {from: "draft", to: "proposed", at: "2026-11-24T13:09:06Z", actor: "agent:slot", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-24T13:09:06Z", actor: "agent:slot", revision: 3}
 ---
 # The compiler calls the cache refuses are named per repository with their remedy
 
