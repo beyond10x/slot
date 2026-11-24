@@ -98,7 +98,12 @@ const RSYNC_LONG: &[&str] = &[
 ];
 
 /// rsync long options that take a value and may carry one.
-const RSYNC_LONG_VALUE: &[&str] = &["--compress-level", "--compress-choice", "--checksum-choice"];
+const RSYNC_LONG_VALUE: &[&str] = &[
+    "--bwlimit",
+    "--compress-level",
+    "--compress-choice",
+    "--checksum-choice",
+];
 
 /// Short-option letters rsync's client sends in server mode that open no
 /// other file or program. `e` is the protocol capability string after `.`
@@ -383,6 +388,12 @@ mod tests {
         let mirror =
             "rsync --server --sender -logDtpre.iLsfxCIvu . .local/state/slot/ws/0123abcd/bin/tool";
         assert!(matches!(p(mirror), Ok(Plan::Rsync(_))));
+    }
+
+    #[test]
+    fn a_sync_with_a_bandwidth_cap_passes() {
+        let capped = "rsync --server -logDtpre.iLsfxCIvu --bwlimit=2700 --delete --mkpath . .local/state/slot/ws/0123abcd/";
+        assert!(matches!(p(capped), Ok(Plan::Rsync(_))), "{:?}", p(capped));
     }
 
     #[test]
