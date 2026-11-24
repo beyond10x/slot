@@ -160,6 +160,74 @@ run "$R" apply
 run "$R" check
 [ $? -eq 0 ] && ok "after the download works: 0 drift" || bad "after the download: $(cat "$W/out")"
 
+# 5c. Closing the setup login ends the connections still logged in with the setup key; the
+# build key's connections stay. The node's sshd log names each connection's pid and key.
+ssh-keygen -q -t ed25519 -N '' -C setup -f "$W/setupkey" </dev/null
+fp=$(ssh-keygen -lf "$W/setupkey.pub" | awk '{print $2}')
+conf
+echo "SETUP_KEY=$(cat "$W/setupkey.pub")" >>"$W/node.conf"
+run "$R" apply
+# journalctl -o short-unix lines. Older OpenSSH logs as sshd[<pid>]; from 9.8 the
+# per-connection process is sshd-session. Pid 4646 logged a setup login, ended, and its number
+# now belongs to another program; pid 4747's number was taken by a later connection.
+# alive-pids: pid, process name, start time.
+printf '%s\n' "1795600001.000000 node sshd[4242]: Accepted publickey for $me from 192.0.2.1 port 5 ssh2: ED25519 $fp" \
+  "1795600002.000000 node sshd[4343]: Accepted publickey for $me from 192.0.2.1 port 6 ssh2: ED25519 SHA256:BuildKeyFingerprint" \
+  "1795600003.000000 node sshd[4444]: Accepted publickey for $me from 192.0.2.1 port 7 ssh2: ED25519 $fp" \
+  "1795600004.000000 node sshd-session[4545]: Accepted publickey for $me from 192.0.2.1 port 8 ssh2: ED25519 $fp" \
+  "1795600005.000000 node sshd-session[4646]: Accepted publickey for $me from 192.0.2.1 port 9 ssh2: ED25519 $fp" \
+  "1795600006.000000 node sshd-session[4747]: Accepted publickey for $me from 192.0.2.1 port 10 ssh2: ED25519 $fp" >"$R/.state/sshd-journal"
+printf '4242 sshd 1795600001\n4343 sshd 1795600002\n4545 sshd-session 1795600004\n4646 bash 1795600005\n4747 sshd-session 1795609999\n' >"$R/.state/alive-pids"
+NODE_TEST=1 NODE_ROOT=$R sh "$P" check "$W/node.conf" --open >"$W/out" 2>"$W/err"
+grep -q 'setup key' "$W/out" && grep -q '^drift: keys: a login' "$W/out" && bad "while open, a setup login is drift: $(grep '^drift' "$W/out")" || ok "while the setup login is open, its connections are not drift"
+run "$R" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: keys: a login with the setup key is still connected: pid 4242' "$W/out" && ok "closed: a connected setup login is drift" || bad "closed setup login: exit $st $(cat "$W/out")"
+grep -qx 'drift: keys: a login with the setup key is still connected: pid 4545' "$W/out" && ok "an sshd-session login is drift" || bad "sshd-session login not found: $(cat "$W/out")"
+grep -q 'pid 4343\|pid 4444\|pid 4646\|pid 4747' "$W/out" && bad "a build login, an ended login or a reused pid is drift: $(grep pid "$W/out")" || ok "build logins, ended logins and reused pids are not drift"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'kill 4242' "$R/.calls" && ok "apply ends the setup login's connection" || bad "no kill: $(cat "$R/.calls")"
+grep -qx 'kill 4545' "$R/.calls" && ok "apply ends the sshd-session connection" || bad "no kill of 4545: $(cat "$R/.calls")"
+grep -q 'kill 4343\|kill 4646\|kill 4747' "$R/.calls" && bad "apply ended a build login or another program" || ok "apply leaves the build login and other programs"
+run "$R" check
+[ $? -eq 0 ] && ok "after the setup connection ended: 0 drift" || bad "after the kill: $(cat "$W/out")"
+rm -f "$R/.state/sshd-journal" "$R/.state/alive-pids"
+
+# 5d. With logind, each login is a session whose scope holds every process it started, also one
+# whose parent became pid 1. Closing ends the setup login's whole session: session 7 is live
+# (leader 5050, its user process 5051, a command 5052); session 8's leader 6060 has ended and
+# one command (6070) still runs. Session 9 is the build key's; session 10's leader pid 6161
+# logged a setup login long before the session began, so the number was reused.
+# sessions/<id>: LEADER and REALTIME (microseconds) as in /run/systemd/sessions/<id>.
+printf '%s\n' "1795600010.000000 node sshd-session[5050]: Accepted publickey for $me from 192.0.2.1 port 11 ssh2: ED25519 $fp" \
+  "1795600020.000000 node sshd-session[6060]: Accepted publickey for $me from 192.0.2.1 port 12 ssh2: ED25519 $fp" \
+  "1795600021.000000 node sshd-session[4343]: Accepted publickey for $me from 192.0.2.1 port 13 ssh2: ED25519 SHA256:BuildKeyFingerprint" \
+  "1795600030.000000 node sshd-session[6161]: Accepted publickey for $me from 192.0.2.1 port 14 ssh2: ED25519 $fp" >"$R/.state/sshd-journal"
+printf '5050 sshd-session 1795600010\n4343 sshd-session 1795600021\n6161 sshd-session 1795700000\n' >"$R/.state/alive-pids"
+mkdir -p "$R/.state/sessions" "$R/.state/session-procs"
+printf 'LEADER=5050\nREALTIME=1795600010200000\n' >"$R/.state/sessions/7"
+printf 'LEADER=6060\nREALTIME=1795600020100000\n' >"$R/.state/sessions/8"
+printf 'LEADER=4343\nREALTIME=1795600021100000\n' >"$R/.state/sessions/9"
+printf 'LEADER=6161\nREALTIME=1795700000000000\n' >"$R/.state/sessions/10"
+echo '5050 5051 5052' >"$R/.state/session-procs/7"
+echo '6070' >"$R/.state/session-procs/8"
+echo '4343 4344' >"$R/.state/session-procs/9"
+echo '6161 6162' >"$R/.state/session-procs/10"
+run "$R" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: keys: a login with the setup key is still running: session 7 (leader pid 5050)' "$W/out" && ok "a live setup session is drift" || bad "live session: exit $st $(cat "$W/out")"
+grep -qx 'drift: keys: a login with the setup key is still running: session 8 (leader pid 6060)' "$W/out" && ok "a setup session whose leader ended is drift while a command runs" || bad "orphan session: $(cat "$W/out")"
+grep -q 'session 9\|session 10\|connected: pid' "$W/out" && bad "another session or a bare pid is drift: $(grep '^drift: keys' "$W/out")" || ok "the build session and a reused leader pid are not drift"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'terminate-session 7' "$R/.calls" && grep -qx 'terminate-session 8' "$R/.calls" && ok "apply ends both setup sessions" || bad "terminate calls: $(cat "$R/.calls")"
+[ ! -e "$R/.state/session-procs/7" ] && [ ! -e "$R/.state/session-procs/8" ] && ok "no process of the setup sessions is left (5050, 5051, 5052, 6070)" || bad "left: $(cat "$R/.state/session-procs/7" "$R/.state/session-procs/8" 2>/dev/null)"
+grep -q 'terminate-session 9\|terminate-session 10\|kill ' "$R/.calls" && bad "apply ended something else: $(cat "$R/.calls")" || ok "apply leaves the build session and the reused pid's session"
+run "$R" check
+[ $? -eq 0 ] && ok "after the setup sessions ended: 0 drift" || bad "after terminate: $(cat "$W/out")"
+rm -rf "$R/.state/sshd-journal" "$R/.state/alive-pids" "$R/.state/sessions" "$R/.state/session-procs"
+
 # 6. The bundle is one self-contained script that gives the same answer.
 sh "$P" bundle "$W/node.conf" check >"$W/bundle.sh" 2>"$W/err"
 st=$?
@@ -187,6 +255,42 @@ grep -q '^3 drift$' "$W/out" && ok "three differences: 3 drift" || bad "count: $
 printf 'host ws\n' >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "a result from the workstation itself is refused" || bad "same host not refused"
+
+# 6c. push.sh apply keeps the setup login's ssh connection to itself and ends it on exit: a
+# shared control connection outlives the key's removal from authorized_keys.
+printf '#!/bin/sh\necho "$*" >>"%s"\nexit 1\n' "$W/ssh.log" >"$W/fake-ssh"
+chmod 755 "$W/fake-ssh"
+: >"$W/ssh.log"
+conf
+printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
+mkdir -p "$W/home"
+HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+n=$(grep -c . "$W/ssh.log")
+[ "$n" -gt 0 ] && ok "apply used the configured ssh ($n calls)" || bad "apply made no ssh call: $(tail -3 "$W/err")"
+grep -v -- '-o ControlPath=' "$W/ssh.log" | grep -q . && bad "an ssh call without a private control path: $(grep -v -- '-o ControlPath=' "$W/ssh.log" | head -1)" || ok "every ssh call names a private control path"
+tail -1 "$W/ssh.log" | grep -q -- '-O exit node-setup' && ok "apply ends the control connection" || bad "last ssh call: $(tail -1 "$W/ssh.log")"
+
+# 6d. push.sh apply copies only under the copy list the last root apply wrote on the node
+# (/etc/slot-node/copies), and prints the list first.
+grep -qx '.m2/repository go/bin' "$R/etc/slot-node/copies" 2>/dev/null && bad "copies written before the key exists" || :
+conf
+printf 'HOME_COPIES=.m2/repository go/bin\n' >>"$W/node.conf"
+run "$R" apply
+[ "$(cat "$R/etc/slot-node/copies" 2>/dev/null)" = ".m2/repository go/bin" ] && ok "apply writes the approved copy list" || bad "copies: $(cat "$R/etc/slot-node/copies" 2>&1)"
+[ "$(stat -c %a "$R/etc/slot-node/copies" 2>/dev/null)" = 644 ] && ok "the copy list is readable by the build user" || bad "copies mode $(stat -c %a "$R/etc/slot-node/copies" 2>&1)"
+printf '#!/bin/sh\necho "$*" >>"%s"\ncase "$*" in *"cat /etc/slot-node/copies"*) cat "%s"; exit 0 ;; esac\nexit 1\n' "$W/ssh.log" "$W/node-copies" >"$W/fake-ssh"
+printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
+echo '.m2/repository go/bin .cache/other' >"$W/node-copies"
+: >"$W/ssh.log"
+HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 2 ] && grep -q 'approved copy list' "$W/err" && ok "another approved list: apply refuses" || bad "other list: exit $st $(cat "$W/err" | tail -2)"
+grep -q 'rsync' "$W/ssh.log" && bad "copied under another list" || ok "nothing copied under another list"
+echo '.m2/repository go/bin' >"$W/node-copies"
+: >"$W/ssh.log"
+HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -qx 'push: copy list: .m2/repository go/bin' "$W/out" && ok "apply prints the copy list" || bad "no list line: $(head -2 "$W/out")"
+grep -q 'rsync' "$W/ssh.log" && ok "the same list: apply copies" || bad "same list, no copy: $(cat "$W/err" | tail -2)"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

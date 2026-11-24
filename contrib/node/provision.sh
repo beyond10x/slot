@@ -197,6 +197,78 @@ a_chown() {
   [ -n "$T" ] && return 0
   chown -h "$@"
 }
+# The ssh logins of this boot with the key of fingerprint $1 that still run, one line each:
+# `session <id> <leader pid>` or, without a logind session, `pid <pid>`.
+# The process that holds a connection logs "Accepted publickey ... <fingerprint>": as
+# sshd[<pid>] up to OpenSSH 9.7, as sshd-session[<pid>] from 9.8. With pam_systemd that process
+# leads a logind session whose scope holds every process the login started, also one whose
+# parent became pid 1, and the session stays while one of them runs. A session counts when its
+# leader is that pid and it began within 2 s of the line; a bare pid counts while its process is
+# sshd or sshd-session and started no later than the line. So a pid number reused by a later
+# connection or another program is left alone.
+q_key_logins() {
+  if [ -n "$T" ]; then sdir=$S/sessions; else sdir=/run/systemd/sessions; fi
+  if [ -n "$T" ]; then
+    cat "$S/sshd-journal" 2>/dev/null
+  else
+    journalctl -b -q --no-pager -o short-unix -t sshd -t sshd-session 2>/dev/null
+  fi |
+    awk -v fp="$1" '/sshd(-session)?\[[0-9]+\]: Accepted publickey for / && $NF == fp {
+      s = $0; sub(/.*sshd(-session)?\[/, "", s); sub(/\].*/, "", s)
+      t = $1; sub(/\..*/, "", t); print s, t }' | sort -un |
+    while read -r pid t; do
+      sid=
+      for f in "$sdir"/*; do
+        case ${f##*/} in *[!0-9a-z]* | "*") continue ;; esac
+        [ -f "$f" ] || continue
+        l=$(sed -n 's/^LEADER=//p' "$f")
+        r=$(sed -n 's/^REALTIME=//p' "$f")
+        [ "$l" = "$pid" ] && [ -n "$r" ] || continue
+        d=$((r / 1000000 - t))
+        [ "$d" -ge -2 ] && [ "$d" -le 2 ] && sid=${f##*/}
+      done
+      if [ -n "$sid" ]; then
+        echo "session $sid $pid"
+        continue
+      fi
+      if [ -n "$T" ]; then
+        set -- $(awk -v p="$pid" '$1 == p { print $2, $3 }' "$S/alive-pids" 2>/dev/null)
+        comm=${1:-} st=${2:-}
+      else
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null)
+        ticks=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)
+        st=
+        [ -n "$ticks" ] && st=$(($(awk '/^btime/ { print $2 }' /proc/stat) + ticks / $(getconf CLK_TCK)))
+      fi
+      case $comm in sshd | sshd-session) ;; *) continue ;; esac
+      [ -n "$st" ] && [ "$st" -le $((t + 1)) ] && echo "pid $pid"
+    done
+}
+# Ends a login's logind session: systemd stops its scope, which ends every process in it (the
+# connection's processes and every command the login started, with SIGTERM, then SIGKILL).
+a_end_session() {
+  if [ -n "$T" ]; then
+    calls "terminate-session $1"
+    for p in $(cat "$S/session-procs/$1" 2>/dev/null); do
+      awk -v p="$p" '$1 != p' "$S/alive-pids" >"$S/alive-pids.n" 2>/dev/null
+      mv "$S/alive-pids.n" "$S/alive-pids"
+    done
+    rm -f "$S/sessions/$1" "$S/session-procs/$1"
+  else
+    loginctl terminate-session "$1"
+  fi
+}
+# Ends a connection without a logind session: the process that logged the login. Commands the
+# login started can outlive it; only a session ends those.
+a_kill() {
+  if [ -n "$T" ]; then
+    calls "kill $1"
+    awk -v p="$1" '$1 != p' "$S/alive-pids" >"$S/alive-pids.n" 2>/dev/null
+    mv "$S/alive-pids.n" "$S/alive-pids"
+  else
+    kill "$1"
+  fi
+}
 
 # Jobs run as the build user, so root never follows a link that user could have planted: a path
 # in the user's area must have no symbolic link in it, and the user's files are written by the
@@ -719,6 +791,8 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
+  # The copy list this run approved: push.sh copies only while its own list equals it.
+  want_file libexec /etc/slot-node/copies 644 root:root echo "$HOME_COPIES"
   # Each bound /etc entry needs a target of the same type as its copy from the workstation.
   for e in $ETC_LIST $ETC_EXTRA; do
     src=$R$STORE/rootfs/etc/$e
@@ -853,6 +927,26 @@ p_keys() {
     drift keys "$p is not immutable"
     if fixing; then a_chattr +i "$p" && changed keys "$p immutable"; fi
   done
+  # A connection that logged in with the setup key stays logged in after the key leaves
+  # authorized_keys; closing the setup login ends it.
+  [ -z "$open" ] && [ -n "$SETUP_KEY" ] || return 0
+  sfp=$(echo "$SETUP_KEY" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+  [ -n "$sfp" ] || return 0
+  lf=$(mktemp) || return 1
+  q_key_logins "$sfp" >"$lf" 2>/dev/null || :
+  while read -r kind id leader; do
+    case $kind in
+      session)
+        drift keys "a login with the setup key is still running: session $id (leader pid $leader)"
+        if fixing; then a_end_session "$id" && changed keys "setup login session $id ended (leader pid $leader)"; fi
+        ;;
+      pid)
+        drift keys "a login with the setup key is still connected: pid $id"
+        if fixing; then a_kill "$id" && changed keys "setup login pid $id ended"; fi
+        ;;
+    esac
+  done <"$lf"
+  rm -f "$lf"
 }
 
 p_imds() {
