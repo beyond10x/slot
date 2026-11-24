@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.36.0 — 2026-11-24
 
 - Products copied back from a node no longer pile up in the local target directory. After a
   remote cargo job's products are copied back, the client removes, in each directory it copied
