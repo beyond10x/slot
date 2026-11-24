@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job, LiveJob } from '../generated/types.ts';
-import { barLabel, checkoutLabel, idLabel, jobId, jobKey, jobName, newestRunning, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
+import { barLabel, checkoutLabel, idLabel, jobId, jobKey, jobName, newestRunning, remoteNode, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
 
 function job(over: Partial<Job>): Job {
   return {
@@ -57,6 +57,20 @@ test('split sorts active ascending and keeps the newest finished', () => {
   assert.deepEqual(active.map(jobId), [1, 3]);
   assert.equal(done.length, 60);
   assert.equal(jobId(done[0]), 79);
+});
+
+test('finished jobs come by their end, so a node\'s jobs with lower ids stand among this host\'s', () => {
+  const list = [
+    ...Array.from({ length: 60 }, (_, k) => job({ id: 1000 + k, state: 'ok', ended_ms: 10_000 + k })),
+    job({ id: 7, node: 'build-1d', from_node: true, state: 'failed', ended_ms: 90_000 }),
+    job({ id: 8, node: 'build-1d', from_node: true, state: 'ok', ended_ms: 90_000 }),
+  ];
+  const { done } = splitJobs(list);
+  assert.deepEqual(done.slice(0, 3).map(jobKey), ['build-1d/8', 'build-1d/7', '1059']);
+  assert.equal(done.length, 60);
+  assert.equal(remoteNode(done[0]), 'build-1d');
+  assert.equal(remoteNode(done[2]), '');
+  assert.equal(remoteNode({ node: '' }), '');
 });
 
 test('newest running is the one started last, id breaks ties, others ignored', () => {

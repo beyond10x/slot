@@ -712,14 +712,15 @@ during periods covered by the one-second live samples.
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). Its
 start page is the cluster view: the headline numbers (running and queued jobs, the slot wait of 9
 in 10 jobs, CPUs in use of those available, the compile cache's share of the last 24 hours, and
-the cost of remote machines once one runs), the queue, a card per node (slots by toolchain, CPU
-over 60 s, memory, free disk, the checkouts with jobs on it, the time left of a remote node's
-lease) with each job moving from the queue to its node, and the newest jobs with the node each
-runs on. Selecting a node card, or Enter on it, shows only that node's jobs; Escape shows all
-again. The page reads `GET /api/nodes`, one row per node (today the local machine). **Jobs and
+the cost of remote machines once one runs), the queue (when it is empty: each node's running jobs
+and busy slots), a card per node (slots by toolchain, CPU over 60 s, memory, free disk, the
+checkouts with jobs on it, the time left of a remote node's lease) with each job moving from the
+queue to its node, and the newest jobs with the node each runs on and its session. Selecting a node
+card, or Enter on it, shows only that node's jobs; Escape shows all again. Below 1100 px the page
+stacks: the queue above the node cards, the job list below them. The page reads `GET /api/nodes`, one row per node (today the local machine). **Jobs and
 charts** (`#jobs`) opens the view of the job tables, which shows:
 
-- slots in use out of the pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
+- slots in use on this host out of its pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
   ([Headroom](headroom.md)); on the machine base, the line with the CPUs busy on the host, the
   target, the pool's quota and the busiest owners outside the pool; when a job failed in the last
   60 minutes, a **failed** count that opens the output of the newest one,
@@ -729,16 +730,17 @@ charts** (`#jobs`) opens the view of the job tables, which shows:
   `24 h:`, the share of the last 24 hours, read from `GET /api/cache-day`; the daemon computes
   both from the lines of `cache.jsonl` ([sccache watchdog](#sccache-watchdog)),
 - directly under the header, queued and running jobs: repository, command, state, wait, elapsed
-  time, cores, memory, session, and for a queued job its level; a running job's row opens on what
-  it compiles now,
-- finished jobs: result (`ok`, `failed (101)` with the exit code, `cancelled`), wait, duration,
+  time, cores, memory, session (its title, else the first 8 characters of its id), and for a queued
+  job its level; a job of a build node names the node under its job number; a running job's row
+  opens on what it compiles now; cores and memory are measured only for jobs on this host,
+- the finished jobs that ended last, a build node's among them: result (`ok`, `failed (101)` with the exit code, `cancelled`), wait, duration,
   CPU seconds, average cores, peak memory,
 - build cores on the whole host by tool family and by agent session, run by slot or **not on
   slot**,
 - a timeline with one bar per job, coloured by toolchain; the pale part of a bar is the wait for
   a slot,
 - cores in use by slot jobs per toolchain, and by the whole host,
-- the share of the pool per project, repository or session for today, the last 24 hours or the
+- the share of this host's pool per project, repository or session for today, the last 24 hours or the
   last 7 days ([Usage](#usage)),
 - the live output of a job, opened by clicking its bar or its job number in a table; the job number
   is a button, so the keyboard reaches it with Tab. Opened by the keyboard, the output takes the

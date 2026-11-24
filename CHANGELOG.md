@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Web view with build nodes: a node job's cell holds its id (up to 7 digits) and its node on a
+  line below, clear of the tool column (UXF-050). Panels that count this host only say so ("slots
+  in use on this host", the Cores charts, "Share of the pool on this host"); the Running line
+  splits node jobs from this host's; Finished keeps the jobs that ended last, so a node's jobs
+  appear there (UXF-051). A job's session is its title wherever the daemon resolved one (also
+  from `api/usage` grouped by session), "no session" when it has none, and the cluster page's
+  job list has a session column (UXF-052). Below 1100 px the cluster page stacks instead of
+  scrolling sideways; the layout gates hold it at 800x600 and 1024x768 (UXF-053). With an empty
+  queue the endpoint panel lists each node's running jobs and busy slots (UXF-054).
 - A node's job keeps the id its node gave it: `GET /api/state`, the job events, `slot status`
   and the web view show that positive id, with the node in `node` and `from_node: true`. Before,
   the daemon moved such ids below 0 (`-1000000007499`), and only two tables of the web view

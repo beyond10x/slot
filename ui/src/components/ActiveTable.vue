@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue';
 import { fmtBytes, fmtDur } from '../lib/format.ts';
-import { sessionName } from '../lib/host.ts';
-import { checkoutLabel, cmdText, idLabel, jobId, jobKey, jobName, runS, waitS } from '../lib/job.ts';
+import { sessionHover, sessionName } from '../lib/host.ts';
+import { checkoutLabel, cmdText, jobId, jobKey, jobName, runS, waitS } from '../lib/job.ts';
 import { shareCell } from '../lib/shares.ts';
 import { phase } from '../lib/units.ts';
 import { jobs, liveOf, select, sessionTitles, sparks, store } from '../store.ts';
 import CoresSpark from './CoresSpark.vue';
+import JobIdCell from './JobIdCell.vue';
 import RepoName from './RepoName.vue';
 import ToolDot from './ToolDot.vue';
 import UnitChips from './UnitChips.vue';
@@ -65,10 +66,10 @@ function toggle(id: string, open: boolean): void {
               <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true" :class="{ open: r.open }"><path d="M3 1.5 7 5 3 8.5" /></svg>
             </button>
           </td>
-          <td><button type="button" class="jobid" :aria-label="`output of job ${jobName(r.job)}`" @click.stop="select(r.id, $event)">{{ idLabel(r.job) }}</button></td>
+          <JobIdCell :job="r.job" @open="select(r.id, $event)" />
           <td class="c-tool" :title="r.job.toolchain"><ToolDot :name="r.job.toolchain" /></td>
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
-          <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
+          <td class="session h-b" :title="sessionHover(r.job.session, r.session)">{{ r.session }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
           <td class="c-out h-c">
             <button type="button" class="btn live" :class="{ on: store.selected === r.id }" tabindex="-1" title="watch this job's output as it is written"

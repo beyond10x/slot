@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { CensusSession } from '../generated/types.ts';
-import { familyColor, familyOrder, hostSample, notOnSlot, orderSessions, sessionCells, sessionLabel, stack } from './host.ts';
+import { familyColor, familyOrder, hostSample, NO_SESSION, notOnSlot, orderSessions, sessionCells, sessionHover, sessionLabel, sessionName, stack } from './host.ts';
 import { tick } from './fixtures.ts';
 
 const session = (over: Partial<CensusSession>): CensusSession => ({
@@ -80,6 +80,15 @@ test('the Sessions table names the id in every row, and says when a session has 
   assert.deepEqual(sessionCells(session({ session: '0123456789abcdef', title: 'fix the parser' })), { name: 'fix the parser', untitled: false, id: '01234567' });
   assert.deepEqual(sessionCells(session({ session: '0123456789abcdef' })), { name: 'no title', untitled: true, id: '01234567' });
   assert.deepEqual(sessionCells(session({})), { name: '(no session)', untitled: true, id: '' });
+});
+
+test('a job\'s session is its title, else its short id, else "no session"', () => {
+  const titles = new Map([['0123456789abcdef', 'fix the parser']]);
+  assert.equal(sessionName('0123456789abcdef', titles), 'fix the parser');
+  assert.equal(sessionName('fedcba9876543210', titles), 'fedcba98');
+  assert.equal(sessionName('', titles), NO_SESSION);
+  assert.equal(sessionHover('0123456789abcdef', 'fix the parser'), 'fix the parser\nsession 0123456789abcdef');
+  assert.match(sessionHover('', NO_SESSION), /outside an agent session/);
 });
 
 test('a session is not on slot above one unmanaged core', () => {

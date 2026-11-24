@@ -111,7 +111,7 @@ onUnmounted(() => {
         <span class="conn" data-ux-region="connection" :class="{ ok: store.connected, wait: !loaded }" :title="connection.title"><i></i>{{ connection.word }}</span>
       </div>
       <span class="tile" data-ux-region="slots">
-        <span class="k">slots in use</span>
+        <span class="k">slots in use on this host</span>
         <span class="v"><span class="tokens" aria-hidden="true"><i v-for="k in store.tokens" :key="k" :class="{ on: k <= used, off: k > limit }"></i></span> <b>{{ used }}/{{ limit }}</b></span>
       </span>
       <span class="tile headroom" data-ux-region="headroom">
@@ -155,7 +155,7 @@ onUnmounted(() => {
       @mouseenter="hovered = true" @mouseleave="hovered = false">
       <dl>
         <div><dt>connected</dt><dd>The page follows the daemon second by second. "Not connected": the numbers are the last ones received.</dd></div>
-        <div><dt>slots in use</dt><dd>Slots that running jobs hold, of the slots builds may use now. A dashed box is a slot the headroom keeps back{{ withheld ? ` (${withheld} now)` : '' }}.</dd></div>
+        <div><dt>slots in use on this host</dt><dd>Slots that running jobs hold on this host, of the slots builds may use here now; a build node has slots of its own (the Cluster page). A dashed box is a slot the headroom keeps back{{ withheld ? ` (${withheld} now)` : '' }}.</dd></div>
         <div><dt>headroom for you</dt><dd>Share of the CPU kept free for you (browser, video calls). Builds get the rest: fewer slots, and one CPU limit on all build jobs together. The line below the numbers says what that comes to.</dd></div>
         <div><dt>running, queue, longest wait</dt><dd>Jobs that hold slots, jobs that wait, and how long the oldest of them has waited. The Queue table names what each one waits for.</dd></div>
         <div><dt>failed</dt><dd>Jobs that ended with an error in the last 60 min. The button opens the output of the newest one.</dd></div>

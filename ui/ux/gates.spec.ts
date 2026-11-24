@@ -8,7 +8,7 @@ import { gateFile } from './metrics.ts';
 import { clsObserver, layoutShift, probe } from './probes.ts';
 import type { Probe } from './probes.ts';
 import { OPEN_PANE, SCENARIOS } from './scenarios.ts';
-import { VIEWPORTS, vpName } from './viewports.ts';
+import { CLUSTER_GATING, VIEWPORTS, vpName } from './viewports.ts';
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), 'out', 'gates');
 
@@ -22,7 +22,8 @@ const problems = (p: Probe): string[] => [
 ];
 
 for (const sc of SCENARIOS) {
-  for (const vp of VIEWPORTS.filter((v) => v.gating || process.env.UX_ALL)) {
+  const sizes = [...VIEWPORTS.filter((v) => v.gating || process.env.UX_ALL), ...(sc.view === 'cluster' ? CLUSTER_GATING : [])];
+  for (const vp of sizes) {
     test(`layout ${sc.name} @ ${vpName(vp)}`, async ({ page, baseURL }, info) => {
       await page.setViewportSize({ width: vp.width, height: vp.height });
       await page.addInitScript(clsObserver);

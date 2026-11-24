@@ -57,6 +57,9 @@ button.jobid { min-width: 24px; min-height: 22px; padding: 0 2px; margin-left: -
 button.jobid:hover { text-decoration-color: var(--fg); text-decoration-thickness: 2px; }
 /* The ring stays clear of the queue position left of it. */
 button.jobid:focus-visible { outline-offset: 0; }
+/* The job cell: the id, and for a job of a build node the node on a quiet line below; a long node name is cut with its full name in the hover text. */
+td.jid { overflow: hidden; }
+td.jid .where { display: block; overflow: hidden; text-overflow: ellipsis; margin-top: -2px; font-size: 12px; line-height: 14px; color: var(--mute); }
 tbody tr { cursor: pointer; }
 tbody tr:hover td { background: var(--hover); }
 tbody tr.sel td { background: var(--sel); }
@@ -71,11 +74,11 @@ tbody tr.static.flag td, tbody tr.static.flag:hover td { background: #fdf0e6; }
 tr.empty td { color: var(--mute); }
 /*
  * The job tables: one column order and one set of widths for Queue, Running and Finished. Running and Finished share every
- * column line; the Queue ends with wait below 1800 px (QueueTable.vue). The command takes what is left. The widths hold the widest value in the harness's wide font, a job number of 6 digits included.
+ * column line; the Queue ends with wait below 1800 px (QueueTable.vue). The command takes what is left. The widths hold the widest value in the harness's wide font, a job number of 7 digits included.
  */
 table.jobs { table-layout: fixed; --c-tool: 94px; --c-repo: 160px; --c-session: 112px; --c-state: 106px; }
 .jobs .c-lead { width: 38px; }
-.jobs .c-job { width: 60px; }
+.jobs .c-job { width: 80px; }
 .jobs .c-tool { width: var(--c-tool); overflow: hidden; }
 .jobs .c-repo { width: var(--c-repo); }
 .jobs .c-session { width: var(--c-session); }

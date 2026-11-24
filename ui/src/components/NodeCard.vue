@@ -195,6 +195,17 @@ watch(() => [store.clock, props.node, props.dark], drawSpark, { flush: 'post' })
 @media (max-width: 1330px) {
   .nbody { grid-template-columns: 271px minmax(70px, 1fr) 124px 140px 56px; gap: 12px; }
 }
+/* In the stacked page (below 1100 px) the card takes the height it needs: its head may wrap, memory, disk and checkouts go to a second row. */
+@media (max-width: 1099px) {
+  .nhead { flex-wrap: wrap; height: auto; min-height: 22px; row-gap: 2px; }
+  .nname { max-width: none; }
+  .nbody { grid-template-columns: 271px minmax(0, 1fr) 56px; grid-template-areas: 'slots spark life' 'bars wts life'; gap: 10px 12px; }
+  .slots { grid-area: slots; }
+  .spark { grid-area: spark; height: 64px; }
+  .bars { grid-area: bars; }
+  .wts { grid-area: wts; }
+  .life { grid-area: life; }
+}
 @media (prefers-reduced-motion: reduce) {
   .node, .cell, .bar i, .life .arc { transition-property: opacity, background-color; }
 }
