@@ -3,6 +3,13 @@ import { fmtBytes, fmtDur } from './format.ts';
 
 export const jobId = (j: { id: number }): number => Number(j.id);
 
+/** The id a person reads: a remote node's job as `<node>/<its id on that node>`, a local job as its id. */
+export function idLabel(j: { id: number; node?: string }): string {
+  const id = Number(j.id);
+  if (id >= 0 || !j.node || j.node === 'local') return String(id);
+  return `${j.node}/${-id % 1_000_000_000_000}`;
+}
+
 export const isActive = (s: JobState): boolean => s === 'queued' || s === 'running';
 
 export const cmdText = (j: Job): string => j.argv.join(' ');

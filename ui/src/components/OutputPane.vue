@@ -4,7 +4,7 @@ import type { Chunk } from '../generated/types.ts';
 import { Terminal, lineHtml, lineIsErr } from '../lib/ansi.ts';
 import type { Segment } from '../lib/ansi.ts';
 import { fmtBytes, fmtClock, fmtDur } from '../lib/format.ts';
-import { checkoutLabel, cmdText, resultLong, runS, times, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, resultLong, runS, times, waitS , idLabel } from '../lib/job.ts';
 import { levelText, queuePlace, servedQueue, waitReasonText } from '../lib/queue.ts';
 import { atBottom, revealDelta } from '../lib/scroll.ts';
 import { jobs, live, select, sessionTitles, store } from '../store.ts';
@@ -16,7 +16,7 @@ const props = defineProps<{ id: number }>();
 
 const job = computed(() => jobs.get(props.id));
 /** "#42 ledger · worktree tax-rounding: " before the command; the number alone while the job is unknown. */
-const head = computed(() => (job.value ? `#${props.id} ${checkoutLabel(job.value)}: ` : `#${props.id}`));
+const head = computed(() => (job.value ? `#${idLabel(job.value)} ${checkoutLabel(job.value)}: ` : `#${props.id}`));
 const cmd = computed(() => (job.value ? cmdText(job.value) : ''));
 
 type Stream = 'connecting' | 'live' | 'ended' | 'unavailable';

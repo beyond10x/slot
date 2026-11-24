@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { fmtDur } from '../lib/format.ts';
 import { sessionName } from '../lib/host.ts';
-import { checkoutLabel, cmdText, jobId, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobId, waitS , idLabel } from '../lib/job.ts';
 import { level, levelText, servedQueue, waitReasonText } from '../lib/queue.ts';
 import { shareCell } from '../lib/shares.ts';
 import { jobs, select, sessionTitles, store } from '../store.ts';
@@ -42,7 +42,7 @@ const rows = computed(() => {
       <template v-for="r in rows" :key="r.id">
         <tr :class="{ sel: store.selected === r.id, lead: !!r.why }" @click="select(r.id)">
           <td class="c-lead num">#{{ r.pos }}</td>
-          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
+          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ idLabel(r.job) }}</button></td>
           <td class="c-tool" :title="r.job.toolchain"><ToolDot :name="r.job.toolchain" /></td>
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
           <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>

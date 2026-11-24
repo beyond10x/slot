@@ -2,7 +2,7 @@
 import { computed, reactive } from 'vue';
 import { fmtBytes, fmtDur } from '../lib/format.ts';
 import { sessionName } from '../lib/host.ts';
-import { checkoutLabel, cmdText, jobId, runS, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobId, runS, waitS , idLabel } from '../lib/job.ts';
 import { shareCell } from '../lib/shares.ts';
 import { phase } from '../lib/units.ts';
 import { jobs, live, select, sessionTitles, sparks, store } from '../store.ts';
@@ -65,7 +65,7 @@ function toggle(id: number, open: boolean): void {
               <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true" :class="{ open: r.open }"><path d="M3 1.5 7 5 3 8.5" /></svg>
             </button>
           </td>
-          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
+          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ idLabel(r.job) }}</button></td>
           <td class="c-tool" :title="r.job.toolchain"><ToolDot :name="r.job.toolchain" /></td>
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
           <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
