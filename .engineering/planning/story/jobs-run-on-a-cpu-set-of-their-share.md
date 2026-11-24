@@ -8,7 +8,7 @@ relations:
 - decomposes: epic:desktop-headroom
 - serves: vision:O2
 - informed_by: story:test-execution-bounded-by-pool
-revision: 1
+revision: 2
 ---
 # Story: jobs-run-on-a-cpu-set-of-their-share
 
@@ -53,3 +53,5 @@ Admission bounds how many jobs start. It cannot bound the threads a job starts a
   every 10 s stays at or under 64 for the whole run.
 - Inside a job holding 4 slots, `nproc` prints 4.
 - A job of 1 slot running `cargo nextest run` starts 1 test process at a time.
+- A job's CPU set is the same size on this host and on a build node for the same request, so a
+  test's thread count does not depend on where it ran.
