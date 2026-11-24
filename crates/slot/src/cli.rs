@@ -70,8 +70,8 @@ pub enum Cmd {
     Serve(Box<ServeArgs>),
     /// Bridge stdin/stdout to the daemon's socket (remote clients run this over ssh).
     Proxy(ProxyArgs),
-    /// ssh forced command for a build server: runs only the sync, fetch,
-    /// proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`.
+    /// ssh forced command for a build server: runs only the sync, sibling,
+    /// fetch, proxy and cancel steps named in `SSH_ORIGINAL_COMMAND`.
     Shell(ShellArgs),
     /// Serve gate directories: builds in a sandbox that can open FIFOs there,
     /// but cannot reach the daemon's socket, queue in the pool and run in
@@ -86,6 +86,11 @@ pub enum Cmd {
     /// place (same pid, same process group). Started by the daemon only.
     #[command(name = "__exec", hide = true)]
     Exec(ExecArgs),
+    /// The step a remote client runs on the build server before a sync:
+    /// records the mirror's repository and prints the sibling mirrors it
+    /// can copy from. Run by remote clients only.
+    #[command(name = "__siblings", hide = true)]
+    Siblings(SiblingsArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -320,6 +325,17 @@ pub struct ExecArgs {
     /// The program, a resolved path, and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<OsString>,
+}
+
+/// `slot __siblings` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct SiblingsArgs {
+    /// The workspace root the client syncs to.
+    pub ws_root: PathBuf,
+    /// The mirror's workspace id.
+    pub id: String,
+    /// The repository key.
+    pub key: String,
 }
 
 /// `slot run` arguments.

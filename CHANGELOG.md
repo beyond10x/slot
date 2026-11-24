@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.32.0 — 2026-11-24
+
+- Remote mode seeds a new worktree's mirror from its siblings. Before each sync the client asks
+  the server for other mirrors of the same repository (same normalized `origin` URL), through a
+  new step `slot __siblings` that `slot shell` admits, and passes up to four of them to rsync as
+  `--copy-dest`: unchanged files are copied on the server, changed ones sent as deltas against the
+  sibling's. The first sync of a worktree used to send the whole tree; over a link of about
+  1 MB/s a 145 MB tree took more than 16 minutes. A server whose slot does not know the step gets
+  the plain sync. `slot shell` takes `--copy-dest` only as `../<id>` of a sync, and `--stats`.
+
+- A remote sync that reads and writes no byte for `SLOT_SYNC_STALL` (default 60 s), or runs
+  longer than `SLOT_SYNC_LIMIT` (default 5 min), is killed with its ssh, and the job runs on this
+  machine's daemon. An rsync killed from outside also sends the job to the local daemon. Before,
+  a sync over a stalled link held the job for as long as the link stayed open.
+
+- Every remote sync prints one line with its bytes and seconds, for example `slot: synced to
+  buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`.
+
+- Two clients of one worktree on one workstation sync it one after the other: the second waits
+  for the first (a `flock` in the runtime directory, at most `SLOT_SYNC_LIMIT`) and its line says
+  how long. Two rsyncs into one mirror at once had ended one of them with exit 23.
+
 ## 0.31.1 — 2026-11-24
 
 - The UX gates' accessibility probe waits until every finite animation on the page has ended
