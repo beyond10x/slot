@@ -1,3 +1,5 @@
+| `SLOT_CLUSTER_FILE` | default for `slot serve --cluster-file`: the host configuration file whose `[remote.<name>]` tables are the nodes the daemon polls; `off` reads none |
+| `XDG_CONFIG_HOME` | the default host configuration file is `$XDG_CONFIG_HOME/slot/cluster.toml`, otherwise `~/.config/slot/cluster.toml` |
 ---
 title: Environment variables
 description: Variables slot reads, variables it sets in a job, and variables it drops.

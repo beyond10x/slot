@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The daemon shows remote build nodes: each `[remote.<name>]` table of the host configuration
+  file (`$XDG_CONFIG_HOME/slot/cluster.toml`, `slot serve --cluster-file`, `SLOT_CLUSTER_FILE`)
+  is polled every 5 s over ssh with the new read-only `slot shell` step `state`, which prints the
+  node daemon's own row of `/api/nodes` and its jobs. `GET /api/nodes` lists each node (kind
+  Remote; Joining until its first answer, Gone with reason Lost after three missed polls, a poll
+  bounded at 4 s); `GET /api/state` and the job events carry its jobs with `node` set and an id
+  below 0. The cluster page shows the node's card and jobs; its job list is ordered by queue
+  time.
+
 ## 0.33.0 — 2026-11-24
 
 - `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is

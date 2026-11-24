@@ -185,6 +185,16 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             client::cancel(id, &s)
         }
         Ok(Plan::Siblings { id, key }) => siblings(&ws, &id, &key),
+        Ok(Plan::State) => match slot::server::nodes::state_step(&args.http) {
+            Ok(s) => {
+                println!("{s}");
+                0
+            }
+            Err(e) => {
+                eprintln!("slot shell: state: {e:#}");
+                1
+            }
+        },
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126

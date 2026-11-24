@@ -264,6 +264,11 @@ pub struct ServeArgs {
     /// does not start.
     #[arg(long)]
     pub sandbox: bool,
+    /// The host configuration file: its `[remote.<name>]` tables are the
+    /// remote nodes the daemon polls every 5 s and shows in `GET /api/nodes`
+    /// and the web UI. `off` reads none.
+    #[arg(long, env = "SLOT_CLUSTER_FILE", default_value_os_t = crate::hostconfig::default_path())]
+    pub cluster_file: PathBuf,
     /// One more path a sandboxed job may write, for example a package
     /// manager's store; repeat for more.
     #[arg(long, value_name = "PATH", requires = "sandbox")]
@@ -299,6 +304,9 @@ pub struct ShellArgs {
     /// Target dirs of synced workspaces (default: `<state-dir>/cache`).
     #[arg(long)]
     pub cache_root: Option<PathBuf>,
+    /// The daemon's web address, for the `state` step.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
 }
 
 /// `slot gate` options.
@@ -787,6 +795,8 @@ impl ServeArgs {
             } else {
                 None
             },
+            cluster_file: (self.cluster_file.as_os_str() != "off")
+                .then(|| self.cluster_file.clone()),
         })
     }
 }

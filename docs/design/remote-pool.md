@@ -233,6 +233,13 @@ limit order what arrives.
   daemon's version, its clock, whether it admits jobs, and the job-log lines since the last poll,
   which the local daemon appends to `<state-dir>/hosts/<name>/jobs.jsonl`. A reclaimed host then
   loses at most one poll of its log, and no key needs a fetch path for the log.
+- Built first (the minimal slice): the nodes are the `[remote.<name>]` tables of the host
+  configuration file (`slot.hostconfig.RemoteNodeTable`), not a registry; the `state` step
+  (`server/nodes.rs`) prints the node daemon's own `/api/nodes` row and its active and last 30
+  finished jobs, read from its web address; the poll is bounded at 4 s, a node is Joining until
+  its first answer and Gone (Lost) after three misses, and an answer makes it Ready again. Jobs of
+  a node are shown with ids below 0 (`-(index + 1) * 10^12 - id`), not yet logged to
+  `<state-dir>/hosts/<name>/jobs.jsonl`; version and clock are not yet checked at join.
 - Three missed polls in a row, or three failed syncs in a row: `gone`; its placements end.
 - Refused at join: a slot version other than the workstation's; a clock more than 1 s from the
   workstation's (§ 4.5).

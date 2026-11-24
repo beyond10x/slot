@@ -15,6 +15,7 @@ pub mod cpu_limit;
 pub mod evict;
 pub mod gate;
 pub mod hook;
+pub mod hostconfig;
 pub mod job_parallel;
 pub mod jobserver;
 pub mod mirror;

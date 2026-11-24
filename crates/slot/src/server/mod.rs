@@ -7,6 +7,7 @@ mod http;
 pub mod limits;
 pub mod machine;
 mod metrics;
+pub mod nodes;
 pub mod priority;
 mod ring;
 mod upgrade;
@@ -168,6 +169,9 @@ pub struct Config {
     /// Run every job in this sandbox (`slot serve --sandbox`); `None` runs
     /// jobs as the daemon's user with its whole filesystem.
     pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// The host configuration file (`cluster.toml`) whose remote nodes the
+    /// daemon polls; `None` polls none.
+    pub cluster_file: Option<PathBuf>,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -492,6 +496,8 @@ pub struct Server {
     /// milliseconds; 0 while there are none).
     unaccounted: AtomicU64,
     unaccounted_since: AtomicI64,
+    /// Remote nodes of the host configuration.
+    remotes: nodes::Remotes,
     /// What eviction of target directories did last.
     evict: Mutex<crate::evict::Report>,
     /// Target directories being deleted now: their jobs wait.
@@ -697,6 +703,7 @@ impl Server {
         let sccache_watch = cfg.sccache_watch;
         let upgrade_hold = cfg.upgrade_hold;
         let evict_settings = cfg.evict;
+        let remotes = nodes::Remotes::load(cfg.cluster_file.as_deref(), &host);
         let server = Arc::new(Self {
             cfg,
             pool,
@@ -762,6 +769,7 @@ impl Server {
             removed: AtomicU64::new(0),
             unaccounted: AtomicU64::new(0),
             unaccounted_since: AtomicI64::new(0),
+            remotes,
             evict: Mutex::new(crate::evict::Report {
                 floor: crate::evict::below(saved.evict_below_gb, evict_settings.floor),
                 dry_run: evict_settings.dry_run,
@@ -923,6 +931,7 @@ impl Server {
         tokio::spawn(Arc::clone(&self).token_watch());
         tokio::spawn(Arc::clone(&self).priority_watch());
         tokio::spawn(Arc::clone(&self).run_limit_watch());
+        tokio::spawn(Arc::clone(&self).node_poll());
         // Always: `slot evict-below` may turn eviction on at run time.
         tokio::spawn(Arc::clone(&self).evict_watch());
         if self.cfg.sccache_watch {
@@ -4401,8 +4410,8 @@ impl Server {
         });
     }
 
-    /// The `GET /api/state` snapshot.
-    pub fn state(&self) -> State {
+    /// The `GET /api/state` snapshot of the local pool.
+    fn local_state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
         let m = &g.machine_shown;
         // A guard taken inside the struct literal would live until its end,
@@ -4465,9 +4474,8 @@ impl Server {
         }
     }
 
-    /// The `GET /api/nodes` answer: the daemon's own machine, the only node
-    /// until remote nodes join.
-    pub fn nodes(&self) -> Vec<Node> {
+    /// The daemon's own machine as a node of `GET /api/nodes`.
+    fn local_node(&self) -> Node {
         let now = now_ms();
         let g = self.inner.lock().expect("server lock");
         let cpu_busy = match self.cpu_figure(&g, now) {
@@ -4479,7 +4487,7 @@ impl Server {
         let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
         // Eviction's last look; before one, the filesystem of the state.
         let evicted = self.evict.lock().expect("evict lock").free;
-        let local = local_node(&LocalFacts {
+        local_node(&LocalFacts {
             cluster: &self.host,
             cpus: self.cores,
             slots: self.pool.limit() as u32,
@@ -4494,8 +4502,7 @@ impl Server {
             joined_ms: self.born_ms,
             cpu_busy,
             jobs: &jobs,
-        });
-        vec![local]
+        })
     }
 
     fn output(&self, id: i64) -> Output {

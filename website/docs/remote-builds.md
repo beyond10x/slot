@@ -180,6 +180,33 @@ local pool, and slot prints `slot: .slot.toml lists `cargo test -p integration` 
 on this machine`. For a one-off, `slot --local <command>` runs the command here without the
 daemon.
 
+## Show the server in the web view
+
+The workstation's daemon shows a build server as a node of its web view when the host
+configuration file names it, `~/.config/slot/cluster.toml` (`$XDG_CONFIG_HOME/slot/cluster.toml`;
+`slot serve --cluster-file` or `SLOT_CLUSTER_FILE` names another, `off` none):
+
+```toml
+[remote.build-1]
+ssh = "ssh -o BatchMode=yes build-1.example"
+slot_path = "/usr/local/bin/slot"
+deadline = "2030-01-01T18:00:00Z"
+price_per_hour_cents = 250
+location = "region-a"
+machine_type = "64-vcpu"
+```
+
+Only `ssh` is required. The daemon reads the file at start. Every 5 s it runs `<ssh> <slot_path>
+state` for each node: the server's `slot shell` answers with its daemon's own row of
+`/api/nodes` and its queued, running and last 30 finished jobs. `GET /api/nodes` then lists the
+node (kind `Remote`, its CPUs, slots, memory, disk and load as the server reports them, the
+deadline and price from the file), and `GET /api/state` and the job events carry its jobs with
+`node` set to the node's name and an id below 0, so they never meet a local id. A node is
+`Joining` until its first answer; a poll that fails or takes longer than 4 s is missed, and after
+three misses in a row the node is `Gone` (reason `Lost`) with its last row; the next answer makes
+it `Ready` again. A key of the file that the shape does not declare is refused, and the daemon
+then polls no node.
+
 ## Security
 
 Build scripts and tests run arbitrary code on the server. slot assumes the workstation and the
@@ -197,7 +224,9 @@ command="/usr/local/bin/slot shell",restrict ssh-ed25519 AAAA… workstation
 ssh then runs `slot shell` for every connection with that key, and it runs only the steps of
 remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
 --sender` from the workspace root or the cache root's `target/`), `slot proxy`, `slot cancel
-<id>` and the sibling step (`slot __siblings` on the server's own workspace root). Anything else
+<id>`, the sibling step (`slot __siblings` on the server's own workspace root) and the
+read-only `state` step (`slot state`: the server daemon's own row of `/api/nodes` and its jobs,
+read from `--http`, for the [node poll](#show-the-server-in-the-web-view)). Anything else
 exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
 `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and
 `--copy-dest` is taken only as `../<id>`, a sibling mirror in the workspace root. Also refused:

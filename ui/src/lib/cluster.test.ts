@@ -77,3 +77,8 @@ test('the job list is newest first and keeps one node under a filter', () => {
   assert.deepEqual(jobList(jobs, null, 10).map((j) => j.id), [3, 2, 1]);
   assert.deepEqual(jobList(jobs, 'local', 1).map((j) => j.id), [2]);
 });
+
+test('a job of a remote node, with an id below 0, takes its place in the list by when it was queued', () => {
+  const jobs = [job(1, { enqueued_ms: T - 3 }), job(-1000000000007, { node: 'build-1', enqueued_ms: T - 1 }), job(2, { enqueued_ms: T - 2 })];
+  assert.deepEqual(jobList(jobs, null, 2).map((j) => j.id), [-1000000000007, 2]);
+});

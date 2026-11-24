@@ -55,6 +55,7 @@ slot serve [OPTIONS]
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
 - `--sandbox`: Run every job in a sandbox (bubblewrap): the whole filesystem read-only and in its own pid namespace; writable are only the job's checkout, its target directory, a private /tmp and the download caches of cargo and Go. Other workspaces, other jobs' target directories and the user's runtime directory are hidden. Without a working `bwrap` the daemon does not start (default `false`)
+- `--cluster-file`: The host configuration file: its `[remote.<name>]` tables are the remote nodes the daemon polls every 5 s and shows in `GET /api/nodes` and the web UI. `off` reads none (env `SLOT_CLUSTER_FILE`)
 - `--sandbox-write`: One more path a sandboxed job may write, for example a package manager's store; repeat for more
 - `--sandbox-fixed-paths`: With --sandbox: mount each job's checkout at /work/src and its target directory at /work/target, so every worktree of a repository builds at the same paths. The job then runs without a rustc wrapper: the compile cache server outside the sandbox cannot read sources at those paths (default `false`)
 
@@ -80,6 +81,7 @@ slot shell [OPTIONS]
 - `--state-dir`: The daemon's state directory
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs of synced workspaces (default: `<state-dir>/cache`)
+- `--http`: The daemon's web address, for the `state` step (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
 ### `slot gate`
 

@@ -13,6 +13,8 @@
 //! - the sync: `rsync --server … . <ws-root>/<id>/`;
 //! - a fetch: `rsync --server --sender … . <path>` under the workspace root
 //!   or the cache root's `target/`;
+//! - `slot state`, read-only: the node daemon's own row and its jobs, for
+//!   the endpoint's poll;
 //! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
 //!   <key>`, run by this binary whatever path the client named; the
 //!   workspace root must be this server's.
@@ -40,6 +42,10 @@ pub enum Plan {
     Proxy,
     /// Cancel job `id`.
     Cancel(i64),
+    /// Print the node daemon's own node row and its jobs as one JSON
+    /// object, read from its web address: the read-only `state` step an
+    /// endpoint polls.
+    State,
     /// Record mirror `id` under repository `key` and print its siblings.
     Siblings {
         /// Workspace id.
@@ -164,6 +170,7 @@ pub fn plan(line: &str, home: &Path, ws_root: &Path, cache_root: &Path) -> Resul
         "rsync" => rsync(args, home, ws_root, cache_root).map(Plan::Rsync),
         "slot" => match args {
             [p] if p == "proxy" => Ok(Plan::Proxy),
+            [s] if s == "state" => Ok(Plan::State),
             [c, id] if c == "cancel" => id
                 .parse()
                 .map(Plan::Cancel)
@@ -312,6 +319,15 @@ mod tests {
         assert_eq!(p("/srv/u/.local/bin/slot proxy"), Ok(Plan::Proxy));
         assert_eq!(p("slot proxy"), Ok(Plan::Proxy));
         assert_eq!(p("slot cancel 42"), Ok(Plan::Cancel(42)));
+        assert_eq!(p("/srv/u/.local/bin/slot state"), Ok(Plan::State));
+        for bad in [
+            "slot state x",
+            "slot state --http 0:1",
+            "slot state; id",
+            "slot states",
+        ] {
+            assert!(p(bad).is_err(), "accepted: {bad}");
+        }
         assert!(p("slot cancel x").is_err());
         assert!(p("slot serve").is_err());
         assert!(p("slot cargo build").is_err());

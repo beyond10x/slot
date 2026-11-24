@@ -20,6 +20,7 @@ impl Daemon {
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let child = Command::new(SLOT)
+            .env("SLOT_CLUSTER_FILE", "off")
             .args([
                 "serve",
                 "--http",

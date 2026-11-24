@@ -91,6 +91,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         exec_shim: None,
         handover: true,
         sandbox: None,
+        cluster_file: None,
     }
 }
 
@@ -730,6 +731,7 @@ fn history_survives_restart() {
         exec_shim: None,
         handover: true,
         sandbox: None,
+        cluster_file: None,
     })
     .unwrap();
     let st = again.state();

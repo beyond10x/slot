@@ -25,6 +25,7 @@ impl Setup {
         drop(bind);
         let log = std::fs::File::create(dir.path().join("daemon.log")).unwrap();
         let daemon = Command::new(SLOT)
+            .env("SLOT_CLUSTER_FILE", "off")
             .args(["serve", "--http", &http.to_string(), "--cpu-quota", "false"])
             .args(["--tokens", &tokens.to_string()])
             .args(["--call-headroom", "0", "--sccache-watch", "false"])
