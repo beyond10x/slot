@@ -4,6 +4,7 @@ import type { Locator, Page } from '@playwright/test';
 import { open } from './harness.ts';
 import type { Opened } from './harness.ts';
 import { SCENARIOS } from './scenarios.ts';
+import type { Scenario } from './scenarios.ts';
 import { VIEWPORTS, vpName } from './viewports.ts';
 
 const GATING = VIEWPORTS.filter((v) => v.gating);
@@ -404,5 +405,35 @@ for (const size of GATING) {
     expect(new Set(down).size, 'four different heights').toBe(4);
     expect(down, 'order down the page').toEqual([...down].sort((a, b) => a - b));
     expect(down[1], 'Running starts in the upper half of the first screen').toBeLessThan(size.height / 2);
+  });
+}
+
+/** `name` with one running and one finished job of node build-1d whose ids repeat a local job's, as a node daemon numbers them. */
+function withNodeRows(name: string): { sc: Scenario; id: number } {
+  const base = SCENARIOS.find((s) => s.name === name);
+  if (!base) throw new Error(`no scenario ${name}`);
+  const local = base.state.active.filter((j) => j.state === 'running').sort((a, b) => Number(b.enqueued_ms) - Number(a.enqueued_ms))[0];
+  const ended = base.state.done[0];
+  if (!local || !ended) throw new Error(`scenario ${name} has no running and no finished job`);
+  const theirs = { node: 'build-1d', from_node: true, repo: 'node-repo', cwd: '/trees/node-repo', checkout: { kind: 'repository' as const } };
+  const state = { ...base.state, active: [...base.state.active, { ...local, ...theirs }], done: [...base.state.done, { ...ended, ...theirs }] };
+  return { sc: { ...base, name: `${name}-node-ids`, state }, id: Number(local.id) };
+}
+
+/** Every text, label and title in the page that names a job by a negative number. */
+const negativeIds = (page: Page): Promise<string[]> =>
+  page.evaluate(() => {
+    const said = [document.body.innerText, ...[...document.querySelectorAll('[aria-label], [title]')].flatMap((e) => [e.getAttribute('aria-label') ?? '', e.getAttribute('title') ?? ''])];
+    return said.flatMap((s) => s.match(/(?:#|job |^)-\d+/gm) ?? []);
+  });
+
+for (const name of ['busy-failed', 'cluster-remote']) {
+  test(`UXF-038 ${name}: a node's job shows the positive id its node gave it, beside a local job of the same id`, async ({ page, baseURL }) => {
+    await page.setViewportSize({ width: GATING[0].width, height: GATING[0].height });
+    const { sc, id } = withNodeRows(name);
+    await open(page, baseURL ?? '/', sc);
+    await expect(page.getByRole('button', { name: `output of job ${id} on build-1d`, exact: true }).first()).toBeAttached();
+    await expect(page.getByRole('button', { name: `output of job ${id}`, exact: true }).first()).toBeAttached();
+    expect(await negativeIds(page), 'no job is named by a negative number').toEqual([]);
   });
 }

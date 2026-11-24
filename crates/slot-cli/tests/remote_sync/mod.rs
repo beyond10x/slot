@@ -74,11 +74,16 @@ fn script(path: &Path, body: &str) {
 /// A fake `ssh HOST WORDS…` that runs WORDS through `slot shell` against
 /// daemon `d`, as the forced command of the server's key does.
 fn forced_ssh(dir: &Path, d: &Daemon, before: &str) -> PathBuf {
+    forced_ssh_with(dir, d, before, "")
+}
+
+/// [`forced_ssh`] with `shell_args` added to `slot shell`.
+fn forced_ssh_with(dir: &Path, d: &Daemon, before: &str, shell_args: &str) -> PathBuf {
     let path = dir.join("ssh");
     script(
         &path,
         &format!(
-            "shift\necho \"$*\" >> {log}\n{before}\nSSH_ORIGINAL_COMMAND=\"$*\" exec {SLOT} shell --socket {sock} --state-dir {state}",
+            "shift\necho \"$*\" >> {log}\n{before}\nSSH_ORIGINAL_COMMAND=\"$*\" exec {SLOT} shell --socket {sock} --state-dir {state} {shell_args}",
             log = dir.join("ssh.log").display(),
             sock = d.socket().display(),
             state = d.dir.path().join("state").display(),
@@ -88,8 +93,28 @@ fn forced_ssh(dir: &Path, d: &Daemon, before: &str) -> PathBuf {
 }
 
 fn remote_call(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
+    remote_call_env(d, ssh, cwd, argv, &[])
+}
+
+/// The directory every test's tempdir lies in: the client keeps a tree's
+/// own path on the server only below its same-path root.
+fn temp_root() -> PathBuf {
+    std::env::temp_dir().canonicalize().unwrap()
+}
+
+fn remote_call_env(
+    d: &Daemon,
+    ssh: &Path,
+    cwd: &Path,
+    argv: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     Command::new(SLOT)
         .args(argv)
+        .env_remove("SLOT_REMOTE_SAME_PATH")
+        .env_remove("CARGO_TARGET_DIR")
+        .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
+        .envs(env.iter().copied())
         .current_dir(cwd)
         .env("SLOT_HOST", "node")
         .env("SLOT_SSH", ssh)
@@ -299,4 +324,534 @@ fn a_stalled_sync_is_killed_and_the_job_runs_here() {
 #[test]
 fn a_sync_whose_rsync_is_killed_runs_the_job_here() {
     falls_back("kill -9 $PPID; exec sleep 1", "rsync exited");
+}
+
+const SAME_PATH: &[(&str, &str)] = &[("SLOT_REMOTE_SAME_PATH", "1")];
+
+/// With `SLOT_REMOTE_SAME_PATH=1` the tree is synced to its own absolute
+/// path and the job runs there; a second worktree is seeded from the first
+/// through its link in the workspace root.
+#[test]
+fn a_same_path_job_runs_at_the_clients_absolute_path() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, b) = repository(&root);
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), root.as_os_str()]);
+    let ssh = forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", root.display()),
+    );
+    std::fs::create_dir(a.join("sub")).unwrap();
+    let out = remote_call_env(&d, &ssh, &a.join("sub"), &["pwd"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        a.join("sub").to_string_lossy(),
+        "{err}"
+    );
+    let log = std::fs::read_to_string(root.join("ssh.log")).unwrap();
+    let rsync = log.lines().find(|l| l.starts_with("rsync ")).unwrap();
+    assert!(
+        rsync.ends_with(&format!(" {}/", a.display())),
+        "synced elsewhere: {rsync}"
+    );
+    let ws = d.dir.path().join("state/ws");
+    let links: Vec<PathBuf> = std::fs::read_dir(&ws)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| std::fs::read_link(e.path()).ok())
+        .collect();
+    assert_eq!(links, std::slice::from_ref(&a), "the mirror's link by id");
+
+    std::fs::write(b.join("note.txt"), "from b\n").unwrap();
+    let out = remote_call_env(&d, &ssh, &b, &["sh", "-c", "pwd; cat note.txt"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\nfrom b\n", b.display()),
+        "{err}"
+    );
+    assert!(err.contains("1 sibling mirror as base"), "{err}");
+}
+
+/// A same-path tree outside the server's `--same-path-root`: `slot shell`
+/// refuses the sync, and the daemon refuses the job.
+#[test]
+fn a_same_path_tree_outside_the_roots_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, _) = repository(&root);
+    let other = root.join("elsewhere");
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), other.as_os_str()]);
+    let ssh = forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", other.display()),
+    );
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("running it on this machine's daemon"), "{err}");
+
+    // The shell admits it, the daemon does not.
+    let ssh = forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", root.display()),
+    );
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("not below a --same-path-root"), "{err}");
+}
+
+/// A cargo package `tiny` in a git repository: one binary, one integration
+/// test, a `Cargo.lock`, and `extra` added to `Cargo.toml`.
+fn tiny_crate(root: &Path, extra: &str) -> PathBuf {
+    let r = root.join("tiny");
+    std::fs::create_dir_all(r.join("src")).unwrap();
+    std::fs::create_dir_all(r.join("tests")).unwrap();
+    std::fs::write(
+        r.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n{extra}"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        r.join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\n# It is not intended for manual editing.\nversion = 3\n\n[[package]]\nname = \"tiny\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.join("src/main.rs"),
+        "fn main() {\n    println!(\"hi from tiny\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        r.join("tests/it.rs"),
+        "#[test]\nfn adds() {\n    assert_eq!(1 + 1, 2);\n}\n",
+    )
+    .unwrap();
+    std::fs::write(r.join(".gitignore"), "/target/\n").unwrap();
+    git(&r, &["init", "-q"]);
+    git(&r, &["add", "."]);
+    git(&r, &["commit", "-qm", "tiny"]);
+    r
+}
+
+/// A `cargo` that appends `<CARGO_NET_OFFLINE>|<args>` to `cargo.log` in
+/// `dir` and runs the cargo that built this test.
+fn logging_cargo(dir: &Path) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = bin.join("cargo");
+    script(
+        &path,
+        &format!(
+            "echo \"$CARGO_NET_OFFLINE|$*\" >> {log}\nexec {real} \"$@\"",
+            log = dir.join("cargo.log").display(),
+            real = env!("CARGO"),
+        ),
+    );
+    path
+}
+
+/// A remote call of a cargo job. The caller names no target directory, so
+/// the local one is `<repository>/target`.
+fn remote_cargo(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
+    Command::new(SLOT)
+        .args(argv)
+        .current_dir(cwd)
+        .env("SLOT_HOST", "node")
+        .env("SLOT_SSH", ssh)
+        .env("SLOT_WSROOT", d.dir.path().join("state/ws"))
+        .env("SLOT_REMOTE", SLOT)
+        .env("SLOT_SOCKET", d.socket())
+        .env("SLOT_SYNC_STALL", "20s")
+        .env("SLOT_SYNC_LIMIT", "50s")
+        .env_remove("SLOT_JOB")
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("CARGO_NET_OFFLINE")
+        // A forge runner sets CARGO_TERM_COLOR=always; the job gets it and
+        // cargo would colour the lines this test reads.
+        .env("CARGO_TERM_COLOR", "never")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// The one target directory the stand-in node built into.
+fn node_target(d: &Daemon) -> PathBuf {
+    let dirs: Vec<PathBuf> = std::fs::read_dir(d.dir.path().join("state/cache/target"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    dirs.into_iter().next().unwrap()
+}
+
+fn mode(p: &Path) -> u32 {
+    std::fs::metadata(p).unwrap().permissions().mode()
+}
+
+#[test]
+fn a_remote_cargo_build_leaves_the_binary_in_the_local_target_dir() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(t.path(), "");
+    let ssh = forced_ssh(t.path(), &d, "");
+    let cargo = logging_cargo(t.path());
+    let out = remote_cargo(&d, &ssh, &repo, &[cargo.to_str().unwrap(), "build"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "cargo's JSON reached the caller: {err}"
+    );
+    assert!(err.contains("Compiling tiny"), "cargo's own lines: {err}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("slot: fetched 1 artifact, ") && l.ends_with(" s")),
+        "{err}"
+    );
+    let local = repo.join("target/debug/tiny");
+    let node = node_target(&d).join("debug/tiny");
+    assert_eq!(
+        std::fs::read(&local).unwrap(),
+        std::fs::read(&node).unwrap()
+    );
+    assert_eq!(
+        std::fs::metadata(&local).unwrap().modified().unwrap(),
+        std::fs::metadata(&node).unwrap().modified().unwrap(),
+        "mtime kept"
+    );
+    assert_ne!(mode(&local) & 0o111, 0, "executable");
+    let ran = Command::new(&local).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "hi from tiny\n");
+    assert!(
+        !repo.join("target/debug/deps").exists(),
+        "only the product came back"
+    );
+    let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
+    assert!(
+        log.lines()
+            .any(|l| l == "true|build --message-format=json-render-diagnostics"),
+        "{log}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+#[test]
+fn a_remote_cargo_test_no_run_leaves_the_test_binary() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(t.path(), "");
+    let ssh = forced_ssh(t.path(), &d, "");
+    let cargo = logging_cargo(t.path());
+    let out = remote_cargo(
+        &d,
+        &ssh,
+        &repo,
+        &[cargo.to_str().unwrap(), "test", "--no-run"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    let deps = repo.join("target/debug/deps");
+    let it: Vec<PathBuf> = std::fs::read_dir(&deps)
+        .unwrap_or_else(|e| panic!("{}: {e}: {err}", deps.display()))
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("it-") && !n.contains('.'))
+        })
+        .collect();
+    assert_eq!(it.len(), 1, "{it:?}: {err}");
+    let listed = Command::new(&it[0]).arg("--list").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout).lines().next(),
+        Some("adds: test"),
+        "the test binary runs here"
+    );
+    assert!(repo.join("target/debug/tiny").exists(), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("slot: fetched 3 artifacts, ")),
+        "the binary, its unit tests and the integration test: {err}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+#[test]
+fn a_server_that_takes_one_path_per_fetch_gets_the_products_one_by_one() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(t.path(), "");
+    // The `slot shell` of 0.33.0 and older refuses a fetch of several paths.
+    let ssh = forced_ssh(
+        t.path(),
+        &d,
+        "case \"$*\" in *\"/./\"*\"/./\"*) echo \"slot shell: refused\" >&2; exit 126;; esac",
+    );
+    let cargo = logging_cargo(t.path());
+    let out = remote_cargo(
+        &d,
+        &ssh,
+        &repo,
+        &[cargo.to_str().unwrap(), "test", "--no-run"],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("slot: fetched 3 artifacts, ")),
+        "{err}"
+    );
+    assert!(repo.join("target/debug/tiny").exists(), "{err}");
+    let log = std::fs::read_to_string(t.path().join("ssh.log")).unwrap();
+    let single = log
+        .lines()
+        .filter(|l| l.contains("--sender") && l.matches("/./").count() == 1)
+        .count();
+    assert_eq!(single, 3, "{log}");
+}
+
+#[test]
+fn a_second_job_with_the_same_lock_file_does_not_fetch_again() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(t.path(), "");
+    let ssh = forced_ssh(t.path(), &d, "");
+    let cargo = logging_cargo(t.path());
+    let cargo = cargo.to_str().unwrap();
+    for argv in [[cargo, "check"], [cargo, "build"]] {
+        let out = remote_cargo(&d, &ssh, &repo, &argv);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{err}");
+    }
+    let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "|fetch",
+            "true|check",
+            "true|build --message-format=json-render-diagnostics"
+        ],
+        "one fetch, then each job offline"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+#[test]
+fn a_job_whose_fetch_fails_runs_on_this_machines_daemon() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(
+        t.path(),
+        "\n[dependencies]\nabsent = { path = \"absent\" }\n",
+    );
+    let ssh = forced_ssh(t.path(), &d, "");
+    let cargo = logging_cargo(t.path());
+    let out = remote_cargo(&d, &ssh, &repo, &[cargo.to_str().unwrap(), "check"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cargo fetch failed") && err.contains("running it on this machine's daemon"),
+        "{err}"
+    );
+    let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines, ["|fetch", "|check"], "{err}");
+}
+
+/// A daemon and a fake ssh that admit same-path mirrors below `root`.
+fn same_path_node(root: &Path) -> (Daemon, PathBuf) {
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), root.as_os_str()]);
+    let ssh = forced_ssh_with(
+        root,
+        &d,
+        "",
+        &format!("--same-path-root {}", root.display()),
+    );
+    (d, ssh)
+}
+
+/// The rsync receivers `ssh.log` in `root` shows, by destination path.
+fn synced_paths(root: &Path) -> Vec<String> {
+    let log = std::fs::read_to_string(root.join("ssh.log")).unwrap();
+    log.lines()
+        .filter(|l| l.starts_with("rsync --server") && !l.contains("--sender"))
+        .filter_map(|l| l.rsplit(' ').next())
+        .map(String::from)
+        .collect()
+}
+
+/// Same-path: a linked worktree's job gets its repository's common git
+/// directory at its own path, and a working directory under an ignored
+/// path (`target/`) is synced on its own.
+#[test]
+fn a_same_path_job_carries_its_git_dir_and_ignored_cwd() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, b) = repository(&root);
+    let (d, ssh) = same_path_node(&root);
+    let cwd = b.join("target/scratch/cli");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &cwd,
+        &["sh", "-c", "pwd; git rev-parse --show-toplevel"],
+        SAME_PATH,
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\n{}\n", cwd.display(), b.display()),
+        "{err}"
+    );
+    let got = synced_paths(&root);
+    for want in [
+        format!("{}/", b.display()),
+        format!("{}/", a.join(".git").display()),
+        format!("{}/", cwd.display()),
+    ] {
+        assert!(got.contains(&want), "{want} not synced: {got:?}\n{err}");
+    }
+}
+
+/// Same-path: a directory outside any git checkout is the tree.
+#[test]
+fn a_same_path_job_outside_a_checkout_syncs_its_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (d, ssh) = same_path_node(&root);
+    let dir = root.join("copy");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("note.txt"), "here\n").unwrap();
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &dir,
+        &["sh", "-c", "pwd; cat note.txt"],
+        SAME_PATH,
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(!err.contains("this machine's daemon"), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\nhere\n", dir.display()),
+        "{err}"
+    );
+    assert!(
+        synced_paths(&root).contains(&format!("{}/", dir.display())),
+        "{err}"
+    );
+}
+
+/// Same-path: cargo builds into the client's own target directory, also
+/// for a nested workspace named with `--manifest-path`; the node's cache
+/// holds no target directory.
+#[test]
+fn a_same_path_cargo_build_uses_the_clients_target_dir() {
+    let t0 = Instant::now();
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (d, ssh) = same_path_node(&root);
+    let repo = tiny_crate(&root, "");
+    let driver = repo.join("driver");
+    std::fs::create_dir_all(driver.join("src")).unwrap();
+    std::fs::write(
+        driver.join("Cargo.toml"),
+        "[package]\nname = \"driver\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(driver.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        driver.join("Cargo.lock"),
+        "version = 3\n\n[[package]]\nname = \"driver\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    script(
+        &cargo,
+        &format!(
+            "echo \"$CARGO_TARGET_DIR|$*\" >> {log}\nexec {real} \"$@\"",
+            log = root.join("cargo.log").display(),
+            real = env!("CARGO"),
+        ),
+    );
+    let cargo = cargo.to_str().unwrap();
+    for argv in [
+        vec![cargo, "build"],
+        vec![cargo, "build", "--manifest-path", "driver/Cargo.toml"],
+    ] {
+        let out = Command::new(SLOT)
+            .args(&argv)
+            .current_dir(&repo)
+            .env("SLOT_HOST", "node")
+            .env("SLOT_SSH", &ssh)
+            .env("SLOT_WSROOT", d.dir.path().join("state/ws"))
+            .env("SLOT_REMOTE", SLOT)
+            .env("SLOT_SOCKET", d.socket())
+            .env("SLOT_REMOTE_SAME_PATH", "1")
+            .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
+            .env("SLOT_SYNC_STALL", "20s")
+            .env("SLOT_SYNC_LIMIT", "50s")
+            .env_remove("SLOT_JOB")
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{argv:?}: {err}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    }
+    assert!(repo.join("target/debug/tiny").is_file());
+    assert!(driver.join("target/debug/driver").is_file());
+    let log = std::fs::read_to_string(root.join("cargo.log")).unwrap();
+    let dirs: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("|build"))
+        .filter_map(|l| l.split('|').next())
+        .collect();
+    assert_eq!(
+        dirs,
+        [
+            repo.join("target").to_str().unwrap(),
+            driver.join("target").to_str().unwrap()
+        ],
+        "{log}"
+    );
+    let node = d.dir.path().join("state/cache/target");
+    let built: Vec<_> = std::fs::read_dir(&node)
+        .map(|r| {
+            r.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(built.is_empty(), "built in the node's cache: {built:?}");
+    eprintln!("took {:?}", t0.elapsed());
 }

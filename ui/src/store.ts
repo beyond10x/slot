@@ -8,7 +8,7 @@ import { POOL_BASE, machineNumbers, notJsonError } from './lib/headroom.ts';
 import type { MachineNumbers } from './lib/headroom.ts';
 import { familyOrder, hostSample } from './lib/host.ts';
 import type { HostSample } from './lib/host.ts';
-import { isActive, jobId } from './lib/job.ts';
+import { isActive, jobId, jobKey } from './lib/job.ts';
 import { SparkBuffer } from './lib/spark.ts';
 import type { Point } from './lib/spark.ts';
 
@@ -16,8 +16,13 @@ export type { Sample } from './lib/history.ts';
 
 const MAX_SAMPLES = 21600;
 
-export const jobs = shallowReactive(new Map<number, Job>());
+/** Every job the page knows, by [`jobKey`]: a node's own row may repeat a local id. */
+export const jobs = shallowReactive(new Map<string, Job>());
+/** Live numbers of this daemon's running jobs, by id. */
 export const live = shallowReactive(new Map<number, LiveJob>());
+
+/** The live numbers of job `j`; none for a node's own row, whose numbers stay on its node. */
+export const liveOf = (j: Job): LiveJob | undefined => (j.from_node ? undefined : live.get(jobId(j)));
 /** Not reactive: read by the canvas loops every frame. */
 export const series: Sample[] = [];
 /** Not reactive: host census per second, read by the host panel's canvas loops. */
@@ -74,7 +79,7 @@ export const store = reactive({
   error: '',
   clock: Date.now(),
   windowS: 600,
-  selected: null as number | null,
+  selected: null as string | null,
   /** Output pane switches to the most recently started running job by itself. */
   followNewest: false,
   /** The pane was asked for by the keyboard and has not taken the focus yet. */
@@ -159,7 +164,7 @@ async function loadNodes(force = false): Promise<void> {
 /** Server time estimate, ms. */
 export const now = (): number => Date.now() + skew;
 
-const toolchainOf = (id: number): string | undefined => jobs.get(id)?.toolchain;
+const toolchainOf = (id: number): string | undefined => jobs.get(String(id))?.toolchain;
 
 function replace<T>(arr: T[], items: readonly T[]): void {
   arr.length = 0;
@@ -192,7 +197,7 @@ async function loadState(): Promise<void> {
   store.toolchains = st.toolchains;
   evictFree.value = st.evict?.free ?? 0;
   store.clock = now();
-  for (const j of [...st.done, ...st.active]) jobs.set(jobId(j), j);
+  for (const j of [...st.done, ...st.active]) jobs.set(jobKey(j), j);
 }
 
 /** Applies the newest tick: live numbers, and one more sample in every buffer. */
@@ -313,11 +318,11 @@ export const jobChanges = new Set<(before: Job | undefined, after: Job) => void>
 
 function apply(m: Event): void {
   if (m.type === 'job') {
-    const id = jobId(m.job);
-    const before = jobs.get(id);
+    const key = jobKey(m.job);
+    const before = jobs.get(key);
     for (const f of jobChanges) f(before, m.job);
-    jobs.set(id, m.job);
-    if (!isActive(m.job.state)) live.delete(id);
+    jobs.set(key, m.job);
+    if (!isActive(m.job.state) && !m.job.from_node) live.delete(jobId(m.job));
     return;
   }
   applyTick(m);
@@ -369,7 +374,7 @@ export async function start(): Promise<void> {
  * `click` is the click that asked for it: one made by the keyboard (Enter or Space on a button,
  * `detail` 0) moves the focus into the pane.
  */
-export function select(id: number | null, click?: UIEvent): void {
+export function select(id: string | null, click?: UIEvent): void {
   store.selected = id;
   store.paneFocus = id !== null && click?.detail === 0;
   if (id === null) store.followNewest = false;

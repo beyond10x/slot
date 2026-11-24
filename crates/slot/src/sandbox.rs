@@ -525,6 +525,40 @@ mod tests {
         assert!(w.iter().all(|w| !w.why.is_empty()));
     }
 
+    /// A same-path mirror under the home directory is bound writable at its
+    /// own path; the workspace root stays hidden.
+    #[test]
+    fn a_same_path_tree_is_bound_writable_at_its_own_path() {
+        let root = tempfile::tempdir().unwrap();
+        let ws = root.path().join("ws");
+        let tree = root.path().join("srv/u/trees/a");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&tree).unwrap();
+        let e = env(&["HOME=/srv/u"]);
+        let job = Job {
+            cwd: &tree.join("sub"),
+            workspace: Some(&tree),
+            target_dir: None,
+            env: &e,
+            ws_root: &ws,
+            cache_root: Path::new("/c"),
+            socket: Path::new("relative.sock"),
+            fifo: Path::new("/state/jobserver.fifo"),
+        };
+        let a = sandbox(&[]).wrap(&job, vec!["pwd".into()]);
+        let t = tree.to_string_lossy().into_owned();
+        let w = ws.to_string_lossy().into_owned();
+        assert!(
+            a.windows(3)
+                .any(|x| x[0] == "--bind-try" && x[1] == t && x[2] == t),
+            "tree not bound at its path: {a:?}"
+        );
+        assert!(
+            a.windows(2).any(|x| x[0] == "--tmpfs" && x[1] == w),
+            "{a:?}"
+        );
+    }
+
     /// The bwrap command line: the root read-only, the private /tmp, the
     /// hidden paths before the job's own writable paths, the socket bound
     /// to /dev/null, the FIFO bound again, then the job's command.

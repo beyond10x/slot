@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/slot", "crates/slot-cli", "crates/slot-docs"]
 
 [workspace.package]
-version = "0.33.1"
+version = "0.34.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ signal-hook = "0.3"
 tempfile = "3"
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "process"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 ts-rs = "11"
 

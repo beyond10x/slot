@@ -1,15 +1,30 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job, LiveJob } from '../generated/types.ts';
-import { barLabel, checkoutLabel, jobId, newestRunning, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
+import { barLabel, checkoutLabel, idLabel, jobId, jobKey, jobName, newestRunning, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
 
 function job(over: Partial<Job>): Job {
   return {
     id: 1, argv: ['cargo', 'build', '--release', '-p', 'slot'], cwd: '/w/slot', repo: 'slot', checkout: { kind: 'repository' }, session: '', client: '',
     toolchain: 'rust', remote: false, tokens: 1, state: 'queued', enqueued_ms: 1000, started_ms: 0, ended_ms: 0,
-    exit: 0, cpu_s: 0, compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
+    exit: 0, cpu_s: 0, compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', local_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
   };
 }
+
+test('a node job is named by its node and the positive id its node gave it', () => {
+  const mine = job({ id: 7 });
+  const theirs = job({ id: 7, node: 'build-1d', from_node: true });
+  const handed = job({ id: 8, node: 'build-1d' });
+  assert.notEqual(jobKey(mine), jobKey(theirs));
+  assert.equal(jobKey(handed), '8');
+  assert.equal(idLabel(theirs), '7');
+  assert.equal(jobName(theirs), '7 on build-1d');
+  assert.equal(jobName(mine), '7');
+  for (const j of [mine, theirs, handed]) {
+    assert.ok(!idLabel(j).startsWith('-') && !jobName(j).startsWith('-'), jobName(j));
+    assert.ok(!tooltipText(j, undefined, 2000).includes('#-'));
+  }
+});
 
 test('unset times are null', () => {
   assert.deepEqual(times(job({})), { queued: 1000, started: null, ended: null });

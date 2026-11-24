@@ -16,6 +16,7 @@ slot [OPTIONS] <COMMAND>
 ```
 
 - `--local`: Run the command here, without the daemon (default `false`)
+- `--here`: Keep the job in this host's pool, never on a build node: for a step that needs this host's credentials while it runs (a clone, a fetch, a push). `slot status` shows `local: here: needs this host` under it (default `false`)
 - `--tokens`: Slots the job holds, in place of the count slot derives from the command. For work the daemon cannot see, such as a script that starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The daemon caps it at the slots in circulation (the pool less the headroom), so the job never waits forever. Ignored with `--local` (env `SLOT_TOKENS`)
 - `--priority`: The job's queue level: queued `urgent` jobs get free slots first, then `high`, `normal` and `low` ones; with no slot free, an `urgent` job starts on one the headroom holds back. A rule set with `slot priority set` for the job's repository wins over it. Ignored with `--local` (env `SLOT_PRIORITY`)
 - `--timeout`: How long the job may run, counted from its start, in place of the daemon's run-time limit (`slot run-limit`): seconds, or a number with `s`, `m` or `h`, such as `90s`, `30m` or `1h`. The daemon ends a job that runs longer (SIGTERM, SIGKILL 5 s later) and the job exits 124. It is capped at the most a job may name, 1 h unless `slot run-limit --max` changed it. A `timeout` command in front of the job's command does not extend it. Ignored with `--local` (env `SLOT_TIMEOUT`)
@@ -55,8 +56,10 @@ slot serve [OPTIONS]
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
 - `--sandbox`: Run every job in a sandbox (bubblewrap): the whole filesystem read-only and in its own pid namespace; writable are only the job's checkout, its target directory, a private /tmp and the download caches of cargo and Go. Other workspaces, other jobs' target directories and the user's runtime directory are hidden. Without a working `bwrap` the daemon does not start (default `false`)
+- `--cluster-file`: The host configuration file: its `[remote.<name>]` tables are the remote nodes the daemon polls every 5 s and shows in `GET /api/nodes` and the web UI. `off` reads none (env `SLOT_CLUSTER_FILE`)
 - `--sandbox-write`: One more path a sandboxed job may write, for example a package manager's store; repeat for more
 - `--sandbox-fixed-paths`: With --sandbox: mount each job's checkout at /work/src and its target directory at /work/target, so every worktree of a repository builds at the same paths. The job then runs without a rustc wrapper: the compile cache server outside the sandbox cannot read sources at those paths (default `false`)
+- `--same-path-root`: A directory under which a remote client may mirror its tree at the tree's own absolute path (`SLOT_REMOTE_SAME_PATH=1` on the client), so absolute paths into the tree work on this server. Repeat for more; `SLOT_SAME_PATH_ROOTS` lists them separated by `:`. Give `slot shell` the same list (env `SLOT_SAME_PATH_ROOTS`)
 
 ### `slot proxy`
 
@@ -80,6 +83,8 @@ slot shell [OPTIONS]
 - `--state-dir`: The daemon's state directory
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs of synced workspaces (default: `<state-dir>/cache`)
+- `--http`: The daemon's web address, for the `state` step (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+- `--same-path-root`: A directory under which a client may sync its tree to the tree's own absolute path and fetch from it, as with `slot serve`; repeat for more (env `SLOT_SAME_PATH_ROOTS`)
 
 ### `slot gate`
 

@@ -29,6 +29,7 @@ impl Daemon {
         let dir = tempfile::tempdir().unwrap();
         let log = std::fs::File::create(dir.path().join("daemon.log")).unwrap();
         let mut cmd = Command::new(SLOT);
+        cmd.env("SLOT_CLUSTER_FILE", "off");
         cmd.args(["serve", "--http", addr, "--cpu-quota", "false"])
             .args(["--tokens", &tokens.to_string()])
             .args(["--cpu-weight", "0", "--evict-below", "0"])
@@ -841,6 +842,7 @@ fn start_with_soft_nofile(soft: u64) -> Daemon {
         .arg("-c")
         .arg(format!("ulimit -Sn {soft} && exec \"$0\" \"$@\""))
         .arg(SLOT)
+        .env("SLOT_CLUSTER_FILE", "off")
         .args(["serve", "--http", "off", "--cpu-quota", "false"])
         .args(["--tokens", "4"])
         .args(["--cpu-weight", "0", "--evict-below", "0"])

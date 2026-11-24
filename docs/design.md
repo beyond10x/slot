@@ -113,6 +113,31 @@ A single static binary on `PATH` (Go; see §10).
 - **Job log.** One JSONL line per job: ws-id, repo, argv, enqueue, start, end, exit code, peak RSS,
   tokens held. This replaces mining session logs for the numbers in section 1.
 
+### 3.2a Same-path mirrors
+
+`SLOT_REMOTE_SAME_PATH=1` on the client mirrors the tree at the client's absolute toplevel instead
+of `<ws-root>/<id>`, so absolute paths into the tree and the compiler's working directory are the
+same on both machines; it assumes the server's account has the same home. The request carries
+`workspace.same_path`; the daemon (`slot serve --same-path-root DIR`, repeatable) runs the job
+there only below such a DIR, and `slot shell --same-path-root DIR` admits the sync, fetches and
+`slot __siblings <ws-root> <id> <key> <tree>` below it. The sibling step makes `<ws-root>/<id>` a
+symbolic link to the tree, so sibling seeding by id and the busy set of eviction keep working;
+the sync names a sibling as the absolute `--copy-dest=<ws-root>/<id>`. Eviction removes the link,
+not the tree. The sandbox binds the tree writable at its path (`--sandbox-fixed-paths` is not
+combined with it).
+
+A same-path job runs as on a CI runner (`same_path.rs`). The tree sync keeps a linked worktree's
+`.git` file (`--exclude=/.git/`); the git directories (`--git-common-dir`, and `--git-dir` when
+outside it) follow in syncs of their own at their paths, `*.lock` excluded, one at a time per
+directory and host. A working directory the tree sync leaves out (under a toolchain exclude or
+`git check-ignore`) is synced on its own with the `.gitignore` filter and `--exclude=/target/`.
+Outside any git checkout the working directory is the tree. The request carries
+`workspace.target_dir`: `CARGO_TARGET_DIR` of the client, else `cargo metadata`'s
+`target_directory` for the command's manifest, else `target` beside the nearest lock file; empty
+for a command that is not cargo. The daemon admits it only below a `--same-path-root`, sets
+`CARGO_TARGET_DIR` to it (or unsets it, keeping cargo's default in the tree), binds it writable
+in the sandbox and names it in the `start` frame, so products are fetched to the same path.
+
 ### 3.3 Transport and access
 
 - ssh with a dedicated key whose `authorized_keys` entry has

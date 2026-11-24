@@ -28,6 +28,7 @@ fn main() -> ExitCode {
             args.tokens.or(cli.tokens),
             args.priority.or(cli.priority),
             args.timeout.or(cli.timeout),
+            cli.here,
         )),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
                 cli.tokens,
                 cli.priority,
                 cli.timeout,
+                cli.here,
             ))
         }
     };
@@ -111,11 +113,13 @@ fn build(
     tokens: Option<u32>,
     priority: Option<slot::types::Priority>,
     timeout: Option<u64>,
+    here: bool,
 ) -> i32 {
     if local {
         return client::run_local(argv);
     }
     let mut s = Settings::from_env();
+    s.here = here;
     s.fetch = fetch.to_vec();
     s.tokens = tokens;
     s.priority = priority;
@@ -168,7 +172,12 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
         .cache_root
         .clone()
         .unwrap_or_else(|| args.state_dir.join("cache"));
-    match slot::shell::plan(&line, &home, &ws, &cache) {
+    let roots = slot::shell::Roots {
+        ws: &ws,
+        cache: &cache,
+        same_path: &args.same_path_root,
+    };
+    match slot::shell::plan(&line, &home, &roots) {
         Ok(Plan::Rsync(rsync_args)) => {
             let e = std::process::Command::new("rsync").args(rsync_args).exec();
             eprintln!("slot shell: rsync: {e}");
@@ -184,7 +193,25 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             s.socket.clone_from(&args.socket);
             client::cancel(id, &s)
         }
-        Ok(Plan::Siblings { id, key }) => siblings(&ws, &id, &key),
+        Ok(Plan::State) => match slot::server::nodes::state_step(&args.http) {
+            Ok(s) => {
+                println!("{s}");
+                0
+            }
+            Err(e) => {
+                eprintln!("slot shell: state: {e:#}");
+                1
+            }
+        },
+        Ok(Plan::Siblings { id, key, path }) => {
+            if let Some(p) = path
+                && let Err(e) = slot::mirror::link(&ws, &id, &p)
+            {
+                eprintln!("slot: {e}");
+                return 1;
+            }
+            siblings(&ws, &id, &key)
+        }
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126

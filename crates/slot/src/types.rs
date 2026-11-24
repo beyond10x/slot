@@ -185,11 +185,24 @@ pub struct Job {
     /// without shares.
     #[serde(default, skip_serializing_if = "crate::shares::Mode::is_slots")]
     pub admission: crate::shares::Mode,
+    /// Why the job runs on this machine while a remote node is configured:
+    /// `local requested`, `cache rule`, `sync failed: …`, `nested job`,
+    /// `gated job`, `remote job`, `sent back by a node`, `slots free here
+    /// first` or the text of `SLOT_LOCAL_REASON`. Empty for a job that
+    /// went to a node and without nodes.
+    #[serde(default)]
+    pub local_reason: String,
     /// Id of the node the job runs or ran on ([`Node::node_id`]): `local`
     /// for every job of a daemon without remote nodes. Empty in a job-log
     /// line written before nodes; the API shows such a job as `local`.
     #[serde(default)]
     pub node: String,
+    /// The row came from the daemon of node [`Job::node`]: `id` is the id
+    /// that node gave the job, so a job is named by `node` and `id`
+    /// together. False for this daemon's own jobs, a job it handed to a
+    /// node included.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_node: bool,
 }
 
 /// Id of the daemon's own machine as a node.

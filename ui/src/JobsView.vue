@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, watch, watchEffect } from 'vue';
 import { fmtDur } from './lib/format.ts';
-import { jobId, newestRunning } from './lib/job.ts';
+import { jobKey, newestRunning } from './lib/job.ts';
 import { queueHeading, servedQueue, waitStats } from './lib/queue.ts';
 import { jobs, select, store } from './store.ts';
 import HeaderBar from './components/HeaderBar.vue';
@@ -19,7 +19,7 @@ import UsageTable from './components/UsageTable.vue';
 
 const newest = computed(() => {
   const j = newestRunning(jobs.values());
-  return j ? jobId(j) : null;
+  return j ? jobKey(j) : null;
 });
 
 const queue = computed(() => servedQueue(jobs.values()));

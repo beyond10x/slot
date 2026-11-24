@@ -153,6 +153,63 @@ next to a record `<workspace-id>.json` of its repository, last use and size.
   queued or running job is never deleted. The job's stderr and the journal name every deleted
   workspace. `--cache-budget 0` (the default) leaves only the disk floor.
 
+## Binaries and test binaries come back
+
+A remote `cargo build`, `cargo test`, `cargo bench` or `cargo rustc` copies what it built for
+the workspace's own packages into the local target directory, at the same relative paths, with
+modes and modification times:
+
+```console
+slot cargo build -p mytool
+./target/debug/mytool --version
+slot cargo test --no-run
+./target/debug/deps/mytest-1f2e3d4c5b6a7980
+```
+
+- **What.** Every executable cargo reports for a package of the workspace (binaries, unit and
+  integration test binaries, benches, examples), and the files of `cdylib` and `staticlib`
+  targets. Artifacts of dependencies, `.rlib` and `.rmeta` files and the rest of the target
+  directory stay on the server.
+- **When.** After a build that exits 0; after a test or bench run whatever its exit, so the
+  binaries of a failed run can be run again here. One line follows, for example
+  `slot: fetched 3 artifacts, 41.2 MB, in 0.9 s`. A copy that fails prints
+  `slot: artifacts not fetched: …` and turns exit 0 into 1.
+- **How.** slot adds `--message-format=json-render-diagnostics` to the command on the server and
+  reads cargo's `compiler-artifact` messages from its standard output. It takes those lines out
+  again, so you see what cargo would have shown: its diagnostics on stderr, a test's output on
+  stdout. If you pass `--message-format json…` yourself, your stream reaches you unchanged and
+  slot reads the same messages from it. With `--message-format short` or `human` nothing comes
+  back. One `rsync` copies every path.
+- **Where to.** `CARGO_TARGET_DIR` of your environment, else `target/` beside the nearest
+  `Cargo.lock` above the directory you called from. A `build.target-dir` in a cargo config file
+  and `--target-dir` are not read.
+- **Freshness.** A file that already matches in size and time is not sent again; a file cargo
+  reports as fresh but that is missing here is sent.
+
+## Crates are fetched once per Cargo.lock
+
+Parallel cargo jobs on one server wait in turn on cargo's package-cache lock while one of them
+downloads crates. Before a cargo job that builds (`build`, `check`, `clippy`, `test`, `bench`,
+`doc`, `rustc`, `nextest`, `llvm-cov`), the server daemon compares the digest of the mirror's
+`Cargo.lock` with the one it recorded for that mirror. When they differ it runs
+`cargo fetch` once, under a lock per repository, records the digest, and prints
+`slot: new Cargo.lock on this mirror: cargo fetch took 2.1 s; its cargo jobs run
+offline`. Every such job of the mirror then runs with `CARGO_NET_OFFLINE=true`.
+
+Like cargo on your machine, the fetch updates a `Cargo.lock` that is out of date, for example
+after you add a path dependency. A job that passes `--locked` or `--frozen` itself gets
+`cargo fetch --locked` instead, so it fails on the server as it would locally.
+
+A fetch that fails (a `Cargo.toml` cargo cannot resolve, an unreachable registry, an out-of-date
+`Cargo.lock` under `--locked`) or takes longer than 5 minutes sends the job back to this
+machine's daemon with
+`slot: remote build on <host> did not start (cargo fetch failed …); running it on this
+machine's daemon`. A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
+need the network themselves (`cargo update`, `add`, `install`, `fetch`) run online.
+
+The digests live in `<ws-root>/.cargo-fetch/` on the server and go with their mirror when it is
+evicted. Both features need this release of slot on the server and on the workstation.
+
 ## Fetch build output back
 
 Build output stays on the server. `--fetch PATH` copies a path back into the checkout after the
@@ -171,6 +228,52 @@ the server's copy of the repository, for output a build writes into the source t
 does nothing. Fetching from `target/` needs slot 0.8.0 or later on the server, which reports the
 target directory when the job starts.
 
+## Mirror at the same path
+
+Tests and scripts that name an absolute path into the checkout (`/srv/u/src/app/scripts/check`)
+fail in `<ws-root>/<id>`, and the compile cache sees another working directory. When the server's
+account has the same home directory as the workstation's, the tree can be mirrored at its own
+absolute path instead:
+
+```console
+export SLOT_REMOTE_SAME_PATH=1
+```
+
+The sync then goes to the checkout's absolute path on the server and the job runs in the same
+directory as here. The server admits such a tree only below a directory it names, given to both
+`slot serve` and `slot shell` (repeat the option, or list them in `SLOT_SAME_PATH_ROOTS`
+separated by `:`):
+
+```text
+slot serve --same-path-root /srv/u
+command="/usr/local/bin/slot shell --same-path-root /srv/u",restrict ssh-ed25519 AAAA… workstation
+```
+
+A tree outside those roots is refused: `slot shell` refuses the sync, so the job runs on this
+machine's daemon, and a daemon without the root ends the job with exit 2 and `not below a
+--same-path-root`. `<ws-root>/<id>` becomes a link to the tree, so the next worktree of the same
+repository is still seeded from it (`--copy-dest=<ws-root>/<id>`). Eviction deletes the link,
+never the tree. Needs this release of slot on both machines.
+
+The job then runs as on a CI runner, with everything at the workstation's paths:
+
+- The tree, with uncommitted and untracked files that git does not ignore.
+- The git directory, synced at its own path, so `git` works in the job. For a linked worktree
+  that is the repository's common git directory, which holds the worktree's own; it is shared by
+  every worktree, so after the first sync only changes move. `*.lock` files stay behind.
+- The target directory: `CARGO_TARGET_DIR` when it is set here, else the one `cargo metadata`
+  names for the command's manifest (`--manifest-path driver/Cargo.toml` builds into
+  `driver/target`). The paths cargo prints, and `CARGO_BIN_EXE_*` in tests, are valid on both
+  machines, and a build's products come back to the same paths. It must lie below a
+  `--same-path-root` too.
+- A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
+  directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
+- A directory outside any git checkout (a scratch copy) is the tree itself.
+
+With `--sandbox`, the tree and the target directory are bound writable at their own paths; the
+git directory is read-only. Files the command names outside the tree are not synced: a job that
+reads them fails on the server.
+
 ## Tests that need local services
 
 Tests that talk to docker, a database, a local cluster or a port on localhost fail on the server.
@@ -184,6 +287,79 @@ A command whose first words are one of the entries runs on this machine's daemon
 local pool, and slot prints `slot: .slot.toml lists `cargo test -p integration` as local: running
 on this machine`. For a one-off, `slot --local <command>` runs the command here without the
 daemon.
+
+## Show the server in the web view
+
+The workstation's daemon shows a build server as a node of its web view when the host
+configuration file names it, `~/.config/slot/cluster.toml` (`$XDG_CONFIG_HOME/slot/cluster.toml`;
+`slot serve --cluster-file` or `SLOT_CLUSTER_FILE` names another, `off` none):
+
+```toml
+[remote.build-1]
+ssh = "ssh -o BatchMode=yes build-1.example"
+slot_path = "/usr/local/bin/slot"
+deadline = "2030-01-01T18:00:00Z"
+price_per_hour_cents = 250
+location = "region-a"
+machine_type = "64-vcpu"
+```
+
+Only `ssh` is required. The daemon reads the file at start. Every 5 s it runs `<ssh> <slot_path>
+state` for each node: the server's `slot shell` answers with its daemon's own row of
+`/api/nodes` and its queued, running and last 30 finished jobs. `GET /api/nodes` then lists the
+node (kind `Remote`, its CPUs, slots, memory, disk and load as the server reports them, the
+deadline and price from the file), and `GET /api/state` and the job events carry its jobs with
+`node` set to the node's name, the id the node gave the job, and `from_node: true`: a
+node's job is named by its node and its id together, since the id may repeat a local one
+(`slot status` prints `#7089 on build-1d`). The deadline and price are read again when the file
+changes, at the next poll. A node is
+`Joining` until its first answer; a poll that fails or takes longer than 4 s is missed, and after
+three misses in a row the node is `Gone` (reason `Lost`) with its last row; the next answer makes
+it `Ready` again. A key of the file that the shape does not declare is refused, and the daemon
+then polls no node.
+
+## Hand queued jobs to a node
+
+A node of the host configuration file also takes jobs from the workstation's queue: while it is
+`Ready`, before its deadline and has free slots, the daemon hands it queued local jobs, oldest
+first, without a `SLOT_HOST` in the caller's environment. The job's process is then
+`slot run -- <command>` in remote mode, started by the daemon with the job's directory and
+environment and `SLOT_HOST`, `SLOT_SSH` and `SLOT_REMOTE` from the node's `ssh` line (its last
+word is the host, the words before it the ssh command) and `slot_path`, and
+`SLOT_REMOTE_SAME_PATH=1`: the node runs it at the same path as here. It holds no local slot;
+its output and exit code reach the caller as before, `slot status` prints `spill: N jobs to
+<node>`, and the job's record in `GET /api/state` has `node` set to the node. The node's own
+row of the same job appears beside it, with the node's id and `from_node: true`.
+
+```toml
+spill_after_s = 0
+
+[remote.build-1]
+ssh = "ssh -o BatchMode=yes build-1.example"
+spill = true
+```
+
+- `spill` (default `true`): `false` keeps the node out of it.
+- `spill_after_s` (default 0): seconds a job waits in the local queue first.
+
+A node takes at most its free slots from its last answer, less the jobs handed to it in the last
+15 s, and none while it has a queue of its own. Every job goes but a job nested in another, one
+submitted with `slot --local` (which never reaches the daemon) or with `SLOT_NO_REMOTE=1` in its
+environment, a remote client's job and a gate's hold. When the client ends with exit 3 (the sync
+or ssh failed, or the connection to the node was lost) the job goes back to the local queue once
+and runs here. A command that itself exits 3 is run a second time here too.
+
+A job that runs or waits here while a node takes jobs carries the reason in `local_reason`
+(`/api/state`), and `slot status` prints it under the job's line as `  local: <reason>`:
+`local requested` (`SLOT_NO_REMOTE=1`, or a command `.slot.toml` lists as local), `cache rule`
+(the working directory or an argument under the caller's `~/.cache`), `nested job`, `gated job`,
+`remote job`, `sent back by a node`, `slots free here first` (it got slots here before a node
+took it), or `sync failed: <first line of the error>` from a remote-mode client whose start
+failed and that ran the job on this machine's daemon instead. A wrapper sets its own reason with
+`SLOT_LOCAL_REASON=<text>`; a job with a reason is not handed to a node.
+`slot --here <command>` keeps a job that needs this host's credentials while it runs (a clone, a
+fetch, a push) in this host's pool, whatever `SLOT_HOST` says, with the reason `here: needs this
+host`; unlike `--local` it still waits for slots in the daemon's queue.
 
 ## Security
 
@@ -201,8 +377,11 @@ command="/usr/local/bin/slot shell",restrict ssh-ed25519 AAAA… workstation
 
 ssh then runs `slot shell` for every connection with that key, and it runs only the steps of
 remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
---sender` from the workspace root or the cache root's `target/`), `slot proxy`, `slot cancel
-<id>` and the sibling step (`slot __siblings` on the server's own workspace root). Anything else
+--sender` of one or more paths, each in the workspace root or the cache root's `target/`),
+`slot proxy`, `slot cancel <id>`, the sibling step (`slot __siblings` on the server's own
+workspace root) and the read-only `state` step (`slot state`: the server daemon's own row of
+`/api/nodes` and its jobs, read from `--http`, for the
+[node poll](#show-the-server-in-the-web-view)). Anything else
 exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
 `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and
 `--copy-dest` is taken only as `../<id>`, a sibling mirror in the workspace root. Also refused:

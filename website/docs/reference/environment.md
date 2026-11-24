@@ -1,3 +1,5 @@
+| `SLOT_CLUSTER_FILE` | default for `slot serve --cluster-file`: the host configuration file whose `[remote.<name>]` tables are the nodes the daemon polls; `off` reads none |
+| `XDG_CONFIG_HOME` | the default host configuration file is `$XDG_CONFIG_HOME/slot/cluster.toml`, otherwise `~/.config/slot/cluster.toml` |
 ---
 title: Environment variables
 description: Variables slot reads, variables it sets in a job, and variables it drops.
@@ -16,6 +18,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
 | `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job runs on this machine's daemon: seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
 | `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job runs on this machine's daemon; same format |
+| `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
+| `SLOT_REMOTE_SAME_PATH_ROOT` | `$HOME` | with `SLOT_REMOTE_SAME_PATH`, only a repository below this directory keeps its own path on the remote host; any other goes to the remote workspace root (`SLOT_WSROOT`) |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
 | `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`; by share (`slot admission shares`) the job asks for a share of N CPUs, at most the budget, and holds no slot. See [Toolchains](../toolchains.md#naming-the-slots) and [Admission by share](../how-it-works.md#admission-by-share). |
@@ -46,6 +50,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `GOMAXPROCS` | slots held for go jobs; `--test-threads` for other jobs; unless the caller set it |
 | `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs |
 | `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
+| `CARGO_NET_OFFLINE` | `true`, for a remote cargo job that builds, once the server fetched the crates of the mirror's `Cargo.lock`; not set for a mirror without a `Cargo.lock`. See [Remote builds](../remote-builds.md#crates-are-fetched-once-per-cargolock). |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
 
 ## Dropped from the caller's environment

@@ -168,9 +168,9 @@ export function slotCells(slots: number, running: readonly Job[]): Array<{ tool:
   return cells;
 }
 
-/** Jobs of the list, newest first; a node filter keeps that node's. */
+/** Jobs of the list, newest queued first, then by id (a remote node's ids lie below 0); a node filter keeps that node's. */
 export function jobList(all: Iterable<Job>, filter: string | null, max: number): Job[] {
   const out = [...all].filter((j) => filter === null || nodeOf(j) === filter);
-  out.sort((a, b) => Number(b.id) - Number(a.id));
+  out.sort((a, b) => Number(b.enqueued_ms) - Number(a.enqueued_ms) || Number(b.id) - Number(a.id));
   return out.slice(0, max);
 }

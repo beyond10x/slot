@@ -4,9 +4,9 @@ import type { Job } from '../generated/types.ts';
 import { AXIS, FONT, animate, drawAxis, sizeCanvas } from '../canvas.ts';
 import { tcColor } from '../lib/colors.ts';
 import { fitLabel } from '../lib/fit.ts';
-import { barLabel, jobId, times, tooltipText } from '../lib/job.ts';
+import { barLabel, jobKey, times, tooltipText } from '../lib/job.ts';
 import { assignLanes } from '../lib/lanes.ts';
-import { jobs, live, now, select, store } from '../store.ts';
+import { jobs, liveOf, now, select, store } from '../store.ts';
 
 const BAR = 16;
 const GAP = 3;
@@ -72,7 +72,7 @@ function draw(c: HTMLCanvasElement, ctx: CanvasRenderingContext2D): void {
       ctx.fillStyle = col;
       ctx.fillRect(x0, y, bw, BAR);
       if (j.state === 'running') {
-        const l = live.get(jobId(j));
+        const l = liveOf(j);
         const frac = l ? Math.min(1, l.cores / Math.max(1, store.tokens)) : 0;
         ctx.fillStyle = 'rgba(255,255,255,0.35)';
         ctx.fillRect(x0, y + BAR - 3, bw * frac, 3);
@@ -113,7 +113,7 @@ function onMove(ev: MouseEvent): void {
     tip.show = false;
     return;
   }
-  tip.text = tooltipText(b.job, live.get(jobId(b.job)), now());
+  tip.text = tooltipText(b.job, liveOf(b.job), now());
   tip.x = Math.min(ev.clientX + 14, window.innerWidth - 570);
   tip.y = ev.clientY + 14;
   tip.show = true;
@@ -121,7 +121,7 @@ function onMove(ev: MouseEvent): void {
 
 function onClick(ev: MouseEvent): void {
   const b = hit(ev);
-  if (b) select(jobId(b.job));
+  if (b) select(jobKey(b.job));
 }
 
 let stop = (): void => undefined;

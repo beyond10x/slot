@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::mirror;
+use crate::{mirror, same_path};
 
 /// Default stall window: a sync that moves no byte for this long is killed.
 pub const DEFAULT_STALL: Duration = Duration::from_secs(60);
@@ -44,6 +44,37 @@ pub struct Remote<'a> {
     pub ws_root: &'a str,
     /// slot executable on the server.
     pub remote_slot: &'a str,
+    /// Mirror the checkout at its own absolute path on the server
+    /// (`SLOT_REMOTE_SAME_PATH`), not under the workspace root.
+    pub same_path: bool,
+}
+
+impl Remote<'_> {
+    /// Where the sync of the checkout at `top`, mirror `id`, goes.
+    pub fn dest(&self, top: &Path, id: &str) -> String {
+        if self.same_path {
+            top.display().to_string()
+        } else {
+            format!("{}/{id}", self.ws_root)
+        }
+    }
+
+    /// How rsync names sibling mirror `id` for `--copy-dest`: relative to
+    /// the destination, `../<id>`; for a same-path mirror, whose parent is
+    /// not the workspace root, `<ws-root>/<id>` made absolute with this
+    /// machine's home, which the server's account shares.
+    pub fn copy_dest(&self, id: &str) -> Option<String> {
+        if !self.same_path {
+            return Some(format!("../{id}"));
+        }
+        let ws = Path::new(self.ws_root);
+        let ws = if ws.is_absolute() {
+            ws.to_path_buf()
+        } else {
+            Path::new(&std::env::var_os("HOME")?).join(ws)
+        };
+        Some(format!("{}/{id}", ws.display()))
+    }
 }
 
 /// When a sync is given up.
@@ -315,13 +346,20 @@ pub fn stats_bytes_sent(out: &str) -> Option<u64> {
 
 /// Asks the server for the sibling mirrors of `id`. `None` when it does not
 /// answer within `wait` or does not know the step (an older slot).
-fn ask_siblings(r: &Remote<'_>, id: &str, key: &str, wait: Duration) -> Option<Vec<String>> {
+fn ask_siblings(
+    r: &Remote<'_>,
+    top: &Path,
+    id: &str,
+    key: &str,
+    wait: Duration,
+) -> Option<Vec<String>> {
     let (ssh, opts) = r.ssh.split_first()?;
     let mut child = Command::new(ssh)
         .args(opts)
         .arg(r.host)
         .arg(r.remote_slot)
         .args(["__siblings", r.ws_root, id, key])
+        .args(r.same_path.then_some(top.as_os_str()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -344,44 +382,10 @@ fn ask_siblings(r: &Remote<'_>, id: &str, key: &str, wait: Duration) -> Option<V
         .then(|| ids.into_iter().take(mirror::MAX_SIBLINGS).collect())
 }
 
-/// Syncs the checkout at `top` to mirror `id` on the server, with the
-/// toolchain's `excludes`, within `b`. rsync compares every file by content
-/// (`--checksum`), not by size and time: a file changed at the same size and
-/// time, or a sibling's file of that size and time, would otherwise be taken
-/// as it is and the job would build the old content.
-pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
-    let sources = Sources::of(top);
-    let asked = Instant::now();
-    let _lock = crate::paths::runtime_dir()
-        .map(|dir| lock_workspace(&dir, r.host, id, b.limit))
-        .transpose()?;
-    let t0 = Instant::now();
-    let deadline = t0 + b.limit;
-    let key = mirror::repo_key(top);
-    let siblings = ask_siblings(r, id, &key, b.stall.min(b.limit));
-    let mut rsync = Command::new("rsync");
-    rsync.args([
-        "-a",
-        "--checksum",
-        "--delete",
-        "--mkpath",
-        "--filter=:- .gitignore",
-        "--exclude=/.git",
-    ]);
-    for x in excludes {
-        rsync.arg(format!("--exclude={x}"));
-    }
-    if let Some(sibs) = &siblings {
-        rsync.arg("--stats");
-        for s in sibs {
-            rsync.arg(format!("--copy-dest=../{s}"));
-        }
-    }
+/// Runs `rsync` with its stdout read, killed at a stall or at `deadline`;
+/// its stdout.
+fn run_watched(rsync: &mut Command, b: &Bounds, deadline: Instant) -> Result<String> {
     rsync
-        .arg("-e")
-        .arg(r.ssh.join(" "))
-        .arg(format!("{}/", top.display()))
-        .arg(format!("{}:{}/{id}/", r.host, r.ws_root))
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped());
@@ -398,6 +402,81 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     if !st.success() {
         bail!("rsync exited with {st}");
     }
+    Ok(out)
+}
+
+/// Syncs `e` to its own path on the server, for a same-path job, within
+/// `b`. A git directory is shared by every worktree of its repository: one
+/// sync of it runs at a time on this machine.
+pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()> {
+    let _lock = match e.kind {
+        same_path::Kind::Git => crate::paths::runtime_dir()
+            .map(|dir| {
+                let id = format!("git{}", mirror::digest16(&e.path.to_string_lossy()));
+                lock_workspace(&dir, r.host, &id, b.limit)
+            })
+            .transpose()?,
+        same_path::Kind::Tree => None,
+    };
+    let path = e.path.display();
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-a", "--delete", "--mkpath"])
+        .args(same_path::filters(e.kind))
+        .arg("-e")
+        .arg(r.ssh.join(" "))
+        .arg(format!("{path}/"))
+        .arg(format!("{}:{path}/", r.host));
+    run_watched(&mut rsync, b, Instant::now() + b.limit).map(drop)
+}
+
+/// Syncs the checkout at `top` to mirror `id` on the server, with the
+/// toolchain's `excludes`, within `b`. rsync compares every file by content
+/// (`--checksum`), not by size and time: a file changed at the same size and
+/// time, or a sibling's file of that size and time, would otherwise be taken
+/// as it is and the job would build the old content.
+pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
+    let sources = Sources::of(top);
+    let asked = Instant::now();
+    let _lock = crate::paths::runtime_dir()
+        .map(|dir| lock_workspace(&dir, r.host, id, b.limit))
+        .transpose()?;
+    let t0 = Instant::now();
+    let deadline = t0 + b.limit;
+    let key = mirror::repo_key(top);
+    let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
+    let mut rsync = Command::new("rsync");
+    // A same-path mirror keeps a linked worktree's `.git` file; the git
+    // directories follow in syncs of their own (`sync_extra`).
+    rsync.args([
+        "-a",
+        "--checksum",
+        "--delete",
+        "--mkpath",
+        "--filter=:- .gitignore",
+        if r.same_path {
+            "--exclude=/.git/"
+        } else {
+            "--exclude=/.git"
+        },
+    ]);
+    for x in excludes {
+        rsync.arg(format!("--exclude={x}"));
+    }
+    if let Some(sibs) = &siblings {
+        rsync.arg("--stats");
+        for s in sibs {
+            if let Some(d) = r.copy_dest(s) {
+                rsync.arg(format!("--copy-dest={d}"));
+            }
+        }
+    }
+    rsync
+        .arg("-e")
+        .arg(r.ssh.join(" "))
+        .arg(format!("{}/", top.display()))
+        .arg(format!("{}:{}/", r.host, r.dest(top, id)));
+    let out = run_watched(&mut rsync, b, deadline)?;
     Ok(Synced {
         bytes: siblings.as_ref().and_then(|_| stats_bytes_sent(&out)),
         elapsed: t0.elapsed(),

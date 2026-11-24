@@ -7,9 +7,13 @@ mod http;
 pub mod limits;
 pub mod machine;
 mod metrics;
+pub mod nodes;
 pub mod priority;
 mod ring;
+pub mod spill;
 mod upgrade;
+
+use spill::Ran;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -168,6 +172,12 @@ pub struct Config {
     /// Run every job in this sandbox (`slot serve --sandbox`); `None` runs
     /// jobs as the daemon's user with its whole filesystem.
     pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// The host configuration file (`cluster.toml`) whose remote nodes the
+    /// daemon polls; `None` polls none.
+    pub cluster_file: Option<PathBuf>,
+    /// Directories under which a remote client may mirror its tree at its
+    /// own absolute path (`--same-path-root`); empty refuses such jobs.
+    pub same_path_roots: Vec<PathBuf>,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -260,6 +270,8 @@ struct TokenMemo {
     surplus: Option<usize>,
 }
 
+// Each flag is a fact of its own that the queue and the sampler read alone.
+#[allow(clippy::struct_excessive_bools)]
 struct Live {
     job: Job,
     pid: Option<i32>,
@@ -308,6 +320,12 @@ struct Live {
     /// It claimed its start: with admission by share it holds no slot, so
     /// `held` does not tell a job that is about to start from a queued one.
     claimed: bool,
+    /// It may go to a remote node ([`spill`]) and has not been there.
+    spillable: bool,
+    /// The target directory its environment names (`CARGO_TARGET_DIR`,
+    /// [`crate::evict::env_target`]), whatever its toolchain: eviction
+    /// keeps it.
+    env_target: Option<PathBuf>,
 }
 
 impl Live {
@@ -445,6 +463,10 @@ struct Inner {
     /// Local target directories jobs built into: repository and last build,
     /// Unix milliseconds. Eviction only ever deletes one of these.
     targets: HashMap<PathBuf, (String, i64)>,
+    /// Working directories of the jobs of the log and when a job last ran
+    /// in each, Unix ms: eviction keeps the target directories in the tree
+    /// of one used in the last hour ([`crate::evict::TREE_KEEP`]).
+    ran_in: HashMap<PathBuf, i64>,
     /// Machine base: the cgroup readings and their averages.
     machine: machine::Monitor,
     /// Machine base: the numbers of the last tick.
@@ -492,6 +514,8 @@ pub struct Server {
     /// milliseconds; 0 while there are none).
     unaccounted: AtomicU64,
     unaccounted_since: AtomicI64,
+    /// Remote nodes of the host configuration.
+    remotes: nodes::Remotes,
     /// What eviction of target directories did last.
     evict: Mutex<crate::evict::Report>,
     /// Target directories being deleted now: their jobs wait.
@@ -646,12 +670,14 @@ impl Server {
         let mut next_id = 0;
         let mut memory = admission::History::default();
         let mut targets = HashMap::new();
+        let mut ran_in = HashMap::new();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
                     memory.record(&job);
                     record_target(&mut targets, &job);
+                    record_ran(&mut ran_in, &job);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
@@ -697,6 +723,7 @@ impl Server {
         let sccache_watch = cfg.sccache_watch;
         let upgrade_hold = cfg.upgrade_hold;
         let evict_settings = cfg.evict;
+        let remotes = nodes::Remotes::load(cfg.cluster_file.as_deref(), &host);
         let server = Arc::new(Self {
             cfg,
             pool,
@@ -725,6 +752,7 @@ impl Server {
                 memory,
                 handing_over: false,
                 targets,
+                ran_in,
                 machine: machine::Monitor::default(),
                 machine_shown: machine::Shown::default(),
                 budget: crate::shares::Budget::new(cores, f64::from(cores)),
@@ -762,6 +790,7 @@ impl Server {
             removed: AtomicU64::new(0),
             unaccounted: AtomicU64::new(0),
             unaccounted_since: AtomicI64::new(0),
+            remotes,
             evict: Mutex::new(crate::evict::Report {
                 floor: crate::evict::below(saved.evict_below_gb, evict_settings.floor),
                 dry_run: evict_settings.dry_run,
@@ -923,6 +952,7 @@ impl Server {
         tokio::spawn(Arc::clone(&self).token_watch());
         tokio::spawn(Arc::clone(&self).priority_watch());
         tokio::spawn(Arc::clone(&self).run_limit_watch());
+        tokio::spawn(Arc::clone(&self).node_poll());
         // Always: `slot evict-below` may turn eviction on at run time.
         tokio::spawn(Arc::clone(&self).evict_watch());
         if self.cfg.sccache_watch {
@@ -1300,7 +1330,7 @@ impl Server {
             let s = Arc::clone(self);
             tokio::spawn(async move {
                 let _keep = keep;
-                let done = s.supervise(id, pid, &tx, gone).await;
+                let done = s.supervise(id, pid, &tx, gone, false).await;
                 drop(tx);
                 s.end_conn(conn, done.is_some()).await;
             });
@@ -1367,6 +1397,8 @@ impl Server {
                     // by slots it asked for its slots.
                     share: r.job.share.unwrap_or(f64::from(r.job.tokens.max(1))),
                     claimed: true,
+                    spillable: false,
+                    env_target: crate::evict::pid_env_target(r.pid, Path::new(&r.job.cwd)),
                     job: r.job,
                     pid: Some(r.pid),
                     held: r.held,
@@ -1559,6 +1591,56 @@ impl Server {
         self.end_conn(Some(a), done.is_some()).await;
     }
 
+    /// Fetch once (`cargo_fetch.rs`) for a cargo job of workspace `id` that
+    /// runs in `cwd`: whether the job runs offline, or why it goes back to
+    /// the client.
+    async fn fetch_once(
+        &self,
+        id: &str,
+        root: &Path,
+        cwd: &Path,
+        argv: &[String],
+        env: &[String],
+        tx: &mpsc::UnboundedSender<Frame>,
+    ) -> Result<bool, String> {
+        use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure, label, locked};
+        let ws_root = self.cfg.ws_root.clone();
+        let root = root.to_path_buf();
+        let id = id.to_string();
+        let cwd = cwd.to_path_buf();
+        let cargo = cargo_of(argv);
+        let locked = locked(argv);
+        let what = label(locked);
+        let env = env.to_vec();
+        let out = tokio::task::spawn_blocking(move || {
+            ensure(&Check {
+                ws_root: &ws_root,
+                root: &root,
+                id: &id,
+                cwd: &cwd,
+                cargo,
+                env: &env,
+                locked,
+                limit: crate::cargo_fetch::LIMIT,
+            })
+        })
+        .await
+        .map_err(|e| format!("{what} failed: {e}"))??;
+        Ok(match out {
+            Outcome::NoLock => false,
+            Outcome::Current => true,
+            Outcome::Fetched(t) => {
+                let _ = tx.send(Frame::Info {
+                    msg: format!(
+                        "slot: new Cargo.lock on this mirror: {what} took {:.1} s; its cargo jobs run offline",
+                        t.as_secs_f64()
+                    ),
+                });
+                true
+            }
+        })
+    }
+
     /// Sends a client its last frames unless a handover took the table;
     /// `None` then. Frames sent under the server lock are in the writer's
     /// queue before a handover flushes it.
@@ -1628,6 +1710,64 @@ impl Server {
         (1, format!("slot: job {id} still stopping after 10s"))
     }
 
+    /// Where workspace `ws` is mirrored: `<ws-root>/<id>`, or for a
+    /// same-path mirror the client's own root, which must lie below a
+    /// `--same-path-root`.
+    fn tree(&self, ws: &crate::proto::Workspace) -> Result<PathBuf> {
+        if !ws.same_path {
+            return Ok(self.cfg.ws_root.join(&ws.id));
+        }
+        let root = Path::new(&ws.client_root);
+        if self.below_same_path_root(root) {
+            return Ok(root.to_path_buf());
+        }
+        bail!(
+            "same-path mirror `{}` is not below a --same-path-root of this server",
+            ws.client_root
+        )
+    }
+
+    /// Whether `p` is absolute, without `.` or `..`, and below one of the
+    /// `--same-path-root` directories.
+    fn below_same_path_root(&self, p: &Path) -> bool {
+        crate::same_path::plain(p)
+            && self
+                .cfg
+                .same_path_roots
+                .iter()
+                .any(|r| p.starts_with(r) && p != r)
+    }
+
+    /// A same-path job's own target directory (`Workspace::target_dir`),
+    /// which must lie below a `--same-path-root`; `None` when it names none.
+    fn same_path_target(&self, ws: &crate::proto::Workspace) -> Result<Option<PathBuf>> {
+        if !ws.same_path || ws.target_dir.is_empty() {
+            return Ok(None);
+        }
+        let t = Path::new(&ws.target_dir);
+        if self.below_same_path_root(t) {
+            return Ok(Some(t.to_path_buf()));
+        }
+        bail!(
+            "target directory `{}` is not below a --same-path-root of this server",
+            ws.target_dir
+        )
+    }
+
+    /// Where the job of workspace `ws` builds: `<cache>/target/<id>`, or a
+    /// same-path job's own target directory (else `target` in its tree).
+    fn job_target(&self, ws: &crate::proto::Workspace) -> PathBuf {
+        if ws.same_path {
+            if let Ok(Some(t)) = self.same_path_target(ws) {
+                return t;
+            }
+            if let Ok(t) = self.tree(ws) {
+                return t.join("target");
+            }
+        }
+        self.cfg.cache_root.join("target").join(&ws.id)
+    }
+
     fn resolve(&self, req: &Request) -> Result<(PathBuf, String, String)> {
         let Some(ws) = &req.workspace else {
             let cwd = PathBuf::from(&req.cwd);
@@ -1639,7 +1779,8 @@ impl Server {
         if ws.id.is_empty() || ws.id.contains(['/', '.']) {
             bail!("bad workspace id");
         }
-        let root = self.cfg.ws_root.join(&ws.id);
+        let root = self.tree(ws)?;
+        self.same_path_target(ws)?;
         let mut cwd = root.clone();
         for c in Path::new(&ws.rel_cwd).components() {
             match c {
@@ -1662,7 +1803,7 @@ impl Server {
     /// job: the client is answered by the next process.
     async fn run_job(
         self: &Arc<Self>,
-        req: Request,
+        mut req: Request,
         tx: mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
         stop: Option<Stop>,
@@ -1678,11 +1819,36 @@ impl Server {
         };
         // A mistyped subcommand (`slot cancle 12`) would otherwise wait in
         // the queue for slots and fail only when it starts.
-        let base = Self::base_env(&req);
+        let mut base = Self::base_env(&req);
         if !req.argv[0].contains('/')
             && let Err(e) = look_path(&req.argv[0], &base)
         {
             return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
+        }
+        if req.fetch_once
+            && let Some(ws) = req.workspace.as_ref()
+            && crate::cargo_fetch::applies(&req.argv)
+        {
+            let root = PathBuf::from(&from);
+            match self
+                .fetch_once(&ws.id, &root, &cwd, &req.argv, &base, &tx)
+                .await
+            {
+                Ok(offline) => {
+                    if offline && !req.env.iter().any(|e| e == crate::cargo_fetch::OFFLINE) {
+                        req.env.push(crate::cargo_fetch::OFFLINE.to_string());
+                        base = Self::base_env(&req);
+                    }
+                }
+                Err(msg) => {
+                    let g = self.inner.lock().expect("server lock");
+                    if g.handing_over {
+                        return None;
+                    }
+                    let _ = tx.send(Frame::Fallback { msg });
+                    return Some(());
+                }
+            }
         }
         // A gated job is shown, counted and sized by the command its client
         // runs in a sandbox; the daemon starts only `req.argv`, the hold.
@@ -1778,6 +1944,7 @@ impl Server {
                 compile_server_cpu_s: 0.0,
                 peak_rss: 0,
                 wait_reason: String::new(),
+                local_reason: spill::local_reason(&req, self.remotes.spills()),
                 target_dir: target_dir
                     .as_ref()
                     .map(|t| t.to_string_lossy().into_owned())
@@ -1797,6 +1964,7 @@ impl Server {
                 lent_s: 0.0,
                 admission: crate::shares::Mode::Slots,
                 node: LOCAL_NODE.to_string(),
+                from_node: false,
             };
             g.active.insert(
                 id,
@@ -1825,6 +1993,8 @@ impl Server {
                     overdue: watch::Sender::new(false),
                     share,
                     claimed: false,
+                    spillable: false,
+                    env_target: crate::evict::env_target(&req.env, &cwd),
                 },
             );
             (id, share)
@@ -1887,7 +2057,21 @@ impl Server {
         // another job may be compiling into.
         let shares_target = target_dir.is_some() && crate::cargo_lock::compiles(&shown);
         let mut told_target = false;
+        // Whether the job may go to a remote node of the cluster file.
+        let mut may_spill = self.spill_eligible(id, &req);
         let held = loop {
+            if may_spill && let Some(t) = self.spill_pick(id) {
+                match self
+                    .run_spilled(id, &req, &cwd, t, &tx, gone.clone(), &out)
+                    .await?
+                {
+                    Ran::Requeue => {
+                        may_spill = false;
+                        continue;
+                    }
+                    Ran::Finished => return Some(()),
+                }
+            }
             if !self.admission_open(gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
             }
@@ -1950,6 +2134,12 @@ impl Server {
                             break true;
                         }
                     }
+                    // A node has room for it: it leaves the queue and goes.
+                    () = tokio::time::sleep(spill::TICK), if may_spill => {
+                        if self.spill_due(id) && self.remotes.has_room(now_ms()) {
+                            break true;
+                        }
+                    }
                 }
             };
             if in_use {
@@ -2007,6 +2197,9 @@ impl Server {
                         // By share the job waited in the queue with a
                         // reason; by slots it has none here.
                         l.job.wait_reason.clear();
+                        if l.spillable && l.job.local_reason.is_empty() {
+                            l.job.local_reason = spill::HERE_FIRST.into();
+                        }
                         l.waiter = None;
                         l.cpu_wait = false;
                         l.job.collected = 0;
@@ -2048,6 +2241,14 @@ impl Server {
                 .unwrap_or_default(),
         };
         let mut env = tc.env(&ctx, base);
+        // A same-path job builds where the client would, so the paths cargo
+        // prints hold on both machines.
+        if let Some(ws) = req.workspace.as_ref().filter(|w| w.same_path) {
+            env = match self.same_path_target(ws) {
+                Ok(Some(t)) => toolchain::set(env, "CARGO_TARGET_DIR", &t.to_string_lossy()),
+                _ => toolchain::unset(env, &["CARGO_TARGET_DIR"]),
+            };
+        }
         // The bound in force at the start is the job's, like its run-time
         // limit: a later `slot job-parallel` changes the jobs that start
         // after it. With a bound the job gets no pool jobserver.
@@ -2063,9 +2264,9 @@ impl Server {
         // the sandbox hides.
         if let Some(sandbox) = &self.cfg.sandbox {
             env = crate::sandbox::Sandbox::env(env);
-            let workspace = req.workspace.as_ref().map(|w| self.cfg.ws_root.join(&w.id));
+            let workspace = req.workspace.as_ref().and_then(|w| self.tree(w).ok());
             let target_dir = match &req.workspace {
-                Some(w) => Some(self.cfg.cache_root.join("target").join(&w.id)),
+                Some(w) => Some(self.job_target(w)),
                 None => crate::evict::target_dir(&shown, &env, &cwd),
             };
             let job = crate::sandbox::Job {
@@ -2168,12 +2369,7 @@ impl Server {
         // The process is reaped by pid (`reap`), here or after a handover.
         drop(child);
         let target_dir = req.workspace.as_ref().map_or_else(String::new, |w| {
-            self.cfg
-                .cache_root
-                .join("target")
-                .join(&w.id)
-                .to_string_lossy()
-                .into_owned()
+            self.job_target(w).to_string_lossy().into_owned()
         });
         // With fixed paths a synced workspace's job names its tree by the
         // fixed path; its output is rewritten from there.
@@ -2204,7 +2400,7 @@ impl Server {
             let _ = tx.send(Frame::Start { id, target_dir });
         }
         self.publish(id);
-        let done = self.supervise(id, pid, &tx, gone).await;
+        let done = self.supervise(id, pid, &tx, gone, false).await.map(drop);
         if done.is_some()
             && let Some(ws) = &req.workspace
         {
@@ -2224,7 +2420,8 @@ impl Server {
         pid: i32,
         tx: &mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
-    ) -> Option<()> {
+        requeue: bool,
+    ) -> Option<Ran> {
         let s = Arc::clone(self);
         let wait = tokio::task::spawn_blocking(move || s.reap(id, pid));
         tokio::pin!(wait);
@@ -2297,6 +2494,8 @@ impl Server {
                 msg: None,
                 note_wait: false,
             }
+        } else if requeue && exited.code == spill::INFRA_EXIT {
+            return Some(Ran::Requeue);
         } else {
             End {
                 state: if exited.code == 0 {
@@ -2311,7 +2510,7 @@ impl Server {
                 note_wait: true,
             }
         };
-        self.finish(id, tx, end).ok()
+        self.finish(id, tx, end).ok().map(|()| Ran::Finished)
     }
 
     /// Waits for job `id`'s process to exit, reads its CPU time while it is
@@ -2365,6 +2564,12 @@ impl Server {
                     .ok()
                     .and_then(|r| r.components().next())
                     .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .or_else(|| {
+                        if self.cfg.same_path_roots.is_empty() {
+                            return None;
+                        }
+                        crate::mirror::linked_id(&self.cfg.ws_root, Path::new(&l.job.cwd))
+                    })
             })
             .collect()
     }
@@ -2380,10 +2585,18 @@ impl Server {
         let budget = self.cfg.cache_budget;
         let floor = self.cfg.admission.min_free_disk;
         let (ws, repo) = (ws.to_string(), repo.to_string());
+        // A same-path job builds at its tree's own path; another tree's target
+        // carries freshness records and build-script output made for that
+        // tree, which cargo may take as fresh here. Such a job is not seeded.
+        let same_path = !self.cfg.same_path_roots.is_empty();
         let Ok((gone, seeded)) = tokio::task::spawn_blocking(move || {
             cache.touch(&ws, &repo, now_ms());
             let gone = cache.evict(budget, floor, &busy);
-            let seeded = cache.seed(&ws, &repo, &busy);
+            let seeded = if same_path {
+                Err("same-path workspace".to_string())
+            } else {
+                cache.seed(&ws, &repo, &busy)
+            };
             (gone, seeded)
         })
         .await
@@ -2666,8 +2879,12 @@ impl Server {
             }
             let job = live.job.clone();
             g.metrics.record(&job);
-            g.memory.record(&job);
+            // A job that ran on a node says nothing of this machine.
+            if job.node == LOCAL_NODE {
+                g.memory.record(&job);
+            }
             record_target(&mut g.targets, &job);
+            record_ran(&mut g.ran_in, &job);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -4131,13 +4348,18 @@ impl Server {
                     .values()
                     .filter(|l| !l.job.target_dir.is_empty())
                     .map(|l| PathBuf::from(&l.job.target_dir))
+                    .chain(g.active.values().filter_map(|l| l.env_target.clone()))
                     .chain(failed)
                     .collect();
+                // The trees of queued and running jobs, and of every job
+                // that ran in the last hour: the steps of one long task
+                // keep their target directories between them.
                 let cwds: HashSet<PathBuf> = g
                     .active
                     .values()
                     .filter(|l| !l.job.cwd.is_empty())
                     .map(|l| PathBuf::from(&l.job.cwd))
+                    .chain(crate::evict::ran_recently(&g.ran_in, now_ms()))
                     .collect();
                 (g.targets.clone(), dirs, cwds)
             };
@@ -4229,8 +4451,13 @@ impl Server {
                     &c.path,
                     Path::new(&l.job.target_dir),
                     Path::new(&l.job.cwd),
-                )
-            });
+                ) || l
+                    .env_target
+                    .as_deref()
+                    .is_some_and(|t| crate::evict::holds_target(&c.path, t))
+            }) || crate::evict::ran_recently(&g.ran_in, now_ms())
+                .iter()
+                .any(|cwd| crate::evict::job_keeps(&c.path, Path::new(""), cwd));
             if busy {
                 return "kept: a job started".into();
             }
@@ -4401,8 +4628,8 @@ impl Server {
         });
     }
 
-    /// The `GET /api/state` snapshot.
-    pub fn state(&self) -> State {
+    /// The `GET /api/state` snapshot of the local pool.
+    fn local_state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
         let m = &g.machine_shown;
         // A guard taken inside the struct literal would live until its end,
@@ -4465,9 +4692,8 @@ impl Server {
         }
     }
 
-    /// The `GET /api/nodes` answer: the daemon's own machine, the only node
-    /// until remote nodes join.
-    pub fn nodes(&self) -> Vec<Node> {
+    /// The daemon's own machine as a node of `GET /api/nodes`.
+    fn local_node(&self) -> Node {
         let now = now_ms();
         let g = self.inner.lock().expect("server lock");
         let cpu_busy = match self.cpu_figure(&g, now) {
@@ -4479,7 +4705,7 @@ impl Server {
         let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
         // Eviction's last look; before one, the filesystem of the state.
         let evicted = self.evict.lock().expect("evict lock").free;
-        let local = local_node(&LocalFacts {
+        local_node(&LocalFacts {
             cluster: &self.host,
             cpus: self.cores,
             slots: self.pool.limit() as u32,
@@ -4494,8 +4720,7 @@ impl Server {
             joined_ms: self.born_ms,
             cpu_busy,
             jobs: &jobs,
-        });
-        vec![local]
+        })
     }
 
     fn output(&self, id: i64) -> Output {
@@ -4570,7 +4795,7 @@ fn local_node(f: &LocalFacts<'_>) -> Node {
                 .filter(|j| j.state == JobState::Queued)
                 .count(),
         ),
-        slot_version: env!("CARGO_PKG_VERSION").to_string(),
+        slot_version: env!("SLOT_VERSION").to_string(),
         cpu_busy_milli: Some((f.cpu_busy.max(0.0) * 1000.0).round() as u32),
         memory_used_mib: Some(
             u32::try_from(f.memory.saturating_sub(f.available) >> 20).unwrap_or(u32::MAX),
@@ -4954,6 +5179,17 @@ fn record_target(targets: &mut HashMap<PathBuf, (String, i64)>, job: &Job) {
     if when >= e.1 {
         *e = (job.repo.clone(), when);
     }
+}
+
+/// Notes that `job` ran (or waited) in its working directory, with the
+/// latest of its end, start and enqueue time.
+fn record_ran(ran_in: &mut HashMap<PathBuf, i64>, job: &Job) {
+    if job.cwd.is_empty() {
+        return;
+    }
+    let when = job.ended_ms.max(job.started_ms).max(job.enqueued_ms);
+    let e = ran_in.entry(PathBuf::from(&job.cwd)).or_insert(when);
+    *e = (*e).max(when);
 }
 
 fn look_path(name: &str, env: &[String]) -> Result<PathBuf> {

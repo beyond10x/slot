@@ -1,7 +1,19 @@
 import type { Job, JobState, LiveJob } from '../generated/types.ts';
 import { fmtBytes, fmtDur } from './format.ts';
 
+/** The job's id: the daemon's own, or for a row a node reported (`from_node`) the id that node gave it. */
 export const jobId = (j: { id: number }): number => Number(j.id);
+
+type Named = { id: number; node?: string; from_node?: boolean };
+
+/** What names one job in the page: its id, with the node for a node's own row, whose ids may repeat a local one. */
+export const jobKey = (j: Named): string => (j.from_node ? `${j.node}/${jobId(j)}` : String(jobId(j)));
+
+/** The id a person reads in a table cell. */
+export const idLabel = (j: Named): string => String(jobId(j));
+
+/** The job named in words: `7089 on build-1d` for a node's own job, the id alone for this daemon's. */
+export const jobName = (j: Named): string => (j.from_node ? `${jobId(j)} on ${j.node}` : String(jobId(j)));
 
 export const isActive = (s: JobState): boolean => s === 'queued' || s === 'running';
 
@@ -79,7 +91,7 @@ export function newestRunning(list: Iterable<Job>): Job | undefined {
 export function tooltipText(j: Job, l: LiveJob | undefined, now: number): string {
   const run = runS(j, now);
   const lines = [
-    `#${jobId(j)} ${j.toolchain} ${checkoutLabel(j)}`,
+    `#${jobName(j)} ${j.toolchain} ${checkoutLabel(j)}`,
     cmdText(j),
     j.cwd,
     `state ${j.state}` + (isActive(j.state) ? '' : ` exit ${j.exit}`),

@@ -75,7 +75,7 @@ function job(id: number, over: Partial<Job> = {}): Job {
     id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], checkout: { kind: 'repository' }, session,
     client: 'ws:1', toolchain, remote: false, tokens: toolchain === 'rust' ? 4 : 2, state: 'running',
     enqueued_ms: s(-400 + id), started_ms: s(-380 + id), ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', local_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
   };
 }
 

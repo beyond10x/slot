@@ -6,7 +6,10 @@
 //! syncs the repository to a build server over ssh first.
 
 pub mod admission;
+pub mod artifacts;
+pub mod build_version;
 pub mod call;
+pub mod cargo_fetch;
 pub mod cargo_lock;
 pub mod census;
 pub mod cli;
@@ -15,6 +18,7 @@ pub mod cpu_limit;
 pub mod evict;
 pub mod gate;
 pub mod hook;
+pub mod hostconfig;
 pub mod job_parallel;
 pub mod jobserver;
 pub mod mirror;
@@ -26,6 +30,7 @@ pub mod proto;
 pub mod repo_config;
 pub mod rewrite;
 pub mod run_limit;
+pub mod same_path;
 pub mod sandbox;
 pub mod sccache;
 pub mod server;

@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue';
 import { fmtDur } from '../lib/format.ts';
 import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machineSentence } from '../lib/headroom.ts';
-import { jobId } from '../lib/job.ts';
+import { jobKey, jobName } from '../lib/job.ts';
 import { failedStats, queueSummary, servedQueue } from '../lib/queue.ts';
 import { sharesLine } from '../lib/shares.ts';
 import { census, jobs, select, setHeadroom, store } from '../store.ts';
@@ -65,7 +65,7 @@ const queue = computed(() => queueSummary(servedQueue(jobs.values()), store.cloc
 /** Failed jobs of the last 60 minutes; the button opens the output of the one that ended last. */
 const failed = computed(() => {
   const f = failedStats(jobs.values(), store.clock);
-  return f.newest ? { n: f.n, id: jobId(f.newest) } : null;
+  return f.newest ? { n: f.n, id: jobKey(f.newest), name: jobName(f.newest) } : null;
 });
 
 /** The explanation of every item of the header: open by a click or Enter on "?", or while the pointer is on it. */
@@ -129,7 +129,7 @@ onUnmounted(() => {
         <span class="tile"><span class="k">queue</span> <b class="v">{{ queue.length }}</b></span>
         <span class="tile"><span class="k">longest wait</span> <b class="v">{{ queue.length ? fmtDur(queue.longestS) : '–' }}</b></span>
       </span>
-      <button v-if="failed" type="button" class="tile failed" :aria-label="`failed ${failed.n} (60 min): output of job ${failed.id}, the newest failed job`"
+      <button v-if="failed" type="button" class="tile failed" :aria-label="`failed ${failed.n} (60 min): output of job ${failed.name}, the newest failed job`"
         @click="select(failed.id, $event)"><span class="k">failed</span> <span class="v"><b>{{ failed.n }}</b> <span class="span">(60 min)</span></span></button>
       <span v-if="census" class="tile"><span class="k">not on slot</span> <span class="v"><b>{{ census.unmanaged_cores.toFixed(1) }}</b> <span class="span">cores</span></span></span>
       <span class="end">

@@ -2,12 +2,15 @@
 # PATH shim: installed as `cargo`, `go`, `ignite` and `make` in a directory placed first on PATH,
 # it sends build commands through slot and runs everything else directly.
 #
-# Through slot: cargo build|b|check|c|test|t|clippy|doc|d|bench|nextest|install|rustc|llvm-cov|miri
+# Through slot: every cargo subcommand (run, aliases such as xtask, external subcommands)
+#               except the ones below that compile nothing
 #               go build|test|vet|install
 #               ignite build|test|conformance
 #               make, every target
-# Directly:     every other subcommand (run, fmt, metadata, …), any command inside a slot
-#               job (SLOT_JOB set), SLOT_SHIM_OFF=1, or when `slot` is not on PATH.
+# Directly:     cargo fmt, metadata, tree, update, fetch, clean, add, … and cargo mutants (its
+#               own builds start cargo by path), any other go or ignite subcommand, any command
+#               inside a slot job (SLOT_JOB set), SLOT_SHIM_OFF=1, or when `slot` is not on PATH.
+#               contrib/slot-shim.test.sh checks the routing.
 
 name=${0##*/}
 dir=${0%/*}
@@ -49,9 +52,14 @@ for a in "$@"; do
 done
 
 case $name:$sub in
-  cargo:build | cargo:b | cargo:check | cargo:c | cargo:test | cargo:t | cargo:clippy | \
-  cargo:doc | cargo:d | cargo:bench | cargo:nextest | cargo:install | cargo:rustc | \
-  cargo:llvm-cov | cargo:miri | \
+  cargo: | cargo:fmt | cargo:metadata | cargo:locate-project | cargo:pkgid | cargo:search | \
+  cargo:login | cargo:logout | cargo:owner | cargo:yank | cargo:version | cargo:help | \
+  cargo:tree | cargo:update | cargo:generate-lockfile | cargo:fetch | cargo:vendor | cargo:new | \
+  cargo:init | cargo:add | cargo:remove | cargo:clean | cargo:config | cargo:read-manifest | \
+  cargo:verify-project | cargo:report | cargo:info | cargo:mutants)
+    exec "$real" "$@"
+    ;;
+  cargo:* | \
   go:build | go:test | go:vet | go:install | \
   ignite:build | ignite:test | ignite:conformance | make:*)
     exec slot run -- "$real" "$@"

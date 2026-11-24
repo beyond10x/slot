@@ -144,6 +144,14 @@ const KEYWORDS: &[&str] = &[
 
 /// A shell's flag cluster that ends in `c` (`-c`, `-lc`, `-euc`): the next
 /// word is a script.
+/// Marks a task runner whose own steps call `slot` and so become pool jobs one by one: the hook
+/// lets it run outside the pool, with no time cap on the whole run, and the shims stay on, so a
+/// step that compiles without `slot` still goes to the pool.
+const ORCHESTRATOR: &str = "SLOT_ORCHESTRATOR=1";
+
+/// The programs [`ORCHESTRATOR`] admits: runners of steps, not compilers or test runners.
+const ORCHESTRATORS: &[&str] = &["task", "make", "just", "sh", "bash", "zsh", "dash"];
+
 fn takes_script(flag: &str) -> bool {
     flag.starts_with('-') && !flag.starts_with("--") && flag.ends_with('c')
 }
@@ -152,6 +160,7 @@ fn check_command(command: &Command, env: &Env, depth: usize) -> Verdict {
     let words = &command.words;
     let mut i = 0;
     let mut shim_off = false;
+    let mut orchestrator = false;
     // Leading keywords, assignments and wrappers that run the rest of the line.
     loop {
         let Some(w) = words.get(i) else {
@@ -165,6 +174,9 @@ fn check_command(command: &Command, env: &Env, depth: usize) -> Verdict {
             if w == "SLOT_SHIM_OFF=1" {
                 shim_off = true;
             }
+            if w == ORCHESTRATOR {
+                orchestrator = true;
+            }
             i += 1;
             continue;
         }
@@ -177,6 +189,9 @@ fn check_command(command: &Command, env: &Env, depth: usize) -> Verdict {
                 {
                     if words[i] == "SLOT_SHIM_OFF=1" {
                         shim_off = true;
+                    }
+                    if words[i] == ORCHESTRATOR {
+                        orchestrator = true;
                     }
                     let takes = matches!(words[i].as_str(), "-u" | "--unset" | "-C" | "--chdir");
                     i += if takes { 2 } else { 1 };
@@ -207,6 +222,9 @@ fn check_command(command: &Command, env: &Env, depth: usize) -> Verdict {
     }
     let cmd = &words[i..];
     let prog = base(&cmd[0]);
+    if orchestrator && ORCHESTRATORS.contains(&prog) {
+        return Verdict::Allow;
+    }
     let args = &cmd[1..];
     let line = command.raw[i..].join(" ");
     // `slot …` itself falls through to Allow.
@@ -803,6 +821,27 @@ mod tests {
 
     fn refused(cmd: &str, env: &Env) -> bool {
         matches!(verdict(cmd, env), Verdict::Refuse(_))
+    }
+
+    #[test]
+    fn an_orchestrator_runs_outside_the_pool_and_its_steps_inside() {
+        for cmd in [
+            "SLOT_ORCHESTRATOR=1 task gate-sharded",
+            "env SLOT_ORCHESTRATOR=1 task gate-sharded",
+            "SLOT_ORCHESTRATOR=1 make check",
+            "SLOT_ORCHESTRATOR=1 sh scripts/gate-sharded.sh",
+        ] {
+            assert_eq!(verdict(cmd, &bare()), Verdict::Allow, "should allow: {cmd}");
+        }
+        for cmd in [
+            "SLOT_ORCHESTRATOR=1 cargo build",
+            "SLOT_ORCHESTRATOR=1 go test ./...",
+            "SLOT_ORCHESTRATOR=1 npx vitest run",
+            "SLOT_ORCHESTRATOR=0 task gate-sharded",
+            "task gate-sharded",
+        ] {
+            assert!(refused(cmd, &bare()), "should refuse: {cmd}");
+        }
     }
 
     #[test]

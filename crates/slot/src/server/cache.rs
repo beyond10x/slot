@@ -228,6 +228,7 @@ impl Cache {
             let _ = std::fs::remove_file(self.meta_path(&e.id));
             let _ = std::fs::remove_dir_all(self.ws_root.join(&e.id));
             crate::mirror::forget(&self.ws_root, &e.id);
+            crate::cargo_fetch::forget(&self.ws_root, &e.id);
             total = total.saturating_sub(e.meta.bytes);
             gone.push((e.id, e.meta.bytes));
         }

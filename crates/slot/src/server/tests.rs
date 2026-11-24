@@ -91,6 +91,8 @@ fn config(root: &Path, tokens: usize) -> Config {
         exec_shim: None,
         handover: true,
         sandbox: None,
+        cluster_file: None,
+        same_path_roots: Vec::new(),
     }
 }
 
@@ -124,7 +126,7 @@ fn collect(c: UnixStream) -> Res {
         match serde_json::from_str::<Frame>(&line).unwrap() {
             Frame::Out { b } => r.out += &b,
             Frame::Err { b } => r.err += &b,
-            Frame::Info { msg } => r.info += &msg,
+            Frame::Info { msg } | Frame::Fallback { msg } => r.info += &msg,
             Frame::Start { .. } => r.started = true,
             Frame::Exit { code } => {
                 r.code = code;
@@ -188,7 +190,7 @@ fn nodes_answers_the_local_machine_and_jobs_name_it() {
         n.joined_at.as_deref().is_some_and(|t| t.ends_with('Z')),
         "{text}"
     );
-    assert_eq!(n.slot_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(n.slot_version, env!("SLOT_VERSION"));
     assert!(!text.contains("\"deadline\""), "{text}");
 }
 
@@ -598,6 +600,8 @@ fn workspace_is_confined_and_paths_rewritten() {
             id: "../x".into(),
             rel_cwd: ".".into(),
             client_root: String::new(),
+            same_path: false,
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -608,7 +612,9 @@ fn workspace_is_confined_and_paths_rewritten() {
         workspace: Some(Workspace {
             id: "abc".into(),
             rel_cwd: "../../..".into(),
+            same_path: false,
             client_root: "/client".into(),
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -630,8 +636,10 @@ fn remote_job_gets_server_path_and_client_flags() {
         env: vec!["RUSTFLAGS=-Cx".into()],
         workspace: Some(Workspace {
             id: "w1".into(),
+            same_path: false,
             rel_cwd: ".".into(),
             client_root: "/c".into(),
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -730,6 +738,8 @@ fn history_survives_restart() {
         exec_shim: None,
         handover: true,
         sandbox: None,
+        cluster_file: None,
+        same_path_roots: Vec::new(),
     })
     .unwrap();
     let st = again.state();
@@ -1527,7 +1537,7 @@ fn a_rust_job_logs_its_cache_environment_and_is_warned_when_the_cache_is_off() {
     for line in BufReader::new(c).lines() {
         match serde_json::from_str::<Frame>(&line.unwrap()).unwrap() {
             Frame::Info { msg } if !started => before_start.push(msg),
-            Frame::Info { .. } | Frame::Err { .. } => {}
+            Frame::Info { .. } | Frame::Err { .. } | Frame::Fallback { .. } => {}
             Frame::Out { b } => {
                 assert!(!before_start.is_empty(), "output before the warnings");
                 out += &b;
@@ -1977,9 +1987,11 @@ fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
         cwd: String::new(),
         env: Vec::new(),
         workspace: Some(Workspace {
+            same_path: false,
             id: "w1".into(),
             rel_cwd: ".".into(),
             client_root: "/c".into(),
+            ..Workspace::default()
         }),
         ..fake_build(&f.root, &target, "echo ran")
     };
@@ -3421,7 +3433,10 @@ fn eviction_starts_at_the_disk_holds_mark_and_the_held_job_starts() {
     assert!(target.exists(), "60 GB free: nothing to delete");
 
     FREE.store(45 * GB, SeqCst);
-    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    // The job works in another tree: its own would keep the target.
+    let elsewhere = f.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (c, id) = submit(&f, sh(&elsewhere, "echo ran"));
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let r = collect(c);
     assert!(
@@ -3599,13 +3614,13 @@ fn the_idle_keep_is_set_at_run_time_and_applies_at_the_next_look() {
         .lock()
         .unwrap()
         .targets
-        .insert(target.clone(), ("recent".into(), now_ms() - 40 * 60_000));
+        .insert(target.clone(), ("recent".into(), now_ms() - 90 * 60_000));
     let v = evict_view(put_evict_below(&f, r#"{"evict_below_gb":50}"#));
     assert_eq!((v.evict_idle_s, v.idle_s), (None, 7200), "the default");
     wait_for_jobs(&f, "the look at the new mark", || {
         f.server.state().evict.checked_ms > 0
     });
-    assert!(target.exists(), "built 40 min ago: kept at 2 h");
+    assert!(target.exists(), "built 90 min ago: kept at 2 h");
 
     let v = evict_view(put_evict_below(&f, r#"{"evict_idle_s":1800}"#));
     assert_eq!((v.evict_idle_s, v.idle_s), (Some(1800), 1800));
@@ -4971,6 +4986,8 @@ fn a_sandboxed_workspace_job_writes_only_what_it_builds() {
             id: "mine".into(),
             rel_cwd: ".".into(),
             client_root: "/client".into(),
+            same_path: false,
+            ..Workspace::default()
         }),
         ..Request::default()
     };

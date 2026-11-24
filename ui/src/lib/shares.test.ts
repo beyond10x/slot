@@ -7,7 +7,7 @@ function job(over: Partial<Job>): Job {
   return {
     id: 1, argv: ['cargo', 'build'], cwd: '/w/slot', repo: 'slot', checkout: { kind: 'repository' }, session: '', client: '',
     toolchain: 'rust', remote: false, tokens: 4, state: 'running', enqueued_ms: 1000, started_ms: 2000, ended_ms: 0,
-    exit: 0, cpu_s: 0, compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
+    exit: 0, cpu_s: 0, compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', local_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
   };
 }
 

@@ -17,11 +17,17 @@ use crate::paths;
 /// GNU-make jobserver, so cargo, rustc and make draw parallelism from the
 /// same pool and the machine is never oversubscribed.
 #[derive(Debug, Parser)]
-#[command(name = "slot", version)]
+#[command(name = "slot", version = env!("SLOT_VERSION"))]
 pub struct Cli {
     /// Run the command here, without the daemon.
     #[arg(long, global = true)]
     pub local: bool,
+
+    /// Keep the job in this host's pool, never on a build node: for a step
+    /// that needs this host's credentials while it runs (a clone, a fetch,
+    /// a push). `slot status` shows `local: here: needs this host` under it.
+    #[arg(long, global = true)]
+    pub here: bool,
 
     /// Slots the job holds, in place of the count slot derives from the
     /// command. For work the daemon cannot see, such as a script that
@@ -264,6 +270,11 @@ pub struct ServeArgs {
     /// does not start.
     #[arg(long)]
     pub sandbox: bool,
+    /// The host configuration file: its `[remote.<name>]` tables are the
+    /// remote nodes the daemon polls every 5 s and shows in `GET /api/nodes`
+    /// and the web UI. `off` reads none.
+    #[arg(long, env = "SLOT_CLUSTER_FILE", default_value_os_t = crate::hostconfig::default_path())]
+    pub cluster_file: PathBuf,
     /// One more path a sandboxed job may write, for example a package
     /// manager's store; repeat for more.
     #[arg(long, value_name = "PATH", requires = "sandbox")]
@@ -274,6 +285,18 @@ pub struct ServeArgs {
     /// cache server outside the sandbox cannot read sources at those paths.
     #[arg(long, requires = "sandbox")]
     pub sandbox_fixed_paths: bool,
+    /// A directory under which a remote client may mirror its tree at the
+    /// tree's own absolute path (`SLOT_REMOTE_SAME_PATH=1` on the client), so
+    /// absolute paths into the tree work on this server. Repeat for more;
+    /// `SLOT_SAME_PATH_ROOTS` lists them separated by `:`. Give `slot shell`
+    /// the same list.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "SLOT_SAME_PATH_ROOTS",
+        value_delimiter = ':'
+    )]
+    pub same_path_root: Vec<PathBuf>,
 }
 
 /// `slot proxy` options.
@@ -299,6 +322,18 @@ pub struct ShellArgs {
     /// Target dirs of synced workspaces (default: `<state-dir>/cache`).
     #[arg(long)]
     pub cache_root: Option<PathBuf>,
+    /// The daemon's web address, for the `state` step.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+    /// A directory under which a client may sync its tree to the tree's own
+    /// absolute path and fetch from it, as with `slot serve`; repeat for more.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "SLOT_SAME_PATH_ROOTS",
+        value_delimiter = ':'
+    )]
+    pub same_path_root: Vec<PathBuf>,
 }
 
 /// `slot gate` options.
@@ -787,6 +822,9 @@ impl ServeArgs {
             } else {
                 None
             },
+            cluster_file: (self.cluster_file.as_os_str() != "off")
+                .then(|| self.cluster_file.clone()),
+            same_path_roots: self.same_path_root.clone(),
         })
     }
 }
@@ -797,6 +835,18 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("slot").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn here_is_a_global_flag_off_by_default() {
+        let cli = parse(&["--here", "git", "fetch"]).unwrap();
+        assert!(cli.here);
+        assert!(!cli.local);
+        assert!(matches!(cli.command, Cmd::External(_)));
+        let cli = parse(&["run", "--here", "--", "git", "push"]).unwrap();
+        assert!(cli.here);
+        assert!(matches!(cli.command, Cmd::Run(_)));
+        assert!(!parse(&["git", "clone", "x"]).unwrap().here);
     }
 
     #[test]

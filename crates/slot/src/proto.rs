@@ -65,6 +65,19 @@ pub struct Request {
     /// build server's limit applies there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nofile: Option<FileLimit>,
+    /// A remote cargo job: before it queues, the daemon fetches the crates
+    /// of the mirror's `Cargo.lock` once and runs it offline
+    /// (`cargo_fetch.rs`); when the fetch fails it answers with a
+    /// [`Frame::Fallback`], which only a client that sets this reads. A
+    /// daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fetch_once: bool,
+    /// Why the client sends the job to this machine's daemon when a remote
+    /// node is configured, such as `sync failed: …` after a remote start
+    /// failed. The daemon shows it as the job's `local_reason` and hands
+    /// such a job to no node. A daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_reason: String,
 }
 
 impl Request {
@@ -204,6 +217,15 @@ pub struct Workspace {
     pub rel_cwd: String,
     /// Repository root on the client, for path rewriting.
     pub client_root: String,
+    /// Mirrored at `client_root` itself, not under the workspace root
+    /// (`SLOT_REMOTE_SAME_PATH`); the server admits it only under a
+    /// `--same-path-root`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_path: bool,
+    /// A same-path job's target directory, the client's own absolute path
+    /// (below a `--same-path-root`); empty keeps cargo's default there.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_dir: String,
 }
 
 /// One server message.
@@ -242,6 +264,13 @@ pub enum Frame {
     Exit {
         /// Exit code; 128 + signal for a signalled process.
         code: i32,
+    },
+    /// The job did not start on this server and goes back to the client,
+    /// which runs it on its own machine's daemon. Sent only to a client
+    /// whose request set `fetch_once`, after its fetch failed.
+    Fallback {
+        /// Why, for the client's stderr.
+        msg: String,
     },
 }
 

@@ -547,6 +547,11 @@ pub(crate) fn secs(ms: i64) -> String {
     }
 }
 
+/// Whether job `j` runs or waits on this machine, not on a node.
+fn on_this_machine(j: &Job) -> bool {
+    j.node.is_empty() || j.node == crate::types::LOCAL_NODE
+}
+
 fn line(j: &Job, now: i64) -> String {
     let (state, since) = match j.state {
         JobState::Queued => ("queued", j.enqueued_ms),
@@ -570,9 +575,14 @@ fn line(j: &Job, now: i64) -> String {
         (Some(asked), None) => format!("share {asked:.1}"),
         (None, _) => format!("{:>2} slot(s)", j.tokens),
     };
+    let id = if j.from_node {
+        format!("{} on {}", j.id, j.node)
+    } else {
+        j.id.to_string()
+    };
     let mut s = format!(
         "#{:<5} {:<7} {:<9} {} {:>7}  {}  {}",
-        j.id,
+        id,
         state,
         j.toolchain,
         held,
@@ -593,6 +603,11 @@ fn line(j: &Job, now: i64) -> String {
             use std::fmt::Write as _;
             let _ = write!(s, ", holds {} of {}", j.collected, j.tokens);
         }
+    }
+    // The daemon names a reason only while a remote node is configured.
+    if on_this_machine(j) && !j.local_reason.is_empty() {
+        s.push_str("\n  local: ");
+        s.push_str(&j.local_reason);
     }
     if !j.wait_reason.is_empty() {
         s.push_str("\n       waiting: ");
@@ -683,6 +698,23 @@ fn served_class(j: &Job) -> u8 {
     j.queue_class.unwrap_or(if j.ahead { 1 } else { 2 })
 }
 
+/// `spill: N jobs to <node>`, one line per node that runs jobs this
+/// daemon handed it: its own jobs with a node, not the rows a node reports.
+fn spill_lines(s: &State) -> String {
+    use std::fmt::Write as _;
+    let mut by: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for j in &s.active {
+        if !j.from_node && !on_this_machine(j) {
+            *by.entry(j.node.as_str()).or_default() += 1;
+        }
+    }
+    let mut out = String::new();
+    for (n, c) in by {
+        let _ = writeln!(out, "spill: {c} jobs to {n}");
+    }
+    out
+}
+
 /// The pool line, then one line per queued or running job, queued first,
 /// in the order they get slots: by level, then the job's place in its
 /// level, then arrival.
@@ -745,6 +777,7 @@ pub fn render(s: &State) -> String {
     if let Some(l) = lost_line(s) {
         out.push_str(&l);
     }
+    out.push_str(&spill_lines(s));
     let w = &s.sccache;
     if w.enabled && (w.servers > 0 || w.refills > 0) {
         out.push_str(&sccache_line(w, s.now_ms));
@@ -785,6 +818,7 @@ mod tests {
             compile_server_cpu_s: 0.0,
             peak_rss: 0,
             wait_reason: String::new(),
+            local_reason: String::new(),
             target_dir: String::new(),
             priority: crate::types::Priority::Normal,
             promoted: false,
@@ -801,7 +835,35 @@ mod tests {
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
             node: String::new(),
+            from_node: false,
         }
+    }
+
+    #[test]
+    fn status_counts_the_jobs_handed_to_each_node() {
+        let mut s: State = serde_json::from_value(serde_json::json!({
+            "host": "h", "cores": 1, "tokens": 1, "free": 1, "active": [], "done": [],
+            "now_ms": 1, "toolchains": [],
+        }))
+        .unwrap();
+        let on = |id, node: &str| {
+            let mut j = job(id, JobState::Running, 1);
+            j.node = node.into();
+            j
+        };
+        // Two handed to node-1, one local, one the node runs of its own.
+        s.active = vec![
+            on(1, "node-1"),
+            on(2, "node-1"),
+            on(3, crate::types::LOCAL_NODE),
+            {
+                let mut j = on(7, "node-1");
+                j.from_node = true;
+                j
+            },
+        ];
+        assert_eq!(spill_lines(&s), "spill: 2 jobs to node-1\n");
+        assert!(render(&s).contains("spill: 2 jobs to node-1\n"));
     }
 
     #[test]
@@ -1326,6 +1388,76 @@ mod tests {
             lines[4].starts_with("#2 ") && lines[4].ends_with("cargo test"),
             "running: {out}"
         );
+    }
+
+    #[test]
+    fn a_node_job_shows_its_nodes_id_and_the_node() {
+        let mut theirs = job(7089, JobState::Running, 1);
+        theirs.node = "build-1d".into();
+        theirs.from_node = true;
+        let mut handed = job(12, JobState::Running, 1);
+        handed.node = "build-1d".into();
+        let out = line(&theirs, 0);
+        assert!(out.starts_with("#7089 on build-1d "), "{out}");
+        assert!(!out.contains("#-"), "{out}");
+        let s = State {
+            tokens: 4,
+            limit: 4,
+            active: vec![theirs, handed],
+            ..State::default()
+        };
+        assert_eq!(spill_lines(&s), "spill: 1 jobs to build-1d\n");
+    }
+
+    #[test]
+    fn a_local_job_names_why_it_did_not_go_to_a_node() {
+        let mut running = job(4, JobState::Running, 1);
+        running.node = crate::types::LOCAL_NODE.into();
+        running.local_reason = "sync failed: ssh: connection refused".into();
+        let mut queued = job(5, JobState::Queued, 1);
+        queued.local_reason = "cache rule".into();
+        queued.wait_reason = "memory: 1.0 GB free".into();
+        let mut on_node = job(6, JobState::Running, 1);
+        on_node.node = "node-1".into();
+        on_node.local_reason = "stale".into();
+        let plain = job(7, JobState::Running, 1);
+        let s = State {
+            tokens: 4,
+            limit: 4,
+            active: vec![
+                running.clone(),
+                queued.clone(),
+                on_node.clone(),
+                plain.clone(),
+            ],
+            now_ms: 151_000,
+            ..State::default()
+        };
+        let out = render(&s);
+        let lines: Vec<&str> = out
+            .lines()
+            .filter(|l| !l.starts_with("spill:"))
+            .skip(1)
+            .collect();
+        let first = |j: &Job| line(j, 151_000).lines().next().unwrap().to_string();
+        assert_eq!(
+            lines,
+            [
+                first(&queued).as_str(),
+                "  local: cache rule",
+                "       waiting: memory: 1.0 GB free",
+                first(&running).as_str(),
+                "  local: sync failed: ssh: connection refused",
+                first(&on_node).as_str(),
+                first(&plain).as_str(),
+            ],
+            "{out}"
+        );
+        // A job record without the field reads as no reason.
+        let mut v = serde_json::to_value(&plain).unwrap();
+        v.as_object_mut().unwrap().remove("local_reason");
+        let j: Job = serde_json::from_value(v).unwrap();
+        assert_eq!(j.local_reason, "");
     }
 
     #[test]

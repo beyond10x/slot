@@ -203,6 +203,8 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         // The command runs in the sandbox with the sandbox's limits; the hold
         // process the daemon starts needs none.
         nofile: None,
+        fetch_once: false,
+        local_reason: client.local_reason,
     }
 }
 
@@ -544,6 +546,7 @@ fn submit_inner(dir: &Path, req: &Request) -> std::result::Result<i32, Fallback>
             Ok(Event::Frame(Frame::Exit { code })) => return Ok(code),
             Ok(Event::Frame(Frame::Out { b })) => print!("{b}"),
             Ok(Event::Frame(Frame::Err { b })) => eprint!("{b}"),
+            Ok(Event::Frame(Frame::Fallback { msg })) => return Err(Fallback(msg)),
             Ok(Event::Closed) => {
                 return Err(Fallback(format!(
                     "gate {} closed before the job started",

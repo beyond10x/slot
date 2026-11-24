@@ -24,9 +24,11 @@ use anyhow::{Context as _, Result, anyhow};
 use sha2::{Digest, Sha256};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
+use crate::artifacts;
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
+use crate::same_path;
 use crate::sync;
 use crate::toolchain;
 use crate::types::Checkout;
@@ -109,6 +111,13 @@ pub struct Settings {
     /// `SLOT_SYNC_STALL` and `SLOT_SYNC_LIMIT`: when a remote sync is
     /// killed and the job runs on this machine's daemon instead.
     pub sync: sync::Bounds,
+    /// `SLOT_REMOTE_SAME_PATH` set and not `0`: the server mirrors the
+    /// tree at its absolute path here, and the job runs there.
+    pub same_path: bool,
+    /// `--here`: the job goes to this machine's daemon whatever `SLOT_HOST`
+    /// says, and carries the reason [`crate::server::spill::HERE`], so the
+    /// daemon never hands it to a node.
+    pub here: bool,
 }
 
 /// A duration from variable `name`, or `default` with a line on stderr when
@@ -128,8 +137,8 @@ fn duration_var(name: &str, default: Duration) -> Duration {
 
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
-    /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`
-    /// and `SLOT_SYNC_LIMIT`.
+    /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`,
+    /// `SLOT_SYNC_LIMIT` and `SLOT_REMOTE_SAME_PATH`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
@@ -172,6 +181,8 @@ impl Settings {
             priority: None,
             timeout: None,
             fallback: var("SLOT_LOCAL_FALLBACK").is_some_and(|v| v != "0"),
+            same_path: var("SLOT_REMOTE_SAME_PATH").is_some_and(|v| v != "0"),
+            here: false,
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
@@ -191,7 +202,74 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         repo,
         checkout,
     } = checkout_info(&cwd);
-    let mut req = Request {
+    let mut req = new_request(argv, s, repo, checkout);
+    if let Some(dir) = crate::gate::dir_from_env() {
+        local_fields(&mut req, &cwd);
+        return crate::gate::submit(&dir, &req);
+    }
+    if let Some(host) = remote_host(&mut req, s, || listed_local(top.as_deref(), argv)) {
+        let plan = artifacts::plan(argv);
+        if let Some(p) = &plan {
+            req.argv.clone_from(&p.argv);
+        }
+        req.fetch_once = crate::cargo_fetch::applies(argv);
+        // A same-path job outside any git checkout mirrors its working
+        // directory as the tree.
+        let top = top.or_else(|| keeps_path(s, &cwd).then(|| cwd.clone()));
+        let why = match remote(host, top.as_deref(), &cwd, &mut req, s) {
+            Ok(c) => {
+                let mut collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
+                match talk_with(c, &req, collector.as_mut()) {
+                    Ended::Fallback(msg) => msg,
+                    ended => {
+                        let ran = matches!(ended, Ended::Exit(_));
+                        let mut code = ended.code();
+                        if let (Some(p), Some(col), Some(top)) = (&plan, &collector, top.as_deref())
+                            && ran
+                            && (code == 0 || p.when == artifacts::When::AnyExit)
+                        {
+                            code = products_back(host, top, &cwd, s, col, code);
+                        }
+                        return match (&req.workspace, top.as_deref()) {
+                            (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
+                                fetch(host, top, &ws.id, s)
+                            }
+                            _ => code,
+                        };
+                    }
+                }
+            }
+            Err(e) => format!("{e:#}"),
+        };
+        // A job the daemon handed to a node goes back to the daemon's queue.
+        if std::env::var_os(crate::server::spill::SPILLED_ENV).is_some_and(|v| !v.is_empty()) {
+            eprintln!("slot: remote build on {host} did not start ({why})");
+            return crate::server::spill::INFRA_EXIT;
+        }
+        eprintln!(
+            "slot: remote build on {host} did not start ({why}); running it on this machine's daemon"
+        );
+        req.argv = argv.to_vec();
+        req.workspace = None;
+        req.fetch_once = false;
+        req.local_reason = sync_failed(&why);
+        local_fields(&mut req, &cwd);
+        return submit_local(&s.socket, &req, &Waits::of(s));
+    }
+    local_fields(&mut req, &cwd);
+    submit_local(&s.socket, &req, &Waits::of(s))
+}
+
+/// The request for `argv` before its route is known. With `--here` it
+/// carries the reason [`crate::server::spill::HERE`], so the daemon never
+/// hands the job to a node.
+fn new_request(
+    argv: &[String],
+    s: &Settings,
+    repo: Option<String>,
+    checkout: Option<Checkout>,
+) -> Request {
+    Request {
         argv: argv.to_vec(),
         session: std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),
         client: client_id(),
@@ -200,39 +278,44 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         tokens: s.tokens,
         priority: s.priority,
         timeout_s: s.timeout,
+        local_reason: if s.here {
+            crate::server::spill::HERE.into()
+        } else {
+            String::new()
+        },
         ..Request::default()
-    };
-    if let Some(dir) = crate::gate::dir_from_env() {
-        local_fields(&mut req, &cwd);
-        return crate::gate::submit(&dir, &req);
     }
-    if let Some(host) = s
-        .host
-        .as_ref()
-        .filter(|_| !listed_local(top.as_deref(), argv))
-    {
-        return match remote(host, top.as_deref(), &cwd, &mut req, s) {
-            Ok(c) => {
-                let code = talk(c, &req).code();
-                match (&req.workspace, top.as_deref()) {
-                    (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
-                        fetch(host, top, &ws.id, s)
-                    }
-                    _ => code,
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "slot: remote build on {host} did not start ({e:#}); running it on this machine's daemon"
-                );
-                req.workspace = None;
-                local_fields(&mut req, &cwd);
-                submit_local(&s.socket, &req, &Waits::of(s))
-            }
-        };
+}
+
+/// The build server the job goes to, or `None` when it stays on this
+/// machine's daemon: no `SLOT_HOST`, `--here`, or a command `.slot.toml`
+/// lists as local (`listed`, asked only when a host is set and `--here` is
+/// not), which also names the job's reason.
+fn remote_host<'a>(
+    req: &mut Request,
+    s: &'a Settings,
+    listed: impl FnOnce() -> bool,
+) -> Option<&'a String> {
+    let host = s.host.as_ref()?;
+    if s.here {
+        return None;
     }
-    local_fields(&mut req, &cwd);
-    submit_local(&s.socket, &req, &Waits::of(s))
+    if listed() {
+        req.local_reason = crate::server::spill::LOCAL_REQUESTED.into();
+        return None;
+    }
+    Some(host)
+}
+
+/// The `local_reason` of a job whose remote start failed with `why`:
+/// `sync failed: ` and the first line of the error.
+pub fn sync_failed(why: &str) -> String {
+    let first = crate::server::spill::first_line(why);
+    if first.is_empty() {
+        "sync failed".into()
+    } else {
+        format!("sync failed: {first}")
+    }
 }
 
 /// What only a daemon on this machine uses: the working directory, the whole
@@ -283,11 +366,25 @@ pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String
     Ok(format!("{mirror}/{path}"))
 }
 
+/// Same-path mode is on and `top` lies under the same-path root
+/// (`SLOT_REMOTE_SAME_PATH_ROOT`, by default this home; `same_path::applies`);
+/// any other tree goes to the workspace root.
+fn keeps_path(s: &Settings, top: &Path) -> bool {
+    let root = std::env::var_os("SLOT_REMOTE_SAME_PATH_ROOT")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("HOME"));
+    s.same_path && same_path::applies(top, root.as_deref().map(Path::new))
+}
+
 /// Copies every `--fetch` path back from `host` into the repository at
 /// `top`. Returns 0, or 1 after printing which path failed.
 fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
     let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
-    let mirror = format!("{}/{id}", s.ws_root);
+    let mirror = if keeps_path(s, top) {
+        top.to_string_lossy().into_owned()
+    } else {
+        format!("{}/{id}", s.ws_root)
+    };
     let mut code = 0;
     for path in &s.fetch {
         let src = match fetch_source(path, &mirror, &target_dir) {
@@ -319,6 +416,57 @@ fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
         }
     }
     code
+}
+
+/// Copies the products `col` collected from the job's target directory on
+/// `host` into the local target directory and prints one line. Returns
+/// `code`, or 1 when the copy failed after a job that exited 0: the caller
+/// would run a stale binary.
+fn products_back(
+    host: &str,
+    top: &Path,
+    cwd: &Path,
+    s: &Settings,
+    col: &artifacts::Collector,
+    code: i32,
+) -> i32 {
+    let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
+    if target_dir.is_empty() {
+        eprintln!(
+            "slot: artifacts not fetched: the server did not report its target directory (slot 0.8.0 or later needed there)"
+        );
+        return code;
+    }
+    let rels: Vec<String> = col
+        .paths()
+        .iter()
+        .filter_map(|p| artifacts::relative(p, &target_dir))
+        .collect();
+    if rels.is_empty() {
+        return code;
+    }
+    // A same-path job built into the client's own target directory, at the
+    // same path on the server.
+    let local = if keeps_path(s, top) {
+        PathBuf::from(&target_dir)
+    } else {
+        artifacts::local_target(cwd, top, std::env::var("CARGO_TARGET_DIR").ok().as_deref())
+    };
+    let src = artifacts::Source {
+        host,
+        ssh: &s.ssh,
+        target: &target_dir,
+    };
+    match artifacts::fetch(&src, &rels, &local, &s.sync) {
+        Ok(f) => {
+            eprintln!("{}", f.line());
+            code
+        }
+        Err(e) => {
+            eprintln!("slot: artifacts not fetched: {e:#}");
+            if code == 0 { 1 } else { code }
+        }
+    }
 }
 
 /// Whether the repository's `.slot.toml` lists `argv` under `local`, so it
@@ -621,6 +769,41 @@ fn local(socket: &Path) -> Result<Conn> {
     })
 }
 
+/// Syncs what a same-path job needs beside its tree at `top`: the git
+/// directories (a failed sync is reported, and the job runs without
+/// them), and the working directory when the tree's sync left it out (a
+/// failed sync is the caller's error: the job could not start there).
+fn same_path_extras(
+    top: &Path,
+    cwd: &Path,
+    excludes: &[&str],
+    r: &sync::Remote<'_>,
+    s: &Settings,
+) -> Result<()> {
+    use same_path::{Extra, Kind};
+    for path in same_path::git_dirs(top) {
+        let e = Extra {
+            path,
+            kind: Kind::Git,
+        };
+        if let Err(err) = sync::sync_extra(&e, r, &s.sync) {
+            eprintln!(
+                "slot: git directory {} not synced: {err:#}",
+                e.path.display()
+            );
+        }
+    }
+    if same_path::cwd_ignored(top, cwd, excludes) {
+        let e = Extra {
+            path: cwd.to_path_buf(),
+            kind: Kind::Tree,
+        };
+        sync::sync_extra(&e, r, &s.sync)
+            .with_context(|| format!("sync of the working directory {}", cwd.display()))?;
+    }
+    Ok(())
+}
+
 fn remote(
     host: &str,
     top: Option<&Path>,
@@ -630,6 +813,7 @@ fn remote(
 ) -> Result<Conn> {
     let top = top.ok_or_else(|| anyhow!("remote mode needs a git repository"))?;
     let id = workspace_id(top);
+    let same_path = keeps_path(s, top);
     let rel = cwd
         .strip_prefix(top)
         .unwrap_or(Path::new(""))
@@ -641,9 +825,23 @@ fn remote(
         ssh: &s.ssh,
         ws_root: &s.ws_root,
         remote_slot: &s.remote_slot,
+        same_path,
     };
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
+    let target_dir = if same_path {
+        same_path_extras(top, cwd, tc.sync_excludes(), &target, s)?;
+        same_path::target_dir(
+            &req.argv,
+            cwd,
+            top,
+            std::env::var("CARGO_TARGET_DIR").ok().as_deref(),
+        )
+        .map(|t| t.to_string_lossy().into_owned())
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
     for (k, v) in std::env::vars() {
         if (tc.client_env(&k) && !toolchain::credential(&k)) || s.extra_env.contains(&k) {
             req.env.push(format!("{k}={v}"));
@@ -653,6 +851,8 @@ fn remote(
         id,
         rel_cwd: rel,
         client_root: top.to_string_lossy().into_owned(),
+        same_path,
+        target_dir,
     });
     let mut child: Child = Command::new(&s.ssh[0])
         .args(&s.ssh[1..])
@@ -675,7 +875,7 @@ fn remote(
 }
 
 /// How a conversation with the daemon ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Ended {
     /// The job's exit code, or 3 when the request could not be sent.
     Exit(i32),
@@ -684,6 +884,8 @@ enum Ended {
     Lost { started: bool },
     /// The client got this signal; the job was cancelled.
     Signalled(i32),
+    /// The server sent the job back without starting it, for this reason.
+    Fallback(String),
 }
 
 impl Ended {
@@ -696,11 +898,21 @@ impl Ended {
                 eprintln!("slot: connection to daemon lost");
                 3
             }
+            Self::Fallback(msg) => {
+                eprintln!("slot: the job did not start: {msg}");
+                3
+            }
         }
     }
 }
 
 fn talk(conn: Conn, req: &Request) -> Ended {
+    talk_with(conn, req, None)
+}
+
+/// Talks to the daemon; the job's stdout goes through `collector` when
+/// given.
+fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Collector>) -> Ended {
     let Conn {
         reader,
         mut writer,
@@ -735,7 +947,14 @@ fn talk(conn: Conn, req: &Request) -> Ended {
         match serde_json::from_str::<Frame>(&l) {
             Ok(Frame::Out { b }) => {
                 started = true;
-                let _ = stdout.write_all(b.as_bytes());
+                match collector.as_deref_mut() {
+                    Some(c) => {
+                        let _ = stdout.write_all(&c.push(b.as_bytes()));
+                    }
+                    None => {
+                        let _ = stdout.write_all(b.as_bytes());
+                    }
+                }
                 let _ = stdout.flush();
             }
             Ok(Frame::Err { b }) => {
@@ -751,10 +970,22 @@ fn talk(conn: Conn, req: &Request) -> Ended {
             Ok(Frame::Info { msg }) => eprintln!("{msg}"),
             Ok(Frame::Exit { code }) => {
                 drop(writer);
+                if let Some(c) = collector.as_deref_mut() {
+                    let _ = stdout.write_all(&c.finish());
+                    let _ = stdout.flush();
+                }
                 return Ended::Exit(code);
             }
-            Err(_) => {}
+            Ok(Frame::Fallback { msg }) if !started => {
+                drop(writer);
+                return Ended::Fallback(msg);
+            }
+            Ok(Frame::Fallback { .. }) | Err(_) => {}
         }
+    }
+    if let Some(c) = collector {
+        let _ = stdout.write_all(&c.finish());
+        let _ = stdout.flush();
     }
     if let Some(sig) = signalled() {
         return Ended::Signalled(sig);
@@ -767,6 +998,75 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn here_names_its_reason_on_the_request() {
+        let argv = vec!["git".to_string(), "fetch".to_string()];
+        let here = Settings {
+            here: true,
+            ..Settings::default()
+        };
+        let req = new_request(&argv, &here, None, None);
+        assert_eq!(req.local_reason, "here: needs this host");
+        assert_eq!(
+            crate::server::spill::local_reason(&req, false),
+            "here: needs this host"
+        );
+        assert_eq!(
+            crate::server::spill::refusal(&req).as_deref(),
+            Some("here: needs this host")
+        );
+        let plain = new_request(&argv, &Settings::default(), None, None);
+        assert_eq!(plain.local_reason, "");
+    }
+
+    #[test]
+    fn here_skips_remote_mode() {
+        let argv = vec!["git".to_string(), "push".to_string()];
+        let remote = Settings {
+            host: Some("build-1".into()),
+            ..Settings::default()
+        };
+        let here = Settings {
+            here: true,
+            ..remote.clone()
+        };
+        let mut req = new_request(&argv, &here, None, None);
+        let asked = std::cell::Cell::new(false);
+        let to = remote_host(&mut req, &here, || {
+            asked.set(true);
+            true
+        });
+        assert_eq!(to, None);
+        assert!(!asked.get(), ".slot.toml is not read with --here");
+        assert_eq!(req.local_reason, "here: needs this host");
+
+        let mut req = new_request(&argv, &remote, None, None);
+        assert_eq!(
+            remote_host(&mut req, &remote, || false).map(String::as_str),
+            Some("build-1")
+        );
+        assert_eq!(req.local_reason, "");
+        assert_eq!(remote_host(&mut req, &remote, || true), None);
+        assert_eq!(req.local_reason, "local requested");
+
+        let mut req = new_request(&argv, &Settings::default(), None, None);
+        assert_eq!(remote_host(&mut req, &Settings::default(), || true), None);
+        assert_eq!(req.local_reason, "");
+    }
+
+    #[test]
+    fn a_failed_remote_start_names_its_first_error_line() {
+        assert_eq!(
+            sync_failed("rsync: connection unexpectedly closed\ncode 12"),
+            "sync failed: rsync: connection unexpectedly closed"
+        );
+        assert_eq!(
+            sync_failed("\n  ssh: timeout  \n"),
+            "sync failed: ssh: timeout"
+        );
+        assert_eq!(sync_failed(""), "sync failed");
+    }
 
     #[test]
     fn fetch_source_maps_target_to_the_job_target_dir() {
