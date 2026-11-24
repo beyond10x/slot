@@ -160,6 +160,31 @@ run "$R" apply
 run "$R" check
 [ $? -eq 0 ] && ok "after the download works: 0 drift" || bad "after the download: $(cat "$W/out")"
 
+# 5c. Closing the setup login ends the connections still logged in with the setup key; the
+# build key's connections stay. The node's sshd log names each connection's pid and key.
+ssh-keygen -q -t ed25519 -N '' -C setup -f "$W/setupkey" </dev/null
+fp=$(ssh-keygen -lf "$W/setupkey.pub" | awk '{print $2}')
+conf
+echo "SETUP_KEY=$(cat "$W/setupkey.pub")" >>"$W/node.conf"
+run "$R" apply
+printf '%s\n' "Nov 25 00:00:01 node sshd[4242]: Accepted publickey for $me from 192.0.2.1 port 5 ssh2: ED25519 $fp" \
+  "Nov 25 00:00:02 node sshd[4343]: Accepted publickey for $me from 192.0.2.1 port 6 ssh2: ED25519 SHA256:BuildKeyFingerprint" \
+  "Nov 25 00:00:03 node sshd[4444]: Accepted publickey for $me from 192.0.2.1 port 7 ssh2: ED25519 $fp" >"$R/.state/sshd-journal"
+printf '4242\n4343\n' >"$R/.state/alive-pids"
+NODE_TEST=1 NODE_ROOT=$R sh "$P" check "$W/node.conf" --open >"$W/out" 2>"$W/err"
+grep -q 'setup key' "$W/out" && grep -q '^drift: keys: a login' "$W/out" && bad "while open, a setup login is drift: $(grep '^drift' "$W/out")" || ok "while the setup login is open, its connections are not drift"
+run "$R" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: keys: a login with the setup key is still connected: pid 4242' "$W/out" && ok "closed: a connected setup login is drift" || bad "closed setup login: exit $st $(cat "$W/out")"
+grep -q 'pid 4343\|pid 4444' "$W/out" && bad "a build login or an ended login is drift: $(grep pid "$W/out")" || ok "build logins and ended logins are not drift"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'kill 4242' "$R/.calls" && ok "apply ends the setup login's connection" || bad "no kill: $(cat "$R/.calls")"
+grep -q 'kill 4343' "$R/.calls" && bad "apply ended a build login" || ok "apply leaves the build login"
+run "$R" check
+[ $? -eq 0 ] && ok "after the setup connection ended: 0 drift" || bad "after the kill: $(cat "$W/out")"
+rm -f "$R/.state/sshd-journal" "$R/.state/alive-pids"
+
 # 6. The bundle is one self-contained script that gives the same answer.
 sh "$P" bundle "$W/node.conf" check >"$W/bundle.sh" 2>"$W/err"
 st=$?
@@ -201,6 +226,28 @@ n=$(grep -c . "$W/ssh.log")
 [ "$n" -gt 0 ] && ok "apply used the configured ssh ($n calls)" || bad "apply made no ssh call: $(tail -3 "$W/err")"
 grep -v -- '-o ControlPath=' "$W/ssh.log" | grep -q . && bad "an ssh call without a private control path: $(grep -v -- '-o ControlPath=' "$W/ssh.log" | head -1)" || ok "every ssh call names a private control path"
 tail -1 "$W/ssh.log" | grep -q -- '-O exit node-setup' && ok "apply ends the control connection" || bad "last ssh call: $(tail -1 "$W/ssh.log")"
+
+# 6d. push.sh apply copies only under the copy list the last root apply wrote on the node
+# (/etc/slot-node/copies), and prints the list first.
+grep -qx '.m2/repository go/bin' "$R/etc/slot-node/copies" 2>/dev/null && bad "copies written before the key exists" || :
+conf
+printf 'HOME_COPIES=.m2/repository go/bin\n' >>"$W/node.conf"
+run "$R" apply
+[ "$(cat "$R/etc/slot-node/copies" 2>/dev/null)" = ".m2/repository go/bin" ] && ok "apply writes the approved copy list" || bad "copies: $(cat "$R/etc/slot-node/copies" 2>&1)"
+[ "$(stat -c %a "$R/etc/slot-node/copies" 2>/dev/null)" = 644 ] && ok "the copy list is readable by the build user" || bad "copies mode $(stat -c %a "$R/etc/slot-node/copies" 2>&1)"
+printf '#!/bin/sh\necho "$*" >>"%s"\ncase "$*" in *"cat /etc/slot-node/copies"*) cat "%s"; exit 0 ;; esac\nexit 1\n' "$W/ssh.log" "$W/node-copies" >"$W/fake-ssh"
+printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
+echo '.m2/repository go/bin .cache/other' >"$W/node-copies"
+: >"$W/ssh.log"
+HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 2 ] && grep -q 'approved copy list' "$W/err" && ok "another approved list: apply refuses" || bad "other list: exit $st $(cat "$W/err" | tail -2)"
+grep -q 'rsync' "$W/ssh.log" && bad "copied under another list" || ok "nothing copied under another list"
+echo '.m2/repository go/bin' >"$W/node-copies"
+: >"$W/ssh.log"
+HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -qx 'push: copy list: .m2/repository go/bin' "$W/out" && ok "apply prints the copy list" || bad "no list line: $(head -2 "$W/out")"
+grep -q 'rsync' "$W/ssh.log" && ok "the same list: apply copies" || bad "same list, no copy: $(cat "$W/err" | tail -2)"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

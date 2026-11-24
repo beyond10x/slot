@@ -197,6 +197,30 @@ a_chown() {
   [ -n "$T" ] && return 0
   chown -h "$@"
 }
+# Pids of the sshd connections of this boot that logged in with the key of fingerprint $1 and
+# still run. sshd logs "sshd[<pid>]: Accepted publickey ... <fingerprint>" from the process that
+# holds the connection.
+q_key_logins() {
+  if [ -n "$T" ]; then cat "$S/sshd-journal" 2>/dev/null; else journalctl -b -q --no-pager -t sshd 2>/dev/null; fi |
+    awk -v fp="$1" '/sshd\[[0-9]+\]: Accepted publickey for / && $NF == fp {
+      s = $0; sub(/.*sshd\[/, "", s); sub(/\].*/, "", s); print s }' | sort -un |
+    while read -r pid; do
+      if [ -n "$T" ]; then
+        grep -qx "$pid" "$S/alive-pids" 2>/dev/null && echo "$pid"
+      else
+        [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = sshd ] && echo "$pid"
+      fi
+    done
+}
+a_kill() {
+  if [ -n "$T" ]; then
+    calls "kill $1"
+    grep -vx "$1" "$S/alive-pids" >"$S/alive-pids.n" 2>/dev/null
+    mv "$S/alive-pids.n" "$S/alive-pids"
+  else
+    kill "$1"
+  fi
+}
 
 # Jobs run as the build user, so root never follows a link that user could have planted: a path
 # in the user's area must have no symbolic link in it, and the user's files are written by the
@@ -719,6 +743,8 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
+  # The copy list this run approved: push.sh copies only while its own list equals it.
+  want_file libexec /etc/slot-node/copies 644 root:root echo "$HOME_COPIES"
   # Each bound /etc entry needs a target of the same type as its copy from the workstation.
   for e in $ETC_LIST $ETC_EXTRA; do
     src=$R$STORE/rootfs/etc/$e
@@ -852,6 +878,15 @@ p_keys() {
     q_immutable "$p" && continue
     drift keys "$p is not immutable"
     if fixing; then a_chattr +i "$p" && changed keys "$p immutable"; fi
+  done
+  # A connection that logged in with the setup key stays logged in after the key leaves
+  # authorized_keys; closing the setup login ends it.
+  [ -z "$open" ] && [ -n "$SETUP_KEY" ] || return 0
+  sfp=$(echo "$SETUP_KEY" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+  [ -n "$sfp" ] || return 0
+  for pid in $(q_key_logins "$sfp"); do
+    drift keys "a login with the setup key is still connected: pid $pid"
+    if fixing; then a_kill "$pid" && changed keys "setup login pid $pid ended"; fi
   done
 }
 

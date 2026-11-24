@@ -51,7 +51,13 @@ that replaced one, restart it when no job runs.
 Removing the setup key from `authorized_keys` does not end an ssh connection that is already
 logged in, and a control connection (`ControlMaster`, `ControlPersist`) shared through the ssh
 config is reused by every later call. `push.sh apply` keeps its own control connection and ends
-it on exit; give the setup host no `ControlMaster` in the ssh config.
+it on exit; give the setup host no `ControlMaster` in the ssh config. `provision.sh apply`
+without `--open` also ends every connection of this boot that logged in with the setup key and
+still runs (sshd logs each connection's pid and key fingerprint); `check` reports one as drift.
+
+`provision.sh apply` writes `HOME_COPIES` to `/etc/slot-node/copies`. `push.sh apply` reads its
+config once, prints `push: copy list: …`, and stops with exit status 2 when its list differs from
+the node's: a list changed after the root step that approved it needs that root step again.
 
 ## Choosing `HOME_COPIES`
 

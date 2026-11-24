@@ -89,6 +89,16 @@ if [ "$mode" = apply ]; then
   cdir=$(mktemp -d) || exit 1
   NODE_SSH="$NODE_SSH -o ControlMaster=auto -o ControlPersist=60 -o ControlPath=$cdir/m"
   trap '$NODE_SSH -O exit "$PUSH_HOST" >/dev/null 2>&1; rm -rf "$cdir"' EXIT
+  # The copy list is read once, here, and must equal the one the last root apply wrote on the
+  # node: a list changed after that approval waits for the next root apply.
+  approved=$($NODE_SSH "$PUSH_HOST" cat /etc/slot-node/copies 2>/dev/null)
+  if [ "$approved" != "$HOME_COPIES" ]; then
+    echo "push: the node's approved copy list differs from this config; run provision.sh apply with it first" >&2
+    echo "push: node:   ${approved:-(none)}" >&2
+    echo "push: config: ${HOME_COPIES:-(none)}" >&2
+    exit 2
+  fi
+  echo "push: copy list: $HOME_COPIES"
   dst=$PUSH_HOST:$STORE
   fails=0
   t0=$(date +%s)
