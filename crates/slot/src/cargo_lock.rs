@@ -129,6 +129,9 @@ mod tests {
         let old = lock_file(&target.join("release"), ".cargo-lock");
         old.lock().unwrap();
         assert!(held(&target));
+        // A child another test forks shares this open file until its exec;
+        // unlock releases the lock for every holder, a drop only for this one.
+        old.unlock().unwrap();
         drop(old);
         assert!(!held(&target));
         let cross = lock_file(
