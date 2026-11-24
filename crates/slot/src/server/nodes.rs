@@ -34,10 +34,6 @@ const MISSES_GONE: u32 = 3;
 /// Finished jobs the `state` step reports, newest.
 const DONE_SENT: usize = 30;
 
-/// Remote ids of one node lie in their own range below 0, so they never
-/// meet a local id or another node's.
-const ID_RANGE: i64 = 1_000_000_000_000;
-
 /// What the `state` step prints: the node daemon's own row and its jobs,
 /// as its web API answers them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -90,8 +86,6 @@ pub fn state_step(http: &str) -> Result<String> {
 #[derive(Debug, Clone)]
 pub(super) struct Entry {
     pub(super) conf: RemoteNode,
-    /// Its place in the file, for the id range of its jobs.
-    index: usize,
     pub(super) row: Node,
     misses: u32,
     active: Vec<Job>,
@@ -109,6 +103,8 @@ pub struct Remotes {
     pub(super) nodes: Mutex<Vec<Entry>>,
     /// The spill settings of the file.
     pub spill: crate::hostconfig::SpillConf,
+    /// The file the nodes came from and its modification time when last read.
+    file: Mutex<Option<(std::path::PathBuf, Option<std::time::SystemTime>)>>,
 }
 
 impl Remotes {
@@ -126,15 +122,45 @@ impl Remotes {
         };
         let mut r = Self::new(confs, cluster);
         r.spill = spill;
+        r.file = Mutex::new(path.map(|p| (p.to_path_buf(), modified(p))));
         r
+    }
+
+    /// Reads the file again when it changed since the last read, and takes each
+    /// known node's new terms (deadline, price, place, machine type) into its
+    /// entry and its row. A node added to or removed from the file needs a
+    /// restart. A file that does not parse is reported and changes nothing.
+    pub fn reread(&self, cluster: &str) {
+        let mut file = self.file.lock().expect("file lock");
+        let Some((path, seen)) = file.as_mut() else {
+            return;
+        };
+        let now = modified(path);
+        if now == *seen {
+            return;
+        }
+        *seen = now;
+        let confs = match crate::hostconfig::load_all(path) {
+            Ok((confs, _)) => confs,
+            Err(e) => {
+                eprintln!("slot: cluster config: {e}");
+                return;
+            }
+        };
+        let mut nodes = self.nodes.lock().expect("nodes lock");
+        for e in nodes.iter_mut() {
+            if let Some(c) = confs.iter().find(|c| c.name == e.conf.name) {
+                e.conf = c.clone();
+                configure(&mut e.row, &e.conf, cluster);
+            }
+        }
     }
 
     /// The nodes `confs`, each Joining.
     pub fn new(confs: Vec<RemoteNode>, cluster: &str) -> Self {
         let nodes = confs
             .into_iter()
-            .enumerate()
-            .map(|(index, conf)| {
+            .map(|conf| {
                 let mut row = Node {
                     state: NodeState::Joining,
                     ..Node::default()
@@ -142,7 +168,6 @@ impl Remotes {
                 configure(&mut row, &conf, cluster);
                 Entry {
                     conf,
-                    index,
                     row,
                     misses: 0,
                     active: Vec::new(),
@@ -155,6 +180,7 @@ impl Remotes {
         Self {
             nodes: Mutex::new(nodes),
             spill: crate::hostconfig::SpillConf::default(),
+            file: Mutex::new(None),
         }
     }
 
@@ -228,7 +254,7 @@ impl Remotes {
                     );
                     row.slots_in_use = e.row.slots_in_use.min(row.slots);
                 }
-                let (name, index) = (e.conf.name.clone(), e.index);
+                let name = e.conf.name.clone();
                 let jobs = |v: Vec<serde_json::Value>| -> Vec<Job> {
                     v.into_iter()
                         .filter_map(|j| match serde_json::from_value::<Job>(j) {
@@ -238,7 +264,7 @@ impl Remotes {
                                 None
                             }
                         })
-                        .map(|j| on_node(j, &name, index))
+                        .map(|j| on_node(j, &name))
                         .collect()
                 };
                 let active = jobs(a.active);
@@ -291,17 +317,18 @@ fn configure(row: &mut Node, conf: &RemoteNode, cluster: &str) {
     }
 }
 
-/// A job of node `name` as the endpoint shows it: its id moved into the
-/// node's range, its node named.
-fn on_node(mut j: Job, name: &str, index: usize) -> Job {
-    j.id = remote_job_id(index, j.id);
-    j.node = name.to_string();
-    j
+/// The modification time of `path`, if it can be read.
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// The endpoint's id of job `id` of the node at `index` of the file.
-pub fn remote_job_id(index: usize, id: i64) -> i64 {
-    -((index as i64 + 1) * ID_RANGE + id.rem_euclid(ID_RANGE))
+/// A job of node `name` as the endpoint shows it: the id that node gave it,
+/// the node named, and marked as a node's row, so `node` and `id` together
+/// name it.
+fn on_node(mut j: Job, name: &str) -> Job {
+    j.node = name.to_string();
+    j.from_node = true;
+    j
 }
 
 /// Runs `argv` and parses its output as an [`Answer`], within `timeout`.
@@ -356,6 +383,7 @@ impl Server {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
+            self.remotes.reread(&self.host);
             let argvs: Vec<Vec<String>> = {
                 let g = self.remotes.nodes.lock().expect("nodes lock");
                 g.iter().map(|e| e.conf.state_command()).collect()
@@ -446,7 +474,7 @@ mod tests {
         assert_eq!(row.deadline.as_deref(), Some("2030-01-01T00:00:00Z"));
         // The first answer publishes the running job, not the old ones.
         assert_eq!(changed.len(), 1);
-        assert_eq!(changed[0].id, remote_job_id(0, 7));
+        assert_eq!(changed[0].id, 7);
         assert_eq!(changed[0].node, "build-1");
 
         // The running job finished: published once.
@@ -459,10 +487,7 @@ mod tests {
             20,
             "endpoint",
         );
-        assert_eq!(
-            changed.iter().map(|j| j.id).collect::<Vec<_>>(),
-            [remote_job_id(0, 7)]
-        );
+        assert_eq!(changed.iter().map(|j| j.id).collect::<Vec<_>>(), [7]);
 
         for n in 1..=3 {
             r.record(0, Err("timeout".into()), 30 + n, "endpoint");
@@ -478,10 +503,67 @@ mod tests {
     }
 
     #[test]
-    fn remote_ids_meet_no_local_id_and_no_other_node() {
-        assert!(remote_job_id(0, 1) < 0);
-        assert_ne!(remote_job_id(0, 1), remote_job_id(1, 1));
-        assert_ne!(remote_job_id(0, 2), remote_job_id(0, 1));
+    fn a_changed_lease_in_the_file_reaches_the_node_row_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cluster.toml");
+        std::fs::write(&path, FILE).unwrap();
+        let r = Remotes::load(Some(&path), "endpoint");
+        assert_eq!(
+            r.rows()[0].deadline.as_deref(),
+            Some("2030-01-01T00:00:00Z")
+        );
+        std::fs::write(&path, FILE.replace("2030-01-01", "2031-02-03")).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        r.reread("endpoint");
+        assert_eq!(
+            r.rows()[0].deadline.as_deref(),
+            Some("2031-02-03T00:00:00Z")
+        );
+        r.record(0, Ok(answer(vec![], vec![])), 10, "endpoint");
+        assert_eq!(
+            r.rows()[0].deadline.as_deref(),
+            Some("2031-02-03T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn a_node_job_keeps_the_id_its_node_gave_it() {
+        let r = remotes(FILE);
+        let changed = r.record(
+            0,
+            Ok(answer(
+                vec![job(7, JobState::Running)],
+                vec![job(5, JobState::Ok)],
+            )),
+            10,
+            "endpoint",
+        );
+        assert_eq!(
+            changed
+                .iter()
+                .map(|j| (j.id, j.node.as_str(), j.from_node))
+                .collect::<Vec<_>>(),
+            [(7, "build-1", true)]
+        );
+        let mut st: State = serde_json::from_value(serde_json::json!({
+            "host": "h", "cores": 1, "tokens": 1, "free": 1, "active": [], "done": [],
+            "now_ms": 1, "toolchains": [],
+        }))
+        .unwrap();
+        r.merge_jobs(&mut st);
+        let ids: Vec<i64> = st.active.iter().chain(&st.done).map(|j| j.id).collect();
+        assert_eq!(ids, [7, 5]);
+        let text = serde_json::to_string(&st).unwrap();
+        assert!(
+            !text.contains("\"id\":-"),
+            "a negative id in the state: {text}"
+        );
     }
 
     #[test]

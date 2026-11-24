@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- A node's job keeps the id its node gave it: `GET /api/state`, the job events, `slot status`
+  and the web view show that positive id, with the node in `node` and `from_node: true`. Before,
+  the daemon moved such ids below 0 (`-1000000007499`), and only two tables of the web view
+  rewrote them. The web view names a job by node and id together, so a node's job and a local
+  job of the same id are two rows; labels read `output of job 7089 on build-1d`; the output pane
+  of a node's job says its output stays on that node. `slot status` prints `#7089 on build-1d`.
+  UXF-038 holds it in the UX gate.
+- The daemon reads the host configuration file again when it changes, at the next node poll: a
+  node's deadline, price, place and machine type follow the file without a restart. Before, a
+  lease extended in the file kept showing the old deadline until the daemon restarted.
+
 - `contrib/rustc-gate`, set as `rustc-wrapper`, refuses a compile outside a slot job (no
   `SLOT_JOB`) with exit 3 and the `slot run -- …` command that replaces it; `slot --local`,
   `SLOT_SHIM_OFF=1`, `SLOT_EDITOR=1` (rust-analyzer) and queries such as `rustc -vV` pass.

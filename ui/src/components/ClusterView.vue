@@ -4,9 +4,9 @@ import type { Job, Node } from '../generated/types.ts';
 import { QUEUE_COLOR, tcColor } from '../lib/colors.ts';
 import { LOCAL, cacheShare, checkoutOf, cloudCost, cpuTotals, jobList, laneColor, nodeJobs, nodeOf } from '../lib/cluster.ts';
 import { fmtDur } from '../lib/format.ts';
-import { cmdText, isActive, jobId, runS, waitS } from '../lib/job.ts';
+import { cmdText, idLabel, isActive, jobKey, jobName, runS, waitS } from '../lib/job.ts';
 import { servedQueue, waitReasonText, waitStats } from '../lib/queue.ts';
-import { cacheDay, chartWindow, jobChanges, jobs, live, nodes, select, store } from '../store.ts';
+import { cacheDay, chartWindow, jobChanges, jobs, liveOf, nodes, select, store } from '../store.ts';
 import NodeCard from './NodeCard.vue';
 
 const props = defineProps<{ theme: 'dark' | 'light' }>();
@@ -116,7 +116,7 @@ const jobSum = computed(() => {
 const cpuCell = (j: Job): string => {
   if (j.state === 'queued') return `×${j.tokens}`;
   if (j.state === 'running') {
-    const l = live.get(jobId(j));
+    const l = liveOf(j);
     return `${(l?.cores ?? 0).toFixed(1)} / ${j.tokens}`;
   }
   const r = runS(j, store.clock);
@@ -126,7 +126,7 @@ const stateWord = (j: Job): string => j.state;
 const toolNames = computed(() => [...new Set(allJobs.value.map((j) => j.toolchain))].slice(0, 5));
 
 function openOutput(j: Job, e: MouseEvent): void {
-  select(jobId(j), e);
+  select(jobKey(j), e);
   location.hash = '#jobs';
 }
 
@@ -238,7 +238,7 @@ function cssVar(name: string): string {
 /** A job that starts leaves its queue chip and moves along its checkout's lane to its node's cells. */
 function onJob(before: Job | undefined, after: Job): void {
   if (reduce.value || !diagram.value) return;
-  const id = jobId(after);
+  const id = jobKey(after);
   if (after.state === 'running' && before?.state !== 'running') {
     const start = rel(diagram.value.querySelector(`[data-chip="${id}"]`)) ?? rel(diagram.value.querySelector('.qlist'));
     if (!start) return;
@@ -272,7 +272,7 @@ function drawFlow(now: number): void {
   g.setTransform(DPR, 0, 0, DPR, 0, 0);
   g.clearRect(0, 0, W, H);
   const cpuBy = new Map<string, number>();
-  for (const j of running.value) cpuBy.set(checkoutOf(j), (cpuBy.get(checkoutOf(j)) ?? 0) + (live.get(jobId(j))?.cores ?? 0));
+  for (const j of running.value) cpuBy.set(checkoutOf(j), (cpuBy.get(checkoutOf(j)) ?? 0) + (liveOf(j)?.cores ?? 0));
   if (!reduce.value) dash += dt;
   for (const L of lanes()) {
     const cpu = cpuBy.get(L.name) ?? 0;
@@ -449,8 +449,8 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
           <div class="esub">places jobs on <b>{{ shown.length }}</b> {{ shown.length === 1 ? 'node' : 'nodes' }}</div>
           <div ref="qBox" class="qlist" role="list" aria-label="Queue">
             <TransitionGroup name="chip">
-              <div v-for="(j, i) in chips" :key="jobId(j)" class="qchip" role="listitem" :data-chip="jobId(j)" :class="{ dim: filter && nodeOf(j) !== filter }"
-                :style="{ transform: `translateY(${i * QH}px)` }" :title="`#${jobId(j)} ${cmdText(j)} · ${checkoutOf(j)} · ${queueMeta(j)}`">
+              <div v-for="(j, i) in chips" :key="jobKey(j)" class="qchip" role="listitem" :data-chip="jobKey(j)" :class="{ dim: filter && nodeOf(j) !== filter }"
+                :style="{ transform: `translateY(${i * QH}px)` }" :title="`#${jobName(j)} ${cmdText(j)} · ${checkoutOf(j)} · ${queueMeta(j)}`">
                 <span class="wt" :style="{ background: laneColor(checkoutOf(j), dark) }"></span>
                 <span class="td" :style="{ background: tcColor(j.toolchain) }"></span>
                 <span class="name">{{ checkoutOf(j) }}</span><span class="age">{{ fmtDur(waitS(j, store.clock)) }}</span>
@@ -490,9 +490,9 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
           </div>
           <div ref="rowsBox" class="jrows" role="rowgroup">
             <TransitionGroup name="row">
-              <div v-for="(j, i) in list" :key="jobId(j)" class="jrow" role="row" :style="{ transform: `translateY(${i * RH}px)` }">
-                <span role="cell" class="id"><button type="button" class="jobid" :aria-label="`output of job ${jobId(j)}`" :title="`open the output of job ${jobId(j)} in the job view`"
-                  @click="openOutput(j, $event)">{{ jobId(j) }}</button></span>
+              <div v-for="(j, i) in list" :key="jobKey(j)" class="jrow" role="row" :style="{ transform: `translateY(${i * RH}px)` }">
+                <span role="cell" class="id"><button type="button" class="jobid" :aria-label="`output of job ${jobName(j)}`" :title="`open the output of job ${jobName(j)} in the job view`"
+                  @click="openOutput(j, $event)">{{ idLabel(j) }}</button></span>
                 <span role="cell"><span class="st" :class="j.state"><i></i>{{ stateWord(j) }}</span></span>
                 <span role="cell" class="tool" :title="j.toolchain"><i :style="{ background: tcColor(j.toolchain) }"></i>{{ j.toolchain }}</span>
                 <span role="cell" class="wt" :title="checkoutOf(j)"><i :style="{ background: laneColor(checkoutOf(j), dark) }"></i>{{ checkoutOf(j) }}</span>

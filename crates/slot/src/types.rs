@@ -197,6 +197,12 @@ pub struct Job {
     /// line written before nodes; the API shows such a job as `local`.
     #[serde(default)]
     pub node: String,
+    /// The row came from the daemon of node [`Job::node`]: `id` is the id
+    /// that node gave the job, so a job is named by `node` and `id`
+    /// together. False for this daemon's own jobs, a job it handed to a
+    /// node included.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_node: bool,
 }
 
 /// Id of the daemon's own machine as a node.

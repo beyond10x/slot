@@ -314,6 +314,7 @@ mod tests {
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
             node: String::new(),
+            from_node: false,
         }
     }
 

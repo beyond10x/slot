@@ -197,7 +197,14 @@ local_reason: string,
  * for every job of a daemon without remote nodes. Empty in a job-log
  * line written before nodes; the API shows such a job as `local`.
  */
-node: string, };
+node: string, 
+/**
+ * The row came from the daemon of node [`Job::node`]: `id` is the id
+ * that node gave the job, so a job is named by `node` and `id`
+ * together. False for this daemon's own jobs, a job it handed to a
+ * node included.
+ */
+from_node?: boolean, };
 
 export type Unit = { 
 /**

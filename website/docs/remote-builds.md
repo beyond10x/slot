@@ -304,7 +304,10 @@ state` for each node: the server's `slot shell` answers with its daemon's own ro
 `/api/nodes` and its queued, running and last 30 finished jobs. `GET /api/nodes` then lists the
 node (kind `Remote`, its CPUs, slots, memory, disk and load as the server reports them, the
 deadline and price from the file), and `GET /api/state` and the job events carry its jobs with
-`node` set to the node's name and an id below 0, so they never meet a local id. A node is
+`node` set to the node's name, the id the node gave the job, and `from_node: true`: a
+node's job is named by its node and its id together, since the id may repeat a local one
+(`slot status` prints `#7089 on build-1d`). The deadline and price are read again when the file
+changes, at the next poll. A node is
 `Joining` until its first answer; a poll that fails or takes longer than 4 s is missed, and after
 three misses in a row the node is `Gone` (reason `Lost`) with its last row; the next answer makes
 it `Ready` again. A key of the file that the shape does not declare is refused, and the daemon
@@ -321,7 +324,7 @@ word is the host, the words before it the ssh command) and `slot_path`, and
 `SLOT_REMOTE_SAME_PATH=1`: the node runs it at the same path as here. It holds no local slot;
 its output and exit code reach the caller as before, `slot status` prints `spill: N jobs to
 <node>`, and the job's record in `GET /api/state` has `node` set to the node. The node's own
-row of the same job appears beside it, with an id below 0.
+row of the same job appears beside it, with the node's id and `from_node: true`.
 
 ```toml
 spill_after_s = 0

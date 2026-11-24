@@ -378,6 +378,7 @@ mod tests {
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
             node: String::new(),
+            from_node: false,
         };
         serde_json::to_string(&j).unwrap()
     }

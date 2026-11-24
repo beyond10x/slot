@@ -244,7 +244,8 @@ limit order what arrives.
   (`server/nodes.rs`) prints the node daemon's own `/api/nodes` row and its active and last 30
   finished jobs, read from its web address; the poll is bounded at 4 s, a node is Joining until
   its first answer and Gone (Lost) after three misses, and an answer makes it Ready again. Jobs of
-  a node are shown with ids below 0 (`-(index + 1) * 10^12 - id`), not yet logged to
+  a node keep the id the node gave them and carry `from_node`; node and id together name one
+  (ids below 0 until 0.34), not yet logged to
   `<state-dir>/hosts/<name>/jobs.jsonl`; version and clock are not yet checked at join.
 - Three missed polls in a row, or three failed syncs in a row: `gone`; its placements end.
 - Refused at join: a slot version other than the workstation's; a clock more than 1 s from the

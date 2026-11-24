@@ -1964,6 +1964,7 @@ impl Server {
                 lent_s: 0.0,
                 admission: crate::shares::Mode::Slots,
                 node: LOCAL_NODE.to_string(),
+                from_node: false,
             };
             g.active.insert(
                 id,

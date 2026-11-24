@@ -6,9 +6,9 @@ import { failedStats, levelText, percentile, queueHeading, queuePlace, queueSumm
 
 test('a queued job has a place in the served order, and its reason reads as a line', () => {
   const q = servedQueue([job({ id: 5, enqueued_ms: 3000 }), job({ id: 6, enqueued_ms: 1000 }), job({ id: 7, state: 'running', started_ms: 9 })]);
-  assert.deepEqual(queuePlace(q, 5), { pos: 2, of: 2 });
-  assert.deepEqual(queuePlace(q, 6), { pos: 1, of: 2 });
-  assert.equal(queuePlace(q, 7), null);
+  assert.deepEqual(queuePlace(q, '5'), { pos: 2, of: 2 });
+  assert.deepEqual(queuePlace(q, '6'), { pos: 1, of: 2 });
+  assert.equal(queuePlace(q, '7'), null);
   assert.equal(waitReasonText(job({})), '');
   assert.equal(
     waitReasonText(job({ wait_reason: 'free space on the build filesystem is below 25 GB' })),
@@ -172,7 +172,7 @@ test('adversary u5: a job moved ahead has the place the pool serves it at', () =
   const long = job({ id: 4, enqueued_ms: 1000 });
   const short = job({ id: 9, enqueued_ms: 3000, ahead: true, predicted_ms: 800 });
   const q = servedQueue([long, short]);
-  assert.deepEqual(queuePlace(q, 9), { pos: 1, of: 2 }, 'the pool serves the short job first');
+  assert.deepEqual(queuePlace(q, '9'), { pos: 1, of: 2 }, 'the pool serves the short job first');
 });
 
 test('inside a level the queue is listed by the class the daemon sends: waited the bound, short, the others', () => {

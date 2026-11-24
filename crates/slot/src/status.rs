@@ -575,9 +575,14 @@ fn line(j: &Job, now: i64) -> String {
         (Some(asked), None) => format!("share {asked:.1}"),
         (None, _) => format!("{:>2} slot(s)", j.tokens),
     };
+    let id = if j.from_node {
+        format!("{} on {}", j.id, j.node)
+    } else {
+        j.id.to_string()
+    };
     let mut s = format!(
         "#{:<5} {:<7} {:<9} {} {:>7}  {}  {}",
-        j.id,
+        id,
         state,
         j.toolchain,
         held,
@@ -694,12 +699,12 @@ fn served_class(j: &Job) -> u8 {
 }
 
 /// `spill: N jobs to <node>`, one line per node that runs jobs this
-/// daemon handed it. Those jobs have a local id (above 0) and a node.
+/// daemon handed it: its own jobs with a node, not the rows a node reports.
 fn spill_lines(s: &State) -> String {
     use std::fmt::Write as _;
     let mut by: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for j in &s.active {
-        if j.id > 0 && j.node != crate::types::LOCAL_NODE && !j.node.is_empty() {
+        if !j.from_node && !on_this_machine(j) {
             *by.entry(j.node.as_str()).or_default() += 1;
         }
     }
@@ -830,6 +835,7 @@ mod tests {
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
             node: String::new(),
+            from_node: false,
         }
     }
 
@@ -850,7 +856,11 @@ mod tests {
             on(1, "node-1"),
             on(2, "node-1"),
             on(3, crate::types::LOCAL_NODE),
-            on(-7, "node-1"),
+            {
+                let mut j = on(7, "node-1");
+                j.from_node = true;
+                j
+            },
         ];
         assert_eq!(spill_lines(&s), "spill: 2 jobs to node-1\n");
         assert!(render(&s).contains("spill: 2 jobs to node-1\n"));
@@ -1378,6 +1388,25 @@ mod tests {
             lines[4].starts_with("#2 ") && lines[4].ends_with("cargo test"),
             "running: {out}"
         );
+    }
+
+    #[test]
+    fn a_node_job_shows_its_nodes_id_and_the_node() {
+        let mut theirs = job(7089, JobState::Running, 1);
+        theirs.node = "build-1d".into();
+        theirs.from_node = true;
+        let mut handed = job(12, JobState::Running, 1);
+        handed.node = "build-1d".into();
+        let out = line(&theirs, 0);
+        assert!(out.starts_with("#7089 on build-1d "), "{out}");
+        assert!(!out.contains("#-"), "{out}");
+        let s = State {
+            tokens: 4,
+            limit: 4,
+            active: vec![theirs, handed],
+            ..State::default()
+        };
+        assert_eq!(spill_lines(&s), "spill: 1 jobs to build-1d\n");
     }
 
     #[test]
