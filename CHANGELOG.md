@@ -14,6 +14,9 @@
 - `provision.sh apply` installs the slot release into the instance store and the build user's
   home again, and reads every installed path back: a failed install exits 1 with a `failed:`
   line instead of `changed:`.
+- `push.sh check` compares the copied home directories file by file (name and size): a file
+  missing or of another size on the node is drift, a file a node job added there (a cache) is
+  not. `push.sh compare HERE NODE` runs the comparison on two digest files.
 
 ## 0.36.0 — 2026-11-24
 

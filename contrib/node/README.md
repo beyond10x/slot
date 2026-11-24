@@ -86,3 +86,12 @@ CPUs. The node's slots follow the CPUs found, so the config file does not change
 that holds a filesystem, and as root it neither writes nor mounts through a symbolic link in
 the build user's directories. Files it replaces keep their old version beside them as
 `<name>.slot-prev`.
+
+`push.sh check` compares the toolchain digest of `/usr` and `/etc`, the size of each cargo tool,
+and each file under the `HOME_COPIES` directories by name and size. A file only on the node under
+one of those directories is not drift: `push.sh apply` copies without deleting, and a node job
+may add files to a copied cache.
+
+`HOME_COPIES` directories under a `MIRROR_DIRS` entry live on the instance store: after a stop and
+start they are back only after `push.sh apply`. A tool a job reads from such a directory and
+that is not in `HOME_COPIES` is gone after a start.

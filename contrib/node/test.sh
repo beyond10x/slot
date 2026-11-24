@@ -168,6 +168,26 @@ NODE_TEST=1 NODE_ROOT=$R sh "$W/bundle.sh" >"$W/out" 2>"$W/err"
 st=$?
 if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "bundle check: 0 drift"; else bad "bundle check exit $st: $(cat "$W/out" "$W/err" | tail -5)"; fi
 
+# 6b. push.sh compares file by file: a file a node job added to a copied directory (a cache)
+# is not drift; a file missing or of another size on the node is.
+U=$here/push.sh
+printf 'host ws\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\n' >"$W/here"
+printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\ncopy .cache/t/job-added 3\n' >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "a file a job added on the node is not drift" || bad "job-added file: exit $st $(cat "$W/out" "$W/err")"
+printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 6\nbin cargo-y 3\n' >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 1 ] && ok "compare with differences exits 1" || bad "compare with differences exit $st"
+grep -qx 'drift: push: workstation has: copy .cache/t/a 5' "$W/out" && ok "a file of another size is drift" || bad "size: $(cat "$W/out")"
+grep -qx 'drift: push: workstation has: copy .cache/t/b 7' "$W/out" && ok "a file missing on the node is drift" || bad "missing: $(cat "$W/out")"
+grep -qx 'drift: push: only on the node: bin cargo-y 3' "$W/out" && ok "a cargo tool only on the node is drift" || bad "bin: $(cat "$W/out")"
+grep -q '^3 drift$' "$W/out" && ok "three differences: 3 drift" || bad "count: $(cat "$W/out")"
+printf 'host ws\n' >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >/dev/null 2>&1
+[ $? -eq 2 ] && ok "a result from the workstation itself is refused" || bad "same host not refused"
+
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
 leaks=$(grep -nE '/home/[a-z]|\b(i|vol|subnet|sg|vpc|ami)-0?[0-9a-f]{8,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \
