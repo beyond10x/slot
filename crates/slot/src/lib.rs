@@ -7,6 +7,7 @@
 
 pub mod admission;
 pub mod artifacts;
+pub mod build_version;
 pub mod call;
 pub mod cargo_fetch;
 pub mod cargo_lock;

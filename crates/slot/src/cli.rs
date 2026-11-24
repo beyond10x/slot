@@ -17,7 +17,7 @@ use crate::paths;
 /// GNU-make jobserver, so cargo, rustc and make draw parallelism from the
 /// same pool and the machine is never oversubscribed.
 #[derive(Debug, Parser)]
-#[command(name = "slot", version)]
+#[command(name = "slot", version = env!("SLOT_VERSION"))]
 pub struct Cli {
     /// Run the command here, without the daemon.
     #[arg(long, global = true)]

@@ -190,7 +190,7 @@ fn nodes_answers_the_local_machine_and_jobs_name_it() {
         n.joined_at.as_deref().is_some_and(|t| t.ends_with('Z')),
         "{text}"
     );
-    assert_eq!(n.slot_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(n.slot_version, env!("SLOT_VERSION"));
     assert!(!text.contains("\"deadline\""), "{text}");
 }
 

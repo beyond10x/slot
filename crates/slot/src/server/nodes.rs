@@ -70,7 +70,7 @@ pub fn state_step(http: &str) -> Result<String> {
     let mut done = take(&mut st, "done");
     done.drain(..done.len().saturating_sub(DONE_SENT));
     let a = Answer {
-        slot_version: env!("CARGO_PKG_VERSION").to_string(),
+        slot_version: env!("SLOT_VERSION").to_string(),
         now_ms: st
             .get("now_ms")
             .and_then(serde_json::Value::as_i64)

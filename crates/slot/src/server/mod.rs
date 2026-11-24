@@ -4795,7 +4795,7 @@ fn local_node(f: &LocalFacts<'_>) -> Node {
                 .filter(|j| j.state == JobState::Queued)
                 .count(),
         ),
-        slot_version: env!("CARGO_PKG_VERSION").to_string(),
+        slot_version: env!("SLOT_VERSION").to_string(),
         cpu_busy_milli: Some((f.cpu_busy.max(0.0) * 1000.0).round() as u32),
         memory_used_mib: Some(
             u32::try_from(f.memory.saturating_sub(f.available) >> 20).unwrap_or(u32::MAX),
