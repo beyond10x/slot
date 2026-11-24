@@ -194,6 +194,40 @@ run "$R" check
 [ $? -eq 0 ] && ok "after the setup connection ended: 0 drift" || bad "after the kill: $(cat "$W/out")"
 rm -f "$R/.state/sshd-journal" "$R/.state/alive-pids"
 
+# 5d. With logind, each login is a session whose scope holds every process it started, also one
+# whose parent became pid 1. Closing ends the setup login's whole session: session 7 is live
+# (leader 5050, its user process 5051, a command 5052); session 8's leader 6060 has ended and
+# one command (6070) still runs. Session 9 is the build key's; session 10's leader pid 6161
+# logged a setup login long before the session began, so the number was reused.
+# sessions/<id>: LEADER and REALTIME (microseconds) as in /run/systemd/sessions/<id>.
+printf '%s\n' "1795600010.000000 node sshd-session[5050]: Accepted publickey for $me from 192.0.2.1 port 11 ssh2: ED25519 $fp" \
+  "1795600020.000000 node sshd-session[6060]: Accepted publickey for $me from 192.0.2.1 port 12 ssh2: ED25519 $fp" \
+  "1795600021.000000 node sshd-session[4343]: Accepted publickey for $me from 192.0.2.1 port 13 ssh2: ED25519 SHA256:BuildKeyFingerprint" \
+  "1795600030.000000 node sshd-session[6161]: Accepted publickey for $me from 192.0.2.1 port 14 ssh2: ED25519 $fp" >"$R/.state/sshd-journal"
+printf '5050 sshd-session 1795600010\n4343 sshd-session 1795600021\n6161 sshd-session 1795700000\n' >"$R/.state/alive-pids"
+mkdir -p "$R/.state/sessions" "$R/.state/session-procs"
+printf 'LEADER=5050\nREALTIME=1795600010200000\n' >"$R/.state/sessions/7"
+printf 'LEADER=6060\nREALTIME=1795600020100000\n' >"$R/.state/sessions/8"
+printf 'LEADER=4343\nREALTIME=1795600021100000\n' >"$R/.state/sessions/9"
+printf 'LEADER=6161\nREALTIME=1795700000000000\n' >"$R/.state/sessions/10"
+echo '5050 5051 5052' >"$R/.state/session-procs/7"
+echo '6070' >"$R/.state/session-procs/8"
+echo '4343 4344' >"$R/.state/session-procs/9"
+echo '6161 6162' >"$R/.state/session-procs/10"
+run "$R" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: keys: a login with the setup key is still running: session 7 (leader pid 5050)' "$W/out" && ok "a live setup session is drift" || bad "live session: exit $st $(cat "$W/out")"
+grep -qx 'drift: keys: a login with the setup key is still running: session 8 (leader pid 6060)' "$W/out" && ok "a setup session whose leader ended is drift while a command runs" || bad "orphan session: $(cat "$W/out")"
+grep -q 'session 9\|session 10\|connected: pid' "$W/out" && bad "another session or a bare pid is drift: $(grep '^drift: keys' "$W/out")" || ok "the build session and a reused leader pid are not drift"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'terminate-session 7' "$R/.calls" && grep -qx 'terminate-session 8' "$R/.calls" && ok "apply ends both setup sessions" || bad "terminate calls: $(cat "$R/.calls")"
+[ ! -e "$R/.state/session-procs/7" ] && [ ! -e "$R/.state/session-procs/8" ] && ok "no process of the setup sessions is left (5050, 5051, 5052, 6070)" || bad "left: $(cat "$R/.state/session-procs/7" "$R/.state/session-procs/8" 2>/dev/null)"
+grep -q 'terminate-session 9\|terminate-session 10\|kill ' "$R/.calls" && bad "apply ended something else: $(cat "$R/.calls")" || ok "apply leaves the build session and the reused pid's session"
+run "$R" check
+[ $? -eq 0 ] && ok "after the setup sessions ended: 0 drift" || bad "after terminate: $(cat "$W/out")"
+rm -rf "$R/.state/sshd-journal" "$R/.state/alive-pids" "$R/.state/sessions" "$R/.state/session-procs"
+
 # 6. The bundle is one self-contained script that gives the same answer.
 sh "$P" bundle "$W/node.conf" check >"$W/bundle.sh" 2>"$W/err"
 st=$?
