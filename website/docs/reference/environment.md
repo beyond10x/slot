@@ -21,6 +21,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
 | `SLOT_REMOTE_SAME_PATH_ROOT` | `$HOME` | with `SLOT_REMOTE_SAME_PATH`, only a repository below this directory keeps its own path on the remote host; any other goes to the remote workspace root (`SLOT_WSROOT`) |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
+| `SLOT_PHASES_FILE` | unset | in remote mode, after the job: the file the client writes the job's sync, back time, node target directory and seed to, as JSON. The daemon sets it for a job it hands to a node; a caller has no need to. See [Recorded phases of a job](#recorded-phases-of-a-job). |
 | `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`; by share (`slot admission shares`) the job asks for a share of N CPUs, at most the budget, and holds no slot. See [Toolchains](../toolchains.md#naming-the-slots) and [Admission by share](../how-it-works.md#admission-by-share). |
 | `SLOT_PRIORITY` | unset (`normal`) | a job's queue level, `urgent`, `high`, `normal` or `low`, as `slot --priority` (which wins over it); a rule set with `slot priority set` for the repository wins over both; ignored with `--local`. See [Priority](../how-it-works.md#priority). |
@@ -52,6 +53,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
 | `CARGO_NET_OFFLINE` | `true`, for a remote cargo job that builds, once the server fetched the crates of the mirror's `Cargo.lock`; not set for a mirror without a `Cargo.lock`. See [Remote builds](../remote-builds.md#crates-are-fetched-once-per-cargolock). |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
+| `SLOT_PHASES_FILE` | `<state-dir>/phases-<id>.json`, for a job the daemon hands to a node: the remote-mode client that runs it writes what it measured there, and the daemon adds that to the job's record when the job ends (see [below](#recorded-phases-of-a-job)) |
 
 ## Dropped from the caller's environment
 
@@ -108,3 +110,26 @@ unchanged.
 | `compile cache off: RUSTC_WRAPPER is empty` | `RUSTC_WRAPPER` is set and empty; with `RUSTC_WRAPPER` unset and `CARGO_BUILD_RUSTC_WRAPPER` empty, the warning names that variable |
 | `private sccache server (port N)` | `SCCACHE_SERVER_PORT` is a port other than 4226 |
 | `private sccache directory` | `SCCACHE_DIR` is set |
+
+## Recorded phases of a job
+
+The record of a job in the [job log](../how-it-works.md#job-log) says where its time went. Each
+field is absent where it does not apply and in a line an older slot wrote: an absent field means
+unknown, never 0.
+
+| field | job | value |
+|---|---|---|
+| `sync_ms` | remote | milliseconds the client took to send the tree to the node, git directories and a same-path working directory included |
+| `sync_bytes` | remote | bytes that sync sent, as rsync counted them |
+| `back_ms` | remote | milliseconds the client took to copy the cargo products and the `--fetch` paths back after the job ended; absent when nothing came back |
+| `compile_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the start to the first test binary, as the job's output shows it: cargo's `Running …` or `Doc-tests …` line, nextest's `Starting N tests across …` line or cargo's JSON `build-finished` message; the whole run when no test binary ran |
+| `test_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the first test binary to the end; absent when no test binary ran |
+| `node_target_dir` | remote cargo | the target directory the job built into on the node |
+| `seeded_from` | remote cargo | what that directory held when the job queued: the workspace id of the sibling it was seeded from by reflink, `kept` (the build of an earlier job of the same tree) or `empty` |
+
+A node's record gets `sync_ms` and `sync_bytes` with the job's request. `back_ms` is measured
+after the job ended: the client sends it to the node in a second request, and the node appends
+it to its job log as a line of its own, `{"amend":<id>,"back_ms":<ms>}`, which a reader of job
+lines skips and the daemon applies to job `<id>` when it reads the log back. For a job the daemon
+hands to a node, its own record gets every remote field from the file in `SLOT_PHASES_FILE`, and
+its compile and test time from the output the node streams back.

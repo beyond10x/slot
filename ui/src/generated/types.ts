@@ -204,7 +204,48 @@ node: string,
  * together. False for this daemon's own jobs, a job it handed to a
  * node included.
  */
-from_node?: boolean, };
+from_node?: boolean, 
+/**
+ * A remote job: milliseconds its client took to send the tree to the
+ * node, before the job queued there. Absent for a local job and from a
+ * client or daemon that does not measure it (`crate::phases`).
+ */
+sync_ms?: number, 
+/**
+ * A remote job: bytes that sync sent, as rsync counted them. Absent
+ * where `sync_ms` is, and when rsync did not say.
+ */
+sync_bytes?: number, 
+/**
+ * A remote job: milliseconds its client took to copy the cargo
+ * products and the `--fetch` paths back after the job ended. Absent
+ * when nothing was copied back, and from a client that does not say.
+ */
+back_ms?: number, 
+/**
+ * A cargo `test`, `nextest` or `bench` job: milliseconds from its
+ * start to the first test binary it ran, as its output shows it (a
+ * `Running …` or `Doc-tests …` line of cargo, nextest's `Starting …`
+ * line or cargo's `build-finished` message); the whole run when no
+ * test binary ran. Absent for other jobs and from an older daemon.
+ */
+compile_ms?: number, 
+/**
+ * A cargo `test`, `nextest` or `bench` job: milliseconds from the
+ * first test binary to its end. Absent when no test binary ran.
+ */
+test_ms?: number, 
+/**
+ * A remote cargo job: the target directory it built into on the node.
+ */
+node_target_dir?: string, 
+/**
+ * A remote cargo job: what its target directory on the node held when
+ * the job queued: the workspace id of the sibling it was seeded from,
+ * `empty` (absent or empty, and not seeded) or `kept` (the directory
+ * of an earlier job of the same tree).
+ */
+seeded_from?: string, };
 
 export type Unit = { 
 /**

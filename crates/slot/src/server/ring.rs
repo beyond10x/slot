@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use tokio::sync::mpsc;
 
@@ -10,6 +11,9 @@ use crate::types::Chunk;
 /// Bounded output buffer.
 pub struct Ring {
     inner: Mutex<Inner>,
+    /// When the job's output first showed a test binary start
+    /// ([`crate::phases::starts_tests`]), Unix ms; 0 until then.
+    tests_at: AtomicI64,
 }
 
 struct Inner {
@@ -34,6 +38,28 @@ impl Ring {
                 closed: false,
                 subs: Vec::new(),
             }),
+            tests_at: AtomicI64::new(0),
+        }
+    }
+
+    /// Records that the job's first test binary started at `ms`, unless an
+    /// earlier one was recorded.
+    pub fn mark_tests(&self, ms: i64) {
+        let _ = self
+            .tests_at
+            .compare_exchange(0, ms, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// Forgets the recorded start of the tests, for a job that runs again.
+    pub fn unmark_tests(&self) {
+        self.tests_at.store(0, Ordering::SeqCst);
+    }
+
+    /// When the job's first test binary started, Unix ms.
+    pub fn tests_at(&self) -> Option<i64> {
+        match self.tests_at.load(Ordering::SeqCst) {
+            0 => None,
+            t => Some(t),
         }
     }
 

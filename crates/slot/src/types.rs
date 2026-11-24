@@ -203,6 +203,47 @@ pub struct Job {
     /// node included.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub from_node: bool,
+    /// A remote job: milliseconds its client took to send the tree to the
+    /// node, before the job queued there. Absent for a local job and from a
+    /// client or daemon that does not measure it (`crate::phases`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub sync_ms: Option<u64>,
+    /// A remote job: bytes that sync sent, as rsync counted them. Absent
+    /// where `sync_ms` is, and when rsync did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub sync_bytes: Option<u64>,
+    /// A remote job: milliseconds its client took to copy the cargo
+    /// products and the `--fetch` paths back after the job ended. Absent
+    /// when nothing was copied back, and from a client that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub back_ms: Option<u64>,
+    /// A cargo `test`, `nextest` or `bench` job: milliseconds from its
+    /// start to the first test binary it ran, as its output shows it (a
+    /// `Running …` or `Doc-tests …` line of cargo, nextest's `Starting …`
+    /// line or cargo's `build-finished` message); the whole run when no
+    /// test binary ran. Absent for other jobs and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub compile_ms: Option<u64>,
+    /// A cargo `test`, `nextest` or `bench` job: milliseconds from the
+    /// first test binary to its end. Absent when no test binary ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub test_ms: Option<u64>,
+    /// A remote cargo job: the target directory it built into on the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_target_dir: Option<String>,
+    /// A remote cargo job: what its target directory on the node held when
+    /// the job queued: the workspace id of the sibling it was seeded from,
+    /// `empty` (absent or empty, and not seeded) or `kept` (the directory
+    /// of an earlier job of the same tree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seeded_from: Option<String>,
 }
 
 /// Id of the daemon's own machine as a node.
@@ -706,6 +747,9 @@ pub struct State {
 /// One message on `GET /api/events`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "lowercase")]
+// An event is built, serialized to its line at once and dropped: no
+// collection holds events, so the size of the larger variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// A job changed state.
     Job {
@@ -953,6 +997,56 @@ mod tests {
             "{line}"
         );
         assert_eq!(serde_json::from_str::<Job>(&line).unwrap(), j);
+    }
+
+    /// A job-log line written before the phase fields reads each of them
+    /// as unknown, never as 0, and a job without them is written without
+    /// them; a line of the new shape reads every one back.
+    #[test]
+    fn a_jobs_record_names_its_sync_phases_and_seed() {
+        let old = r#"{"id":7,"argv":["cargo","test"],"cwd":"/srv/acct/ws/w1","repo":"repo",
+            "session":"","client":"h:1","toolchain":"rust","remote":true,"tokens":1,
+            "state":"ok","enqueued_ms":1,"started_ms":2,"ended_ms":3,"exit":0,"cpu_s":0.0,
+            "compile_server_cpu_s":0.0,"peak_rss":0}"#;
+        let j: Job = serde_json::from_str(old).unwrap();
+        assert_eq!(j.sync_ms, None);
+        assert_eq!(j.back_ms, None);
+        assert_eq!(j.sync_bytes, None);
+        assert_eq!(j.compile_ms, None);
+        assert_eq!(j.test_ms, None);
+        assert_eq!(j.node_target_dir, None);
+        assert_eq!(j.seeded_from, None);
+        let line = serde_json::to_string(&j).unwrap();
+        for k in [
+            "sync_ms",
+            "back_ms",
+            "sync_bytes",
+            "compile_ms",
+            "test_ms",
+            "node_target_dir",
+            "seeded_from",
+        ] {
+            assert!(!line.contains(k), "{k}: {line}");
+        }
+        let new = r#"{"id":8,"argv":["cargo","test"],"cwd":"/srv/acct/ws/w1","repo":"repo",
+            "session":"","client":"h:1","toolchain":"rust","remote":true,"tokens":1,
+            "state":"ok","enqueued_ms":1,"started_ms":2,"ended_ms":3,"exit":0,"cpu_s":0.0,
+            "compile_server_cpu_s":0.0,"peak_rss":0,"sync_ms":1200,"back_ms":300,
+            "sync_bytes":4096,"compile_ms":45000,"test_ms":9000,
+            "node_target_dir":"/srv/acct/cache/target/w1","seeded_from":"w0"}"#;
+        let j: Job = serde_json::from_str(new).unwrap();
+        assert_eq!(j.sync_ms, Some(1200));
+        assert_eq!(j.back_ms, Some(300));
+        assert_eq!(j.sync_bytes, Some(4096));
+        assert_eq!(j.compile_ms, Some(45_000));
+        assert_eq!(j.test_ms, Some(9000));
+        assert_eq!(
+            j.node_target_dir.as_deref(),
+            Some("/srv/acct/cache/target/w1")
+        );
+        assert_eq!(j.seeded_from.as_deref(), Some("w0"));
+        let back: Job = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(back, j);
     }
 
     /// A job-log line written before nodes has no `node` and reads as "";

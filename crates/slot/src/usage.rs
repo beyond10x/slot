@@ -379,6 +379,13 @@ mod tests {
             admission: crate::shares::Mode::Slots,
             node: String::new(),
             from_node: false,
+            sync_ms: None,
+            sync_bytes: None,
+            back_ms: None,
+            compile_ms: None,
+            test_ms: None,
+            node_target_dir: None,
+            seeded_from: None,
         };
         serde_json::to_string(&j).unwrap()
     }
