@@ -322,6 +322,10 @@ struct Live {
     claimed: bool,
     /// It may go to a remote node ([`spill`]) and has not been there.
     spillable: bool,
+    /// The target directory its environment names (`CARGO_TARGET_DIR`,
+    /// [`crate::evict::env_target`]), whatever its toolchain: eviction
+    /// keeps it.
+    env_target: Option<PathBuf>,
 }
 
 impl Live {
@@ -459,6 +463,10 @@ struct Inner {
     /// Local target directories jobs built into: repository and last build,
     /// Unix milliseconds. Eviction only ever deletes one of these.
     targets: HashMap<PathBuf, (String, i64)>,
+    /// Working directories of the jobs of the log and when a job last ran
+    /// in each, Unix ms: eviction keeps the target directories in the tree
+    /// of one used in the last hour ([`crate::evict::TREE_KEEP`]).
+    ran_in: HashMap<PathBuf, i64>,
     /// Machine base: the cgroup readings and their averages.
     machine: machine::Monitor,
     /// Machine base: the numbers of the last tick.
@@ -662,12 +670,14 @@ impl Server {
         let mut next_id = 0;
         let mut memory = admission::History::default();
         let mut targets = HashMap::new();
+        let mut ran_in = HashMap::new();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
                     memory.record(&job);
                     record_target(&mut targets, &job);
+                    record_ran(&mut ran_in, &job);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
@@ -742,6 +752,7 @@ impl Server {
                 memory,
                 handing_over: false,
                 targets,
+                ran_in,
                 machine: machine::Monitor::default(),
                 machine_shown: machine::Shown::default(),
                 budget: crate::shares::Budget::new(cores, f64::from(cores)),
@@ -1387,6 +1398,7 @@ impl Server {
                     share: r.job.share.unwrap_or(f64::from(r.job.tokens.max(1))),
                     claimed: true,
                     spillable: false,
+                    env_target: crate::evict::pid_env_target(r.pid, Path::new(&r.job.cwd)),
                     job: r.job,
                     pid: Some(r.pid),
                     held: r.held,
@@ -1978,6 +1990,7 @@ impl Server {
                     share,
                     claimed: false,
                     spillable: false,
+                    env_target: crate::evict::env_target(&req.env, &cwd),
                 },
             );
             (id, share)
@@ -2859,6 +2872,7 @@ impl Server {
                 g.memory.record(&job);
             }
             record_target(&mut g.targets, &job);
+            record_ran(&mut g.ran_in, &job);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -4322,13 +4336,18 @@ impl Server {
                     .values()
                     .filter(|l| !l.job.target_dir.is_empty())
                     .map(|l| PathBuf::from(&l.job.target_dir))
+                    .chain(g.active.values().filter_map(|l| l.env_target.clone()))
                     .chain(failed)
                     .collect();
+                // The trees of queued and running jobs, and of every job
+                // that ran in the last hour: the steps of one long task
+                // keep their target directories between them.
                 let cwds: HashSet<PathBuf> = g
                     .active
                     .values()
                     .filter(|l| !l.job.cwd.is_empty())
                     .map(|l| PathBuf::from(&l.job.cwd))
+                    .chain(crate::evict::ran_recently(&g.ran_in, now_ms()))
                     .collect();
                 (g.targets.clone(), dirs, cwds)
             };
@@ -4420,8 +4439,13 @@ impl Server {
                     &c.path,
                     Path::new(&l.job.target_dir),
                     Path::new(&l.job.cwd),
-                )
-            });
+                ) || l
+                    .env_target
+                    .as_deref()
+                    .is_some_and(|t| crate::evict::holds_target(&c.path, t))
+            }) || crate::evict::ran_recently(&g.ran_in, now_ms())
+                .iter()
+                .any(|cwd| crate::evict::job_keeps(&c.path, Path::new(""), cwd));
             if busy {
                 return "kept: a job started".into();
             }
@@ -5143,6 +5167,17 @@ fn record_target(targets: &mut HashMap<PathBuf, (String, i64)>, job: &Job) {
     if when >= e.1 {
         *e = (job.repo.clone(), when);
     }
+}
+
+/// Notes that `job` ran (or waited) in its working directory, with the
+/// latest of its end, start and enqueue time.
+fn record_ran(ran_in: &mut HashMap<PathBuf, i64>, job: &Job) {
+    if job.cwd.is_empty() {
+        return;
+    }
+    let when = job.ended_ms.max(job.started_ms).max(job.enqueued_ms);
+    let e = ran_in.entry(PathBuf::from(&job.cwd)).or_insert(when);
+    *e = (*e).max(when);
 }
 
 fn look_path(name: &str, env: &[String]) -> Result<PathBuf> {

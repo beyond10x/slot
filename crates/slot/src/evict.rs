@@ -4,10 +4,14 @@
 //! a floor, the daemon deletes the target directories it saw jobs build
 //! into, least recently built first, until free space is above the floor
 //! plus a margin. It never deletes a directory a queued or running job
-//! builds into or whose checkout such a job runs in, one built more recently
-//! than the idle keep (2 h, or the one `slot evict-below --idle` set), one
-//! a process or a service uses, one whose removal failed in the last hour,
-//! or a path that no job of the log built into. The mark is
+//! builds into (its own or the one its `CARGO_TARGET_DIR` names, a directory
+//! nested in it or holding it), one in the tree a queued or running job
+//! works in (git's top level of its working directory, else the working
+//! directory) or in the tree of a job that ran in the last hour, one built
+//! more recently than the idle keep (2 h, or the one `slot evict-below
+//! --idle` set; never less than an hour), one a process or a service uses
+//! or whose `.cargo-lock` a process holds locked, one whose removal failed
+//! in the last hour, or a path that no job of the log built into. The mark is
 //! `--evict-below`, or the one `slot evict-below` set at run time. A path
 //! must carry Cargo's `CACHEDIR.TAG` to count as a target directory. A dry
 //! run (`--evict-dry-run`, or [`FILE`]) only says what it would delete.
@@ -350,15 +354,93 @@ impl std::str::FromStr for BelowSetting {
 }
 
 /// Whether a queued or running job that builds into `target_dir` and runs
-/// in `cwd` keeps target directory `dir`: it builds into it, or it runs in
-/// the checkout that holds it (the directory above `dir`, or below that).
+/// in `cwd` keeps target directory `dir`: it builds into it, below it or
+/// above it ([`holds_target`]), or it runs in the checkout that holds it
+/// ([`runs_in_checkout`]).
 pub fn job_keeps(dir: &Path, target_dir: &Path, cwd: &Path) -> bool {
-    target_dir == dir || runs_in_checkout(dir, cwd)
+    holds_target(dir, target_dir) || runs_in_checkout(dir, cwd, &tree_of(cwd))
 }
 
-/// Whether `cwd` lies in the checkout of target directory `dir`.
-fn runs_in_checkout(dir: &Path, cwd: &Path) -> bool {
-    !cwd.as_os_str().is_empty() && dir.parent().is_some_and(|c| cwd.starts_with(c))
+/// Whether target directory `dir` equals, holds or lies inside `target`, a
+/// target directory a job builds into (`target/ignite-test/rt` keeps
+/// `target`, and `target` keeps the ones nested in it).
+pub fn holds_target(dir: &Path, target: &Path) -> bool {
+    !target.as_os_str().is_empty() && (target.starts_with(dir) || dir.starts_with(target))
+}
+
+/// Whether a job working in `cwd`, whose tree is `tree` ([`tree_of`]), uses
+/// target directory `dir`: `dir` lies anywhere in the tree (nested ones
+/// such as `target/ignite-test/rt` or `driver/target` too), or `cwd` lies
+/// below the directory that holds `dir`.
+fn runs_in_checkout(dir: &Path, cwd: &Path, tree: &Path) -> bool {
+    !cwd.as_os_str().is_empty()
+        && (dir.parent().is_some_and(|c| cwd.starts_with(c))
+            || (!tree.as_os_str().is_empty() && dir.starts_with(tree)))
+}
+
+/// The tree a job working in `cwd` uses: git's top level (the nearest
+/// directory at or above `cwd` that holds `.git`), else `cwd` itself.
+/// A `.git` in the home directory (`$HOME`) or above it does not count: a
+/// repository of the whole home would make every target directory on the
+/// host one tree. Empty for an empty `cwd`.
+pub fn tree_of(cwd: &Path) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    tree_under(cwd, home.as_deref())
+}
+
+/// [`tree_of`] with the home directory `home`.
+fn tree_under(cwd: &Path, home: Option<&Path>) -> PathBuf {
+    if cwd.as_os_str().is_empty() {
+        return PathBuf::new();
+    }
+    cwd.ancestors()
+        .take_while(|d| home.is_none_or(|h| !h.starts_with(d)))
+        .find(|d| std::fs::symlink_metadata(d.join(".git")).is_ok())
+        .unwrap_or(cwd)
+        .to_path_buf()
+}
+
+/// How long the tree of a job keeps every target directory in it after the
+/// job ran, whatever the idle keep: the steps of one long task run as
+/// several jobs in a row and use the same target directories between them.
+pub const TREE_KEEP: Duration = Duration::from_secs(3600);
+
+/// The working directories of `ran` (a directory and when the last job
+/// ran in it, Unix ms) a job ran in within [`TREE_KEEP`] of `now_ms`: their
+/// trees keep their target directories like a queued job's
+/// ([`candidates`]).
+#[allow(clippy::implicit_hasher)]
+pub fn ran_recently(ran: &HashMap<PathBuf, i64>, now_ms: i64) -> HashSet<PathBuf> {
+    let keep = i64::try_from(TREE_KEEP.as_millis()).unwrap_or(i64::MAX);
+    ran.iter()
+        .filter(|(_, at)| now_ms - **at < keep)
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
+/// The target directory a job's environment names (`CARGO_TARGET_DIR`,
+/// else `CARGO_BUILD_TARGET_DIR`; a later entry wins), relative to `cwd`.
+pub fn env_target(env: &[String], cwd: &Path) -> Option<PathBuf> {
+    ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"]
+        .iter()
+        .find_map(|k| {
+            env.iter()
+                .rev()
+                .find_map(|e| e.strip_prefix(k).and_then(|r| r.strip_prefix('=')))
+                .filter(|v| !v.is_empty())
+        })
+        .map(|t| normalize(&cwd.join(t)))
+}
+
+/// [`env_target`] of process `pid`, read from `/proc/<pid>/environ`: the
+/// target of a running job whose request a reload did not keep.
+pub fn pid_env_target(pid: i32, cwd: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let env: Vec<String> = raw
+        .split(|b| *b == 0)
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .collect();
+    env_target(&env, cwd)
 }
 
 /// The mark as `slot status` and the journal name it: `40.0 GB`, or
@@ -573,10 +655,12 @@ pub struct Candidate {
 }
 
 /// Target directories eligible now, least recently built first: not
-/// built within `min_idle` of `now_ms`, not in `busy_dirs` (the target
-/// directories of queued and running jobs) and not in the checkout of one
-/// of `busy_cwds` (their working directories, [`job_keeps`]). Another
-/// directory of the same repository may go.
+/// built within `min_idle` (and never within [`TREE_KEEP`]) of `now_ms`,
+/// not equal to, inside or holding one of `busy_dirs` (the target
+/// directories of queued and running jobs, [`holds_target`]) and not in
+/// the tree of one of `busy_cwds` (the working directories of queued and
+/// running jobs and of jobs that ran within [`TREE_KEEP`],
+/// [`job_keeps`]). Another directory of the same repository may go.
 #[allow(clippy::implicit_hasher)]
 pub fn candidates(
     seen: &HashMap<PathBuf, (String, i64)>,
@@ -585,13 +669,14 @@ pub fn candidates(
     now_ms: i64,
     min_idle: Duration,
 ) -> Vec<Candidate> {
-    let idle_ms = i64::try_from(min_idle.as_millis()).unwrap_or(i64::MAX);
+    let idle_ms = i64::try_from(min_idle.max(TREE_KEEP).as_millis()).unwrap_or(i64::MAX);
+    let trees: Vec<(&PathBuf, PathBuf)> = busy_cwds.iter().map(|c| (c, tree_of(c))).collect();
     let mut v: Vec<Candidate> = seen
         .iter()
         .filter(|(p, (_, last))| {
             now_ms - *last >= idle_ms
-                && !busy_dirs.contains(*p)
-                && !busy_cwds.iter().any(|c| runs_in_checkout(p, c))
+                && !busy_dirs.iter().any(|t| holds_target(p, t))
+                && !trees.iter().any(|(c, t)| runs_in_checkout(p, c, t))
         })
         .map(|(p, (repo, last))| Candidate {
             path: p.clone(),
@@ -633,6 +718,51 @@ pub fn plan(free: u64, s: Settings, cands: &[(Candidate, u64)]) -> Vec<&(Candida
 pub struct InUse {
     /// A used path and who uses it (`process 123 runs it`).
     paths: Vec<(PathBuf, String)>,
+    /// Inode numbers of the files a process holds a lock on
+    /// (`<proc>/locks`). Matched without the device: `/proc/locks` names
+    /// the filesystem's device, which on btrfs differs from the one `stat`
+    /// gives, and a false match only keeps a directory.
+    locked: HashSet<u64>,
+}
+
+/// The inode numbers `/proc/locks` text `text` names (`MAJ:MIN:INODE` on
+/// each line, blocked waiters too).
+pub fn locked_inodes(text: &str) -> HashSet<u64> {
+    text.lines()
+        .filter_map(|l| {
+            l.split_whitespace().find_map(|w| {
+                let mut p = w.split(':');
+                let (maj, min, ino) = (p.next()?, p.next()?, p.next()?);
+                (p.next().is_none()
+                    && u32::from_str_radix(maj, 16).is_ok()
+                    && u32::from_str_radix(min, 16).is_ok())
+                .then(|| ino.parse::<u64>().ok())
+                .flatten()
+            })
+        })
+        .collect()
+}
+
+/// Whether a `.cargo-lock` anywhere under `dir` has an inode in `locked`:
+/// a cargo holds the directory's build lock.
+fn holds_held_lock(dir: &Path, locked: &HashSet<u64>) -> bool {
+    if locked.is_empty() {
+        return false;
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if e.file_name() == ".cargo-lock"
+                && e.metadata().is_ok_and(|m| locked.contains(&m.ino()))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 impl InUse {
@@ -710,7 +840,9 @@ impl InUse {
                 }
             }
         }
-        Self { paths }
+        let locked =
+            locked_inodes(&std::fs::read_to_string(proc_root.join("locks")).unwrap_or_default());
+        Self { paths, locked }
     }
 
     /// Why target directory `dir` is in use, if it is.
@@ -719,6 +851,9 @@ impl InUse {
             .iter()
             .find(|(p, _)| p.starts_with(dir))
             .map(|(_, why)| why.as_str())
+            .or_else(|| {
+                holds_held_lock(dir, &self.locked).then_some("a cargo holds a .cargo-lock in it")
+            })
     }
 }
 
@@ -1093,7 +1228,7 @@ mod tests {
         ]);
         let dirs = HashSet::from([shared.clone()]);
         let cwds = HashSet::from([PathBuf::from("/w/trees/repo-a"), PathBuf::from("/w/repo")]);
-        let left: Vec<PathBuf> = candidates(&seen, &dirs, &cwds, 2, Duration::ZERO)
+        let left: Vec<PathBuf> = candidates(&seen, &dirs, &cwds, 2 * 3_600_000, Duration::ZERO)
             .into_iter()
             .map(|c| c.path)
             .collect();
@@ -1112,6 +1247,156 @@ mod tests {
         assert!(!job_keeps(&idle, Path::new(""), Path::new("")));
     }
 
+    /// A queued or running job keeps every target directory in its tree
+    /// (git's top level, else its working directory), nested ones too, and
+    /// the one its environment names, with what lies above and below it.
+    #[test]
+    fn a_job_keeps_every_target_dir_in_its_tree_and_the_one_its_env_names() {
+        let d = tempfile::tempdir().unwrap();
+        let u = d.path().join("srv/u");
+        let tree = u.join("tree");
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        std::fs::create_dir_all(tree.join("crates/a")).unwrap();
+        let plain = u.join("plain");
+        std::fs::create_dir_all(plain.join("sub")).unwrap();
+        let nested = tree.join("target/ignite-test/rt");
+        let top = tree.join("target");
+        let driver = tree.join("driver/target");
+        let in_plain = plain.join("sub/target");
+        let shared = u.join("shared/target");
+        let shared_rt = shared.join("ignite-test/rt");
+        let other = u.join("other/target");
+        let seen: HashMap<PathBuf, (String, i64)> = [
+            &nested, &top, &driver, &in_plain, &shared, &shared_rt, &other,
+        ]
+        .map(|p| (p.clone(), ("r".to_string(), 1)))
+        .into();
+        let cwd = u.join("elsewhere");
+        let env_t = env_target(
+            &s(&["CARGO_TARGET_DIR=../shared/target/ignite-test/rt"]),
+            &cwd,
+        )
+        .expect("the environment names a target");
+        assert_eq!(env_t, shared_rt);
+        let dirs = HashSet::from([env_t.clone()]);
+        let cwds = HashSet::from([tree.join("crates/a"), plain.clone()]);
+        let left: Vec<PathBuf> = candidates(&seen, &dirs, &cwds, 100 * 3_600_000, Duration::ZERO)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert_eq!(left, std::slice::from_ref(&other));
+        let a = tree.join("crates/a");
+        for kept in [&nested, &top, &driver] {
+            assert!(job_keeps(kept, Path::new(""), &a), "{}", kept.display());
+        }
+        assert!(job_keeps(&in_plain, Path::new(""), &plain));
+        assert!(
+            job_keeps(&shared, &env_t, &cwd),
+            "it holds the job's target"
+        );
+        assert!(
+            job_keeps(&shared_rt, &shared, &cwd),
+            "it lies in the job's target"
+        );
+        assert!(!job_keeps(&other, &env_t, &a));
+        assert_eq!(env_target(&s(&["CARGO_TARGET_DIR="]), &cwd), None);
+
+        let h = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(h.path().join(".git")).unwrap();
+        let sub = h.path().join("r/sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(tree_under(&sub, None), h.path());
+        assert_eq!(
+            tree_under(&sub, Some(h.path())),
+            sub,
+            "a repository of the home directory is not a tree"
+        );
+    }
+
+    /// A target directory with a `.cargo-lock` a process holds locked,
+    /// anywhere in it, is in use; one whose lock nobody holds is not.
+    #[test]
+    fn a_target_whose_cargo_lock_is_held_is_in_use() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("srv/u/tree/target");
+        let lock = t.join("ignite-test/rt/debug/.cargo-lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        let idle = d.path().join("srv/u/idle/target");
+        std::fs::create_dir_all(idle.join("debug")).unwrap();
+        std::fs::write(idle.join("debug/.cargo-lock"), b"").unwrap();
+        let ino = std::fs::metadata(&lock).unwrap().ino();
+
+        let f = std::fs::File::open(&lock).unwrap();
+        f.lock().unwrap();
+        let held = locked_inodes(&std::fs::read_to_string("/proc/locks").unwrap());
+        f.unlock().unwrap();
+        drop(f);
+        assert!(held.contains(&ino), "/proc/locks names the held lock");
+
+        let proc_root = d.path().join("proc");
+        std::fs::create_dir_all(&proc_root).unwrap();
+        std::fs::write(
+            proc_root.join("locks"),
+            format!(
+                "1: FLOCK  ADVISORY  WRITE 4242 00:2a:{ino} 0 EOF\n\
+                 1: -> FLOCK  ADVISORY  WRITE 4343 00:2a:{ino} 0 EOF\n\
+                 2: POSIX  ADVISORY  WRITE 99 fd:01:7 0 EOF\n"
+            ),
+        )
+        .unwrap();
+        let used = InUse::scan_from(&proc_root, &[]);
+        assert_eq!(used.why(&t), Some("a cargo holds a .cargo-lock in it"));
+        assert_eq!(used.why(&idle), None);
+        std::fs::write(proc_root.join("locks"), "").unwrap();
+        assert_eq!(InUse::scan_from(&proc_root, &[]).why(&t), None);
+    }
+
+    /// A tree any job ran in within the hour keeps all its target
+    /// directories, whatever the idle keep; an hour later they may go.
+    #[test]
+    fn a_tree_a_job_ran_in_within_the_hour_keeps_its_target_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        let tree = d.path().join("srv/u/tree");
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        std::fs::create_dir_all(tree.join("crates/a")).unwrap();
+        let h = 3_600_000;
+        let now = 100 * h;
+        let nested = tree.join("target/ignite-test/rt");
+        let top = tree.join("target");
+        let other = d.path().join("srv/u/other/target");
+        let seen: HashMap<PathBuf, (String, i64)> = [&nested, &top, &other]
+            .map(|p| (p.clone(), ("r".to_string(), now - 10 * h)))
+            .into();
+        let left = |ran_ago: i64| -> Vec<PathBuf> {
+            let ran = HashMap::from([(tree.join("crates/a"), now - ran_ago)]);
+            let cwds = ran_recently(&ran, now);
+            candidates(&seen, &HashSet::new(), &cwds, now, Duration::ZERO)
+                .into_iter()
+                .map(|c| c.path)
+                .collect()
+        };
+        assert_eq!(left(59 * 60_000), std::slice::from_ref(&other));
+        let mut all = left(61 * 60_000);
+        all.sort();
+        let mut want = vec![nested.clone(), top.clone(), other.clone()];
+        want.sort();
+        assert_eq!(all, want);
+        let built: HashMap<PathBuf, (String, i64)> =
+            HashMap::from([(other.clone(), ("r".to_string(), now - 59 * 60_000))]);
+        assert!(
+            candidates(
+                &built,
+                &HashSet::new(),
+                &HashSet::new(),
+                now,
+                Duration::ZERO
+            )
+            .is_empty(),
+            "a target built into within the hour stays whatever the idle keep"
+        );
+    }
+
     #[test]
     fn unnamed_repositories_are_protected_by_their_active_target_directory() {
         let active = PathBuf::from("/w/active/target");
@@ -1122,7 +1407,13 @@ mod tests {
         ]);
         let busy_dirs = HashSet::from([active]);
 
-        let candidates = candidates(&seen, &busy_dirs, &HashSet::new(), 2, Duration::ZERO);
+        let candidates = candidates(
+            &seen,
+            &busy_dirs,
+            &HashSet::new(),
+            2 * 3_600_000,
+            Duration::ZERO,
+        );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, idle);
     }
@@ -1270,7 +1561,11 @@ mod tests {
         };
         assert!(names(DEFAULT_MIN_IDLE).is_empty(), "both built in 2 h");
         assert_eq!(names(min_idle(Some(1800), DEFAULT_MIN_IDLE)), ["a"]);
-        assert_eq!(names(min_idle(Some(300), DEFAULT_MIN_IDLE)), ["a", "b"]);
+        assert_eq!(
+            names(min_idle(Some(300), DEFAULT_MIN_IDLE)),
+            ["a"],
+            "an idle keep under an hour still keeps what was built in the last hour"
+        );
         let v = BelowView::of(Some(100.0), 40 * GB, 25 * GB);
         assert_eq!(
             v.with_idle(None, DEFAULT_MIN_IDLE).render(),

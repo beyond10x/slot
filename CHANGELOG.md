@@ -9,6 +9,12 @@
   line>` (sent by a remote-mode client in the new request field `local_reason` when it falls back
   to the local daemon), or the text of `SLOT_LOCAL_REASON`. A job with a named reason is not
   handed to a node.
+- Eviction no longer deletes a target directory a job still uses. It keeps every target directory
+  in the tree of a queued or running job (git's top level of its working directory, else the
+  working directory; nested ones such as `target/ignite-test/rt` or `driver/target` too), one equal
+  to, inside or holding the target its `CARGO_TARGET_DIR` names, one with a `.cargo-lock` a process
+  holds locked (`/proc/locks`), and every target directory in the tree of any job that ran in the
+  last hour, whatever the idle keep: the steps of one long task run as several jobs in a row.
 
 - Spill-over: the daemon hands every queued local job to a remote node of the host
   configuration file while the node is Ready, before its deadline and has free slots by its last
