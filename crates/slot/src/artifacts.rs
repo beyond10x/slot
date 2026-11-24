@@ -17,8 +17,12 @@
 //! exit) one rsync copies those paths from the node's target directory to the
 //! same relative paths under the local one, with modes and mtimes. Artifacts
 //! of dependencies, `deps/*.rlib` and the rest of the target directory stay
-//! on the node.
+//! on the node. Then [`prune`] removes the local files the copied ones
+//! supersede (the same target under an older hash), so the local target
+//! directory does not grow with every rebuild. `SLOT_NO_PRODUCTS=1` turns
+//! all of it off for a job ([`NO_PRODUCTS_ENV`]).
 
+use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,6 +32,10 @@ use anyhow::{Result, anyhow, bail};
 
 /// The message format the client adds when the caller named none.
 pub const FORMAT: &str = "--message-format=json-render-diagnostics";
+
+/// Set and not `0` in the caller's environment: nothing comes back, and the
+/// command runs on the node as the caller wrote it.
+pub const NO_PRODUCTS_ENV: &str = "SLOT_NO_PRODUCTS";
 
 /// Paths one rsync names at most; more go in further calls.
 const BATCH: usize = 200;
@@ -268,6 +276,88 @@ pub fn local_target(cwd: &Path, top: &Path, target_env: Option<&str>) -> PathBuf
         .map_or_else(|| top.join("target"), |d| d.join("target"))
 }
 
+/// What [`prune`] removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pruned {
+    /// Files removed.
+    pub files: usize,
+    /// Their bytes.
+    pub bytes: u64,
+}
+
+/// Digits in the hash cargo puts in a unit's file name.
+const HASH_LEN: usize = 16;
+
+/// `name` read as `<stem>-<16 lowercase hex>`, optionally followed by an
+/// extension (`.d`, `.dwp`, `.pdb`, …): the stem and the hash. Cargo writes
+/// `-` in a target's name as `_`, so the first `-` that such a hash follows
+/// ends the stem.
+fn hashed(name: &str) -> Option<(&str, &str)> {
+    let b = name.as_bytes();
+    name.match_indices('-').find_map(|(i, _)| {
+        let h = b.get(i + 1..i + 1 + HASH_LEN)?;
+        let rest = &b[i + 1 + HASH_LEN..];
+        (i > 0
+            && h.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+            && (rest.is_empty() || rest[0] == b'.'))
+            .then(|| (&name[..i], &name[i + 1..i + 1 + HASH_LEN]))
+    })
+}
+
+/// Removes, beside the products just copied to `local` (`rels`, relative
+/// to it), the files they supersede: in each directory a product was copied
+/// to, every file named `<stem>-<16 lowercase hex>[.<ext>]` for a stem
+/// copied there whose hash is none of the hashes copied there with that
+/// stem. A product that is not in `local` removes nothing; a directory is
+/// never removed. Each rebuild of a test target writes it under a new hash,
+/// so without this the old copies pile up. Errors leave the file in place.
+pub fn prune(local: &Path, rels: &[String]) -> Pruned {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut kept: BTreeMap<(PathBuf, String), BTreeSet<String>> = BTreeMap::new();
+    for r in rels {
+        let p = Path::new(r);
+        let (Some(dir), Some(name)) = (p.parent(), p.file_name().and_then(|n| n.to_str())) else {
+            continue;
+        };
+        let Some((stem, hash)) = hashed(name) else {
+            continue;
+        };
+        if !std::fs::symlink_metadata(local.join(p)).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        kept.entry((local.join(dir), stem.to_string()))
+            .or_default()
+            .insert(hash.to_string());
+    }
+    let mut out = Pruned::default();
+    for ((dir, stem), hashes) in &kept {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.filter_map(Result::ok) {
+            let name = e.file_name();
+            let Some((s, h)) = name.to_str().and_then(hashed) else {
+                continue;
+            };
+            if s != stem || hashes.contains(h) {
+                continue;
+            }
+            let path = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                out.files += 1;
+                out.bytes += meta.len();
+            }
+        }
+    }
+    out
+}
+
 /// What one fetch of products did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
@@ -277,18 +367,31 @@ pub struct Fetched {
     pub bytes: u64,
     /// Wall time of every rsync together.
     pub elapsed: Duration,
+    /// Superseded files removed after the copy.
+    pub pruned: Pruned,
 }
 
 impl Fetched {
     /// The line the job's caller sees on stderr.
     pub fn line(&self) -> String {
-        format!(
+        let mut line = format!(
             "slot: fetched {} artifact{}, {:.1} MB, in {:.1} s",
             self.count,
             if self.count == 1 { "" } else { "s" },
             self.bytes as f64 / 1e6,
             self.elapsed.as_secs_f64()
-        )
+        );
+        let p = self.pruned;
+        if p.files > 0 {
+            let _ = write!(
+                line,
+                "; removed {} superseded file{}, {:.1} MB",
+                p.files,
+                if p.files == 1 { "" } else { "s" },
+                p.bytes as f64 / 1e6
+            );
+        }
+        line
     }
 }
 
@@ -385,6 +488,7 @@ pub fn fetch(
         count: rels.len(),
         bytes,
         elapsed: t0.elapsed(),
+        pruned: Pruned::default(),
     })
 }
 
@@ -538,14 +642,148 @@ mod tests {
         assert_eq!(local_target(&sub, top, Some("out")), sub.join("out"));
     }
 
+    const H1: &str = "0123456789abcdef";
+    const H2: &str = "fedcba9876543210";
+    const H3: &str = "00112233445566ff";
+
+    /// Files under `dir`, relative, sorted.
+    fn files(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                let rel = p.strip_prefix(dir).unwrap().to_string_lossy().into_owned();
+                if p.is_dir() {
+                    out.push(format!("{rel}/"));
+                    todo.push(p);
+                } else {
+                    out.push(rel);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn put(root: &Path, rel: &str, len: usize) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, vec![0u8; len]).unwrap();
+    }
+
+    #[test]
+    fn a_second_copy_of_a_rebuilt_test_target_leaves_one_binary() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path();
+        // First copy-back: the test binary under its first hash.
+        let first = vec![format!("debug/deps/it-{H1}")];
+        put(t, &first[0], 100);
+        assert_eq!(prune(t, &first), Pruned::default(), "nothing older yet");
+        // A local build left its dep-info beside it.
+        put(t, &format!("debug/deps/it-{H1}.d"), 10);
+        // Second copy-back: the same target under a new hash.
+        let second = vec![format!("debug/deps/it-{H2}")];
+        put(t, &second[0], 200);
+        assert_eq!(
+            prune(t, &second),
+            Pruned {
+                files: 2,
+                bytes: 110
+            }
+        );
+        assert_eq!(
+            files(t),
+            ["debug/", "debug/deps/", &format!("debug/deps/it-{H2}")]
+        );
+    }
+
+    #[test]
+    fn pruning_touches_only_older_hashes_of_a_stem_just_copied() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path();
+        let keep = [
+            // Copied now: a unit-test binary and an integration test of the
+            // same name, both live; and an unhashed binary.
+            format!("debug/deps/tiny-{H1}"),
+            format!("debug/deps/tiny-{H2}"),
+            "debug/tiny".to_string(),
+        ];
+        for k in &keep {
+            put(t, k, 1);
+        }
+        let left = [
+            // The new hash's own sibling file.
+            format!("debug/deps/tiny-{H1}.d"),
+            // Other stems, and names that are not `<stem>-<16 hex>`.
+            format!("debug/deps/tiny_more-{H3}"),
+            format!("debug/deps/libtiny-{H3}.rlib"),
+            format!("debug/deps/tiny-{}", H3.to_uppercase()),
+            format!("debug/deps/tiny-{}", &H3[..15]),
+            format!("debug/deps/tiny-{H3}-x"),
+            format!("debug/deps/tiny-{H3}0"),
+            // An older hash of the unhashed binary's name.
+            format!("debug/tiny-{H3}"),
+            // The same stem in another directory.
+            format!("release/deps/tiny-{H3}"),
+        ];
+        for l in &left {
+            put(t, l, 1);
+        }
+        // A directory under an older hash's name stays.
+        std::fs::create_dir_all(t.join(format!("debug/deps/tiny-{H3}.dir"))).unwrap();
+        let gone = [
+            format!("debug/deps/tiny-{H3}"),
+            format!("debug/deps/tiny-{H3}.d"),
+            format!("debug/deps/tiny-{H3}.dwp"),
+        ];
+        for g in &gone {
+            put(t, g, 7);
+        }
+        assert_eq!(
+            prune(t, &keep),
+            Pruned {
+                files: 3,
+                bytes: 21
+            }
+        );
+        for k in keep.iter().chain(&left) {
+            assert!(t.join(k).is_file(), "{k} kept");
+        }
+        assert!(t.join(format!("debug/deps/tiny-{H3}.dir")).is_dir());
+        for g in &gone {
+            assert!(!t.join(g).exists(), "{g} removed");
+        }
+    }
+
+    #[test]
+    fn a_product_that_did_not_arrive_removes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path();
+        put(t, &format!("debug/deps/it-{H1}"), 1);
+        let absent = vec![format!("debug/deps/it-{H2}")];
+        assert_eq!(prune(t, &absent), Pruned::default());
+        assert!(t.join(format!("debug/deps/it-{H1}")).is_file());
+        assert_eq!(prune(&t.join("missing"), &absent), Pruned::default());
+    }
+
     #[test]
     fn the_line_names_count_size_and_time() {
-        let f = Fetched {
+        let mut f = Fetched {
             count: 3,
             bytes: 12_345_678,
             elapsed: Duration::from_millis(2340),
+            pruned: Pruned::default(),
         };
         assert_eq!(f.line(), "slot: fetched 3 artifacts, 12.3 MB, in 2.3 s");
+        f.pruned = Pruned {
+            files: 2,
+            bytes: 45_600_000,
+        };
+        assert_eq!(
+            f.line(),
+            "slot: fetched 3 artifacts, 12.3 MB, in 2.3 s; removed 2 superseded files, 45.6 MB"
+        );
         assert_eq!(
             bytes_received("Total bytes sent: 1\nTotal bytes received: 9,876\n"),
             Some(9876)

@@ -1,5 +1,3 @@
-| `SLOT_CLUSTER_FILE` | default for `slot serve --cluster-file`: the host configuration file whose `[remote.<name>]` tables are the nodes the daemon polls; `off` reads none |
-| `XDG_CONFIG_HOME` | the default host configuration file is `$XDG_CONFIG_HOME/slot/cluster.toml`, otherwise `~/.config/slot/cluster.toml` |
 ---
 title: Environment variables
 description: Variables slot reads, variables it sets in a job, and variables it drops.
@@ -20,6 +18,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job runs on this machine's daemon; same format |
 | `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
 | `SLOT_REMOTE_SAME_PATH_ROOT` | `$HOME` | with `SLOT_REMOTE_SAME_PATH`, only a repository below this directory keeps its own path on the remote host; any other goes to the remote workspace root (`SLOT_WSROOT`) |
+| `SLOT_NO_PRODUCTS` | unset | `1`: a remote `cargo build`, `test`, `bench` or `rustc` copies nothing back into the local target directory; the command runs on the remote host unchanged, and the client prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` where it would have copied. Unset or `0`: the products come back. See [Remote builds](../remote-builds.md#binaries-and-test-binaries-come-back). |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
 | `SLOT_PHASES_FILE` | unset | in remote mode, after the job: the file the client writes the job's sync, back time, node target directory and seed to, as JSON. The daemon sets it for a job it hands to a node; a caller has no need to. See [Recorded phases of a job](#recorded-phases-of-a-job). |
 | `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
@@ -38,6 +37,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_GATE_DIRS` | default for `slot gate --dir`, directories separated by `:` |
 | `XDG_RUNTIME_DIR` | directory of the default socket; without it `/run/user/<uid>` when that exists, else `slot-<uid>.sock` in the temporary directory |
 | `XDG_STATE_HOME` | the default state directory is `$XDG_STATE_HOME/slot`, otherwise `~/.local/state/slot` |
+| `SLOT_CLUSTER_FILE` | default for `slot serve --cluster-file`: the host configuration file whose `[remote.<name>]` tables are the nodes the daemon polls; `off` reads none |
+| `XDG_CONFIG_HOME` | the default host configuration file is `$XDG_CONFIG_HOME/slot/cluster.toml`, otherwise `~/.config/slot/cluster.toml` |
 
 ## Set in every job
 

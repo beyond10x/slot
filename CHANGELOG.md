@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Products copied back from a node no longer pile up in the local target directory. After a
+  remote cargo job's products are copied back, the client removes, in each directory it copied
+  into, every older file of the same target: a file named `<stem>-<16 lowercase hex>`, with or
+  without an extension, for a stem it just copied, whose hash is not one it just copied.
+  Directories and every other name stay, and nothing is removed for a product that did not
+  arrive. Before, each rebuild of a test target under a new hash left the old binary behind, and
+  the private target directories of worktrees that built on a node grew by several GB each. The
+  products line names what went:
+  `slot: fetched 3 artifacts, 41.2 MB, in 0.9 s; removed 2 superseded files, 38.4 MB`.
+- `SLOT_NO_PRODUCTS=1` turns the copy-back off for a job: the command runs on the node unchanged
+  (no `--message-format` added) and the client prints `slot: artifacts not fetched:
+  SLOT_NO_PRODUCTS is set` where it would have copied.
 - A job's record says where its time went. A remote job carries `sync_ms` and `sync_bytes` (the
   tree to the node, as its client measured it) and `back_ms` (the cargo products and `--fetch`
   paths back); a cargo `test`, `nextest` or `bench` job carries `compile_ms` and `test_ms`, split

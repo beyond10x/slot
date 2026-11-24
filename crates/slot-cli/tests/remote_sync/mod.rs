@@ -471,7 +471,20 @@ fn logging_cargo(dir: &Path) -> PathBuf {
 /// A remote call of a cargo job. The caller names no target directory, so
 /// the local one is `<repository>/target`.
 fn remote_cargo(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
+    remote_cargo_env(d, ssh, cwd, argv, &[])
+}
+
+/// [`remote_cargo`] with `env` added to the caller's environment.
+fn remote_cargo_env(
+    d: &Daemon,
+    ssh: &Path,
+    cwd: &Path,
+    argv: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     Command::new(SLOT)
+        .env_remove("SLOT_NO_PRODUCTS")
+        .envs(env.iter().copied())
         .args(argv)
         .current_dir(cwd)
         .env("SLOT_HOST", "node")
@@ -598,6 +611,95 @@ fn a_remote_cargo_test_no_run_leaves_the_test_binary() {
         err.lines()
             .any(|l| l.starts_with("slot: fetched 3 artifacts, ")),
         "the binary, its unit tests and the integration test: {err}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+/// Executables in `deps` whose name starts with `<stem>-`, without the
+/// sibling files that have an extension.
+fn hashed_binaries(deps: &Path, stem: &str) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(deps)
+        .unwrap_or_else(|e| panic!("{}: {e}", deps.display()))
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with(&format!("{stem}-")) && !n.contains('.'))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn two_remote_test_runs_of_a_rebuilt_target_leave_one_test_binary_here() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(t.path(), "");
+    let ssh = forced_ssh(t.path(), &d, "");
+    let cargo = logging_cargo(t.path());
+    let cargo = cargo.to_str().unwrap();
+    let out = remote_cargo(&d, &ssh, &repo, &[cargo, "test"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let deps = repo.join("target/debug/deps");
+    let first = hashed_binaries(&deps, "it");
+    assert_eq!(first.len(), 1, "{first:?}: {err}");
+    // A new package version gives every target of it a new hash.
+    for f in ["Cargo.toml", "Cargo.lock"] {
+        let p = repo.join(f);
+        let s = std::fs::read_to_string(&p).unwrap();
+        std::fs::write(&p, s.replace("0.1.0", "0.1.1")).unwrap();
+    }
+    let out = remote_cargo(&d, &ssh, &repo, &[cargo, "test"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let node = hashed_binaries(&node_target(&d).join("debug/deps"), "it");
+    assert_eq!(node.len(), 2, "the hash changed on the node: {node:?}");
+    let it = hashed_binaries(&deps, "it");
+    assert_eq!(it.len(), 1, "{it:?}: {err}");
+    assert_ne!(it, first, "the new binary is the one kept");
+    assert_eq!(hashed_binaries(&deps, "tiny").len(), 1, "{err}");
+    let line = err
+        .lines()
+        .find(|l| l.starts_with("slot: fetched 3 artifacts, "))
+        .unwrap_or_else(|| panic!("{err}"));
+    assert!(
+        line.contains("; removed 2 superseded files, "),
+        "the unit tests and the integration test of 0.1.0: {line}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+#[test]
+fn slot_no_products_copies_nothing_back() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = tiny_crate(t.path(), "");
+    let ssh = forced_ssh(t.path(), &d, "");
+    let cargo = logging_cargo(t.path());
+    let out = remote_cargo_env(
+        &d,
+        &ssh,
+        &repo,
+        &[cargo.to_str().unwrap(), "build"],
+        &[("SLOT_NO_PRODUCTS", "1")],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(!repo.join("target").exists(), "{err}");
+    assert!(node_target(&d).join("debug/tiny").is_file(), "built there");
+    assert_eq!(
+        err.lines()
+            .filter(|l| l.starts_with("slot: artifacts not fetched: SLOT_NO_PRODUCTS"))
+            .count(),
+        1,
+        "{err}"
+    );
+    assert!(!err.contains("slot: fetched"), "{err}");
+    let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
+    assert!(
+        log.lines().any(|l| l == "true|build"),
+        "the caller's command unchanged: {log}"
     );
     eprintln!("took {:?}", t0.elapsed());
 }

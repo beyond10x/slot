@@ -267,6 +267,13 @@ slot cargo test --no-run
   and `--target-dir` are not read.
 - **Freshness.** A file that already matches in size and time is not sent again; a file cargo
   reports as fresh but that is missing here is sent.
+- **Older copies.** cargo names a test binary `<name>-<hash>`, and a new version, feature set or
+  profile gives it a new hash. After the copy, slot removes from the same local directory every
+  file named `<name>-<16 hex digits>`, with or without an extension (`.d`, `.dwp`), whose hash
+  is not one it just copied, for each `<name>` it just copied. Other files and directories stay.
+  The products line then ends with, for example, `; removed 2 superseded files, 38.4 MB`.
+- **Off.** `SLOT_NO_PRODUCTS=1` in your environment copies nothing back and runs your command
+  unchanged; slot prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` instead.
 
 ## Crates are fetched once per Cargo.lock
 
