@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.32.0 — 2026-11-24
 
 - Remote mode seeds a new worktree's mirror from its siblings. Before each sync the client asks
   the server for other mirrors of the same repository (same normalized `origin` URL), through a
