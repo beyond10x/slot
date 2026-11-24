@@ -188,6 +188,20 @@ printf 'host ws\n' >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "a result from the workstation itself is refused" || bad "same host not refused"
 
+# 6c. push.sh apply keeps the setup login's ssh connection to itself and ends it on exit: a
+# shared control connection outlives the key's removal from authorized_keys.
+printf '#!/bin/sh\necho "$*" >>"%s"\nexit 1\n' "$W/ssh.log" >"$W/fake-ssh"
+chmod 755 "$W/fake-ssh"
+: >"$W/ssh.log"
+conf
+printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
+mkdir -p "$W/home"
+HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+n=$(grep -c . "$W/ssh.log")
+[ "$n" -gt 0 ] && ok "apply used the configured ssh ($n calls)" || bad "apply made no ssh call: $(tail -3 "$W/err")"
+grep -v -- '-o ControlPath=' "$W/ssh.log" | grep -q . && bad "an ssh call without a private control path: $(grep -v -- '-o ControlPath=' "$W/ssh.log" | head -1)" || ok "every ssh call names a private control path"
+tail -1 "$W/ssh.log" | grep -q -- '-O exit node-setup' && ok "apply ends the control connection" || bad "last ssh call: $(tail -1 "$W/ssh.log")"
+
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
 leaks=$(grep -nE '/home/[a-z]|\b(i|vol|subnet|sg|vpc|ami)-0?[0-9a-f]{8,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \

@@ -17,6 +17,9 @@
 - `push.sh check` compares the copied home directories file by file (name and size): a file
   missing or of another size on the node is drift, a file a node job added there (a cache) is
   not. `push.sh compare HERE NODE` runs the comparison on two digest files.
+- `push.sh apply` uses an ssh control connection of its own and ends it on exit. A control
+  connection shared through the ssh config stayed logged in to the node's setup login after
+  `provision.sh apply` had removed the setup key.
 
 ## 0.36.0 — 2026-11-24
 

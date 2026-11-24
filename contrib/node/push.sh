@@ -84,6 +84,11 @@ rs() {
 }
 
 if [ "$mode" = apply ]; then
+  # One ssh control connection of this run's own, ended on exit: a connection shared through
+  # the ssh config would stay logged in after the setup key leaves authorized_keys.
+  cdir=$(mktemp -d) || exit 1
+  NODE_SSH="$NODE_SSH -o ControlMaster=auto -o ControlPersist=60 -o ControlPath=$cdir/m"
+  trap '$NODE_SSH -O exit "$PUSH_HOST" >/dev/null 2>&1; rm -rf "$cdir"' EXIT
   dst=$PUSH_HOST:$STORE
   fails=0
   t0=$(date +%s)

@@ -48,6 +48,25 @@ The instance store is empty after every stop and start; the root volume keeps th
 A running `slot-node` keeps the `/etc` files it bound at its start; after a `push.sh apply`
 that replaced one, restart it when no job runs.
 
+Removing the setup key from `authorized_keys` does not end an ssh connection that is already
+logged in, and a control connection (`ControlMaster`, `ControlPersist`) shared through the ssh
+config is reused by every later call. `push.sh apply` keeps its own control connection and ends
+it on exit; give the setup host no `ControlMaster` in the ssh config.
+
+## Choosing `HOME_COPIES`
+
+A tool that a job reads from a directory under a `MIRROR_DIRS` entry, and that is not in
+`HOME_COPIES`, is gone after a stop and start. Ask every session that builds on the node which
+paths under the home outside its repositories its gates read, and add them in one change.
+
+- List a cache directory file by file before adding it: a cache holds whatever was downloaded
+  into it, not only what its name says.
+- Leave out anything that came from a repository or origin the remote deny lists name, even
+  when a gate reads it; the gate then names the exact files it needs, or runs on the
+  workstation.
+- Leave out credentials, the agent's own configuration, and caches a build fills again by
+  itself.
+
 A root channel that takes one script, such as SSM Run Command, gets it from
 `provision.sh bundle CONF apply` (or `check`): one script with the config inside.
 
