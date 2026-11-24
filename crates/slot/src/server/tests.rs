@@ -125,7 +125,7 @@ fn collect(c: UnixStream) -> Res {
         match serde_json::from_str::<Frame>(&line).unwrap() {
             Frame::Out { b } => r.out += &b,
             Frame::Err { b } => r.err += &b,
-            Frame::Info { msg } => r.info += &msg,
+            Frame::Info { msg } | Frame::Fallback { msg } => r.info += &msg,
             Frame::Start { .. } => r.started = true,
             Frame::Exit { code } => {
                 r.code = code;
@@ -1529,7 +1529,7 @@ fn a_rust_job_logs_its_cache_environment_and_is_warned_when_the_cache_is_off() {
     for line in BufReader::new(c).lines() {
         match serde_json::from_str::<Frame>(&line.unwrap()).unwrap() {
             Frame::Info { msg } if !started => before_start.push(msg),
-            Frame::Info { .. } | Frame::Err { .. } => {}
+            Frame::Info { .. } | Frame::Err { .. } | Frame::Fallback { .. } => {}
             Frame::Out { b } => {
                 assert!(!before_start.is_empty(), "output before the warnings");
                 out += &b;

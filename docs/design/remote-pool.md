@@ -63,9 +63,13 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
   After exit 0 the client copies that path from the host's target directory to the same path in
   the local checkout (`client.rs:194`, `:264-298`). A debug binary of 410 MB (design.md § 16)
   takes about 33 s at 100 Mbit/s down; a stripped release binary of 5 to 30 MB under 3 s (§ 5.2).
-- Without `--fetch` the local `target/` is not touched. A binary already there is from the last
-  local build and is stale. Nothing warns about that today (§ 5.1).
-- A fetch runs only after exit 0, so the artifacts of a failed test run stay on the host (§ 5.3).
+- A remote `cargo build`, `test`, `bench` or `rustc` brings the products of the workspace's own
+  packages back into the local target directory (§ 5.2, `artifacts.rs`): binaries and test
+  binaries, never a dependency's artifacts. A build fetches after exit 0, a test run whatever its
+  exit, so the binaries of a failed test run come back too (§ 5.3). Other files of `target/`
+  stay on the host.
+- Before a cargo job the host fetches the crates of the mirror's `Cargo.lock` once and runs the
+  job offline (§ 5.8, `cargo_fetch.rs`).
 - Files a job writes into the tree (`Cargo.lock`, snapshots, formatted sources) stay in the mirror
   and are deleted by the next push. Commands that exist to write the tree stay local (§ 5.5).
 - `cargo run` would run the program on the host. It stays local (§ 5.4).
@@ -97,6 +101,8 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | seed, evict | before a remote job queues, a new workspace's target directory is a reflink copy of the most recently used one of the same repository; least recently used ones are deleted over the budget or under the disk floor | `server/cache.rs:144-195`, `:201-205`, `server/mod.rs:1839-1841`, `:2337-2378` |
 | output | streamed line by line; the mirror path is rewritten to the client's repository path | `rewrite.rs:1-2`, `server/mod.rs:1627-1654`, `:1475-1494` |
 | fetch | after exit 0 only, each `--fetch PATH` is copied back with `rsync -a --mkpath`; `target/…` is read from the job's target directory, which the host reports in its `start` frame | `client.rs:194`, `:230-298`, `server/mod.rs:2143-2169` |
+| products | a cargo `build`/`rustc` (after exit 0) or `test`/`bench` (any exit) runs with `--message-format=json-render-diagnostics` unless the caller named a format; the client strips cargo's JSON lines from stdout, keeps the `compiler-artifact` paths of `path+` packages, and copies them with one `rsync -a --relative` into the local target directory | `artifacts.rs`, `client.rs` (`products_back`) |
+| fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch --locked` when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository, then sets `CARGO_NET_OFFLINE=true`; a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
 | measure | one stderr line per sync: bytes sent (rsync `--stats`) and seconds | `sync.rs` |
 | fallback | when the sync fails, stalls (no byte read or written for `SLOT_SYNC_STALL`, 60 s) or runs past `SLOT_SYNC_LIMIT` (5 min), or ssh cannot be started, the job goes to the local daemon with one stderr line; a stalled rsync is killed with its ssh | `client.rs:200-207`, `sync.rs` |
 | lost connection | `slot: connection to daemon lost`, exit 3, whether or not the job had started; the host cancels the job | `client.rs:190-192`, `:683-686`, design.md § 16 |
@@ -429,10 +435,11 @@ of the same repository name by reflink.
 A remote job returns its stdout, stderr and exit code, and nothing else (`client.rs:190-198`).
 That is right for `cargo check`, `clippy`, `test`, `nextest` and a `build` used as a check.
 
-The trap is a `build` whose product is run next. The local `target/` is unchanged, so
-`./target/debug/mytool` is absent or, worse, the product of an older local build. Phase 1 prints
-the line of § 3.7; phase 2 lets the operator's opt-in name files that every successful `cargo
-build` of the repository fetches.
+The trap was a `build` whose product is run next: the local `target/` stayed unchanged, so
+`./target/debug/mytool` was absent or, worse, the product of an older local build. Every
+repository session declined the node for that reason. Built since: the products of a cargo
+`build`, `rustc`, `test` and `bench` come back on their own (§ 5.2). Other commands still return
+only output and exit code.
 
 ### 5.2 `cargo build` of a binary that runs locally
 
@@ -450,17 +457,47 @@ loop on a large binary, fetching it each time costs more than the build saved: s
 with less debug info (`CARGO_PROFILE_DEV_DEBUG` crosses, `toolchain.rs:216`) or stay local.
 Cloud egress costs about $0.09 per GB after a free allowance (approximate): $0.04 per 410 MB.
 
-Phase 3: `--fetch auto`. The host lists the files in `target/<profile>/` (not `deps/`) that the
-job created or changed and the client fetches those, after checking each name (§ 8.6).
+**Products come back without `--fetch`** (`artifacts.rs`). Two ways to know what to copy were
+weighed:
+
+| way | how | judgement |
+|---|---|---|
+| (a) cargo's JSON | run cargo with `--message-format=json-render-diagnostics`, read the `compiler-artifact` messages of `path+` packages: each `executable`, and the files of `bin`, `test`, `cdylib`, `staticlib` targets | chosen: cargo names exactly the files of this job, fresh ones included, and its package id tells the workspace's own packages from dependencies; no new step on the host |
+| (b) a listing | copy executables in `target/<profile>/` and `target/<profile>/deps/` newer than the job's start | rejected: needs a listing step in `slot shell`; misses a fresh product the local tree lacks (the last fetch failed, `target/` was cleaned); takes dependencies' proc-macro `.so` files, which are executable too |
+
+The JSON is not fragile where it counts: with `json-render-diagnostics` cargo renders diagnostics
+on stderr itself, so the only lines to remove from stdout are whole lines that start with
+`{"reason":` and parse as JSON. A test's own output passes through. A caller who passes a JSON
+format gets the stream unchanged; `short` or `human` turns the return off, because cargo would
+then print no artifact messages.
+
+The paths are mapped from the job's target directory (or `/work/target` of a sandbox with fixed
+paths) to the local one: `CARGO_TARGET_DIR` of the caller, else `target/` beside the nearest
+`Cargo.lock`. One `rsync -a --relative` call names every path (`<target>/./debug/x`), so the
+relative layout, modes and mtimes come along; `slot shell` admits a sender with several paths,
+each checked as before. rsync's quick check skips a file whose size and mtime already match.
+
+Measured for this repository's workspace, 3 packages, debug profile without debug info
+(`debug = false`), 2026-11-24: the sizes of the files cargo reported, which is what the first
+fetch sends; a later fetch sends only files whose size or mtime changed.
+
+| command | products | MB | target directory |
+|---|---|---|---|
+| `cargo build` | 2 (`slot` 23.8 MB, `slot-docs` 5.0 MB) | 28.8 | |
+| `cargo test --no-run` | 10 (the 2 binaries, 8 test binaries; the largest, the `slot` library's unit tests, 32.1 MB) | 72.5, of which 43.7 new after the build | 608 MB after both |
+
+At 100 Mbit/s down the test binaries take about 6 s, a twelfth of the target directory. Debug info
+makes them larger *(not measured here; the 410 MB binary of § 2.2 had it)*.
 
 ### 5.3 `cargo test`
 
-Only the log and the exit code come back. Tests that read files in the repository work, since
-the tree is synced. Tests that need anything outside it (a local service, docker, a socket, a
+The log and the exit code come back, and so do the test binaries, whatever the exit (§ 5.2): a
+failed test can be run again here, under a debugger or with other arguments. Tests that read
+files in the repository work, since the tree is synced. Tests that need anything outside it (a local service, docker, a socket, a
 file in the home directory, a kind cluster) fail remotely and belong in `.slot.toml` `local`.
 
-What a failing run leaves behind stays on the host, because the fetch runs only after exit 0
-(`client.rs:194`): a JUnit report, a coverage file, `*.snap.new`, a `proptest-regressions` file.
+Other files a failing run leaves behind stay on the host, because `--fetch` runs only after exit
+0: a JUnit report, a coverage file, `*.snap.new`, a `proptest-regressions` file.
 Phase 2: the operator's opt-in names `return` patterns, and files a job created under them come
 back whatever the exit code.
 
@@ -521,6 +558,34 @@ Recommendation: (1) through phase 2, since binaries that are fetched and debugge
 case. Evaluate (3) in phase 3 *(unverified: not prototyped)*. (2) is rejected for its cache cost.
 None of the three makes two worktrees share sccache entries: their paths differ on the
 workstation too.
+
+### 5.8 Fetch once per `Cargo.lock`
+
+Parallel cargo jobs on one node waited up to 28 minutes on cargo's package-cache lock: every job
+resolves under that lock, and one that downloads holds it for the whole download. Built
+(`cargo_fetch.rs`):
+
+1. A client whose remote command is a cargo command that builds (`build`, `check`, `clippy`,
+   `test`, `bench`, `doc`, `rustc`, `nextest`, `llvm-cov`) sets `fetch_once` in its request.
+   Commands that need the network themselves (`update`, `add`, `install`, `fetch`) do not.
+2. Before the job is queued, the host daemon finds the nearest `Cargo.lock` from the job's
+   directory up to the mirror root. None: the job runs as before, online.
+3. Its SHA-256 is compared with `<ws-root>/.cargo-fetch/<id>`. Equal: the job runs with
+   `CARGO_NET_OFFLINE=true`.
+4. Different: the daemon takes a `flock` per repository key (`.repo-keys/<id>`, else the
+   workspace id) in the same directory, compares again (another mirror's job may have fetched),
+   runs `<cargo> [+toolchain] fetch --locked` in that directory with the job's environment, and
+   records the digest. Lock wait and fetch together are bounded at 5 minutes.
+5. A fetch that fails or runs over the bound answers with a `fallback` frame before the job is
+   registered; the client prints `slot: remote build on <host> did not start (cargo fetch
+   --locked failed …); running it on this machine's daemon` and submits the original command
+   locally. Only a client that set `fetch_once` gets the frame, so an older client never sees it.
+6. Eviction of a mirror removes its digest.
+
+The fetch is network work, not compile work, so it takes no slot. Offline, a job still takes the
+package-cache lock while it resolves, but only for the moment it reads the cache. Not covered: a
+crate that cargo's cache cleaner removed after the digest was recorded fails the offline build;
+editing `Cargo.lock` (or a sync of a new one) fetches again.
 
 ## 6. Jobs that stay local
 

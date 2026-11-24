@@ -1568,6 +1568,50 @@ impl Server {
         self.end_conn(Some(a), done.is_some()).await;
     }
 
+    /// Fetch once (`cargo_fetch.rs`) for a cargo job of workspace `id` that
+    /// runs in `cwd`: whether the job runs offline, or why it goes back to
+    /// the client.
+    async fn fetch_once(
+        &self,
+        id: &str,
+        cwd: &Path,
+        argv: &[String],
+        env: &[String],
+        tx: &mpsc::UnboundedSender<Frame>,
+    ) -> Result<bool, String> {
+        use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure};
+        let ws_root = self.cfg.ws_root.clone();
+        let id = id.to_string();
+        let cwd = cwd.to_path_buf();
+        let cargo = cargo_of(argv);
+        let env = env.to_vec();
+        let out = tokio::task::spawn_blocking(move || {
+            ensure(&Check {
+                ws_root: &ws_root,
+                id: &id,
+                cwd: &cwd,
+                cargo,
+                env: &env,
+                limit: crate::cargo_fetch::LIMIT,
+            })
+        })
+        .await
+        .map_err(|e| format!("cargo fetch --locked failed: {e}"))??;
+        Ok(match out {
+            Outcome::NoLock => false,
+            Outcome::Current => true,
+            Outcome::Fetched(t) => {
+                let _ = tx.send(Frame::Info {
+                    msg: format!(
+                        "slot: new Cargo.lock on this mirror: cargo fetch --locked took {:.1} s; its cargo jobs run offline",
+                        t.as_secs_f64()
+                    ),
+                });
+                true
+            }
+        })
+    }
+
     /// Sends a client its last frames unless a handover took the table;
     /// `None` then. Frames sent under the server lock are in the writer's
     /// queue before a handover flushes it.
@@ -1671,7 +1715,7 @@ impl Server {
     /// job: the client is answered by the next process.
     async fn run_job(
         self: &Arc<Self>,
-        req: Request,
+        mut req: Request,
         tx: mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
         stop: Option<Stop>,
@@ -1687,11 +1731,32 @@ impl Server {
         };
         // A mistyped subcommand (`slot cancle 12`) would otherwise wait in
         // the queue for slots and fail only when it starts.
-        let base = Self::base_env(&req);
+        let mut base = Self::base_env(&req);
         if !req.argv[0].contains('/')
             && let Err(e) = look_path(&req.argv[0], &base)
         {
             return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
+        }
+        if req.fetch_once
+            && let Some(ws) = req.workspace.as_ref()
+            && crate::cargo_fetch::applies(&req.argv)
+        {
+            match self.fetch_once(&ws.id, &cwd, &req.argv, &base, &tx).await {
+                Ok(offline) => {
+                    if offline && !req.env.iter().any(|e| e == crate::cargo_fetch::OFFLINE) {
+                        req.env.push(crate::cargo_fetch::OFFLINE.to_string());
+                        base = Self::base_env(&req);
+                    }
+                }
+                Err(msg) => {
+                    let g = self.inner.lock().expect("server lock");
+                    if g.handing_over {
+                        return None;
+                    }
+                    let _ = tx.send(Frame::Fallback { msg });
+                    return Some(());
+                }
+            }
         }
         // A gated job is shown, counted and sized by the command its client
         // runs in a sandbox; the daemon starts only `req.argv`, the hold.

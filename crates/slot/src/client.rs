@@ -24,6 +24,7 @@ use anyhow::{Context as _, Result, anyhow};
 use sha2::{Digest, Sha256};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
+use crate::artifacts;
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
@@ -211,25 +212,44 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         .as_ref()
         .filter(|_| !listed_local(top.as_deref(), argv))
     {
-        return match remote(host, top.as_deref(), &cwd, &mut req, s) {
+        let plan = artifacts::plan(argv);
+        if let Some(p) = &plan {
+            req.argv.clone_from(&p.argv);
+        }
+        req.fetch_once = crate::cargo_fetch::applies(argv);
+        let why = match remote(host, top.as_deref(), &cwd, &mut req, s) {
             Ok(c) => {
-                let code = talk(c, &req).code();
-                match (&req.workspace, top.as_deref()) {
-                    (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
-                        fetch(host, top, &ws.id, s)
+                let mut collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
+                match talk_with(c, &req, collector.as_mut()) {
+                    Ended::Fallback(msg) => msg,
+                    ended => {
+                        let ran = matches!(ended, Ended::Exit(_));
+                        let mut code = ended.code();
+                        if let (Some(p), Some(col), Some(top)) = (&plan, &collector, top.as_deref())
+                            && ran
+                            && (code == 0 || p.when == artifacts::When::AnyExit)
+                        {
+                            code = products_back(host, top, &cwd, s, col, code);
+                        }
+                        return match (&req.workspace, top.as_deref()) {
+                            (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
+                                fetch(host, top, &ws.id, s)
+                            }
+                            _ => code,
+                        };
                     }
-                    _ => code,
                 }
             }
-            Err(e) => {
-                eprintln!(
-                    "slot: remote build on {host} did not start ({e:#}); running it on this machine's daemon"
-                );
-                req.workspace = None;
-                local_fields(&mut req, &cwd);
-                submit_local(&s.socket, &req, &Waits::of(s))
-            }
+            Err(e) => format!("{e:#}"),
         };
+        eprintln!(
+            "slot: remote build on {host} did not start ({why}); running it on this machine's daemon"
+        );
+        req.argv = argv.to_vec();
+        req.workspace = None;
+        req.fetch_once = false;
+        local_fields(&mut req, &cwd);
+        return submit_local(&s.socket, &req, &Waits::of(s));
     }
     local_fields(&mut req, &cwd);
     submit_local(&s.socket, &req, &Waits::of(s))
@@ -319,6 +339,52 @@ fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
         }
     }
     code
+}
+
+/// Copies the products `col` collected from the job's target directory on
+/// `host` into the local target directory and prints one line. Returns
+/// `code`, or 1 when the copy failed after a job that exited 0: the caller
+/// would run a stale binary.
+fn products_back(
+    host: &str,
+    top: &Path,
+    cwd: &Path,
+    s: &Settings,
+    col: &artifacts::Collector,
+    code: i32,
+) -> i32 {
+    let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
+    if target_dir.is_empty() {
+        eprintln!(
+            "slot: artifacts not fetched: the server did not report its target directory (slot 0.8.0 or later needed there)"
+        );
+        return code;
+    }
+    let rels: Vec<String> = col
+        .paths()
+        .iter()
+        .filter_map(|p| artifacts::relative(p, &target_dir))
+        .collect();
+    if rels.is_empty() {
+        return code;
+    }
+    let local =
+        artifacts::local_target(cwd, top, std::env::var("CARGO_TARGET_DIR").ok().as_deref());
+    let src = artifacts::Source {
+        host,
+        ssh: &s.ssh,
+        target: &target_dir,
+    };
+    match artifacts::fetch(&src, &rels, &local, &s.sync) {
+        Ok(f) => {
+            eprintln!("{}", f.line());
+            code
+        }
+        Err(e) => {
+            eprintln!("slot: artifacts not fetched: {e:#}");
+            if code == 0 { 1 } else { code }
+        }
+    }
 }
 
 /// Whether the repository's `.slot.toml` lists `argv` under `local`, so it
@@ -675,7 +741,7 @@ fn remote(
 }
 
 /// How a conversation with the daemon ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Ended {
     /// The job's exit code, or 3 when the request could not be sent.
     Exit(i32),
@@ -684,6 +750,8 @@ enum Ended {
     Lost { started: bool },
     /// The client got this signal; the job was cancelled.
     Signalled(i32),
+    /// The server sent the job back without starting it, for this reason.
+    Fallback(String),
 }
 
 impl Ended {
@@ -696,11 +764,21 @@ impl Ended {
                 eprintln!("slot: connection to daemon lost");
                 3
             }
+            Self::Fallback(msg) => {
+                eprintln!("slot: the job did not start: {msg}");
+                3
+            }
         }
     }
 }
 
 fn talk(conn: Conn, req: &Request) -> Ended {
+    talk_with(conn, req, None)
+}
+
+/// Talks to the daemon; the job's stdout goes through `collector` when
+/// given.
+fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Collector>) -> Ended {
     let Conn {
         reader,
         mut writer,
@@ -735,7 +813,14 @@ fn talk(conn: Conn, req: &Request) -> Ended {
         match serde_json::from_str::<Frame>(&l) {
             Ok(Frame::Out { b }) => {
                 started = true;
-                let _ = stdout.write_all(b.as_bytes());
+                match collector.as_deref_mut() {
+                    Some(c) => {
+                        let _ = stdout.write_all(&c.push(b.as_bytes()));
+                    }
+                    None => {
+                        let _ = stdout.write_all(b.as_bytes());
+                    }
+                }
                 let _ = stdout.flush();
             }
             Ok(Frame::Err { b }) => {
@@ -751,10 +836,22 @@ fn talk(conn: Conn, req: &Request) -> Ended {
             Ok(Frame::Info { msg }) => eprintln!("{msg}"),
             Ok(Frame::Exit { code }) => {
                 drop(writer);
+                if let Some(c) = collector.as_deref_mut() {
+                    let _ = stdout.write_all(&c.finish());
+                    let _ = stdout.flush();
+                }
                 return Ended::Exit(code);
             }
-            Err(_) => {}
+            Ok(Frame::Fallback { msg }) if !started => {
+                drop(writer);
+                return Ended::Fallback(msg);
+            }
+            Ok(Frame::Fallback { .. }) | Err(_) => {}
         }
+    }
+    if let Some(c) = collector {
+        let _ = stdout.write_all(&c.finish());
+        let _ = stdout.flush();
     }
     if let Some(sig) = signalled() {
         return Ended::Signalled(sig);
