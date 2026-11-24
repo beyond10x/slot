@@ -704,8 +704,15 @@ the census log. Select **6 h** to see the full window. Historical samples show
 mean host CPU in cores and mean queued jobs. The toolchain breakdown is available
 during periods covered by the one-second live samples.
 
-The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). It
-shows:
+The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). Its
+start page is the cluster view: the headline numbers (running and queued jobs, the slot wait of 9
+in 10 jobs, CPUs in use of those available, the compile cache's share of the last 24 hours, and
+the cost of remote machines once one runs), the queue, a card per node (slots by toolchain, CPU
+over 60 s, memory, free disk, the checkouts with jobs on it, the time left of a remote node's
+lease) with each job moving from the queue to its node, and the newest jobs with the node each
+runs on. Selecting a node card, or Enter on it, shows only that node's jobs; Escape shows all
+again. The page reads `GET /api/nodes`, one row per node (today the local machine). **Jobs and
+charts** (`#jobs`) opens the view of the job tables, which shows:
 
 - slots in use out of the pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
   ([Headroom](headroom.md)); on the machine base, the line with the CPUs busy on the host, the
@@ -734,5 +741,11 @@ shows:
 
 It keeps the last 500 finished jobs in memory (`--keep-jobs`). The UI has no authentication;
 keep it on a loopback address. The same data is available as JSON from `/api/state`, as a stream
-of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/output`. `/api/limits`
+of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/output`. `/api/nodes`
+answers an array with one row per node: `node_id` (`local` for the daemon's machine), `kind`,
+`state`, `cpus`, `slots`, `slots_in_use`, `running_jobs`, `queued_jobs`, `memory_gib`,
+`memory_used_mib`, `disk_gib`, `disk_free_gib`, `cpu_busy_milli` (the CPUs of the pool and the
+compile cache over the last 10 s, in thousandths) and `joined_at`; a remote node adds
+`machine_type`, `location`, `price_per_hour_cents` and `deadline`. Every job in `/api/state` names
+its `node`. `/api/limits`
 reads and sets the headroom, `/api/priority` the [priority rules](#priority).

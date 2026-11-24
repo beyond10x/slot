@@ -22,6 +22,26 @@
   for the first (a `flock` in the runtime directory, at most `SLOT_SYNC_LIMIT`) and its line says
   how long. Two rsyncs into one mirror at once had ended one of them with exit 23.
 
+## 0.31.1 — 2026-11-24
+
+- The UX gates' accessibility probe waits until every finite animation on the page has ended
+  before axe-core runs. The 0.31.0 release gate measured the colour of cluster-view rows while
+  they faded in and failed on contrast; 0.31.0 has no published release, and 0.31.1 carries its
+  changes.
+
+## 0.31.0 — 2026-11-24
+
+- The web UI opens on a cluster view: headline numbers, the queue, a card per node with its
+  slots, CPU over 60 s, memory, free disk and the checkouts with jobs on it, jobs moving from the
+  queue to their node, and the newest jobs with their node. Selecting a node shows only its
+  jobs; Escape shows all. A dark and a light theme; with reduced motion nothing moves but fades.
+  The job tables, charts and output are unchanged at `#jobs`, linked from both views.
+- `GET /api/nodes` answers one row per node in the names of the cluster specification
+  (`node_id`, `kind`, `state`, `cpus`, `slots`, `slots_in_use`, `memory_gib`, `disk_free_gib`,
+  `cpu_busy_milli`, `joined_at` and more); today the one row is the local machine. Every job in
+  `/api/state` and in the job log names its `node` (`local`). Against an older daemon the page
+  builds the local node from `/api/state`.
+
 ## 0.30.0 — 2026-11-23
 
 - `slot evict-below [GB|default] --idle <duration>` sets on the running daemon how long eviction
