@@ -10,6 +10,14 @@
 //! alone, and the sync line names the commit and the count of changed files
 //! it sent, so a job is not run on content the caller did not have.
 //!
+//! The mirror keeps the server's modification times (`--no-times`): a file
+//! whose content changed gets the time rsync wrote it, one whose content did
+//! not keeps the time it has. cargo decides by modification time. With the
+//! caller's times, a change made before a build the server ran on the old
+//! content, and synced after it, was older than that build: cargo took the
+//! old build as fresh. A `touch` on the server did not help, since the next
+//! sync set the caller's time again.
+//!
 //! Symlinks stay links (`-a`): a link whose target lies outside the tree is
 //! sent as the link, never as the file it points to, and the sync line counts
 //! such links. Before any byte is sent, the tree is listed with the same
@@ -36,6 +44,11 @@ pub const DEFAULT_STALL: Duration = Duration::from_secs(60);
 
 /// Default bound on a whole sync.
 pub const DEFAULT_LIMIT: Duration = Duration::from_secs(300);
+
+/// rsync options after `-a` of a sync of sources: compare by content, and
+/// leave the mirror its own modification times. Without `--checksum` every
+/// file would differ in time and be sent on every sync.
+pub const BY_CONTENT: [&str; 2] = ["--checksum", "--no-times"];
 
 /// How often a running sync is looked at.
 const POLL: Duration = Duration::from_millis(100);
@@ -441,8 +454,13 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
     preflight(&e.path, &filters, b, deadline)?;
     let path = e.path.display();
     let mut rsync = Command::new("rsync");
+    rsync.arg("-a");
+    // A tree holds sources cargo may read; a git directory does not.
+    if e.kind == same_path::Kind::Tree {
+        rsync.args(BY_CONTENT);
+    }
     rsync
-        .args(["-a", "--delete", "--mkpath"])
+        .args(["--delete", "--mkpath"])
         .args(&filters)
         .arg("-e")
         .arg(r.ssh.join(" "))
@@ -562,7 +580,8 @@ pub fn preflight(src: &Path, filters: &[String], b: &Bounds, deadline: Instant) 
 /// toolchain's `excludes`, within `b`. rsync compares every file by content
 /// (`--checksum`), not by size and time: a file changed at the same size and
 /// time, or a sibling's file of that size and time, would otherwise be taken
-/// as it is and the job would build the old content.
+/// as it is and the job would build the old content. The mirror keeps its
+/// own modification times ([`BY_CONTENT`]).
 pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
     let sources = Sources::of(top);
     let asked = Instant::now();
@@ -590,7 +609,9 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     // `-a` keeps every symlink a link: a link that leaves the tree is never
     // sent as the file it points to.
     rsync
-        .args(["-a", "--checksum", "--delete", "--mkpath"])
+        .arg("-a")
+        .args(BY_CONTENT)
+        .args(["--delete", "--mkpath"])
         .args(&filters);
     if let Some(sibs) = &siblings {
         rsync.arg("--stats");

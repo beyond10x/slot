@@ -81,6 +81,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         cpu_bound_gap: Duration::from_millis(cpu_limit::STARTING_MS as u64),
         cpu_pressure: None,
         cache_budget: 0,
+        seed_copy: cache::SeedCopy::Reflink,
         evict: crate::evict::Settings {
             floor: 0,
             margin: 0,
@@ -889,6 +890,7 @@ fn history_survives_restart() {
         cpu_bound_gap: Duration::from_millis(cpu_limit::STARTING_MS as u64),
         cpu_pressure: None,
         cache_budget: 0,
+        seed_copy: cache::SeedCopy::Reflink,
         evict: crate::evict::Settings {
             floor: 0,
             margin: 0,

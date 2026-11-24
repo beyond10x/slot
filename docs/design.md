@@ -842,6 +842,14 @@ Seeding and eviction (`server/cache.rs`), measured on the same guest with the ca
 The budget counts each target directory in full, so reflinked copies count once per worktree
 although they share blocks: xfs showed 4.2 GB used for two directories recorded as 9.7 GB.
 
+"Sources older than the copied outputs" was also the defect: it held for a source that differed
+from the sibling's too, so cargo ran the sibling's build of the old source. Since then the sync
+keeps the server's modification times (`--no-times`; a changed file gets the time the sync wrote
+it), and after a seed every source file of the new mirror with the sibling's bytes takes the
+sibling's time, every other one a time after every file of the copy (`cache::align_sources`).
+The second row's 0 units hold only for sources that match the sibling's byte for byte. Not
+measured again on the guest.
+
 The forced command (`slot shell`, `shell.rs`) on the same guest, with a second key whose
 `authorized_keys` line is `command="…/slot shell --cache-root …",restrict`: a build, a build with
 `--fetch target/debug/ess` (410 MB back) and `slot cancel` (client exit 130) all ran through it.

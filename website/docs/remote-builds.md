@@ -61,7 +61,13 @@ current directory.
    filter that applies every `.gitignore`, and excludes for `.git` and the toolchain's output
    directories (`/target/`). Uncommitted changes are included. rsync compares every file by its
    content (`--checksum`), not by size and modification time, so a file changed at the same size
-   and time is sent too; this reads every file on both sides on each sync. Over a persistent ssh
+   and time is sent too; this reads every file on both sides on each sync. The mirror does not
+   take the workstation's modification times (`--no-times`): a file whose content changed gets
+   the server's time of the sync, and a file whose content did not change keeps the time it has
+   on the server. cargo decides by modification time, so a change that was made on the
+   workstation before a build the server ran on the old content, and synced after it, is still
+   newer than that build and is compiled; and a `touch` on the server outlives the next sync.
+   Over a persistent ssh
    connection a rerun only sends the changed files. The client prints one line per sync, for
    example
    `slot: synced to buildbox in 0.4 s, 81234 bytes sent, at 1a2b3c4 + 3 changed files`:
@@ -195,7 +201,14 @@ next to a record `<workspace-id>.json` of its repository, last use and size.
   rewrites them. Where the filesystem has no reflinks (ext4), nothing is copied: a plain copy of
   a 4 GB target directory took longer than the compile time it saved. Put the cache root on btrfs
   or xfs to get seeding; the journal says `target directory not seeded: no reflink copy …`
-  otherwise.
+  otherwise. `slot serve --seed-copy copy` takes a byte copy where there are no reflinks. The
+  copy is never a hard link: the two worktrees share no file of their target directories.
+  After the copy, every source file of the new worktree's mirror that has the same bytes as the
+  other worktree's takes that file's modification time, and every other one a time after every
+  file of the copy, so cargo builds each crate whose sources differ from the other worktree's
+  and takes the rest as built. The job's stderr says `target directory seeded from workspace
+  <id> by a copy in 0.4s; 3 source file(s) differ from its sources and build again`, and its
+  record names the workspace in `seeded_from`.
 - **Eviction.** Before a remote job queues, the daemon deletes target directories and their
   source copies, least recently used first, while together they take more than `slot serve
   --cache-budget` GB, or while the disk has less than `--min-free-disk` free. A worktree with a

@@ -14,6 +14,20 @@
 - `SLOT_NO_PRODUCTS=1` turns the copy-back off for a job: the command runs on the node unchanged
   (no `--message-format` added) and the client prints `slot: artifacts not fetched:
   SLOT_NO_PRODUCTS is set` where it would have copied.
+- A changed source is never taken as built on a build node. The sync gave each file on the node
+  the modification time it had on the workstation (rsync `-a`). cargo decides by those times, so
+  an edit made before a build the node ran on the old content, and synced after that build, was
+  older than it: cargo reported the crate fresh and ran the old code. Touching the file on the
+  node did not help, because the next sync set the workstation's time again. The sync now leaves
+  the node its own times (`--no-times`, with the content comparison `--checksum` as before, and
+  the same for a same-path tree's extra directory): a file whose content changed gets the time
+  the sync wrote it, and an unchanged one keeps its time on the node. Seeding a new worktree's
+  target directory from a sibling's now sets the times of the new mirror after the copy: a
+  source file with the sibling's bytes takes the sibling's time, every other one a time after
+  every file of the copy, so cargo rebuilds each crate whose sources differ from the sibling's.
+  The job's stderr counts those files. The copy stays a copy (`cp -a`), never a hard link into
+  the sibling's target; `slot serve --seed-copy copy` takes a byte copy where the filesystem has
+  no reflinks (default `reflink`: no seed there, as before).
 - A job's record says where its time went. A remote job carries `sync_ms` and `sync_bytes` (the
   tree to the node, as its client measured it) and `back_ms` (the cargo products and `--fetch`
   paths back); a cargo `test`, `nextest` or `bench` job carries `compile_ms` and `test_ms`, split
