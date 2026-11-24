@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `contrib/rustc-gate`, set as `rustc-wrapper`, refuses a compile outside a slot job (no
+  `SLOT_JOB`) with exit 3 and the `slot run -- …` command that replaces it; `slot --local`,
+  `SLOT_SHIM_OFF=1`, `SLOT_EDITOR=1` (rust-analyzer) and queries such as `rustc -vV` pass.
+  `contrib/rustc-gate.test.sh` runs in `task check`.
 - The PATH shim (`contrib/slot-shim`) sends every `cargo` subcommand through slot except the ones
   that compile nothing (`fmt`, `metadata`, `tree`, `update`, `clean`, `add`, … and `mutants`).
   Before, `cargo run` and aliases such as `cargo xtask` compiled outside the pool.

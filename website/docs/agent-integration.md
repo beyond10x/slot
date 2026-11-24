@@ -152,6 +152,31 @@ share the pool. Wrapping the task is enough; the cargo calls inside it need no p
 A go command inside a wrapper is not capped, because go does not speak the jobserver protocol. If
 a task runs large go builds, call `slot go …` inside the task instead.
 
+## The rustc gate
+
+The PATH shim sees only commands that start as `cargo`. A program that starts cargo by its full
+path (an xtask binary, a script calling a toolchain's cargo) passes it by. Every compile cargo
+makes passes its `rustc-wrapper`, so `contrib/rustc-gate` set there catches those too:
+
+```toml
+[build]
+rustc-wrapper = "/path/to/rustc-gate"
+```
+
+The gate hands the compile to sccache when one of these holds, and refuses it with exit 3
+otherwise:
+
+- the compile runs inside a slot job (`SLOT_JOB` is set);
+- it runs under `slot --local`;
+- `SLOT_SHIM_OFF=1` is set, for one command outside the pool;
+- `SLOT_EDITOR=1` is set: put it in the environment of an editor's rust-analyzer;
+- the call compiles nothing (`-vV`, `--version`, `--print`), so `cargo metadata` and
+  `cargo fmt` keep working.
+
+The refusal names the crate and the replacement, `slot run -- <the cargo command>`.
+`contrib/rustc-gate.test.sh` checks these cases and runs in `task check`. To remove the gate, set
+`rustc-wrapper = "sccache"` again.
+
 ## What not to wrap
 
 - **rust-analyzer and IDE checks.** They run cargo for metadata and `cargo check` on their own
