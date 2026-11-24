@@ -104,6 +104,15 @@ impl RemoteNode {
         argv.push("state".to_string());
         argv
     }
+
+    /// The command that runs the `output` step on the node: the kept
+    /// output of its job `id` from chunk `from` on.
+    pub fn output_command(&self, id: i64, from: u64) -> Vec<String> {
+        let mut argv = self.state_command();
+        argv.pop();
+        argv.extend(["output".to_string(), id.to_string(), from.to_string()]);
+        argv
+    }
 }
 
 /// Parses the file's text into its remote nodes, in name order.
@@ -194,6 +203,10 @@ ssh = "ssh build-2.example"
         assert_eq!(
             nodes[1].state_command(),
             ["ssh", "build-2.example", "slot", "state"]
+        );
+        assert_eq!(
+            nodes[1].output_command(7, 12),
+            ["ssh", "build-2.example", "slot", "output", "7", "12"]
         );
     }
 

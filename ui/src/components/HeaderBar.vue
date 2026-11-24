@@ -5,7 +5,8 @@ import { HEADROOM_PRESETS, HEADROOM_STEP, MAX_HEADROOM, headroomCaption, machine
 import { jobKey, jobName } from '../lib/job.ts';
 import { failedStats, queueSummary, servedQueue } from '../lib/queue.ts';
 import { sharesLine } from '../lib/shares.ts';
-import { census, jobs, select, setHeadroom, store } from '../store.ts';
+import { failText, failedHour, failedOf } from '../lib/cluster.ts';
+import { census, jobs, nodes, select, setHeadroom, store } from '../store.ts';
 
 const WINDOWS: ReadonlyArray<[number, string]> = [
   [120, '2 min'],
@@ -62,10 +63,16 @@ const running = computed(() => {
   return n;
 });
 const queue = computed(() => queueSummary(servedQueue(jobs.values()), store.clock));
-/** Failed jobs of the last 60 minutes; the button opens the output of the one that ended last. */
+/**
+ * Failed jobs of the last 60 minutes over every node, as each node counts them, split by cause; the button opens the output of the
+ * listed one that ended last.
+ */
 const failed = computed(() => {
+  const by = failedHour(nodes.value, jobs.values(), store.clock);
+  const n = failedOf(by);
+  if (!n) return null;
   const f = failedStats(jobs.values(), store.clock);
-  return f.newest ? { n: f.n, id: jobKey(f.newest), name: jobName(f.newest) } : null;
+  return { n, why: failText(by), id: f.newest ? jobKey(f.newest) : null, name: f.newest ? jobName(f.newest) : '' };
 });
 
 /** The explanation of every item of the header: open by a click or Enter on "?", or while the pointer is on it. */
@@ -129,8 +136,10 @@ onUnmounted(() => {
         <span class="tile"><span class="k">queue</span> <b class="v">{{ queue.length }}</b></span>
         <span class="tile"><span class="k">longest wait</span> <b class="v">{{ queue.length ? fmtDur(queue.longestS) : '–' }}</b></span>
       </span>
-      <button v-if="failed" type="button" class="tile failed" :aria-label="`failed ${failed.n} (60 min): output of job ${failed.name}, the newest failed job`"
-        @click="select(failed.id, $event)"><span class="k">failed</span> <span class="v"><b>{{ failed.n }}</b> <span class="span">(60 min)</span></span></button>
+      <button v-if="failed?.id" type="button" class="tile failed"
+        :aria-label="`failed ${failed.n} (60 min), ${failed.why}: output of job ${failed.name}, the newest failed job`"
+        @click="select(failed.id, $event)"><span class="k">failed</span> <span class="v"><b>{{ failed.n }}</b> <span class="span">(60 min)</span> <span class="why" data-fail-causes>{{ failed.why }}</span></span></button>
+      <span v-else-if="failed" class="tile failed"><span class="k">failed</span> <span class="v"><b>{{ failed.n }}</b> <span class="span">(60 min)</span> <span class="why" data-fail-causes>{{ failed.why }}</span></span></span>
       <span v-if="census" class="tile"><span class="k">not on slot</span> <span class="v"><b>{{ census.unmanaged_cores.toFixed(1) }}</b> <span class="span">cores</span></span></span>
       <span class="end">
         <a class="btn navlink" href="#cluster" title="the cluster start page: nodes, queue and the newest jobs">Cluster</a>
@@ -158,7 +167,7 @@ onUnmounted(() => {
         <div><dt>slots in use</dt><dd>Slots that running jobs hold, of the slots builds may use now. A dashed box is a slot the headroom keeps back{{ withheld ? ` (${withheld} now)` : '' }}.</dd></div>
         <div><dt>headroom for you</dt><dd>Share of the CPU kept free for you (browser, video calls). Builds get the rest: fewer slots, and one CPU limit on all build jobs together. The line below the numbers says what that comes to.</dd></div>
         <div><dt>running, queue, longest wait</dt><dd>Jobs that hold slots, jobs that wait, and how long the oldest of them has waited. The Queue table names what each one waits for.</dd></div>
-        <div><dt>failed</dt><dd>Jobs that ended with an error in the last 60 min. The button opens the output of the newest one.</dd></div>
+        <div><dt>failed</dt><dd>Jobs that ended with an error in the last 60 min on every node, by cause: test (the command failed), timeout (ended at its run-time limit, exit 124), infra (a lost connection, exit 3; a command that could not run or was not found, 125 or 127). The button opens the output of the newest one.</dd></div>
         <div><dt>not on slot</dt><dd>Cores used by builds that do not run through slot. The Host section shows which sessions run them.</dd></div>
         <div><dt>chart window</dt><dd>The time span of every chart of the page.</dd></div>
         <div v-if="machine"><dt>machine</dt><dd>The headroom counts the whole machine: builds get the target less what other programs use, at least 2 CPUs. "Over target": builds are at that lowest limit and the machine is still busier. The Host section lists the other programs.</dd></div>
@@ -207,6 +216,7 @@ h1 .host { grid-row: 2; grid-column: 1 / -1; max-width: 200px; overflow: hidden;
   text-align: left; }
 .failed:hover { background: #fdf1f0; }
 .failed .k, .failed .span { color: var(--bad); }
+.failed .why { font-size: 12px; color: var(--bad); }
 .navlink { display: inline-flex; align-items: center; text-decoration: none; }
 .helpbtn { border-radius: 50%; padding: 0; width: 24px; font-weight: 700; }
 .row2 { display: flex; align-items: center; gap: 10px; height: 24px; margin-top: 5px; overflow: hidden; font-size: 13px; white-space: nowrap; }

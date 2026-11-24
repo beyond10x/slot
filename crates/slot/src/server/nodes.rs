@@ -6,6 +6,10 @@
 //! Gone with reason Lost after three missed polls in a row; an answer
 //! after that makes it Ready again. A poll that fails or takes longer than
 //! 4 s is a miss; the node keeps the last row it sent.
+//!
+//! The output of a node's job is read the same way, on request: the
+//! read-only `output` step of `slot shell`, every 2 s from the next chunk
+//! until the job ended ([`relay_output`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -333,6 +337,107 @@ fn on_node(mut j: Job, name: &str) -> Job {
 
 /// Runs `argv` and parses its output as an [`Answer`], within `timeout`.
 async fn ask(argv: &[String], timeout: Duration) -> Result<Answer, String> {
+    ask_json(argv, timeout).await
+}
+
+/// The `output` step on the node: reads the node daemon's web address
+/// `http` for the kept output of job `id` from chunk `from` on and prints
+/// one JSON object.
+pub fn output_step(http: &str, id: i64, from: u64) -> Result<String> {
+    crate::status::get(http, &format!("/api/jobs/{id}/output-tail?from={from}"))
+}
+
+/// The longest one read of a node job's output may take.
+pub const OUTPUT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Interval between two reads of a running node job's output.
+pub const OUTPUT_EVERY: Duration = Duration::from_secs(2);
+
+/// What the endpoint sends its page of a node job's output.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Relay {
+    /// A chunk of the output.
+    Chunk(crate::types::Chunk),
+    /// The end, with a message for the reader; empty when the job ended.
+    End(String),
+}
+
+/// The output of job `id` of node `name`: reads it with `argv_for(from)`
+/// (the node's `output` step from chunk `from` on) every `every` until the
+/// job ended, and ends with the reason when a read fails.
+pub fn relay_output(
+    argv_for: impl Fn(u64) -> Vec<String> + Send + 'static,
+    id: i64,
+    name: String,
+    every: Duration,
+) -> impl futures_util::Stream<Item = Relay> + Send {
+    use futures_util::StreamExt as _;
+    struct At<F> {
+        argv_for: F,
+        from: u64,
+        first: bool,
+        done: bool,
+    }
+    let at = At {
+        argv_for,
+        from: 0,
+        first: true,
+        done: false,
+    };
+    futures_util::stream::unfold(at, move |mut at| {
+        let name = name.clone();
+        async move {
+            if at.done {
+                return None;
+            }
+            if !at.first {
+                tokio::time::sleep(every).await;
+            }
+            at.first = false;
+            let argv = (at.argv_for)(at.from);
+            let out: Vec<Relay> =
+                match ask_json::<crate::types::OutputTail>(&argv, OUTPUT_TIMEOUT).await {
+                    Err(why) => {
+                        at.done = true;
+                        vec![Relay::End(format!(
+                            "the output of job {id} on {name} was not read: {why}"
+                        ))]
+                    }
+                    Ok(t) if !t.kept => {
+                        at.done = true;
+                        vec![Relay::End("output not kept for this job".into())]
+                    }
+                    Ok(t) => {
+                        at.from = t.next.max(at.from);
+                        let mut v: Vec<Relay> = t.chunks.into_iter().map(Relay::Chunk).collect();
+                        if t.ended {
+                            at.done = true;
+                            v.push(Relay::End(String::new()));
+                        }
+                        v
+                    }
+                };
+            Some((futures_util::stream::iter(out), at))
+        }
+    })
+    .flatten()
+}
+
+impl Remotes {
+    /// The table of node `name`; none for a node the file does not name.
+    pub fn conf(&self, name: &str) -> Option<RemoteNode> {
+        let g = self.nodes.lock().expect("nodes lock");
+        g.iter()
+            .find(|e| e.conf.name == name)
+            .map(|e| e.conf.clone())
+    }
+}
+
+/// Runs `argv` and parses its output as JSON, within `timeout`.
+async fn ask_json<T: serde::de::DeserializeOwned>(
+    argv: &[String],
+    timeout: Duration,
+) -> Result<T, String> {
     let (prog, args) = argv.split_first().ok_or("empty command")?;
     let child = tokio::process::Command::new(prog)
         .args(args)
@@ -408,6 +513,8 @@ impl Server {
 mod tests {
     use super::*;
     use crate::hostconfig::parse;
+    use crate::types::OutputTail;
+    use futures_util::StreamExt as _;
 
     fn remotes(text: &str) -> Remotes {
         Remotes::new(parse(text).unwrap(), "endpoint")
@@ -589,6 +696,27 @@ mod tests {
         assert_eq!(st.done.len(), 1);
     }
 
+    /// The node's own facts reach its row on the endpoint: its boot, the
+    /// poweroff it has scheduled and its counts; the deadline stays the
+    /// file's, so the page can compare the two.
+    #[test]
+    fn a_node_row_keeps_the_nodes_poweroff_boot_and_counts() {
+        let r = remotes(FILE);
+        let mut a = answer(vec![], vec![]);
+        let row = a.node.as_mut().unwrap();
+        row["booted_at"] = "2029-12-31T20:00:00Z".into();
+        row["poweroff_at"] = "2029-12-31T23:00:00Z".into();
+        row["deadline"] = "2000-01-01T00:00:00Z".into();
+        row["ended_hour"] = serde_json::json!({"ok": 7566, "test": 3, "infra": 2});
+        r.record(0, Ok(a), 10, "endpoint");
+        let n = &r.rows()[0];
+        assert_eq!(n.booted_at.as_deref(), Some("2029-12-31T20:00:00Z"));
+        assert_eq!(n.poweroff_at.as_deref(), Some("2029-12-31T23:00:00Z"));
+        assert_eq!(n.deadline.as_deref(), Some("2030-01-01T00:00:00Z"));
+        let h = n.ended_hour.unwrap();
+        assert_eq!((h.ok, h.test, h.timeout, h.infra), (7566, 3, 0, 2));
+    }
+
     #[test]
     fn more_slots_in_use_than_slots_is_not_taken() {
         let r = remotes(FILE);
@@ -596,6 +724,67 @@ mod tests {
         a.node.as_mut().unwrap()["slots_in_use"] = 99.into();
         r.record(0, Ok(a), 10, "endpoint");
         assert_eq!(r.rows()[0].slots_in_use, 0);
+    }
+
+    fn chunk(b: &str) -> crate::types::Chunk {
+        crate::types::Chunk {
+            t: "out".into(),
+            b: b.into(),
+        }
+    }
+
+    async fn relayed(argv_for: impl Fn(u64) -> Vec<String> + Send + 'static) -> Vec<Relay> {
+        relay_output(argv_for, 7, "build-1".into(), Duration::from_millis(10))
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_node_job_output_is_relayed_until_it_ends() {
+        let first = OutputTail {
+            from: 0,
+            next: 2,
+            chunks: vec![chunk("a"), chunk("b")],
+            ended: false,
+            kept: true,
+        };
+        let second = OutputTail {
+            from: 2,
+            next: 3,
+            chunks: vec![chunk("c")],
+            ended: true,
+            kept: true,
+        };
+        let got = relayed(move |from| {
+            let t = if from == 0 { &first } else { &second };
+            vec!["echo".into(), serde_json::to_string(t).unwrap()]
+        })
+        .await;
+        assert_eq!(
+            got,
+            [
+                Relay::Chunk(chunk("a")),
+                Relay::Chunk(chunk("b")),
+                Relay::Chunk(chunk("c")),
+                Relay::End(String::new()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn output_a_node_does_not_give_ends_with_the_reason() {
+        let got = relayed(|_| vec!["false".into()]).await;
+        let [Relay::End(why)] = got.as_slice() else {
+            panic!("{got:?}");
+        };
+        assert!(why.contains("job 7 on build-1"), "{why}");
+        let dropped = OutputTail {
+            ended: true,
+            ..OutputTail::default()
+        };
+        let got =
+            relayed(move |_| vec!["echo".into(), serde_json::to_string(&dropped).unwrap()]).await;
+        assert_eq!(got, [Relay::End("output not kept for this job".into())]);
     }
 
     #[tokio::test]

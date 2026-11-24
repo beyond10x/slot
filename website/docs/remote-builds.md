@@ -308,10 +308,14 @@ Only `ssh` is required. The daemon reads the file at start. Every 5 s it runs `<
 state` for each node: the server's `slot shell` answers with its daemon's own row of
 `/api/nodes` and its queued, running and last 30 finished jobs. `GET /api/nodes` then lists the
 node (kind `Remote`, its CPUs, slots, memory, disk and load as the server reports them, the
-deadline and price from the file), and `GET /api/state` and the job events carry its jobs with
+deadline and price from the file; the machine's boot, its scheduled poweroff, its whole-host CPU and
+load, and the jobs it ended in the last 60 minutes and per hour of the last 25, by result, as the
+server reports them), and `GET /api/state` and the job events carry its jobs with
 `node` set to the node's name, the id the node gave the job, and `from_node: true`: a
 node's job is named by its node and its id together, since the id may repeat a local one
-(`slot status` prints `#7089 on build-1d`). The deadline and price are read again when the file
+(`slot status` prints `#7089 on build-1d`). The output of a node's job is
+`GET /api/jobs/<id>/output?node=<name>`: the daemon reads it from the node with `<ssh> <slot_path>
+output <id> <from>` every 2 s until the job ended. The deadline and price are read again when the file
 changes, at the next poll. A node is
 `Joining` until its first answer; a poll that fails or takes longer than 4 s is missed, and after
 three misses in a row the node is `Gone` (reason `Lost`) with its last row; the next answer makes
@@ -381,7 +385,8 @@ remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsyn
 `slot proxy`, `slot cancel <id>`, the sibling step (`slot __siblings` on the server's own
 workspace root) and the read-only `state` step (`slot state`: the server daemon's own row of
 `/api/nodes` and its jobs, read from `--http`, for the
-[node poll](#show-the-server-in-the-web-view)). Anything else
+[node poll](#show-the-server-in-the-web-view)) and the read-only `output` step (`slot output <id>
+[<from>]`: the kept output of one job from its chunk `<from>` on, read from `--http`). Anything else
 exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
 `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and
 `--copy-dest` is taken only as `../<id>`, a sibling mirror in the workspace root. Also refused:

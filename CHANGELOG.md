@@ -12,6 +12,23 @@
 - The daemon reads the host configuration file again when it changes, at the next node poll: a
   node's deadline, price, place and machine type follow the file without a restart. Before, a
   lease extended in the file kept showing the old deadline until the daemon restarted.
+- A node reports what only it knows, in its row of `GET /api/nodes`: the machine's boot
+  (`booted_at`), the poweroff systemd has scheduled (`poweroff_at`), the CPUs busy on the whole
+  machine and its load (`host_cpu_milli`, `load1`; `/api/state` adds `host_busy_cores` and
+  `load1`), and the jobs it ended in the last 60 minutes and per hour of the last 25, by result
+  (`ended_hour`, `ended_hours`: `ok`, `test`, `timeout`, `infra`, `cancelled`), counted from its
+  whole job log. The web view's node cards show those counts for the last 60 minutes and today,
+  the same windows on every node (before: the local daemon's kept jobs against a node's last 30),
+  and the whole host's CPU and load (before: the pool's CPU only, 0.0 on a busy host). A remote
+  node's lease ring counts to its scheduled poweroff, and its card is red when that lies more
+  than 5 minutes from the deadline of the cluster file or when none is scheduled. The cloud cost
+  runs from the machine's boot to now (before: from the daemon's join to the deadline, so a node
+  that outlived a stale deadline cost nothing more). Failed jobs are split by cause in the header
+  and on the cards: test, timeout (124), infra (3, 125, 127). UXF-039 to UXF-043.
+- The output of a node's job opens in the web view: `GET /api/jobs/<id>/output?node=<name>` reads
+  it from the node with the new read-only `slot shell` step `slot output <id> [<from>]` (the node
+  daemon's `GET /api/jobs/<id>/output-tail?from=<n>`), every 2 s until the job ended. Before, the
+  pane said the output stayed on the node. UXF-044.
 
 - `contrib/rustc-gate`, set as `rustc-wrapper`, refuses a compile outside a slot job (no
   `SLOT_JOB`) with exit 3 and the `slot run -- …` command that replaces it; `slot --local`,

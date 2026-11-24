@@ -4,7 +4,7 @@ import type { Chunk } from '../generated/types.ts';
 import { Terminal, lineHtml, lineIsErr } from '../lib/ansi.ts';
 import type { Segment } from '../lib/ansi.ts';
 import { fmtBytes, fmtClock, fmtDur } from '../lib/format.ts';
-import { checkoutLabel, cmdText, jobName, resultLong, runS, times, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobName, outputUrl, resultLong, runS, times, waitS } from '../lib/job.ts';
 import { levelText, queuePlace, servedQueue, waitReasonText } from '../lib/queue.ts';
 import { atBottom, revealDelta } from '../lib/scroll.ts';
 import { jobs, liveOf, select, sessionTitles, store } from '../store.ts';
@@ -210,13 +210,7 @@ onMounted(() => {
   keepOpenerInSight();
   takeFocus();
   document.addEventListener('keydown', onKey);
-  const j = job.value;
-  if (j?.from_node) {
-    note(`[the output of a job on ${j.node} stays on that node; the slot command that started it prints it]`);
-    stream.value = 'unavailable';
-    return;
-  }
-  const src = new EventSource(`api/jobs/${props.id}/output`);
+  const src = new EventSource(outputUrl(props.id));
   es = src;
   src.onopen = () => {
     // The server replays the kept tail on every connection, so a reconnect starts clean.

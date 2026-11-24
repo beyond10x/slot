@@ -36,6 +36,7 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/nodes", get(nodes))
         .route("/api/events", get(events))
         .route("/api/jobs/{id}/output", get(output))
+        .route("/api/jobs/{id}/output-tail", get(output_tail))
         .route("/metrics", get(metrics))
         .route("/api/history", get(history))
         .route("/api/chart-history", get(chart_history))
@@ -473,7 +474,70 @@ async fn events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-async fn output(State(s): State<Arc<Server>>, Path(id): Path<i64>) -> Response {
+/// `?node=<name>` of `GET /api/jobs/{id}/output`, `?from=<n>` of
+/// `GET /api/jobs/{id}/output-tail`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct OutputQuery {
+    node: Option<String>,
+    from: u64,
+}
+
+/// `GET /api/jobs/{id}/output-tail?from=<n>`: the kept output of a job of
+/// this daemon from chunk `n` on, as one JSON object; what a node's
+/// `output` step prints for its endpoint.
+async fn output_tail(
+    State(s): State<Arc<Server>>,
+    Path(id): Path<i64>,
+    axum::extract::Query(q): axum::extract::Query<OutputQuery>,
+) -> Response {
+    match s.output(id) {
+        super::Output::NoJob => StatusCode::NOT_FOUND.into_response(),
+        super::Output::Dropped => axum::Json(crate::types::OutputTail {
+            ended: true,
+            ..Default::default()
+        })
+        .into_response(),
+        super::Output::Kept(r) => axum::Json(r.since(q.from)).into_response(),
+    }
+}
+
+/// `GET /api/jobs/{id}/output`: the output of a job as server-sent
+/// events, its kept tail and then what it writes, and an `end` event. With
+/// `?node=<name>` of a remote node the job is that node's: the endpoint
+/// reads its output from the node with the node's `output` step.
+async fn output(
+    State(s): State<Arc<Server>>,
+    Path(id): Path<i64>,
+    axum::extract::Query(q): axum::extract::Query<OutputQuery>,
+) -> Response {
+    if let Some(node) = q.node.filter(|n| n != crate::types::LOCAL_NODE) {
+        let Some(conf) = s.remotes.conf(&node) else {
+            return (StatusCode::NOT_FOUND, "slot: no such node\n").into_response();
+        };
+        let relay = super::nodes::relay_output(
+            move |from| conf.output_command(id, from),
+            id,
+            node,
+            super::nodes::OUTPUT_EVERY,
+        );
+        let events = relay.map(|r| {
+            Ok::<_, Infallible>(match r {
+                super::nodes::Relay::Chunk(c) => {
+                    SseEvent::default().data(serde_json::to_string(&c).unwrap_or_default())
+                }
+                super::nodes::Relay::End(msg) if msg.is_empty() => {
+                    SseEvent::default().event("end").data("{}")
+                }
+                super::nodes::Relay::End(msg) => SseEvent::default()
+                    .event("end")
+                    .data(serde_json::json!({ "msg": msg }).to_string()),
+            })
+        });
+        return Sse::new(events)
+            .keep_alive(KeepAlive::default())
+            .into_response();
+    }
     let ring = match s.output(id) {
         super::Output::NoJob => return StatusCode::NOT_FOUND.into_response(),
         super::Output::Dropped => {

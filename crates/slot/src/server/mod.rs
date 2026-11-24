@@ -11,7 +11,10 @@ pub mod nodes;
 pub mod priority;
 mod ring;
 pub mod spill;
+mod tally;
 mod upgrade;
+
+use tally::Tally;
 
 use spill::Ran;
 
@@ -437,6 +440,8 @@ struct Inner {
     next_id: i64,
     active: BTreeMap<i64, Live>,
     done: VecDeque<Done>,
+    /// Jobs this node ended over the last 25 hours, from the whole job log.
+    tally: Tally,
     log: File,
     tag_cache: HashMap<i32, i64>,
     sys_prev: (u64, u64),
@@ -671,6 +676,8 @@ impl Server {
         let mut memory = admission::History::default();
         let mut targets = HashMap::new();
         let mut ran_in = HashMap::new();
+        let mut tally = Tally::default();
+        let started = (cfg.clock)();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
@@ -678,6 +685,7 @@ impl Server {
                     memory.record(&job);
                     record_target(&mut targets, &job);
                     record_ran(&mut ran_in, &job);
+                    tally.record(&job, started);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
@@ -731,6 +739,7 @@ impl Server {
                 next_id,
                 active: BTreeMap::new(),
                 done,
+                tally,
                 log,
                 tag_cache: HashMap::new(),
                 sys_prev: (0, 0),
@@ -2885,6 +2894,7 @@ impl Server {
             }
             record_target(&mut g.targets, &job);
             record_ran(&mut g.ran_in, &job);
+            g.tally.record(&job, job.ended_ms);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -4647,6 +4657,8 @@ impl Server {
             cpu_pressure_max: cpu.cpu_pressure_max,
             headroom_base: base,
             busy_cores: m.busy,
+            host_busy_cores: Some(g.sys_cpu * f64::from(self.cores)),
+            load1: procstat::load1(),
             target_cores: m.target,
             outside_cores: m.outside,
             outside: m.owners.clone(),
@@ -4720,6 +4732,14 @@ impl Server {
             joined_ms: self.born_ms,
             cpu_busy,
             jobs: &jobs,
+            host: HostFacts {
+                booted_ms: procstat::boot_time_ms(),
+                poweroff_ms: procstat::scheduled_poweroff_ms(),
+                busy: g.sys_cpu * f64::from(self.cores),
+                load1: procstat::load1(),
+            },
+            ended: &g.tally,
+            now,
         })
     }
 
@@ -4764,6 +4784,22 @@ struct LocalFacts<'a> {
     cpu_busy: f64,
     /// Queued and running jobs.
     jobs: &'a [&'a Job],
+    host: HostFacts,
+    /// The jobs this node ended.
+    ended: &'a Tally,
+    now: i64,
+}
+
+/// What the daemon reads of the whole machine, beyond its pool.
+struct HostFacts {
+    /// Boot time, Unix ms.
+    booted_ms: Option<i64>,
+    /// The poweroff systemd has scheduled, Unix ms.
+    poweroff_ms: Option<i64>,
+    /// CPUs busy on the whole machine over the last sample.
+    busy: f64,
+    /// One-minute load average.
+    load1: Option<f64>,
 }
 
 const GIB: u64 = 1 << 30;
@@ -4808,6 +4844,12 @@ fn local_node(f: &LocalFacts<'_>) -> Node {
         deadline: None,
         gone_reason: None,
         left_at: None,
+        booted_at: f.host.booted_ms.map(crate::types::rfc3339),
+        poweroff_at: f.host.poweroff_ms.map(crate::types::rfc3339),
+        host_cpu_milli: Some((f.host.busy.max(0.0) * 1000.0).round() as u32),
+        load1: f.host.load1,
+        ended_hour: Some(f.ended.last_hour(f.now)),
+        ended_hours: Some(f.ended.hours(f.now)),
     }
 }
 

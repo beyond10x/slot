@@ -1,7 +1,7 @@
 // The cluster start page: nodes, the jobs on them and the headline numbers, as pure functions.
-// A node is a row of `api/nodes` (the specification's NodeList); what the row does not carry (checkouts,
-// finished and failed jobs) comes from the jobs of `api/state`, each of which names its node.
-import type { CacheMinute, Job, Node } from '../generated/types.ts';
+// A node is a row of `api/nodes` (the specification's NodeList); what the row does not carry (checkouts, and the
+// finished jobs of a daemon that does not count them) comes from the jobs of `api/state`, each of which names its node.
+import type { CacheMinute, Job, Node, Outcomes } from '../generated/types.ts';
 import { hashHue } from './colors.ts';
 import { isActive } from './job.ts';
 
@@ -29,6 +29,9 @@ export function parseNodes(data: unknown): Node[] | null {
 
 /** Busy CPUs of a node over the last poll. */
 export const cpuOf = (n: Node): number => (n.cpu_busy_milli ?? 0) / 1000;
+
+/** Busy CPUs of the whole machine of a node, every program counted; the pool's from a node daemon that predates it. */
+export const hostCpuOf = (n: Node): number => (n.host_cpu_milli === undefined ? cpuOf(n) : n.host_cpu_milli / 1000);
 
 /** An RFC 3339 time of a row as Unix ms; 0 when absent or unreadable. */
 export function timeMs(s: string | undefined): number {
@@ -59,26 +62,96 @@ export function localFromState(f: LocalFallback, jobs: Iterable<Job>): Node {
   };
 }
 
-/** What the page shows of a node beside its row: its checkouts with a job now, and its finished and failed jobs the daemon still lists. */
+/** What the page shows of a node beside its row: its checkouts with a job now. */
 export interface NodeJobs {
   checkouts: string[];
-  done: number;
-  failed: number;
 }
 
 export function nodeJobs(id: string, jobs: Iterable<Job>): NodeJobs {
   const checkouts = new Set<string>();
-  let done = 0;
-  let failed = 0;
   for (const j of jobs) {
-    if (nodeOf(j) !== id) continue;
-    if (isActive(j.state)) {
-      const c = checkoutOf(j);
-      if (c) checkouts.add(c);
-    } else if (j.state === 'ok') done++;
-    else if (j.state === 'failed') failed++;
+    if (nodeOf(j) !== id || !isActive(j.state)) continue;
+    const c = checkoutOf(j);
+    if (c) checkouts.add(c);
   }
-  return { checkouts: [...checkouts].sort(), done, failed };
+  return { checkouts: [...checkouts].sort() };
+}
+
+/** The result of an ended job, a failure by its cause: `infra` for a lost connection (3), a command that could not run (125) or was not found (127). */
+export type Outcome = keyof Outcomes;
+
+export const NO_OUTCOMES: Readonly<Outcomes> = { ok: 0, test: 0, timeout: 0, infra: 0, cancelled: 0 };
+
+/** The result of job `j` as the daemon counts it (`Outcome::of`); null while it is queued or running. */
+export function outcomeOf(j: Job): Outcome | null {
+  switch (j.state) {
+    case 'ok': return 'ok';
+    case 'cancelled': return 'cancelled';
+    case 'failed':
+      if (j.timed_out || j.exit === 124) return 'timeout';
+      return j.exit === 3 || j.exit === 125 || j.exit === 127 ? 'infra' : 'test';
+    default: return null;
+  }
+}
+
+/** Failed jobs of a count, every cause. */
+export const failedOf = (o: Outcomes): number => o.test + o.timeout + o.infra;
+
+/** The failures of a count by cause, `60 test · 2 timeout · 5 infra`, causes without a job left out; empty without a failure. */
+export function failText(o: Outcomes): string {
+  return (['test', 'timeout', 'infra'] as const).filter((k) => o[k] > 0).map((k) => `${o[k]} ${k}`).join(' · ');
+}
+
+function sum(a: Outcomes, b: Outcomes): Outcomes {
+  return { ok: a.ok + b.ok, test: a.test + b.test, timeout: a.timeout + b.timeout, infra: a.infra + b.infra, cancelled: a.cancelled + b.cancelled };
+}
+
+/** The listed jobs of node `id` that ended in `[from, to]`, by result. */
+function countListed(id: string, jobs: Iterable<Job>, from: number, to: number): Outcomes {
+  const n = { ...NO_OUTCOMES };
+  for (const j of jobs) {
+    const o = outcomeOf(j);
+    const end = Number(j.ended_ms);
+    if (o && nodeOf(j) === id && end > from && end <= to) n[o]++;
+  }
+  return n;
+}
+
+/** Local midnight of the day of `now`. */
+export function midnightOf(now: number): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * A node's finished jobs over the last 60 min and today (from `midnight`), as the node counts them in its own job log; for a
+ * daemon that does not count, from the jobs the page lists.
+ */
+export function nodeCounts(n: Node, jobs: Iterable<Job>, now: number, midnight = midnightOf(now)): { hour: Outcomes; today: Outcomes } {
+  const list = [...jobs];
+  const hour = n.ended_hour ?? countListed(n.node_id, list, now - 3_600_000, now);
+  const today = n.ended_hours
+    ? n.ended_hours.filter((h) => h.t >= midnight).reduce((a, h) => sum(a, h.n), { ...NO_OUTCOMES })
+    : countListed(n.node_id, list, midnight, now);
+  return { hour, today };
+}
+
+/** Failed jobs of the last 60 min over every node: each node's own count, the listed jobs of a node without one or of no row. */
+export function failedHour(nodes: readonly Node[], jobs: Iterable<Job>, now: number): Outcomes {
+  const list = [...jobs];
+  let n = { ...NO_OUTCOMES };
+  for (const node of nodes) n = sum(n, node.ended_hour ?? countListed(node.node_id, list, now - 3_600_000, now));
+  const named = new Set(nodes.map((x) => x.node_id));
+  for (const id of new Set(list.map(nodeOf))) if (!named.has(id)) n = sum(n, countListed(id, list, now - 3_600_000, now));
+  return { ...n, ok: 0, cancelled: 0 };
+}
+
+/** The whole machine's busy CPUs and load, every program counted: `whole host 4.1 of 20 CPUs · load 5.3`; null from a daemon that predates it. */
+export function hostLine(n: Node): string | null {
+  if (n.host_cpu_milli === undefined) return null;
+  const cpu = `whole host ${(n.host_cpu_milli / 1000).toFixed(1)} of ${n.cpus} CPUs`;
+  return n.load1 === undefined ? cpu : `${cpu} · load ${n.load1.toFixed(1)}`;
 }
 
 /** Nodes that take or run jobs: their CPUs count as available. */
@@ -96,7 +169,10 @@ export function cpuTotals(nodes: readonly Node[]): { used: number; available: nu
   return { used, available };
 }
 
-/** Cost of the remote nodes so far, from their join to now, their deadline or their leaving; null without a remote node with a price. */
+/**
+ * Cost of the remote nodes so far: from the machine's boot (as the node reports it; else its join) to now, or to its leaving; a
+ * deadline does not stop the count, a machine that outlives it is still paid. Null without a remote node with a price.
+ */
 export function cloudCost(nodes: readonly Node[], now: number): { total: number; perHour: number } | null {
   const priced = nodes.filter((n) => n.kind === 'Remote' && (n.price_per_hour_cents ?? 0) > 0);
   if (!priced.length) return null;
@@ -104,12 +180,39 @@ export function cloudCost(nodes: readonly Node[], now: number): { total: number;
   let perHour = 0;
   for (const n of priced) {
     const price = (n.price_per_hour_cents ?? 0) / 100;
-    const joined = timeMs(n.joined_at);
-    const ends = [now, timeMs(n.deadline), timeMs(n.left_at)].filter((t) => t > 0);
-    if (joined > 0) total += (price * Math.max(0, Math.min(...ends) - joined)) / 3_600_000;
+    const start = timeMs(n.booted_at) || timeMs(n.joined_at);
+    const end = Math.min(now, timeMs(n.left_at) || now);
+    if (start > 0) total += (price * Math.max(0, end - start)) / 3_600_000;
     if (n.state !== 'Gone') perHour += price;
   }
   return { total, perHour };
+}
+
+/** Farthest the poweroff a node reports and the deadline of the cluster file may lie apart before the card says so. */
+export const LEASE_SLACK_MS = 5 * 60_000;
+
+/** `14:00` today, `25 Nov 14:00` on another day; `short` gives the day alone on another day. */
+function fmtWhen(ms: number, now = Date.now(), short = false): string {
+  const d = new Date(ms);
+  const hm = d.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+  if (midnightOf(ms) === midnightOf(now)) return hm;
+  const day = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  return short ? day : `${day} ${hm}`;
+}
+
+/**
+ * Why a remote node's lease is in doubt, in a sentence and in a few words for under the lease ring: the poweroff the node has
+ * scheduled lies more than 5 minutes from the deadline of the cluster file, or a node that reports its machine has none scheduled.
+ * Null when they agree, without a deadline and from a node daemon that reports neither boot nor poweroff.
+ */
+export function leaseMismatch(n: Node, now = Date.now()): { text: string; short: string } | null {
+  const deadline = timeMs(n.deadline);
+  if (n.kind !== 'Remote' || deadline <= 0) return null;
+  const file = `the cluster file says ${fmtWhen(deadline, now)}`;
+  const off = timeMs(n.poweroff_at);
+  if (off <= 0) return n.booted_at ? { text: `no poweroff scheduled on the node; ${file}`, short: 'no poweroff' } : null;
+  if (Math.abs(off - deadline) <= LEASE_SLACK_MS) return null;
+  return { text: `the node powers off at ${fmtWhen(off, now)}, ${file}`, short: `file ${fmtWhen(deadline, now, true)}` };
 }
 
 /** Share of the compiler calls of the last 24 hours that the cache answered; null without calls. */
@@ -119,11 +222,14 @@ export function cacheShare(day: CacheMinute | undefined): number | null {
   return all > 0 ? day.hits / all : null;
 }
 
-/** What is left of a node's lease: the fraction of it, the seconds and the lease in hours; null without a deadline. */
+/**
+ * What is left of a node's lease: the fraction of it, the seconds and the lease in hours; null without an end. The lease ends at the
+ * poweroff the node has scheduled, else at the deadline of the cluster file; it starts at the machine's boot, else at its join.
+ */
 export function lifeLeft(n: Node, now: number): { frac: number; leftS: number; spanH: number } | null {
-  const end = timeMs(n.deadline);
+  const end = timeMs(n.poweroff_at) || timeMs(n.deadline);
   if (end <= 0) return null;
-  const span = end - timeMs(n.joined_at);
+  const span = end - (timeMs(n.booted_at) || timeMs(n.joined_at));
   const left = Math.max(0, end - now);
   return { frac: span > 0 ? Math.min(1, left / span) : 0, leftS: left / 1000, spanH: span / 3_600_000 };
 }

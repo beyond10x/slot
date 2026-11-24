@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use super::{Daemon, SLOT};
 
+mod node_view;
+
 /// Files of the test repository and their size: 2 MiB that do not compress.
 const FILES: usize = 32;
 const FILE_BYTES: usize = 64 << 10;

@@ -9,6 +9,13 @@ type Named = { id: number; node?: string; from_node?: boolean };
 /** What names one job in the page: its id, with the node for a node's own row, whose ids may repeat a local one. */
 export const jobKey = (j: Named): string => (j.from_node ? `${j.node}/${jobId(j)}` : String(jobId(j)));
 
+/** Where the output of the job named `key` ([`jobKey`]) streams from: this daemon, which reads a node's own job from that node. */
+export function outputUrl(key: string): string {
+  const at = key.lastIndexOf('/');
+  if (at < 0) return `api/jobs/${key}/output`;
+  return `api/jobs/${key.slice(at + 1)}/output?node=${encodeURIComponent(key.slice(0, at))}`;
+}
+
 /** The id a person reads in a table cell. */
 export const idLabel = (j: Named): string => String(jobId(j));
 
