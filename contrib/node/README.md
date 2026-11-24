@@ -45,6 +45,9 @@ The instance store is empty after every stop and start; the root volume keeps th
    `slot-node`.
 4. `provision.sh check CONF` (root) and `push.sh check CONF` (workstation) both print `0 drift`.
 
+A running `slot-node` keeps the `/etc` files it bound at its start; after a `push.sh apply`
+that replaced one, restart it when no job runs.
+
 A root channel that takes one script, such as SSM Run Command, gets it from
 `provision.sh bundle CONF apply` (or `check`): one script with the config inside.
 

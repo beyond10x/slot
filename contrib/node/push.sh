@@ -37,10 +37,11 @@ skip() {
   return 1
 }
 
-# rsync exit 23 and 24: some files could not be read (root-only files under /usr) or vanished;
+# rsync from the default PATH (a wrapper earlier on PATH may drop times); exit 23 and 24: some
+# files could not be read (root-only files under /usr) or vanished;
 # the toolchain manifest leaves the unreadable ones out too.
 rs() {
-  rsync "$@"
+  command -p rsync "$@"
   r=$?
   case $r in 0 | 23 | 24) return 0 ;; *)
     echo "push: rsync $* exited $r" >&2
@@ -70,7 +71,7 @@ if [ "$mode" = apply ]; then
     if [ -d "/etc/$e" ] && [ ! -L "/etc/$e" ]; then
       rs -a --delete --mkpath -e "$NODE_SSH" "/etc/$e/" "$dst/rootfs/etc/$e/" || fails=$((fails + 1))
     else
-      rs -L --mkpath -e "$NODE_SSH" "/etc/$e" "$dst/rootfs/etc/" || fails=$((fails + 1))
+      rs -Lt --mkpath -e "$NODE_SSH" "/etc/$e" "$dst/rootfs/etc/" || fails=$((fails + 1))
     fi
   done
   for t in $(toolchains); do
