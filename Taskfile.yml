@@ -60,6 +60,7 @@ tasks:
       - rustc --version
       - sh contrib/slot-shim.test.sh
       - sh contrib/rustc-gate.test.sh
+      - sh contrib/node/test.sh
       - task: ui-check
       - task: ui
       - task: ui-ux
