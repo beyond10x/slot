@@ -108,7 +108,27 @@ pub fn refusal(req: &Request) -> Option<&'static str> {
     if set(&req.env, "SLOT_NO_REMOTE") {
         return Some("SLOT_NO_REMOTE is set");
     }
+    if under_home_cache(req) {
+        return Some("under the caller's ~/.cache");
+    }
     None
+}
+
+/// Whether the job's working directory or an argument lies under the
+/// caller's `$HOME/.cache` (session scratch): such jobs never leave this host.
+fn under_home_cache(req: &Request) -> bool {
+    let own = std::env::var("HOME").unwrap_or_default();
+    let home = req
+        .env
+        .iter()
+        .find_map(|e| e.strip_prefix("HOME="))
+        .unwrap_or(own.as_str());
+    if home.is_empty() {
+        return false;
+    }
+    let cache = format!("{}/.cache/", home.trim_end_matches('/'));
+    format!("{}/", req.cwd).starts_with(&cache)
+        || req.argv.iter().any(|a| a.contains(&cache))
 }
 
 /// The spilled job's environment: the job's, with the node's `SLOT_HOST`,
@@ -401,6 +421,15 @@ mod tests {
             Some("SLOT_NO_REMOTE is set")
         );
         assert_eq!(why(&with_env("SLOT_NO_REMOTE=0")), None);
+        let mut r = base.clone();
+        r.cwd = "/w/.cache/scratch/s1/copy".into();
+        assert_eq!(why(&r), Some("under the caller's ~/.cache"));
+        let mut r = base.clone();
+        r.argv = vec!["sh".into(), "/w/.cache/scratch/s1/run.sh".into()];
+        assert_eq!(why(&r), Some("under the caller's ~/.cache"));
+        let mut r = base.clone();
+        r.cwd = "/w/work/repo".into();
+        assert_eq!(why(&r), None);
         let mut r = base.clone();
         r.hold_for = Some(vec!["cargo".into()]);
         assert_eq!(why(&r), Some("a gated job"));
