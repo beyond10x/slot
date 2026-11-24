@@ -484,6 +484,17 @@ headroom_base: HeadroomBase,
  */
 busy_cores: number, 
 /**
+ * CPUs busy on the whole host over the last second, every program
+ * counted, whatever the headroom base; absent from a daemon that
+ * predates it.
+ */
+host_busy_cores?: number, 
+/**
+ * One-minute load average of the whole host; absent from a daemon that
+ * predates it.
+ */
+load1?: number, 
+/**
  * Machine base: CPUs the host may use with the headroom kept free; 0
  * when the machine base is not in force (pool base or no headroom).
  */
@@ -854,6 +865,39 @@ export type NodeKind = "Local" | "Remote";
 
 export type NodeState = "Joining" | "Ready" | "Draining" | "Gone";
 
+export type Outcomes = { 
+/**
+ * Exited 0.
+ */
+ok: number, 
+/**
+ * Failed with any other exit: the command's own failure, a red test.
+ */
+test: number, 
+/**
+ * Ended at a run-time limit (exit 124).
+ */
+timeout: number, 
+/**
+ * Failed for the infrastructure: the connection to a daemon or a node
+ * was lost (3), the command could not be run (125) or found (127).
+ */
+infra: number, 
+/**
+ * Cancelled.
+ */
+cancelled: number, };
+
+export type HourOutcomes = { 
+/**
+ * Start of the hour, Unix milliseconds.
+ */
+t: number, 
+/**
+ * The jobs that ended in it.
+ */
+n: Outcomes, };
+
 export type Node = { 
 /**
  * Node name, unique in its cluster; `local` for the daemon's machine.
@@ -951,6 +995,37 @@ gone_reason?: GoneReason,
 /**
  * When the node left, RFC 3339; with `Gone` only.
  */
-left_at?: string, };
+left_at?: string, 
+/**
+ * When the machine booted, RFC 3339, as the node reads it (`btime` of
+ * `/proc/stat`); absent from a daemon that predates it.
+ */
+booted_at?: string, 
+/**
+ * The poweroff systemd has scheduled on the machine, RFC 3339, as the
+ * node reads it (`/run/systemd/shutdown/scheduled`); absent when none
+ * is scheduled and from a daemon that predates it.
+ */
+poweroff_at?: string, 
+/**
+ * CPUs busy on the whole machine, every program counted, in
+ * thousandths of a CPU (`/proc/stat`).
+ */
+host_cpu_milli?: number, 
+/**
+ * One-minute load average of the whole machine (`/proc/loadavg`).
+ */
+load1?: number, 
+/**
+ * Jobs of this node that ended in the last 60 minutes, by result, as
+ * its own job log has them.
+ */
+ended_hour?: Outcomes, 
+/**
+ * Jobs of this node that ended, by result, per clock hour (UTC) of the
+ * last 25 hours, oldest first; hours without a job are left out. A
+ * reader sums the hours from its own midnight for "today".
+ */
+ended_hours?: Array<HourOutcomes>, };
 
 export type GoneReason = "Drained" | "Lost" | "Deadline" | "RefusedAtJoin" | "Reclaimed";

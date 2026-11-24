@@ -203,6 +203,18 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
                 1
             }
         },
+        Ok(Plan::Output { id, from }) => {
+            match slot::server::nodes::output_step(&args.http, id, from) {
+                Ok(s) => {
+                    println!("{s}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("slot shell: output: {e:#}");
+                    1
+                }
+            }
+        }
         Ok(Plan::Siblings { id, key, path }) => {
             if let Some(p) = path
                 && let Err(e) = slot::mirror::link(&ws, &id, &p)

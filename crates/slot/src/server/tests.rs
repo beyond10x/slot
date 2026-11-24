@@ -224,6 +224,14 @@ fn the_local_node_counts_jobs_slots_and_sizes() {
         joined_ms: 1_763_899_200_000,
         cpu_busy: 3.4567,
         jobs: &jobs,
+        host: HostFacts {
+            booted_ms: None,
+            poweroff_ms: None,
+            busy: 0.0,
+            load1: None,
+        },
+        ended: &Tally::default(),
+        now: 1_763_899_200_000,
     });
     assert_eq!((n.slots_in_use, n.running_jobs, n.queued_jobs), (5, 2, 1));
     assert_eq!((n.memory_gib, n.disk_gib), (32, 1800));
@@ -233,6 +241,109 @@ fn the_local_node_counts_jobs_slots_and_sizes() {
     assert_eq!(n.joined_at.as_deref(), Some("2025-11-23T12:00:00Z"));
     assert_eq!(n.cluster_id, "host");
     assert_eq!(on_local_node(a.clone()).node, LOCAL_NODE);
+}
+
+/// The local node reports the machine's boot, its scheduled poweroff, the
+/// CPUs busy on the whole host and its load, beside the pool's own CPUs.
+#[test]
+fn the_local_node_reports_boot_poweroff_and_the_whole_host() {
+    let tally = Tally::default();
+    let n = local_node(&LocalFacts {
+        cluster: "host",
+        cpus: 20,
+        slots: 16,
+        memory: 32 << 30,
+        available: 20 << 30,
+        disk_total: 1800 << 30,
+        disk_free: 604 << 30,
+        joined_ms: 1_763_899_200_000,
+        cpu_busy: 0.0,
+        jobs: &[],
+        host: HostFacts {
+            booted_ms: Some(1_763_895_600_000),
+            poweroff_ms: Some(1_763_942_400_000),
+            busy: 4.1234,
+            load1: Some(5.31),
+        },
+        ended: &tally,
+        now: 1_763_899_200_000,
+    });
+    assert_eq!(n.cpu_busy_milli, Some(0));
+    assert_eq!(n.host_cpu_milli, Some(4123));
+    assert_eq!(n.load1, Some(5.31));
+    assert_eq!(n.booted_at.as_deref(), Some("2025-11-23T11:00:00Z"));
+    assert_eq!(n.poweroff_at.as_deref(), Some("2025-11-24T00:00:00Z"));
+}
+
+/// A job-log line of a finished job, `ended_ms` and `exit` given.
+fn log_line(id: i64, ended_ms: i64, state: &str, exit: i32, node: &str) -> String {
+    format!(
+        r#"{{"id":{id},"argv":["true"],"cwd":"/w","repo":"r","toolchain":"other","remote":false,"tokens":1,"state":"{state}","enqueued_ms":{s},"started_ms":{s},"ended_ms":{ended_ms},"exit":{exit},"cpu_s":0.0,"compile_server_cpu_s":0.0,"peak_rss":0,"node":"{node}"}}"#,
+        s = ended_ms - 1000
+    )
+}
+
+/// The node's counts of finished jobs come from its whole job log, not
+/// from the finished jobs it keeps for the page: the last 60 minutes and
+/// each clock hour of the last 25, failures split by cause; a job this
+/// daemon handed to a node counts on that node, not here.
+#[test]
+fn the_local_node_counts_ended_jobs_from_the_job_log_by_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut cfg = config(&root, 2);
+    cfg.keep_jobs = 3;
+    std::fs::create_dir_all(&cfg.state_dir).unwrap();
+    let now = now_ms();
+    let min = 60_000;
+    let mut lines = Vec::new();
+    let mut id = 0;
+    let mut add = |ago_min: i64, state: &str, exit: i32, node: &str| {
+        id += 1;
+        lines.push(log_line(id, now - ago_min * min, state, exit, node));
+    };
+    for _ in 0..20 {
+        add(10, "ok", 0, "local");
+    }
+    add(11, "failed", 101, "local");
+    add(12, "failed", 1, "");
+    add(13, "failed", 124, "local");
+    add(14, "failed", 127, "local");
+    add(15, "failed", 3, "local");
+    add(16, "failed", 125, "local");
+    add(17, "cancelled", -1, "local");
+    add(20, "failed", 101, "build-1");
+    add(180, "ok", 0, "local");
+    add(30 * 60, "ok", 0, "local");
+    std::fs::write(cfg.state_dir.join("jobs.jsonl"), lines.join("\n") + "\n").unwrap();
+    let server = Server::new(cfg).unwrap();
+    let n = server.nodes().remove(0);
+    assert_eq!(
+        n.ended_hour,
+        Some(crate::types::Outcomes {
+            ok: 20,
+            test: 2,
+            timeout: 1,
+            infra: 3,
+            cancelled: 1,
+        })
+    );
+    let hours = n.ended_hours.unwrap_or_default();
+    let ok: u32 = hours.iter().map(|h| h.n.ok).sum();
+    assert_eq!(ok, 21, "the job of 3 h ago counts, the one of 30 h ago not");
+    assert!(hours.windows(2).all(|w| w[0].t < w[1].t), "oldest first");
+    assert!(hours.iter().all(|h| h.t % 3_600_000 == 0), "whole hours");
+}
+
+/// A job that ends is counted at once, by its cause.
+#[test]
+fn an_ended_job_is_counted_by_its_cause() {
+    let f = start(2);
+    assert_eq!(run(&f, sh(&f.root, "exit 127")).code, 127);
+    assert_eq!(run(&f, sh(&f.root, "exit 0")).code, 0);
+    let n = f.server.nodes().remove(0);
+    let h = n.ended_hour.unwrap_or_default();
+    assert_eq!((h.ok, h.infra, h.test), (1, 1, 0));
 }
 
 #[test]

@@ -33,8 +33,9 @@ function fakeEventSource(outputs: Outputs): void {
       setTimeout(() => {
         this.readyState = 1;
         this.onopen?.(new Event('open'));
-        const m = /jobs\/(\d+)\/output$/.exec(this.url);
-        const out = m ? outputs[m[1]] : undefined;
+        // A node's own job is asked with its node named; its output is kept under `<node>/<id>`.
+        const m = /jobs\/(\d+)\/output(?:\?node=([^&]+))?$/.exec(this.url);
+        const out = m ? outputs[m[2] ? `${decodeURIComponent(m[2])}/${m[1]}` : m[1]] : undefined;
         if (out) {
           for (const c of out.chunks) this.emit('message', JSON.stringify(c));
           if (out.end !== '') this.emit('end', JSON.stringify({ msg: out.end }));

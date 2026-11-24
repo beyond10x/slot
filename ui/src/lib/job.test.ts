@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Job, LiveJob } from '../generated/types.ts';
-import { barLabel, checkoutLabel, idLabel, jobId, jobKey, jobName, newestRunning, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
+import { barLabel, checkoutLabel, idLabel, jobId, jobKey, jobName, newestRunning, outputUrl, resultText, runS, splitJobs, times, tooltipText, waitS } from './job.ts';
 
 function job(over: Partial<Job>): Job {
   return {
@@ -117,4 +117,10 @@ test('a finished job states its result in words, a failed one with its exit code
   assert.equal(resultText(job({ state: 'ok' })), 'ok');
   assert.equal(resultText(job({ state: 'failed', exit: 101 })), 'failed (101)');
   assert.equal(resultText(job({ state: 'cancelled', exit: -1 })), 'cancelled');
+});
+
+test('UXF-044: the output of a node\'s job is asked of this daemon with the node named, which reads it from the node', () => {
+  assert.equal(outputUrl(jobKey(job({ id: 7 }))), 'api/jobs/7/output');
+  assert.equal(outputUrl(jobKey(job({ id: 7, node: 'build-1d', from_node: true }))), 'api/jobs/7/output?node=build-1d');
+  assert.equal(outputUrl(jobKey(job({ id: 8, node: 'build-1d' }))), 'api/jobs/8/output', 'a job this daemon handed to a node is its own');
 });

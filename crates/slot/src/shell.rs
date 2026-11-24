@@ -16,6 +16,8 @@
 //!   come back in one fetch of several paths);
 //! - `slot state`, read-only: the node daemon's own row and its jobs, for
 //!   the endpoint's poll;
+//! - `slot output <id> [<from>]`, read-only: the kept output of one job,
+//!   for the endpoint's page;
 //! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
 //!   <key> [<tree>]`, run by this binary whatever path the client named; the
 //!   workspace root must be this server's.
@@ -52,6 +54,15 @@ pub enum Plan {
     /// object, read from its web address: the read-only `state` step an
     /// endpoint polls.
     State,
+    /// Print the kept output of job `id` from its chunk `from` on as one
+    /// JSON object, read from the node daemon's web address: the read-only
+    /// `output` step an endpoint relays to its page.
+    Output {
+        /// Job id on this node.
+        id: i64,
+        /// The first chunk wanted.
+        from: u64,
+    },
     /// Record mirror `id` under repository `key` and print its siblings.
     Siblings {
         /// Workspace id.
@@ -195,6 +206,13 @@ pub fn plan(line: &str, home: &Path, roots: &Roots<'_>) -> Result<Plan, String> 
         "slot" => match args {
             [p] if p == "proxy" => Ok(Plan::Proxy),
             [s] if s == "state" => Ok(Plan::State),
+            [o, id, rest @ ..] if o == "output" && rest.len() <= 1 => Ok(Plan::Output {
+                id: id.parse().map_err(|_| format!("bad job id `{id}`"))?,
+                from: match rest {
+                    [f] => f.parse().map_err(|_| format!("bad chunk number `{f}`"))?,
+                    _ => 0,
+                },
+            }),
             [c, id] if c == "cancel" => id
                 .parse()
                 .map(Plan::Cancel)
@@ -432,6 +450,20 @@ mod tests {
             assert!(p(bad).is_err(), "accepted: {bad}");
         }
         assert!(p("slot cancel x").is_err());
+        assert_eq!(p("slot output 7"), Ok(Plan::Output { id: 7, from: 0 }));
+        assert_eq!(
+            p("/srv/u/.local/bin/slot output 7 12"),
+            Ok(Plan::Output { id: 7, from: 12 })
+        );
+        for bad in [
+            "slot output",
+            "slot output x",
+            "slot output 7 -1",
+            "slot output 7 1 2",
+            "slot output 7; id",
+        ] {
+            assert!(p(bad).is_err(), "accepted: {bad}");
+        }
         assert!(p("slot serve").is_err());
         assert!(p("slot cargo build").is_err());
     }

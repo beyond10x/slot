@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 import { open } from './harness.ts';
 import type { Opened } from './harness.ts';
-import { SCENARIOS } from './scenarios.ts';
+import { SCENARIOS, clusterNodeFacts, nodeJobOutput } from './scenarios.ts';
 import type { Scenario } from './scenarios.ts';
 import { VIEWPORTS, vpName } from './viewports.ts';
 
@@ -48,11 +48,11 @@ test('UXF-018 busy-failed @ 960x1080: a job at the bottom of the window stays in
 test('UXF-019 busy-failed: the header counts the failed jobs of the last 60 min and opens the newest one', async ({ page, baseURL }) => {
   const run = await start(page, baseURL, 'busy-failed');
   const failed = page.locator('header').getByRole('button', { name: /^failed \d+ \(60 min\)/ });
-  await expect(failed).toHaveAccessibleName('failed 1 (60 min): output of job 37, the newest failed job');
+  await expect(failed).toHaveAccessibleName('failed 1 (60 min), 1 test: output of job 37, the newest failed job');
   await run.step();
   await run.step();
-  await expect(failed).toHaveText('failed 2 (60 min)');
-  await expect(failed).toHaveAccessibleName('failed 2 (60 min): output of job 42, the newest failed job');
+  await expect(failed).toHaveText('failed 2 (60 min) 2 test');
+  await expect(failed).toHaveAccessibleName('failed 2 (60 min), 2 test: output of job 42, the newest failed job');
   await failed.focus();
   await page.keyboard.press('Enter');
   await expect(page.locator('aside')).toContainText('error[E0308]');
@@ -437,3 +437,64 @@ for (const name of ['busy-failed', 'cluster-remote']) {
     expect(await negativeIds(page), 'no job is named by a negative number').toEqual([]);
   });
 }
+
+/** The cluster page of `clusterNodeFacts` at the first gating size. */
+async function nodeFacts(page: Page, baseURL: string | undefined): Promise<{ local: Locator; node: Locator }> {
+  await page.setViewportSize({ width: GATING[0].width, height: GATING[0].height });
+  await open(page, baseURL ?? '/', clusterNodeFacts());
+  return { local: page.locator('[data-node="local"]'), node: page.locator('[data-node="build-1d"]') };
+}
+
+test('UXF-039 cluster-node-facts: the lease ring counts to the poweroff the node reports, red while the cluster file says otherwise', async ({ page, baseURL }) => {
+  const { node } = await nodeFacts(page, baseURL);
+  await expect(node.locator('.life text')).toHaveText(/^(2:00|1:59)$/);
+  const lease = node.locator('[data-lease-mismatch]');
+  await expect(lease).toHaveText(/^file /);
+  await expect(lease).toHaveAttribute('aria-label', /^the node powers off at .*, the cluster file says /);
+  const [border, bad] = await node.evaluate((el) => {
+    const probe = document.createElement('i');
+    probe.style.color = 'var(--bad)';
+    el.append(probe);
+    const red = getComputedStyle(probe).color;
+    probe.remove();
+    return [getComputedStyle(el).borderTopColor, red];
+  });
+  expect(border, 'the card is marked in the colour of a fault').toBe(bad);
+});
+
+test('UXF-040 cluster-node-facts: cloud cost counts from the node\'s boot, past the stale deadline', async ({ page, baseURL }) => {
+  await nodeFacts(page, baseURL);
+  await expect(page.locator('.kpi.cost dd')).toContainText('44.76');
+});
+
+test('UXF-041 cluster-node-facts: each card counts its own node\'s finished jobs over the same windows', async ({ page, baseURL }) => {
+  const { local, node } = await nodeFacts(page, baseURL);
+  await expect(node.locator('[data-counts]')).toContainText(/60 min 1,700 done, 120 failed .* today 7,566 done, 1,378 failed/);
+  await expect(local.locator('[data-counts]')).toContainText(/60 min 40 done, 3 failed .* today 300 done, 20 failed/);
+});
+
+test('UXF-042 cluster-node-facts: failures are split by cause on the cards', async ({ page, baseURL }) => {
+  const { node } = await nodeFacts(page, baseURL);
+  await expect(node.locator('[data-fail-causes]')).toHaveText('failed: 110 test · 2 timeout · 8 infra');
+});
+
+test('UXF-042 busy-failed: the header splits the failed jobs by cause', async ({ page, baseURL }) => {
+  await start(page, baseURL, 'busy-failed');
+  await expect(page.locator('header [data-fail-causes]')).toHaveText('1 test');
+});
+
+test('UXF-043 cluster-node-facts: the local card shows the whole host\'s CPUs and load, not only the pool\'s', async ({ page, baseURL }) => {
+  const { local, node } = await nodeFacts(page, baseURL);
+  await expect(local.locator('[data-host]')).toHaveText('whole host 4.1 of 20 CPUs · load 5.3');
+  await expect(node.locator('[data-host]')).toHaveText('whole host 29.5 of 64 CPUs · load 31.2');
+});
+
+test('UXF-044 node-job-output: the output of a node\'s job is shown in the pane', async ({ page, baseURL }) => {
+  await page.setViewportSize({ width: GATING[0].width, height: GATING[0].height });
+  await open(page, baseURL ?? '/', nodeJobOutput());
+  await page.getByRole('button', { name: 'output of job 7089 on build-1d', exact: true }).first().click();
+  const pane = page.locator('aside');
+  await expect(pane).toContainText('test lease::renews ... FAILED on the node');
+  await expect(pane).not.toContainText('stays on that node');
+  await expect(pane).not.toContainText('output not available');
+});

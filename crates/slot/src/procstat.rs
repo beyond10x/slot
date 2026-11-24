@@ -344,9 +344,92 @@ pub fn system_cpu() -> (u64, u64) {
     (busy, total)
 }
 
+/// The machine's boot time from the text of `/proc/stat` (`btime`, Unix
+/// seconds), as Unix milliseconds.
+pub fn parse_btime(stat: &str) -> Option<i64> {
+    stat.lines()
+        .find_map(|l| l.strip_prefix("btime "))
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(|s| s * 1000)
+}
+
+/// The machine's boot time, Unix milliseconds.
+pub fn boot_time_ms() -> Option<i64> {
+    parse_btime(&fs::read_to_string("/proc/stat").ok()?)
+}
+
+/// Where systemd keeps a shutdown scheduled with `shutdown -P <time>`.
+pub const SCHEDULED_SHUTDOWN: &str = "/run/systemd/shutdown/scheduled";
+
+/// The poweroff of the text of [`SCHEDULED_SHUTDOWN`] (`USEC=`,
+/// microseconds since the epoch), as Unix milliseconds; none for a
+/// scheduled reboot or without a time.
+pub fn parse_scheduled_poweroff(text: &str) -> Option<i64> {
+    let field = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix('=')))
+            .map(str::trim)
+    };
+    if matches!(field("MODE"), Some(m) if m.contains("reboot") || m == "kexec") {
+        return None;
+    }
+    let usec: i64 = field("USEC")?.parse().ok()?;
+    (usec > 0).then_some(usec / 1000)
+}
+
+/// The poweroff systemd has scheduled on this machine, Unix milliseconds.
+pub fn scheduled_poweroff_ms() -> Option<i64> {
+    parse_scheduled_poweroff(&fs::read_to_string(SCHEDULED_SHUTDOWN).ok()?)
+}
+
+/// The one-minute load average of the text of `/proc/loadavg`.
+pub fn parse_load1(text: &str) -> Option<f64> {
+    text.split_whitespace().next()?.parse().ok()
+}
+
+/// The machine's one-minute load average.
+pub fn load1() -> Option<f64> {
+    parse_load1(&fs::read_to_string("/proc/loadavg").ok()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_boot_time_is_read_from_btime() {
+        let stat = "cpu  1 2 3 4 5 6 7 0 0 0\ncpu0 1 2 3 4 5 6 7 0 0 0\nintr 1\nctxt 2\nbtime 1795000000\nprocesses 9\n";
+        assert_eq!(parse_btime(stat), Some(1_795_000_000_000));
+        assert_eq!(parse_btime("cpu 1 2 3\n"), None);
+        assert_eq!(parse_btime("btime x\n"), None);
+    }
+
+    #[test]
+    fn a_scheduled_poweroff_is_read_and_a_reboot_is_not_one() {
+        let at = "USEC=1795003600123456\nWARN_WALL=1\nMODE=poweroff\n";
+        assert_eq!(parse_scheduled_poweroff(at), Some(1_795_003_600_123));
+        assert_eq!(
+            parse_scheduled_poweroff("USEC=1795003600000000\n"),
+            Some(1_795_003_600_000),
+            "no mode named: a shutdown"
+        );
+        assert_eq!(
+            parse_scheduled_poweroff("USEC=1795003600000000\nMODE=halt\n"),
+            Some(1_795_003_600_000)
+        );
+        assert_eq!(
+            parse_scheduled_poweroff("USEC=1795003600000000\nMODE=reboot\n"),
+            None
+        );
+        assert_eq!(parse_scheduled_poweroff("MODE=poweroff\n"), None);
+        assert_eq!(parse_scheduled_poweroff("USEC=0\n"), None);
+    }
+
+    #[test]
+    fn the_load_average_is_its_first_field() {
+        assert_eq!(parse_load1("5.31 6.02 7.11 3/1200 4242\n"), Some(5.31));
+        assert_eq!(parse_load1(""), None);
+    }
 
     #[test]
     fn cpu_list_counts_ranges_and_singles() {

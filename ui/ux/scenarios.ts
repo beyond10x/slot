@@ -1,5 +1,5 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
-import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, Node, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
+import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, Node, Outcomes, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
 import { POOL_BASE } from '../src/lib/headroom.ts';
 import type { RecordedBucket } from '../src/lib/history.ts';
 import type { MachineNumbers } from '../src/lib/headroom.ts';
@@ -36,7 +36,8 @@ export interface Scenario {
   /** Answer of `api/cache-day`; the path answers 404 when absent, as a daemon older than the page does. */
   cacheDay?: CacheMinute;
   steps: Step[];
-  output: Record<number, { chunks: Chunk[]; end: string }>;
+  /** Output by job: its id, or `<node>/<id>` for a node's own job. */
+  output: Record<string, { chunks: Chunk[]; end: string }>;
   task: Task | null;
   /** Answer of `api/nodes`; the path answers 404 when absent, as a daemon older than nodes does. */
   nodes?: Node[];
@@ -511,6 +512,48 @@ export const SCENARIOS: Scenario[] = [
 
 /** Scenarios whose output pane is open from the start. */
 export const OPEN_PANE: Record<string, number> = { crowded: 100 };
+
+const outcomes = (o: Partial<Outcomes>): Outcomes => ({ ok: 0, test: 0, timeout: 0, infra: 0, cancelled: 0, ...o });
+const HOUR_S = 3600;
+/** The start of the clock hour `h` hours before T0, ms. */
+const hourAgo = (h: number): number => s(-h * HOUR_S) - (s(-h * HOUR_S) % (HOUR_S * 1000));
+
+/**
+ * A build node that has run for 12 hours past the stale deadline of the cluster file: its machine has a poweroff scheduled in 2 hours,
+ * it counts its own finished jobs, far more than the 30 it lists; the local machine is busy with programs outside the pool.
+ */
+export function clusterNodeFacts(): Scenario {
+  const local = localRow({
+    slots_in_use: 2, running_jobs: 3, queued_jobs: 2, cpu_busy_milli: 0, host_cpu_milli: 4_100, load1: 5.3,
+    ended_hour: outcomes({ ok: 40, test: 3 }), ended_hours: [{ t: hourAgo(1), n: outcomes({ ok: 300, test: 20, cancelled: 4 }) }],
+  });
+  const node: Node = {
+    node_id: 'build-1d', cluster_id: 'workstation', kind: 'Remote', state: 'Ready', cpus: 64, slots: 51, slots_in_use: 8, memory_gib: 124,
+    disk_gib: 1800, running_jobs: 3, queued_jobs: 0, slot_version: '0.33.0', cpu_busy_milli: 27_000, host_cpu_milli: 29_500, load1: 31.2,
+    memory_used_mib: 40_960, disk_free_gib: 1200, price_per_hour_cents: 373,
+    joined_at: iso(-5.5 * HOUR_S), deadline: iso(-4 * HOUR_S), booted_at: iso(-12 * HOUR_S), poweroff_at: iso(2 * HOUR_S),
+    ended_hour: outcomes({ ok: 1_700, test: 110, timeout: 2, infra: 8 }),
+    ended_hours: [
+      { t: hourAgo(24), n: outcomes({ ok: 999 }) },
+      { t: hourAgo(3), n: outcomes({ ok: 5_866, test: 1_243, infra: 15 }) },
+      { t: hourAgo(1), n: outcomes({ ok: 1_700, test: 110, timeout: 2, infra: 8 }) },
+    ],
+  };
+  return cluster('cluster-node-facts', 'A build node outlived the deadline of the cluster file. Read when it really powers off and what it cost.',
+    [local, node], 'build-1d', null);
+}
+
+/** busy-failed with a finished job of node build-1d whose output the node keeps: its output is read from the node. */
+export function nodeJobOutput(): Scenario {
+  const base = busyFailed();
+  const theirs: Job = done(7089, -200, {
+    node: 'build-1d', from_node: true, repo: 'node-repo', cwd: '/trees/node-repo', checkout: { kind: 'repository' }, state: 'failed', exit: 101,
+  });
+  return {
+    ...base, name: 'node-job-output', state: { ...base.state, done: [...base.state.done, theirs] },
+    output: { ...base.output, 'build-1d/7089': { chunks: [{ t: 'err', b: 'test lease::renews ... FAILED on the node\n' }], end: 'exit 101' } },
+  };
+}
 
 /** Freshly opened tab: persisted averages, a gap, recent exact history, and a new live tick. */
 export function recordedCharts(): Scenario {

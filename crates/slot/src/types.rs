@@ -327,6 +327,108 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub left_at: Option<String>,
+    /// When the machine booted, RFC 3339, as the node reads it (`btime` of
+    /// `/proc/stat`); absent from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub booted_at: Option<String>,
+    /// The poweroff systemd has scheduled on the machine, RFC 3339, as the
+    /// node reads it (`/run/systemd/shutdown/scheduled`); absent when none
+    /// is scheduled and from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub poweroff_at: Option<String>,
+    /// CPUs busy on the whole machine, every program counted, in
+    /// thousandths of a CPU (`/proc/stat`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host_cpu_milli: Option<u32>,
+    /// One-minute load average of the whole machine (`/proc/loadavg`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub load1: Option<f64>,
+    /// Jobs of this node that ended in the last 60 minutes, by result, as
+    /// its own job log has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ended_hour: Option<Outcomes>,
+    /// Jobs of this node that ended, by result, per clock hour (UTC) of the
+    /// last 25 hours, oldest first; hours without a job are left out. A
+    /// reader sums the hours from its own midnight for "today".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ended_hours: Option<Vec<HourOutcomes>>,
+}
+
+/// Finished jobs by result: ok, failed by cause, cancelled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct Outcomes {
+    /// Exited 0.
+    pub ok: u32,
+    /// Failed with any other exit: the command's own failure, a red test.
+    pub test: u32,
+    /// Ended at a run-time limit (exit 124).
+    pub timeout: u32,
+    /// Failed for the infrastructure: the connection to a daemon or a node
+    /// was lost (3), the command could not be run (125) or found (127).
+    pub infra: u32,
+    /// Cancelled.
+    pub cancelled: u32,
+}
+
+/// The result of an ended job, a failure by its cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Exited 0.
+    Ok,
+    /// Failed with an exit of the command itself.
+    Test,
+    /// Ended at a run-time limit.
+    Timeout,
+    /// Failed for the infrastructure.
+    Infra,
+    /// Cancelled.
+    Cancelled,
+}
+
+impl Outcome {
+    /// The result of an ended job; none for one still queued or running.
+    pub fn of(j: &Job) -> Option<Self> {
+        Some(match j.state {
+            JobState::Queued | JobState::Running => return None,
+            JobState::Ok => Self::Ok,
+            JobState::Cancelled => Self::Cancelled,
+            JobState::Failed if j.timed_out || j.exit == 124 => Self::Timeout,
+            JobState::Failed if matches!(j.exit, 3 | 125 | 127) => Self::Infra,
+            JobState::Failed => Self::Test,
+        })
+    }
+}
+
+impl Outcomes {
+    /// Counts one more job of result `o`.
+    pub fn add(&mut self, o: Outcome) {
+        let n = match o {
+            Outcome::Ok => &mut self.ok,
+            Outcome::Test => &mut self.test,
+            Outcome::Timeout => &mut self.timeout,
+            Outcome::Infra => &mut self.infra,
+            Outcome::Cancelled => &mut self.cancelled,
+        };
+        *n = n.saturating_add(1);
+    }
+}
+
+/// Finished jobs of one clock hour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct HourOutcomes {
+    /// Start of the hour, Unix milliseconds.
+    #[ts(type = "number")]
+    pub t: i64,
+    /// The jobs that ended in it.
+    pub n: Outcomes,
 }
 
 /// Unix milliseconds as an RFC 3339 time in UTC, as the API's timestamps
@@ -521,6 +623,17 @@ pub struct State {
     /// Machine base: CPUs busy on the host over the last second; 0 otherwise.
     #[serde(default)]
     pub busy_cores: f64,
+    /// CPUs busy on the whole host over the last second, every program
+    /// counted, whatever the headroom base; absent from a daemon that
+    /// predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host_busy_cores: Option<f64>,
+    /// One-minute load average of the whole host; absent from a daemon that
+    /// predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub load1: Option<f64>,
     /// Machine base: CPUs the host may use with the headroom kept free; 0
     /// when the machine base is not in force (pool base or no headroom).
     #[serde(default)]
@@ -757,6 +870,25 @@ pub struct Chunk {
     pub t: String,
     /// Text.
     pub b: String,
+}
+
+/// `GET /api/jobs/{id}/output-tail?from=<n>`: the kept output of a job
+/// from its chunk `n` on, every chunk the job wrote numbered from 0; what
+/// the `output` step of a node prints for the endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputTail {
+    /// The number of the first chunk of `chunks`: above the asked one when
+    /// older chunks were dropped.
+    pub from: u64,
+    /// The number of the next chunk the job writes.
+    pub next: u64,
+    /// The kept chunks from `from` on.
+    pub chunks: Vec<Chunk>,
+    /// Whether the job has ended: no chunk follows.
+    pub ended: bool,
+    /// Whether the daemon still keeps the job's output.
+    pub kept: bool,
 }
 
 #[cfg(test)]
