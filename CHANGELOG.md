@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.33.1 — 2026-11-24
 
 - Remote mode's sync compares every file by content (`rsync --checksum`), not by size and
   modification time. A file changed at the same size and time was skipped, and through
