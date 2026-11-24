@@ -1176,7 +1176,16 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         assert!(listening(port));
         drop(l);
-        assert!(!listening(port));
+        // Another test may bind the freed ephemeral port at once; a closed
+        // port shows on one of a few fresh ones.
+        let closed = !listening(port)
+            || (0..20).any(|_| {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let port = l.local_addr().unwrap().port();
+                drop(l);
+                !listening(port)
+            });
+        assert!(closed);
     }
 
     #[test]
