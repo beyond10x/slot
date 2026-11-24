@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `slot --here <command>` keeps the job in this host's pool, never on a build node, for a step
+  that needs this host's credentials while it runs (a clone, a fetch, a push): the client skips
+  remote mode (`SLOT_HOST`) for the call and the job carries the reason `here: needs this host`.
+  Unlike `--local` it still goes through the daemon's queue and slots.
 - A job that runs or waits on this machine while a remote node is configured names why: the
   job record's new `local_reason` (`/api/state`, job events, UI types) and a `  local: <reason>`
   line under the job in `slot status`. Reasons: `local requested`, `cache rule`, `nested job`,

@@ -114,6 +114,10 @@ pub struct Settings {
     /// `SLOT_REMOTE_SAME_PATH` set and not `0`: the server mirrors the
     /// tree at its absolute path here, and the job runs there.
     pub same_path: bool,
+    /// `--here`: the job goes to this machine's daemon whatever `SLOT_HOST`
+    /// says, and carries the reason [`crate::server::spill::HERE`], so the
+    /// daemon never hands it to a node.
+    pub here: bool,
 }
 
 /// A duration from variable `name`, or `default` with a line on stderr when
@@ -178,6 +182,7 @@ impl Settings {
             timeout: None,
             fallback: var("SLOT_LOCAL_FALLBACK").is_some_and(|v| v != "0"),
             same_path: var("SLOT_REMOTE_SAME_PATH").is_some_and(|v| v != "0"),
+            here: false,
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
@@ -197,26 +202,12 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         repo,
         checkout,
     } = checkout_info(&cwd);
-    let mut req = Request {
-        argv: argv.to_vec(),
-        session: std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),
-        client: client_id(),
-        repo: repo.unwrap_or_default(),
-        checkout,
-        tokens: s.tokens,
-        priority: s.priority,
-        timeout_s: s.timeout,
-        ..Request::default()
-    };
+    let mut req = new_request(argv, s, repo, checkout);
     if let Some(dir) = crate::gate::dir_from_env() {
         local_fields(&mut req, &cwd);
         return crate::gate::submit(&dir, &req);
     }
-    let listed = s.host.is_some() && listed_local(top.as_deref(), argv);
-    if listed {
-        req.local_reason = crate::server::spill::LOCAL_REQUESTED.into();
-    }
-    if let Some(host) = s.host.as_ref().filter(|_| !listed) {
+    if let Some(host) = remote_host(&mut req, s, || listed_local(top.as_deref(), argv)) {
         let plan = artifacts::plan(argv);
         if let Some(p) = &plan {
             req.argv.clone_from(&p.argv);
@@ -267,6 +258,53 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     }
     local_fields(&mut req, &cwd);
     submit_local(&s.socket, &req, &Waits::of(s))
+}
+
+/// The request for `argv` before its route is known. With `--here` it
+/// carries the reason [`crate::server::spill::HERE`], so the daemon never
+/// hands the job to a node.
+fn new_request(
+    argv: &[String],
+    s: &Settings,
+    repo: Option<String>,
+    checkout: Option<Checkout>,
+) -> Request {
+    Request {
+        argv: argv.to_vec(),
+        session: std::env::var("CLAUDE_CODE_SESSION_ID").unwrap_or_default(),
+        client: client_id(),
+        repo: repo.unwrap_or_default(),
+        checkout,
+        tokens: s.tokens,
+        priority: s.priority,
+        timeout_s: s.timeout,
+        local_reason: if s.here {
+            crate::server::spill::HERE.into()
+        } else {
+            String::new()
+        },
+        ..Request::default()
+    }
+}
+
+/// The build server the job goes to, or `None` when it stays on this
+/// machine's daemon: no `SLOT_HOST`, `--here`, or a command `.slot.toml`
+/// lists as local (`listed`, asked only when a host is set and `--here` is
+/// not), which also names the job's reason.
+fn remote_host<'a>(
+    req: &mut Request,
+    s: &'a Settings,
+    listed: impl FnOnce() -> bool,
+) -> Option<&'a String> {
+    let host = s.host.as_ref()?;
+    if s.here {
+        return None;
+    }
+    if listed() {
+        req.local_reason = crate::server::spill::LOCAL_REQUESTED.into();
+        return None;
+    }
+    Some(host)
 }
 
 /// The `local_reason` of a job whose remote start failed with `why`:
@@ -949,6 +987,62 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn here_names_its_reason_on_the_request() {
+        let argv = vec!["git".to_string(), "fetch".to_string()];
+        let here = Settings {
+            here: true,
+            ..Settings::default()
+        };
+        let req = new_request(&argv, &here, None, None);
+        assert_eq!(req.local_reason, "here: needs this host");
+        assert_eq!(
+            crate::server::spill::local_reason(&req, false),
+            "here: needs this host"
+        );
+        assert_eq!(
+            crate::server::spill::refusal(&req).as_deref(),
+            Some("here: needs this host")
+        );
+        let plain = new_request(&argv, &Settings::default(), None, None);
+        assert_eq!(plain.local_reason, "");
+    }
+
+    #[test]
+    fn here_skips_remote_mode() {
+        let argv = vec!["git".to_string(), "push".to_string()];
+        let remote = Settings {
+            host: Some("build-1".into()),
+            ..Settings::default()
+        };
+        let here = Settings {
+            here: true,
+            ..remote.clone()
+        };
+        let mut req = new_request(&argv, &here, None, None);
+        let asked = std::cell::Cell::new(false);
+        let to = remote_host(&mut req, &here, || {
+            asked.set(true);
+            true
+        });
+        assert_eq!(to, None);
+        assert!(!asked.get(), ".slot.toml is not read with --here");
+        assert_eq!(req.local_reason, "here: needs this host");
+
+        let mut req = new_request(&argv, &remote, None, None);
+        assert_eq!(
+            remote_host(&mut req, &remote, || false).map(String::as_str),
+            Some("build-1")
+        );
+        assert_eq!(req.local_reason, "");
+        assert_eq!(remote_host(&mut req, &remote, || true), None);
+        assert_eq!(req.local_reason, "local requested");
+
+        let mut req = new_request(&argv, &Settings::default(), None, None);
+        assert_eq!(remote_host(&mut req, &Settings::default(), || true), None);
+        assert_eq!(req.local_reason, "");
+    }
 
     #[test]
     fn a_failed_remote_start_names_its_first_error_line() {

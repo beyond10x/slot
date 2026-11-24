@@ -23,6 +23,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub local: bool,
 
+    /// Keep the job in this host's pool, never on a build node: for a step
+    /// that needs this host's credentials while it runs (a clone, a fetch,
+    /// a push). `slot status` shows `local: here: needs this host` under it.
+    #[arg(long, global = true)]
+    pub here: bool,
+
     /// Slots the job holds, in place of the count slot derives from the
     /// command. For work the daemon cannot see, such as a script that
     /// starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The
@@ -829,6 +835,18 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("slot").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn here_is_a_global_flag_off_by_default() {
+        let cli = parse(&["--here", "git", "fetch"]).unwrap();
+        assert!(cli.here);
+        assert!(!cli.local);
+        assert!(matches!(cli.command, Cmd::External(_)));
+        let cli = parse(&["run", "--here", "--", "git", "push"]).unwrap();
+        assert!(cli.here);
+        assert!(matches!(cli.command, Cmd::Run(_)));
+        assert!(!parse(&["git", "clone", "x"]).unwrap().here);
     }
 
     #[test]
