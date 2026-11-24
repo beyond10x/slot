@@ -497,6 +497,8 @@ test('UXF-044 node-job-output: the output of a node\'s job is shown in the pane'
   await expect(pane).toContainText('test lease::renews ... FAILED on the node');
   await expect(pane).not.toContainText('stays on that node');
   await expect(pane).not.toContainText('output not available');
+});
+
 for (const size of GATING) {
   test(`UXF-050 nodes-busy @ ${vpName(size)}: a node job's id and its node stand in the job cell, clear of the tool cell`, async ({ page, baseURL }) => {
     await start(page, baseURL, 'nodes-busy', size);
