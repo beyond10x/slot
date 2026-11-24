@@ -71,6 +71,10 @@ The `slot` command in that line has the words as they were written, with their q
 These pass:
 
 - anything that starts with `slot`, or has `SLOT_SHIM_OFF=1` in front;
+- a task runner (`task`, `make`, `just`, `sh`, `bash`) with `SLOT_ORCHESTRATOR=1` in front: a gate
+  whose own steps call `slot` runs outside the pool, with no time cap on the whole run, and each
+  step is its own pool job. The shims stay on, so a step that compiles without `slot` still goes
+  through the pool;
 - every command inside a slot job (`SLOT_JOB` set), so `slot task check` is not refused for the
   cargo calls inside it;
 - `cargo`, `go` and `ignite` when the [PATH shim](agent-integration.md#make-it-the-default-the-path-shim)

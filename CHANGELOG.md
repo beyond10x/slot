@@ -105,6 +105,12 @@
   lock while one of them downloads. A fetch that fails or runs over 5 minutes sends the job back
   to the client, which runs it on its own machine's daemon (a new `fallback` frame, sent only to
   a client whose request sets `fetch_once`).
+- The Claude Code hook lets a task runner (`task`, `make`, `just`, `sh`, `bash`) run with
+  `SLOT_ORCHESTRATOR=1` in front. It is for a gate whose own steps call `slot`: run as one
+  `slot` job, the whole gate was capped at 30 minutes and its steps shared that job; with
+  `SLOT_SHIM_OFF=1` a step that compiled without `slot` ran outside the pool. With the marker each
+  step is its own pool job, the gate has no cap, and the shims stay on. A compiler or test runner
+  behind the marker is still refused.
 
 ## 0.33.1 — 2026-11-24
 
