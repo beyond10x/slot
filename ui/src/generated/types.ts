@@ -254,7 +254,20 @@ seeded_from?: string,
  * `slot job-parallel` on, as its bound if that was lower. Absent for a
  * local job and from an older daemon.
  */
-width?: number, };
+width?: number, 
+/**
+ * A warm-up job (`slot warm`): started after a merge to `main` to
+ * build that tree's tests into the target directory new worktrees of
+ * its repository start from. It is queued at `low`, never promoted,
+ * and cancelled when a job of a session waits for slots.
+ */
+warm?: boolean, 
+/**
+ * Why the daemon cancelled the job, such as `preempted by job 12`;
+ * empty when its client or `slot cancel` ended it, and for a job that
+ * was not cancelled.
+ */
+cancel_reason?: string, };
 
 export type Unit = { 
 /**

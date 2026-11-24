@@ -209,6 +209,9 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         sync_ms: None,
         sync_bytes: None,
         amend: None,
+        // The sandboxed client runs the command and waits for it: a hold
+        // without a client would keep its slots for nothing.
+        warm: false,
     }
 }
 

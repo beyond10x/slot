@@ -202,6 +202,39 @@ next to a record `<workspace-id>.json` of its repository, last use and size.
   queued or running job is never deleted. The job's stderr and the journal name every deleted
   workspace. `--cache-budget 0` (the default) leaves only the disk floor.
 
+## Warm the node after a merge
+
+`slot warm [DIR]` tells the daemon that `main` of a repository moved. Run it in the checkout of
+`main` after it took the merge, for example from that checkout's `.git/hooks/post-merge`:
+
+```sh
+#!/bin/sh
+slot warm
+```
+
+It returns at once. The daemon builds the tests of that checkout, from its root, as a warm-up
+job: `cargo test --no-run`, or the command `.slot.toml` names. On a node that job builds into the
+checkout's own target directory, and when it ends with exit 0 that directory is the most
+recently used one of the repository: the next new worktree is seeded from it.
+
+```toml
+warm = "task warm"
+```
+
+`warm = false` switches it off; `slot warm` then sends nothing. The command is split at
+whitespace.
+
+- The daemon starts one only for a repository a job built on it in the last 24 hours, and one at
+  a time per repository; otherwise it answers `slot: <repo> not warmed: <why>`. `slot warm`
+  exits 0 either way.
+- The job is queued at `low` whatever `slot priority` says, and never promoted.
+- A job of a session that still waits for its slots 50 ms after it queued cancels every running
+  warm-up. The warm-up's record ends `cancelled` with `cancel_reason` `preempted by job <id>`.
+- A daemon that hands jobs to a node hands a warm-up as `slot run --warm -- <command>`, and the
+  node runs it as its own warm-up. A warm-up goes only while no other job waits for a node, and
+  never holds one back.
+- A queued warm-up is dropped at a daemon reload; a running one is handed over.
+
 ## Binaries and test binaries come back
 
 A remote `cargo build`, `cargo test`, `cargo bench` or `cargo rustc` copies what it built for

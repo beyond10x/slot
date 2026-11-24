@@ -137,6 +137,21 @@ impl Cache {
             .collect()
     }
 
+    /// The target directory [`Cache::seed`] copies for a new workspace `id`
+    /// of `repo`: the most recently used one of the repository that no job
+    /// uses (`busy`).
+    pub fn seed_source(&self, id: &str, repo: &str, busy: &HashSet<String>) -> Option<Entry> {
+        self.entries()
+            .into_iter()
+            .filter(|e| {
+                e.id != id
+                    && e.meta.repo == repo
+                    && !busy.contains(&e.id)
+                    && self.dir(&e.id).is_dir()
+            })
+            .max_by_key(|e| e.meta.last_used_ms)
+    }
+
     /// Seeds `id`'s target directory from the most recently used target
     /// directory of the same repository that no job uses (`busy`), by a
     /// reflink copy. Returns the source id and how long it took, or the
@@ -153,17 +168,7 @@ impl Cache {
         if self.dir(id).exists() {
             return Err("target directory exists".into());
         }
-        let Some(src) = self
-            .entries()
-            .into_iter()
-            .filter(|e| {
-                e.id != id
-                    && e.meta.repo == repo
-                    && !busy.contains(&e.id)
-                    && self.dir(&e.id).is_dir()
-            })
-            .max_by_key(|e| e.meta.last_used_ms)
-        else {
+        let Some(src) = self.seed_source(id, repo, busy) else {
             return Err(format!("no other target directory of {repo}"));
         };
         let tmp = self.targets.join(format!(".{id}.seed"));

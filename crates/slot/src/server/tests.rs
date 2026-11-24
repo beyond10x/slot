@@ -5470,3 +5470,159 @@ fn a_jobs_record_names_its_sync_phases_and_seed_on_the_node() {
         .unwrap();
     assert_eq!(read.back_ms, Some(77), "the amend line, read at start");
 }
+
+/// What `slot warm` sends after a merge to `main` of repository `repo`:
+/// `script` stands for the build of the tree's tests.
+fn merge_of(f: &Fixture, repo: &str, script: &str) -> Request {
+    let mut r = sh(&f.root, script);
+    r.repo = repo.into();
+    r.warm = true;
+    r
+}
+
+fn warm_jobs(f: &Fixture) -> Vec<Job> {
+    f.server
+        .state()
+        .active
+        .into_iter()
+        .filter(|j| j.warm)
+        .collect()
+}
+
+/// Told of a merge of a repository that built here in the last 24 hours,
+/// the daemon answers at once and starts one warm-up job at `low`, the
+/// lowest level, over a rule that puts the repository on `high`; a second
+/// word of the same merge starts none. A job a session submits next waits
+/// for the slot and preempts it: the warm-up ends cancelled with the job
+/// that preempted it as its reason, and the session's job runs.
+#[test]
+fn a_merge_starts_one_low_warm_up_and_a_sessions_next_job_preempts_it() {
+    let f = start(1);
+    let mut built = sh(&f.root, "true");
+    built.repo = "r".into();
+    assert_eq!(run(&f, built).code, 0);
+    f.server
+        .set_priority(&priority::Request {
+            pattern: Some("r".into()),
+            level: Some(Priority::High),
+            promote_after_s: None,
+        })
+        .unwrap();
+
+    // `sleep 30` stands for the build; the session's job preempts it.
+    let told = Instant::now();
+    let r = run(&f, merge_of(&f, "r", "sleep 30"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(r.info.contains("warm-up"), "{r:?}");
+    assert!(
+        told.elapsed() < Duration::from_secs(5),
+        "answered without waiting for the build: {:?}",
+        told.elapsed()
+    );
+    wait_for("the warm-up to run", || {
+        warm_jobs(&f).iter().any(|j| j.state == JobState::Running)
+    });
+    let again = run(&f, merge_of(&f, "r", "sleep 30"));
+    assert_eq!(again.code, 0, "{again:?}");
+    assert!(again.info.contains("not warmed"), "{again:?}");
+    let warm = warm_jobs(&f);
+    assert_eq!(warm.len(), 1, "one warm-up: {warm:?}");
+    assert_eq!((warm[0].priority, warm[0].promoted), (Priority::Low, false));
+
+    let mut next = sh(&f.root, "echo session");
+    next.repo = "r".into();
+    let r = run(&f, next);
+    assert_eq!((r.code, r.out.trim()), (0, "session"), "{r:?}");
+    let st = f.server.state();
+    let session = st
+        .done
+        .iter()
+        .find(|j| j.argv.iter().any(|a| a == "echo session"))
+        .expect("the session's job ended");
+    let ended = done_job(&f, warm[0].id);
+    assert_eq!(ended.state, JobState::Cancelled, "{ended:?}");
+    assert_eq!(
+        ended.cancel_reason,
+        format!("preempted by job {}", session.id)
+    );
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let logged: Job = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Job>(l).ok())
+        .find(|j| j.id == ended.id)
+        .expect("the warm-up is in the job log");
+    assert!(logged.warm, "{logged:?}");
+    assert_eq!(logged.cancel_reason, ended.cancel_reason);
+}
+
+/// A repository that built here in no job of the last 24 hours is not
+/// warmed, and nothing is queued: a job of 25 hours ago in the job log does
+/// not count, one of 23 hours ago does.
+#[test]
+fn a_repository_that_built_in_no_job_of_the_last_day_is_not_warmed() {
+    let hour = 3_600_000;
+    let f = start_cfg(1, |c| {
+        std::fs::create_dir_all(&c.state_dir).unwrap();
+        let now = now_ms();
+        let lines = [
+            log_line(1, now - 25 * hour, "ok", 0, "local"),
+            log_line(2, now - 23 * hour, "ok", 0, "local")
+                .replace(r#""repo":"r""#, r#""repo":"q""#),
+        ];
+        std::fs::write(c.state_dir.join("jobs.jsonl"), lines.join("\n") + "\n").unwrap();
+    });
+    for repo in ["r", "never"] {
+        let r = run(&f, merge_of(&f, repo, "true"));
+        assert_eq!(r.code, 0, "{r:?}");
+        assert!(r.info.contains("not warmed"), "{repo}: {r:?}");
+    }
+    assert_eq!(f.server.state().active.len(), 0, "nothing queued");
+    assert_eq!(f.server.inner.lock().unwrap().next_id, 2, "nothing queued");
+    let r = run(&f, merge_of(&f, "q", "true"));
+    assert!(r.info.contains("warm-up"), "{r:?}");
+    assert!(!r.info.contains("not warmed"), "{r:?}");
+    wait_for("the warm-up of q to end", || {
+        f.server
+            .state()
+            .done
+            .iter()
+            .any(|j| j.warm && j.repo == "q")
+    });
+}
+
+/// A warm-up on a node builds into the target directory of its own
+/// workspace and leaves it as the one a new workspace of the repository is
+/// seeded from, even when another workspace's job started while it built.
+/// That job had slots free and did not preempt it.
+#[test]
+fn a_warm_up_leaves_the_target_directory_new_workspaces_are_seeded_from() {
+    let f = start(2);
+    assert_eq!(run(&f, synced_test(&f, "a1")).code, 0);
+    let mut warm = synced_test(&f, "b0");
+    warm.argv[2] = "mkdir -p \"$CARGO_TARGET_DIR/debug\"; sleep 1".into();
+    warm.warm = true;
+    let r = run(&f, warm);
+    assert_eq!(r.code, 0, "{r:?}");
+    wait_for("the warm-up to run", || {
+        warm_jobs(&f).iter().any(|j| j.state == JobState::Running)
+    });
+    // Queued after the warm-up started, ends before it.
+    let r = run(&f, synced_test(&f, "a1"));
+    assert_eq!(r.code, 0, "{r:?}");
+    wait_for("the warm-up to end", || {
+        f.server.state().done.iter().any(|j| j.warm)
+    });
+    let st = f.server.state();
+    let ended = st.done.iter().find(|j| j.warm).unwrap();
+    assert_eq!(ended.state, JobState::Ok, "{ended:?}");
+    assert_eq!(
+        ended.node_target_dir.as_deref(),
+        Some(f.root.join("cache/target/b0").to_str().unwrap())
+    );
+    // The record is touched off the request path, after the job ended.
+    let cache = cache::Cache::new(&f.root.join("cache"), &f.root.join("ws"));
+    let seeded_from = || cache.seed_source("c2", "r", &HashSet::new()).map(|e| e.id);
+    wait_for("the warm-up's target directory to be the seed", || {
+        seeded_from().as_deref() == Some("b0")
+    });
+}

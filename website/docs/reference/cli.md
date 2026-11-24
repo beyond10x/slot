@@ -259,6 +259,18 @@ slot cancel [OPTIONS] <ID>
 
 - `<ID>`: Job id, as `slot status` shows it (`#12` or `12`)
 
+### `slot warm`
+
+After a merge to `main`: build the tests of a checkout of `main` at the lowest level, so the next worktree of the repository starts from a built target directory.
+
+Run it in the checkout after it took the merge, for example from its `post-merge` hook. It returns at once; the daemon runs `cargo test --no-run`, or the `warm` command of the checkout's `.slot.toml` (`warm = false` switches it off). The daemon starts one only for a repository a job built on it in the last 24 hours, one at a time per repository, and cancels it when a job of a session waits for slots.
+
+```text
+slot warm [OPTIONS] [DIR]
+```
+
+- `<DIR>`: The checkout of `main` to build; the working directory without it
+
 ### `slot sessions`
 
 List agent sessions that build outside the pool, with their commands

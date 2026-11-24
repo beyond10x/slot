@@ -12,6 +12,10 @@
 //! when `SLOT_HOST` sends every other build to a build server: tests that
 //! need docker, a database or a port on localhost. A prefix matches when its
 //! words are the first words of the command.
+//!
+//! `warm` is what `slot warm` builds after a merge to `main`: a command,
+//! split at whitespace (`warm = "task warm"`), or `false` for no warm-up.
+//! Without it the warm-up is [`DEFAULT_WARM`].
 
 use std::path::Path;
 
@@ -19,6 +23,10 @@ use serde::Deserialize;
 
 /// File name, at the repository root.
 pub const FILE: &str = ".slot.toml";
+
+/// The warm-up of a repository whose `.slot.toml` names none: builds the
+/// tests of the tree without running them.
+pub const DEFAULT_WARM: &[&str] = &["cargo", "test", "--no-run"];
 
 /// Parsed `.slot.toml`.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -31,6 +39,19 @@ pub struct RepoConfig {
     /// (`crate::project`).
     #[serde(default)]
     pub project: Option<String>,
+    /// The warm-up after a merge to `main` (`slot warm`).
+    #[serde(default)]
+    pub warm: Option<Warm>,
+}
+
+/// The `warm` entry: on or off, or the command.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum Warm {
+    /// `true` is [`DEFAULT_WARM`]; `false` switches the warm-up off.
+    On(bool),
+    /// The command, split at whitespace.
+    Command(String),
 }
 
 impl RepoConfig {
@@ -61,6 +82,21 @@ impl RepoConfig {
                     && words.iter().zip(argv).all(|(w, a)| *w == a.as_str())
             })
             .map(String::as_str)
+    }
+
+    /// The warm-up command, or `None` when `warm` switches it off (`false`
+    /// or a command without a word).
+    pub fn warm_argv(&self) -> Option<Vec<String>> {
+        match &self.warm {
+            None | Some(Warm::On(true)) => {
+                Some(DEFAULT_WARM.iter().map(|w| (*w).to_string()).collect())
+            }
+            Some(Warm::On(false)) => None,
+            Some(Warm::Command(c)) => {
+                let argv: Vec<String> = c.split_whitespace().map(String::from).collect();
+                (!argv.is_empty()).then_some(argv)
+            }
+        }
     }
 }
 
@@ -93,6 +129,20 @@ mod tests {
     fn empty_entry_matches_nothing() {
         let c = RepoConfig::parse(r#"local = ["", "  "]"#).unwrap();
         assert_eq!(c.local_match(&argv("cargo test")), None);
+    }
+
+    #[test]
+    fn the_warm_up_is_cargos_test_build_a_named_command_or_off() {
+        let default = argv("cargo test --no-run");
+        assert_eq!(RepoConfig::default().warm_argv(), Some(default.clone()));
+        let on = RepoConfig::parse("warm = true").unwrap();
+        assert_eq!(on.warm_argv(), Some(default));
+        let named = RepoConfig::parse(r#"warm = "task  warm""#).unwrap();
+        assert_eq!(named.warm_argv(), Some(argv("task warm")));
+        for off in ["warm = false", r#"warm = "  ""#] {
+            assert_eq!(RepoConfig::parse(off).unwrap().warm_argv(), None, "{off}");
+        }
+        assert!(RepoConfig::parse("warm = 3").is_err());
     }
 
     #[test]

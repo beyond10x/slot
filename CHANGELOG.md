@@ -23,6 +23,16 @@
   (`CARGO_BUILD_JOBS`, `MAKEFLAGS=-j`) is raised to it. The job record carries it as `width`.
   Before, every job got a quarter of the pool as test threads (16 on a node of 64 CPUs). Local
   jobs keep `--test-threads`, the bound and the caller's counts.
+- `slot warm [DIR]`: after a merge to `main`, the checkout tells the daemon, and the daemon builds
+  that tree's tests (`cargo test --no-run`, or `warm = "<command>"` in `.slot.toml`; `warm =
+  false` switches it off) as a warm-up job without the client. It starts one only for a
+  repository a job built on it in the last 24 hours, one at a time per repository. The job is
+  queued at `low` over any priority rule and never promoted; a job of a session that still waits
+  for its slots 50 ms after it queued cancels every running warm-up, which ends `cancelled` with
+  the new `cancel_reason` `preempted by job <id>`. On a node a warm-up that ends with exit 0
+  leaves its target directory the most recently used of the repository, the one the next new
+  worktree is seeded from. A daemon hands a warm-up to a node as `slot run --warm`; it goes only
+  while no other job waits for a node. The request and the job record carry the new `warm`.
 
 ## 0.35.0 — 2026-11-24
 

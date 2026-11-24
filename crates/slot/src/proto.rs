@@ -91,6 +91,14 @@ pub struct Request {
     /// predates it answers "empty command".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amend: Option<Amend>,
+    /// `slot warm`: a warm-up job after a merge to `main`. The daemon
+    /// answers at once and runs it without the client, at `low`, cancelled
+    /// when a job of a session waits for slots; it starts none when the
+    /// repository built on it in no job of the last 24 hours, or when a
+    /// warm-up of the repository is queued or running. A daemon that
+    /// predates it runs `argv` as an ordinary job.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warm: bool,
 }
 
 /// What a client adds to the record of a remote job after it ended
