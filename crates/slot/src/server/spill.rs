@@ -96,6 +96,10 @@ pub const LOCAL_REASON_ENV: &str = "SLOT_LOCAL_REASON";
 /// (`SLOT_NO_REMOTE`, or a command `.slot.toml` lists as local).
 pub const LOCAL_REQUESTED: &str = "local requested";
 
+/// The reason of a job submitted with `slot --here`: it needs this host
+/// (its credentials) while it runs.
+pub const HERE: &str = "here: needs this host";
+
 /// The reason of a job a node sent back with [`INFRA_EXIT`].
 pub const SENT_BACK: &str = "sent back by a node";
 

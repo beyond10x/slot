@@ -349,6 +349,9 @@ A job that runs or waits here while a node takes jobs carries the reason in `loc
 took it), or `sync failed: <first line of the error>` from a remote-mode client whose start
 failed and that ran the job on this machine's daemon instead. A wrapper sets its own reason with
 `SLOT_LOCAL_REASON=<text>`; a job with a reason is not handed to a node.
+`slot --here <command>` keeps a job that needs this host's credentials while it runs (a clone, a
+fetch, a push) in this host's pool, whatever `SLOT_HOST` says, with the reason `here: needs this
+host`; unlike `--local` it still waits for slots in the daemon's queue.
 
 ## Security
 

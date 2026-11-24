@@ -28,6 +28,7 @@ fn main() -> ExitCode {
             args.tokens.or(cli.tokens),
             args.priority.or(cli.priority),
             args.timeout.or(cli.timeout),
+            cli.here,
         )),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
                 cli.tokens,
                 cli.priority,
                 cli.timeout,
+                cli.here,
             ))
         }
     };
@@ -111,11 +113,13 @@ fn build(
     tokens: Option<u32>,
     priority: Option<slot::types::Priority>,
     timeout: Option<u64>,
+    here: bool,
 ) -> i32 {
     if local {
         return client::run_local(argv);
     }
     let mut s = Settings::from_env();
+    s.here = here;
     s.fetch = fetch.to_vec();
     s.tokens = tokens;
     s.priority = priority;

@@ -16,6 +16,7 @@ slot [OPTIONS] <COMMAND>
 ```
 
 - `--local`: Run the command here, without the daemon (default `false`)
+- `--here`: Keep the job in this host's pool, never on a build node: for a step that needs this host's credentials while it runs (a clone, a fetch, a push). `slot status` shows `local: here: needs this host` under it (default `false`)
 - `--tokens`: Slots the job holds, in place of the count slot derives from the command. For work the daemon cannot see, such as a script that starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The daemon caps it at the slots in circulation (the pool less the headroom), so the job never waits forever. Ignored with `--local` (env `SLOT_TOKENS`)
 - `--priority`: The job's queue level: queued `urgent` jobs get free slots first, then `high`, `normal` and `low` ones; with no slot free, an `urgent` job starts on one the headroom holds back. A rule set with `slot priority set` for the job's repository wins over it. Ignored with `--local` (env `SLOT_PRIORITY`)
 - `--timeout`: How long the job may run, counted from its start, in place of the daemon's run-time limit (`slot run-limit`): seconds, or a number with `s`, `m` or `h`, such as `90s`, `30m` or `1h`. The daemon ends a job that runs longer (SIGTERM, SIGKILL 5 s later) and the job exits 124. It is capped at the most a job may name, 1 h unless `slot run-limit --max` changed it. A `timeout` command in front of the job's command does not extend it. Ignored with `--local` (env `SLOT_TIMEOUT`)
