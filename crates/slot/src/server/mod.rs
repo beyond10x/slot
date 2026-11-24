@@ -2584,10 +2584,18 @@ impl Server {
         let budget = self.cfg.cache_budget;
         let floor = self.cfg.admission.min_free_disk;
         let (ws, repo) = (ws.to_string(), repo.to_string());
+        // A same-path job builds at its tree's own path; another tree's target
+        // carries freshness records and build-script output made for that
+        // tree, which cargo may take as fresh here. Such a job is not seeded.
+        let same_path = !self.cfg.same_path_roots.is_empty();
         let Ok((gone, seeded)) = tokio::task::spawn_blocking(move || {
             cache.touch(&ws, &repo, now_ms());
             let gone = cache.evict(budget, floor, &busy);
-            let seeded = cache.seed(&ws, &repo, &busy);
+            let seeded = if same_path {
+                Err("same-path workspace".to_string())
+            } else {
+                cache.seed(&ws, &repo, &busy)
+            };
             (gone, seeded)
         })
         .await
