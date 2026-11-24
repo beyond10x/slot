@@ -518,6 +518,120 @@
         "value": 0,
         "tolerance": 0
       }
+    },
+    "cluster-local": {
+      "gates.problems": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 3,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.time_to_act_steps.max": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "actions_per_fix.max": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "cluster-old-daemon": {
+      "gates.problems": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.time_to_act_steps.max": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "actions_per_fix.max": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      }
+    },
+    "cluster-remote": {
+      "gates.problems": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_tabs": {
+        "value": 4,
+        "tolerance": 0
+      },
+      "screen_only.keyboard_failed": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.actions": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.looks": {
+        "value": 2,
+        "tolerance": 0
+      },
+      "screen_only.steers": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "screen_only.time_to_act_steps.max": {
+        "value": 0,
+        "tolerance": 0
+      },
+      "actions_per_fix.max": {
+        "value": 1,
+        "tolerance": 0
+      },
+      "screen_only.failed": {
+        "value": 0,
+        "tolerance": 0
+      }
     }
   }
 }

@@ -33,6 +33,7 @@ const CHART_TAIL_LIMIT: u64 = 32 << 20;
 pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
     let app = Router::new()
         .route("/api/state", get(state))
+        .route("/api/nodes", get(nodes))
         .route("/api/events", get(events))
         .route("/api/jobs/{id}/output", get(output))
         .route("/metrics", get(metrics))
@@ -63,6 +64,11 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
 
 async fn state(State(s): State<Arc<Server>>) -> impl IntoResponse {
     axum::Json(s.state())
+}
+
+/// `GET /api/nodes`: every machine jobs run on.
+pub(super) async fn nodes(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    axum::Json(s.nodes())
 }
 
 async fn usage(

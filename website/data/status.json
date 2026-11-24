@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-23",
-  "source": "CHANGELOG.md 0.1.0 to 0.30.0 and docs/design.md sections 10 to 26",
+  "asOf": "2026-11-24",
+  "source": "CHANGELOG.md 0.1.0 to 0.32.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -161,7 +161,7 @@
       "area": "Observation",
       "label": "Web UI",
       "status": "shipped",
-      "detail": "Four line charts (cores, pressure, pool size, what the compile cache answered per minute), then running, queued and finished jobs, the host census, sessions and a timeline, with live output, on 127.0.0.1:7411 (0.21.0). Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
+      "detail": "It opens on a cluster view: a card per node with its slots, CPU, memory and free disk, and jobs moving from the queue to their node (0.31.0). The jobs view has four line charts (cores, pressure, pool size, what the compile cache answered per minute), then running, queued and finished jobs, the host census, sessions and a timeline, with live output, on 127.0.0.1:7411 (0.21.0). Jobs name their repository and worktree; the charts keep up to six hours of history across a reload (0.19.1).",
       "href": "/docs/how-it-works#web-ui"
     },
     {

@@ -132,6 +132,8 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
   await page.route('**/api/cache-day', (r) => sc.cacheDay
     ? r.fulfill({ json: sc.cacheDay }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/usage**', (r) => r.fulfill({ json: sc.usage ?? EMPTY_USAGE }));
+  await page.route('**/api/nodes', (r) => sc.nodes
+    ? r.fulfill({ json: sc.nodes }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/limits', async (r) => {
     const body = r.request().postDataJSON() as { headroom_percent: number };
     limitPuts.push(body);
@@ -156,7 +158,8 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
       document.head.appendChild(st);
     });
   }, FONT_CSS);
-  await page.goto(base);
+  // The job tables, charts and output are at `#jobs`; the cluster start page is the page without a fragment.
+  await page.goto(sc.view === 'cluster' ? base : `${base}#jobs`);
   await page.waitForFunction(() => document.querySelector('header h1')?.textContent?.includes('workstation'));
   await page.locator('main').waitFor();
   let i = -1;

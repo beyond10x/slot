@@ -183,7 +183,13 @@ lent_s?: number,
  * after a switch back to slots. Absent by slots and from a daemon
  * without shares.
  */
-admission?: Admission, };
+admission?: Admission, 
+/**
+ * Id of the node the job runs or ran on ([`Node::node_id`]): `local`
+ * for every job of a daemon without remote nodes. Empty in a job-log
+ * line written before nodes; the API shows such a job as `local`.
+ */
+node: string, };
 
 export type Unit = { 
 /**
@@ -828,3 +834,108 @@ t: string,
  * Text.
  */
 b: string, };
+
+export type NodeKind = "Local" | "Remote";
+
+export type NodeState = "Joining" | "Ready" | "Draining" | "Gone";
+
+export type Node = { 
+/**
+ * Node name, unique in its cluster; `local` for the daemon's machine.
+ */
+node_id: string, 
+/**
+ * The cluster, one per endpoint daemon: the daemon's host name.
+ */
+cluster_id: string, 
+/**
+ * Where the node runs.
+ */
+kind: NodeKind, 
+/**
+ * Lifecycle state.
+ */
+state: NodeState, 
+/**
+ * CPUs the node gives the cluster.
+ */
+cpus: number, 
+/**
+ * Capacity in slots: the slots in circulation (the pool less the
+ * headroom).
+ */
+slots: number, 
+/**
+ * Slots held by running jobs.
+ */
+slots_in_use: number, 
+/**
+ * Memory of the machine, GiB.
+ */
+memory_gib: number, 
+/**
+ * Disk for mirrors and target directories, GiB.
+ */
+disk_gib: number, 
+/**
+ * The most worktrees placed on a remote node at once; absent on the
+ * local node.
+ */
+max_worktrees?: number, 
+/**
+ * Running jobs.
+ */
+running_jobs: number, 
+/**
+ * Queued jobs.
+ */
+queued_jobs: number, 
+/**
+ * The slot version the node runs.
+ */
+slot_version: string, 
+/**
+ * CPUs the pool's jobs and the compile cache used over the last 10 s,
+ * in thousandths of a CPU.
+ */
+cpu_busy_milli?: number, 
+/**
+ * Memory in use on the machine, MiB.
+ */
+memory_used_mib?: number, 
+/**
+ * Free disk where the node builds, GiB.
+ */
+disk_free_gib?: number, 
+/**
+ * Where a remote machine runs (a provider region or a site).
+ */
+location?: string, 
+/**
+ * The machine type of a remote machine.
+ */
+machine_type?: string, 
+/**
+ * Price of a remote machine per hour, cents.
+ */
+price_per_hour_cents?: number, 
+/**
+ * When the node joined, RFC 3339; the daemon's start for the local
+ * node.
+ */
+joined_at?: string, 
+/**
+ * The end of a remote node's lease, RFC 3339; absent on the local
+ * node.
+ */
+deadline?: string, 
+/**
+ * Why the node left; with `Gone` only.
+ */
+gone_reason?: GoneReason, 
+/**
+ * When the node left, RFC 3339; with `Gone` only.
+ */
+left_at?: string, };
+
+export type GoneReason = "Drained" | "Lost" | "Deadline" | "RefusedAtJoin" | "Reclaimed";

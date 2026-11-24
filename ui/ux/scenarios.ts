@@ -1,5 +1,5 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
-import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
+import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, Node, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
 import { POOL_BASE } from '../src/lib/headroom.ts';
 import type { RecordedBucket } from '../src/lib/history.ts';
 import type { MachineNumbers } from '../src/lib/headroom.ts';
@@ -19,7 +19,9 @@ export type Task =
   | { kind: 'set-headroom'; percent: number; expect: string; fails?: boolean }
   | { kind: 'queue-position'; job: number; position: number }
   /** Read a state off the screen: `expect` is visible in the viewport. */
-  | { kind: 'see'; expect: string };
+  | { kind: 'see'; expect: string }
+  /** Show only one node's jobs: press its card; the job list then names the node and lists only its jobs. */
+  | { kind: 'filter-node'; node: string; name: string };
 
 export interface Scenario {
   name: string;
@@ -36,6 +38,10 @@ export interface Scenario {
   steps: Step[];
   output: Record<number, { chunks: Chunk[]; end: string }>;
   task: Task | null;
+  /** Answer of `api/nodes`; the path answers 404 when absent, as a daemon older than nodes does. */
+  nodes?: Node[];
+  /** The view the scenario opens: the cluster start page, or (default) the job tables at `#jobs`. */
+  view?: 'cluster' | 'jobs';
   /** Answer of `api/usage`; empty when absent. */
   usage?: Usage;
 }
@@ -69,7 +75,7 @@ function job(id: number, over: Partial<Job> = {}): Job {
     id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], checkout: { kind: 'repository' }, session,
     client: 'ws:1', toolchain, remote: false, tokens: toolchain === 'rust' ? 4 : 2, state: 'running',
     enqueued_ms: s(-400 + id), started_ms: s(-380 + id), ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, ...over,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
   };
 }
 
@@ -429,9 +435,78 @@ function poolShare(): Scenario {
   };
 }
 
+const iso = (sec: number): string => new Date(s(sec)).toISOString().replace('.000Z', 'Z');
+
+/** The local machine as `api/nodes` answers it. */
+function localRow(over: Partial<Node> = {}): Node {
+  return {
+    node_id: 'local', cluster_id: 'workstation', kind: 'Local', state: 'Ready', cpus: 20, slots: 20, slots_in_use: 0, memory_gib: 32,
+    disk_gib: 1676, running_jobs: 0, queued_jobs: 0, slot_version: '0.30.0', cpu_busy_milli: 9400, memory_used_mib: 20_480, disk_free_gib: 604,
+    joined_at: iso(-86_400), ...over,
+  };
+}
+
+const TREES: Array<[string, string | null]> = [
+  ['ledger', 'tax-rounding'], ['checkout', null], ['docs-site', 'search'], ['parser', 'incremental'], ['ledger', 'invoices'], ['scheduler', null],
+];
+
+/** Repository, directory, checkout and node of a job of checkout `k`. */
+function onTree(k: number, node: string): Partial<Job> {
+  const [repo, wt] = TREES[k % TREES.length];
+  return { repo, cwd: wt ? `/trees/${wt}` : `/work/${repo}`, checkout: wt ? { kind: 'worktree', name: wt } : { kind: 'repository' }, node };
+}
+
+/**
+ * The cluster start page: `nodes` answers `api/nodes` (absent: 404, a daemon older than nodes); every second job runs on `remote`.
+ * One queued job starts, then one running job ends and one fails.
+ */
+function cluster(name: string, card: string, nodes: Node[] | undefined, remote: string | null, task: Task | null): Scenario {
+  const on = (k: number): string => (remote && k % 2 === 1 ? remote : 'local');
+  const running = [200, 201, 202, 203, 204, 205].map((id, k) => job(id, { ...onTree(k, on(k)), started_ms: s(-60 + k * 7) }));
+  const waiting = [206, 207, 208].map((id, k) => job(id, { ...onTree(k + 2, on(k + 2)), state: 'queued', enqueued_ms: s(-30 + k * 9), started_ms: 0 }));
+  const finished = Array.from({ length: 14 }, (_, i) =>
+    done(180 + i, -600 + i * 40, { ...onTree(i, on(i)), ...(i % 6 === 5 ? { state: 'failed' as const, exit: 101 } : {}) }));
+  const st = state([...running, ...waiting], finished, 20, 0);
+  const started: Job = { ...waiting[0], state: 'running', started_ms: s(2) };
+  const ended: Job = { ...running[1], state: 'ok', ended_ms: s(4), cpu_s: 240 };
+  const failed: Job = { ...running[2], state: 'failed', exit: 1, ended_ms: s(5), cpu_s: 90 };
+  const after1 = [...running, started];
+  const after2 = after1.filter((j) => j.id !== ended.id && j.id !== failed.id);
+  return {
+    name, anchor: false, card, view: 'cluster', state: st, history: history(running, 20, 20, 0, 3), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
+    ...(nodes ? { nodes } : {}),
+    steps: [
+      { moment: 'loaded', dt_s: 1, events: [tick(s(1), running, 20, 20, 0, 3, 1)] },
+      { moment: 'queued job starts', dt_s: 2, events: [{ type: 'job', job: started }, tick(s(3), after1, 20, 20, 0, 2, 2)] },
+      { moment: 'jobs end', dt_s: 2, events: [{ type: 'job', job: ended }, { type: 'job', job: failed }, tick(s(5), after2, 20, 20, 0, 2, 3)] },
+    ],
+    output: {}, task,
+  };
+}
+
+function clusterLocal(): Scenario {
+  return cluster('cluster-local', 'The start page with the local machine as the one node. Show only the jobs of that node.',
+    [localRow({ slots_in_use: 14, running_jobs: 6, queued_jobs: 3 })], null, { kind: 'filter-node', node: 'local', name: 'workstation' });
+}
+
+function clusterRemote(): Scenario {
+  const cloud: Node = {
+    node_id: 'cloud-a', cluster_id: 'workstation', kind: 'Remote', state: 'Ready', cpus: 64, slots: 64, slots_in_use: 8, memory_gib: 128,
+    disk_gib: 3539, max_worktrees: 8, running_jobs: 3, queued_jobs: 1, slot_version: '0.30.0', cpu_busy_milli: 33_500, memory_used_mib: 61_440,
+    disk_free_gib: 2719, location: 'eu-central', machine_type: 'compute-64', price_per_hour_cents: 272, joined_at: iso(-6_420), deadline: iso(7_985),
+  };
+  return cluster('cluster-remote', 'A remote node with a lease runs half of the jobs beside the local machine. Show only the remote node\'s jobs.',
+    [localRow({ slots_in_use: 6, running_jobs: 3, queued_jobs: 2 }), cloud], 'cloud-a', { kind: 'filter-node', node: 'cloud-a', name: 'cloud-a' });
+}
+
+function clusterOldDaemon(): Scenario {
+  return cluster('cluster-old-daemon', 'The daemon is older than the start page and has no node list. The page shows the local machine from its state alone.',
+    undefined, null, { kind: 'see', expect: 'No remote node' });
+}
+
 export const SCENARIOS: Scenario[] = [
   busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), queueLevels(), crowded(), callMode(), upgradePending(), idle(),
-  machineHeadroom(), poolShare(), fresh(), byShare(),
+  machineHeadroom(), poolShare(), fresh(), byShare(), clusterLocal(), clusterRemote(), clusterOldDaemon(),
 ];
 
 /** Scenarios whose output pane is open from the start. */

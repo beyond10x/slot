@@ -795,6 +795,8 @@ Found against the real server, missed by the ssh stand-in:
    failed (`mkdir … No space left on device`) and the client fell back to running the command
    directly on the workstation, outside the pool: 100 crates compiled unpooled next to a full
    local queue. From 0.8.0 a remote job that does not start goes to the local daemon instead.
+   Later a sync that stalls or runs past its bound counts as a failed one, and a new worktree's
+   mirror is seeded from its siblings (`docs/design/remote-pool.md` § 4.7).
 6. **The memory floor serializes jobs on a small server.** On the 8 GB guest a cold ess build
    expects 3.6 GB peak, and `--min-free-memory` keeps 4 GB free, so a second job waits until the
    first ends (it runs at once only when it is alone in the pool). Lower the floor on a small

@@ -147,6 +147,92 @@ fn sh(cwd: &Path, script: &str) -> Request {
     }
 }
 
+/// `GET /api/nodes` answers a bare array with the local machine as the one
+/// node: its CPUs, the slots in circulation, no deadline; every job of
+/// `/api/state` names that node.
+#[test]
+fn nodes_answers_the_local_machine_and_jobs_name_it() {
+    let f = start(2);
+    assert_eq!(run(&f, sh(&f.root, "true")).code, 0);
+    assert_eq!(run(&f, sh(&f.root, "exit 3")).code, 3);
+    let st = f.server.state();
+    assert_eq!(st.done.len(), 2);
+    assert!(
+        st.done.iter().all(|j| j.node == LOCAL_NODE),
+        "{:?}",
+        st.done
+    );
+    let server = Arc::clone(&f.server);
+    let (status, text) = answer(async move {
+        use axum::response::IntoResponse;
+        http::nodes(axum::extract::State(server))
+            .await
+            .into_response()
+    });
+    assert_eq!(status, 200, "{text}");
+    assert!(text.starts_with('['), "a bare array: {text}");
+    let v: Vec<Node> = serde_json::from_str(&text).unwrap();
+    assert_eq!(v.len(), 1, "{text}");
+    let n = &v[0];
+    assert_eq!(
+        (n.node_id.as_str(), n.kind, n.state),
+        ("local", NodeKind::Local, NodeState::Ready)
+    );
+    assert_eq!(
+        (n.slots, n.slots_in_use, n.running_jobs, n.queued_jobs),
+        (2, 0, 0, 0)
+    );
+    assert!(n.cpus >= 1);
+    assert_eq!(n.deadline, None);
+    assert!(
+        n.joined_at.as_deref().is_some_and(|t| t.ends_with('Z')),
+        "{text}"
+    );
+    assert_eq!(n.slot_version, env!("CARGO_PKG_VERSION"));
+    assert!(!text.contains("\"deadline\""), "{text}");
+}
+
+/// The local node counts the slots of its running jobs and its running and
+/// queued jobs, gives sizes in whole GiB and the CPU in thousandths; a
+/// job-log line without a node is shown on the local node.
+#[test]
+fn the_local_node_counts_jobs_slots_and_sizes() {
+    let job = |state: JobState, tokens: u32| Job {
+        tokens,
+        state,
+        ..serde_json::from_str::<Job>(
+            r#"{"id":1,"argv":["true"],"cwd":"/w","repo":"r","toolchain":"other",
+            "remote":false,"tokens":1,"state":"queued","enqueued_ms":1,"started_ms":0,
+            "ended_ms":0,"exit":0,"cpu_s":0.0,"compile_server_cpu_s":0.0,"peak_rss":0}"#,
+        )
+        .unwrap()
+    };
+    let a = job(JobState::Running, 4);
+    let b = job(JobState::Queued, 2);
+    let c = job(JobState::Running, 1);
+    let jobs = [&a, &b, &c];
+    let n = local_node(&LocalFacts {
+        cluster: "host",
+        cpus: 20,
+        slots: 16,
+        memory: 32 << 30,
+        available: 20 << 30,
+        disk_total: 1800 << 30,
+        disk_free: 604 << 30,
+        joined_ms: 1_763_899_200_000,
+        cpu_busy: 3.4567,
+        jobs: &jobs,
+    });
+    assert_eq!((n.slots_in_use, n.running_jobs, n.queued_jobs), (5, 2, 1));
+    assert_eq!((n.memory_gib, n.disk_gib), (32, 1800));
+    assert_eq!(n.memory_used_mib, Some(12 * 1024));
+    assert_eq!(n.disk_free_gib, Some(604));
+    assert_eq!(n.cpu_busy_milli, Some(3457));
+    assert_eq!(n.joined_at.as_deref(), Some("2025-11-23T12:00:00Z"));
+    assert_eq!(n.cluster_id, "host");
+    assert_eq!(on_local_node(a.clone()).node, LOCAL_NODE);
+}
+
 #[test]
 fn streams_output_and_exit_code() {
     let f = start(2);

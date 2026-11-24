@@ -60,13 +60,22 @@ current directory.
 2. **Sync.** rsync copies the repository to `<host>:<SLOT_WSROOT>/<id>/` with `--delete`, a
    filter that applies every `.gitignore`, and excludes for `.git` and the toolchain's output
    directories (`/target/`). Uncommitted changes are included. Over a persistent ssh connection
-   a rerun only sends the changed files.
-3. **Run.** `slot` starts `ssh <host> slot proxy`, which connects to the server daemon's socket.
+   a rerun only sends the changed files. The client prints one line per sync, for example
+   `slot: synced to buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`. Two calls
+   from one worktree sync one after the other; the second waits for the first.
+3. **Siblings.** Before the sync the client asks the server for other mirrors of the same
+   repository (same `origin` URL, so every worktree and clone of it). rsync gets up to four of
+   them as `--copy-dest`: a file the new mirror lacks is copied on the server when a sibling has
+   it unchanged, and a changed file is sent as a delta against the sibling's. The first sync of a
+   new worktree then sends what differs from its siblings, not the whole tree. A server whose
+   slot does not know the step gets the plain sync; the line then says the bytes were not
+   counted.
+4. **Run.** `slot` starts `ssh <host> slot proxy`, which connects to the server daemon's socket.
    The daemon runs the command in the mirror, in the same subdirectory you called it from.
-4. **Caches.** rust and other jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`; go and other
+5. **Caches.** rust and other jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`; go and other
    jobs get `GOCACHE=<cache-root>/go-build`. The cache root is `slot serve --cache-root`, by
    default `<state-dir>/cache` on the server.
-5. **Output.** Paths under the server's mirror in the output are rewritten to the local
+6. **Output.** Paths under the server's mirror in the output are rewritten to the local
    repository path, so `file:line` in compiler errors points at local files.
 
 `SLOT_WSROOT` on the workstation must name the directory the server daemon uses as `--ws-root`.
@@ -114,6 +123,12 @@ because the server disk is full), `slot` sends the job to this machine's daemon 
 then waits for slots in the local pool like any other. Before 0.8.0 it ran the command directly,
 outside the pool. If the connection drops while the job runs, `slot` prints `slot: connection to
 daemon lost` and exits with 3; the daemon cancels the job.
+
+A slow link gets the same treatment. A sync whose rsync reads and writes no byte for
+`SLOT_SYNC_STALL` (default 60 s), or that runs longer than `SLOT_SYNC_LIMIT` (default 5 min), is
+killed with its ssh, and the job goes to this machine's daemon with `(sync killed: no byte moved
+for 60 s)` or `(sync killed: ran over 300 s)` in the line above. An rsync that someone else
+kills ends the same way. The job is never sent to the server after a sync that did not finish.
 
 ## Target directories on the server
 
@@ -181,10 +196,12 @@ command="/usr/local/bin/slot shell",restrict ssh-ed25519 AAAA… workstation
 
 ssh then runs `slot shell` for every connection with that key, and it runs only the steps of
 remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
---sender` from the workspace root or the cache root's `target/`), `slot proxy` and `slot cancel
-<id>`. Anything else exits 126 with `slot shell: refused: …`. rsync options that name another
-file or program (`-e`, `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are
-refused, as are `..` in paths, shell operators and quotes that would expand. `restrict` turns off
+--sender` from the workspace root or the cache root's `target/`), `slot proxy`, `slot cancel
+<id>` and the sibling step (`slot __siblings` on the server's own workspace root). Anything else
+exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
+`--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and
+`--copy-dest` is taken only as `../<id>`, a sibling mirror in the workspace root. Also refused:
+`..` in paths, shell operators and quotes that would expand. `restrict` turns off
 port, agent and X11 forwarding and the terminal. Pass `--ws-root`, `--cache-root` or
 `--state-dir` to `slot shell` when `slot serve` uses other values.
 

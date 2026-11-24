@@ -17,6 +17,7 @@ fn main() -> ExitCode {
         Cmd::Shell(args) => Ok(shell(&args)),
         Cmd::Gate(args) => gate(&args),
         Cmd::Hold(args) => Ok(slot::gate::hold(&args.fifo)),
+        Cmd::Siblings(args) => Ok(siblings(&args.ws_root, &args.id, &args.key)),
         Cmd::Exec(args) => Ok(args
             .nofile
             .exec(&args.arg0, &args.command[0], &args.command[1..])),
@@ -183,9 +184,27 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             s.socket.clone_from(&args.socket);
             client::cancel(id, &s)
         }
+        Ok(Plan::Siblings { id, key }) => siblings(&ws, &id, &key),
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126
+        }
+    }
+}
+
+/// `slot __siblings`: records mirror `id` of repository `key` and prints
+/// its sibling mirrors, one id per line.
+fn siblings(ws_root: &std::path::Path, id: &str, key: &str) -> i32 {
+    match slot::mirror::siblings(ws_root, id, key) {
+        Ok(ids) => {
+            for i in ids {
+                println!("{i}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("slot: {e}");
+            1
         }
     }
 }

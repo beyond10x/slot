@@ -206,6 +206,31 @@ pub fn parse_meminfo(s: &str) -> Option<u64> {
     Some(kb * 1024)
 }
 
+/// `MemTotal` from the text of `/proc/meminfo`, bytes.
+pub fn parse_meminfo_total(s: &str) -> Option<u64> {
+    let kb: u64 = s
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kb * 1024)
+}
+
+/// Size of the filesystem of `path` or of its nearest existing ancestor,
+/// bytes.
+pub fn disk_total(path: &Path) -> Option<u64> {
+    let mut p = Some(path);
+    while let Some(q) = p {
+        if let Ok(st) = rustix::fs::statvfs(q) {
+            return Some(st.f_blocks * st.f_frsize);
+        }
+        p = q.parent();
+    }
+    None
+}
+
 /// Bytes an unprivileged user may still write on the filesystem of `path`
 /// or of its nearest existing ancestor.
 pub fn disk_free(path: &Path) -> Option<u64> {
@@ -313,6 +338,7 @@ mod tests {
             share_used: None,
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
+            node: String::new(),
         }
     }
 

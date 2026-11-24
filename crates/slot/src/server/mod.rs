@@ -50,7 +50,8 @@ use crate::rewrite::Rewriter;
 use crate::run_limit;
 use crate::toolchain::{self, Context};
 use crate::types::{
-    Event, HeadroomBase, HostCensus, Job, JobState, LiveJob, Priority, SccacheWatch, State, Unit,
+    Event, HeadroomBase, HostCensus, Job, JobState, LOCAL_NODE, LiveJob, Node, NodeKind, NodeState,
+    Priority, SccacheWatch, State, Unit,
 };
 
 pub use ring::Ring;
@@ -1795,6 +1796,7 @@ impl Server {
                 share_used: None,
                 lent_s: 0.0,
                 admission: crate::shares::Mode::Slots,
+                node: LOCAL_NODE.to_string(),
             };
             g.active.insert(
                 id,
@@ -4443,10 +4445,14 @@ impl Server {
                     if j.state == JobState::Queued {
                         (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
                     }
-                    j
+                    on_local_node(j)
                 })
                 .collect(),
-            done: g.done.iter().map(|d| d.job.clone()).collect(),
+            done: g
+                .done
+                .iter()
+                .map(|d| on_local_node(d.job.clone()))
+                .collect(),
             now_ms: now_ms(),
             toolchains: toolchain::names().into_iter().map(String::from).collect(),
             sccache: self.sccache.lock().expect("sccache lock").clone(),
@@ -4457,6 +4463,39 @@ impl Server {
                 .expect("upgrade lock")
                 .describe(Instant::now()),
         }
+    }
+
+    /// The `GET /api/nodes` answer: the daemon's own machine, the only node
+    /// until remote nodes join.
+    pub fn nodes(&self) -> Vec<Node> {
+        let now = now_ms();
+        let g = self.inner.lock().expect("server lock");
+        let cpu_busy = match self.cpu_figure(&g, now) {
+            cpu_limit::Figure::Busy(p) => p.counted(),
+            _ => 0.0,
+        };
+        let jobs: Vec<&Job> = g.active.values().map(|l| &l.job).collect();
+        let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
+        // Eviction's last look; before one, the filesystem of the state.
+        let evicted = self.evict.lock().expect("evict lock").free;
+        let local = local_node(&LocalFacts {
+            cluster: &self.host,
+            cpus: self.cores,
+            slots: self.pool.limit() as u32,
+            memory: admission::parse_meminfo_total(&meminfo).unwrap_or(0),
+            available: admission::parse_meminfo(&meminfo).unwrap_or(0),
+            disk_total: admission::disk_total(&self.cfg.state_dir).unwrap_or(0),
+            disk_free: if evicted > 0 {
+                evicted
+            } else {
+                disk_free(&self.cfg.state_dir).unwrap_or(0)
+            },
+            joined_ms: self.born_ms,
+            cpu_busy,
+            jobs: &jobs,
+        });
+        vec![local]
     }
 
     fn output(&self, id: i64) -> Output {
@@ -4473,6 +4512,77 @@ impl Server {
 
     fn subscribe(&self) -> broadcast::Receiver<String> {
         self.events.subscribe()
+    }
+}
+
+/// A job as the API shows it: one of a job-log line written before nodes
+/// ran on the local node.
+fn on_local_node(mut j: Job) -> Job {
+    if j.node.is_empty() {
+        j.node = LOCAL_NODE.to_string();
+    }
+    j
+}
+
+/// What the daemon knows of its own machine, read for `GET /api/nodes`.
+struct LocalFacts<'a> {
+    cluster: &'a str,
+    cpus: u32,
+    slots: u32,
+    /// `MemTotal`, bytes.
+    memory: u64,
+    /// `MemAvailable`, bytes.
+    available: u64,
+    disk_total: u64,
+    disk_free: u64,
+    joined_ms: i64,
+    cpu_busy: f64,
+    /// Queued and running jobs.
+    jobs: &'a [&'a Job],
+}
+
+const GIB: u64 = 1 << 30;
+
+/// Bytes in whole GiB, rounded, as the API's sizes are given.
+fn whole_gib(b: u64) -> u32 {
+    u32::try_from((b + GIB / 2) / GIB).unwrap_or(u32::MAX)
+}
+
+/// The daemon's own machine as a node.
+fn local_node(f: &LocalFacts<'_>) -> Node {
+    let running = || f.jobs.iter().filter(|j| j.state == JobState::Running);
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    Node {
+        node_id: LOCAL_NODE.to_string(),
+        cluster_id: f.cluster.to_string(),
+        kind: NodeKind::Local,
+        state: NodeState::Ready,
+        cpus: f.cpus,
+        slots: f.slots,
+        slots_in_use: running().map(|j| j.tokens).sum::<u32>().min(f.slots),
+        memory_gib: whole_gib(f.memory),
+        disk_gib: whole_gib(f.disk_total),
+        max_worktrees: None,
+        running_jobs: count(running().count()),
+        queued_jobs: count(
+            f.jobs
+                .iter()
+                .filter(|j| j.state == JobState::Queued)
+                .count(),
+        ),
+        slot_version: env!("CARGO_PKG_VERSION").to_string(),
+        cpu_busy_milli: Some((f.cpu_busy.max(0.0) * 1000.0).round() as u32),
+        memory_used_mib: Some(
+            u32::try_from(f.memory.saturating_sub(f.available) >> 20).unwrap_or(u32::MAX),
+        ),
+        disk_free_gib: Some(whole_gib(f.disk_free)),
+        location: None,
+        machine_type: None,
+        price_per_hour_cents: None,
+        joined_at: Some(crate::types::rfc3339(f.joined_ms)),
+        deadline: None,
+        gone_reason: None,
+        left_at: None,
     }
 }
 

@@ -133,6 +133,7 @@ onUnmounted(() => {
         @click="select(failed.id, $event)"><span class="k">failed</span> <span class="v"><b>{{ failed.n }}</b> <span class="span">(60 min)</span></span></button>
       <span v-if="census" class="tile"><span class="k">not on slot</span> <span class="v"><b>{{ census.unmanaged_cores.toFixed(1) }}</b> <span class="span">cores</span></span></span>
       <span class="end">
+        <a class="btn navlink" href="#cluster" title="the cluster start page: nodes, queue and the newest jobs">Cluster</a>
         <label class="tile"><span class="k">chart window</span>
           <span class="v"><select v-model.number="store.windowS">
             <option v-for="[s, label] in WINDOWS" :key="s" :value="s">{{ label }}</option>
@@ -206,6 +207,7 @@ h1 .host { grid-row: 2; grid-column: 1 / -1; max-width: 200px; overflow: hidden;
   text-align: left; }
 .failed:hover { background: #fdf1f0; }
 .failed .k, .failed .span { color: var(--bad); }
+.navlink { display: inline-flex; align-items: center; text-decoration: none; }
 .helpbtn { border-radius: 50%; padding: 0; width: 24px; font-weight: 700; }
 .row2 { display: flex; align-items: center; gap: 10px; height: 24px; margin-top: 5px; overflow: hidden; font-size: 13px; white-space: nowrap; }
 .cap { flex: none; color: var(--mute); font-variant-numeric: tabular-nums; }
