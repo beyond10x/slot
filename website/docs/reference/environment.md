@@ -16,6 +16,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
 | `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job runs on this machine's daemon: seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
 | `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job runs on this machine's daemon; same format |
+| `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
 | `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`; by share (`slot admission shares`) the job asks for a share of N CPUs, at most the budget, and holds no slot. See [Toolchains](../toolchains.md#naming-the-slots) and [Admission by share](../how-it-works.md#admission-by-share). |

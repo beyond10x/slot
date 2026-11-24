@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Same-path mirrors: with `SLOT_REMOTE_SAME_PATH=1` the client syncs the tree to its own absolute
+  path on the server and the job runs in the same directory as on the client, so absolute paths
+  into the tree and compile-cache keys that include the working directory match. The server
+  admits it only below a `--same-path-root DIR` given to `slot serve` and `slot shell`
+  (`SLOT_SAME_PATH_ROOTS`, `:`-separated); outside them `slot shell` refuses the sync and the
+  daemon the job. `<ws-root>/<id>` links to the tree, so sibling seeding, eviction and the
+  target directory keep their ids; the sandbox binds the tree writable at its path. Without the
+  variable nothing changes.
+
 - A remote `cargo build`, `test`, `bench` or `rustc` brings its products back into the local
   target directory, at the same relative paths with modes and mtimes: every executable of the
   workspace's own packages (binaries, unit and integration test binaries, benches, examples)

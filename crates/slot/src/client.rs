@@ -110,6 +110,9 @@ pub struct Settings {
     /// `SLOT_SYNC_STALL` and `SLOT_SYNC_LIMIT`: when a remote sync is
     /// killed and the job runs on this machine's daemon instead.
     pub sync: sync::Bounds,
+    /// `SLOT_REMOTE_SAME_PATH` set and not `0`: the server mirrors the
+    /// tree at its absolute path here, and the job runs there.
+    pub same_path: bool,
 }
 
 /// A duration from variable `name`, or `default` with a line on stderr when
@@ -129,8 +132,8 @@ fn duration_var(name: &str, default: Duration) -> Duration {
 
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
-    /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`
-    /// and `SLOT_SYNC_LIMIT`.
+    /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`,
+    /// `SLOT_SYNC_LIMIT` and `SLOT_REMOTE_SAME_PATH`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
@@ -173,6 +176,7 @@ impl Settings {
             priority: None,
             timeout: None,
             fallback: var("SLOT_LOCAL_FALLBACK").is_some_and(|v| v != "0"),
+            same_path: var("SLOT_REMOTE_SAME_PATH").is_some_and(|v| v != "0"),
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
@@ -307,7 +311,11 @@ pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String
 /// `top`. Returns 0, or 1 after printing which path failed.
 fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
     let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
-    let mirror = format!("{}/{id}", s.ws_root);
+    let mirror = if s.same_path {
+        top.to_string_lossy().into_owned()
+    } else {
+        format!("{}/{id}", s.ws_root)
+    };
     let mut code = 0;
     for path in &s.fetch {
         let src = match fetch_source(path, &mirror, &target_dir) {
@@ -707,6 +715,7 @@ fn remote(
         ssh: &s.ssh,
         ws_root: &s.ws_root,
         remote_slot: &s.remote_slot,
+        same_path: s.same_path,
     };
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
@@ -719,6 +728,7 @@ fn remote(
         id,
         rel_cwd: rel,
         client_root: top.to_string_lossy().into_owned(),
+        same_path: s.same_path,
     });
     let mut child: Child = Command::new(&s.ssh[0])
         .args(&s.ssh[1..])

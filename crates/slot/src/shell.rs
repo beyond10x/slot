@@ -15,8 +15,13 @@
 //!   workspace root or the cache root's `target/` (a cargo job's products
 //!   come back in one fetch of several paths);
 //! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
-//!   <key>`, run by this binary whatever path the client named; the
+//!   <key> [<tree>]`, run by this binary whatever path the client named; the
 //!   workspace root must be this server's.
+//!
+//! With `--same-path-root DIR`, a sync, a fetch and the sibling step may
+//! also name an absolute path below DIR: a tree mirrored at the client's own
+//! path (`SLOT_REMOTE_SAME_PATH`). Its sync may then take `--copy-dest` as
+//! `<ws-root>/<id>`, absolute.
 //!
 //! Anything else is refused with exit 126. rsync options are checked
 //! against a list that leaves out the ones that name other files or
@@ -47,7 +52,20 @@ pub enum Plan {
         id: String,
         /// Repository key.
         key: String,
+        /// The tree of a same-path mirror: `<ws-root>/<id>` links to it.
+        path: Option<PathBuf>,
     },
+}
+
+/// The directories a client's paths may name.
+#[derive(Debug, Clone, Copy)]
+pub struct Roots<'a> {
+    /// The daemon's workspace root.
+    pub ws: &'a Path,
+    /// The daemon's cache root.
+    pub cache: &'a Path,
+    /// `--same-path-root`: where a tree may be mirrored at its own path.
+    pub same_path: &'a [PathBuf],
 }
 
 /// rsync long options a sync or fetch may carry.
@@ -150,9 +168,9 @@ pub fn split(line: &str) -> Result<Vec<String>, String> {
 
 /// Decides what to run for `SSH_ORIGINAL_COMMAND` = `line`. `home` is the
 /// account's home directory (relative paths are taken from it, as ssh
-/// does), `ws_root` the daemon's workspace root and `cache_root` its cache
-/// root.
-pub fn plan(line: &str, home: &Path, ws_root: &Path, cache_root: &Path) -> Result<Plan, String> {
+/// does), `roots` the directories its paths may name.
+pub fn plan(line: &str, home: &Path, roots: &Roots<'_>) -> Result<Plan, String> {
+    let ws_root = roots.ws;
     let words = split(line)?;
     let Some((prog, args)) = words.split_first() else {
         return Err("no command: this key runs only slot's sync and build steps".into());
@@ -162,23 +180,28 @@ pub fn plan(line: &str, home: &Path, ws_root: &Path, cache_root: &Path) -> Resul
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     match base.as_str() {
-        "rsync" => rsync(args, home, ws_root, cache_root).map(Plan::Rsync),
+        "rsync" => rsync(args, home, roots).map(Plan::Rsync),
         "slot" => match args {
             [p] if p == "proxy" => Ok(Plan::Proxy),
             [c, id] if c == "cancel" => id
                 .parse()
                 .map(Plan::Cancel)
                 .map_err(|_| format!("bad job id `{id}`")),
-            [c, root, id, key] if c == "__siblings" => {
+            [c, root, id, key, rest @ ..] if c == "__siblings" && rest.len() <= 1 => {
                 if absolute(home, root)? != absolute(home, &ws_root.to_string_lossy())? {
                     return Err(format!("`{root}` is not this server's workspace root"));
                 }
                 if !crate::mirror::valid_id(id) || !crate::mirror::valid_id(key) {
                     return Err("bad workspace id or repository key".into());
                 }
+                let path = match rest {
+                    [p] => Some(same_path(home, p, roots.same_path)?),
+                    _ => None,
+                };
                 Ok(Plan::Siblings {
                     id: id.clone(),
                     key: key.clone(),
+                    path,
                 })
             }
             _ => Err(format!("`slot {}` is not a remote step", args.join(" "))),
@@ -187,12 +210,35 @@ pub fn plan(line: &str, home: &Path, ws_root: &Path, cache_root: &Path) -> Resul
     }
 }
 
-fn rsync(
-    args: &[String],
-    home: &Path,
-    ws_root: &Path,
-    cache_root: &Path,
-) -> Result<Vec<String>, String> {
+/// `path`, absolute and under one of `roots`, the tree of a same-path
+/// mirror.
+fn same_path(home: &Path, path: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
+    if !Path::new(path).is_absolute() {
+        return Err(format!("same-path mirror `{path}` is not absolute"));
+    }
+    let p = absolute(home, path)?;
+    if !under_any(&p, home, roots)? {
+        return Err(format!(
+            "same-path mirror `{path}` is not under a --same-path-root"
+        ));
+    }
+    Ok(p)
+}
+
+/// Whether `p` is below one of `roots` (not a root itself).
+fn under_any(p: &Path, home: &Path, roots: &[PathBuf]) -> Result<bool, String> {
+    for r in roots {
+        let r = absolute(home, &r.to_string_lossy())?;
+        if p.starts_with(&r) && p != r {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>, String> {
+    let (ws_root, cache_root) = (roots.ws, roots.cache);
+    let ws = absolute(home, &ws_root.to_string_lossy())?;
     if args.first().map(String::as_str) != Some("--server") {
         return Err("rsync runs only in server mode".into());
     }
@@ -210,12 +256,25 @@ fn rsync(
                 Some((_, v)) => Some(v),
                 None => it.next().map(String::as_str),
             };
+            // `<ws-root>/<id>`, absolute: the sibling of a same-path mirror,
+            // whose parent is not the workspace root.
+            let in_ws = value
+                .filter(|v| Path::new(v).is_absolute())
+                .and_then(|v| absolute(home, v).ok())
+                .and_then(|p| {
+                    p.strip_prefix(&ws)
+                        .ok()
+                        .map(|r| r.to_string_lossy().into_owned())
+                });
             let sibling = value
                 .and_then(|v| v.strip_prefix("../"))
                 .map(|v| v.strip_suffix('/').unwrap_or(v));
-            if sender || !sibling.is_some_and(crate::mirror::valid_id) {
+            if sender
+                || !(sibling.is_some_and(crate::mirror::valid_id)
+                    || in_ws.as_deref().is_some_and(crate::mirror::valid_id))
+            {
                 return Err(format!(
-                    "rsync `--copy-dest` takes only `../<id>` of a sync, not `{}`",
+                    "rsync `--copy-dest` takes only `../<id>` or `<ws-root>/<id>` of a sync, not `{}`",
                     value.unwrap_or("")
                 ));
             }
@@ -248,12 +307,12 @@ fn rsync(
     if paths.is_empty() || (!sender && paths.len() > 1) {
         return Err("rsync must name one path".into());
     }
-    let ws = absolute(home, &ws_root.to_string_lossy())?;
     let target = absolute(home, &cache_root.join("target").to_string_lossy())?;
     for path in paths {
         let p = absolute(home, path)?;
         let under = |root: &Path| p.starts_with(root) && p != root;
-        if !(under(&ws) || (sender && under(&target))) {
+        let same = Path::new(path).is_absolute() && under_any(&p, home, roots.same_path)?;
+        if !(under(&ws) || same || (sender && under(&target))) {
             return Err(format!(
                 "rsync path `{path}` is outside {}{}",
                 ws.display(),
@@ -292,11 +351,18 @@ mod tests {
     use super::*;
 
     fn p(line: &str) -> Result<Plan, String> {
+        plan_with(line, &[])
+    }
+
+    fn plan_with(line: &str, same_path: &[PathBuf]) -> Result<Plan, String> {
         plan(
             line,
             Path::new("/srv/u"),
-            Path::new("/srv/u/.local/state/slot/ws"),
-            Path::new("/srv/u/.local/state/slot/cache"),
+            &Roots {
+                ws: Path::new("/srv/u/.local/state/slot/ws"),
+                cache: Path::new("/srv/u/.local/state/slot/cache"),
+                same_path,
+            },
         )
     }
 
@@ -395,6 +461,7 @@ mod tests {
         let ok = Plan::Siblings {
             id: "0123abcd".into(),
             key: "00ff".into(),
+            path: None,
         };
         assert_eq!(
             p("/srv/u/.local/bin/slot __siblings .local/state/slot/ws 0123abcd 00ff"),
@@ -413,6 +480,56 @@ mod tests {
         ] {
             assert!(p(bad).is_err(), "accepted: {bad}");
         }
+    }
+
+    #[test]
+    fn a_same_path_mirror_is_admitted_only_under_a_same_path_root() {
+        let roots = [PathBuf::from("/srv/u/trees")];
+        let same = |l: &str| plan_with(l, &roots);
+        let sync = "rsync --server -logDtpre.iLsfxCIvu --delete --stats --copy-dest=/srv/u/.local/state/slot/ws/00aa/ --copy-dest ../00bb --mkpath . /srv/u/trees/r/a/";
+        assert!(matches!(same(sync), Ok(Plan::Rsync(_))), "{:?}", same(sync));
+        let fetch = "rsync --server --sender -logDtpre.iLsfxCIvu . /srv/u/trees/r/a/bin/tool";
+        assert!(
+            matches!(same(fetch), Ok(Plan::Rsync(_))),
+            "{:?}",
+            same(fetch)
+        );
+        assert_eq!(
+            same("slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/trees/r/a"),
+            Ok(Plan::Siblings {
+                id: "0123abcd".into(),
+                key: "00ff".into(),
+                path: Some(PathBuf::from("/srv/u/trees/r/a")),
+            })
+        );
+        assert!(
+            p(sync).is_err() && p(fetch).is_err(),
+            "without a root nothing outside the workspace root"
+        );
+        for bad in [
+            "rsync --server --delete . /srv/u/trees/",
+            "rsync --server --delete . /srv/u/trees",
+            "rsync --server --delete . /srv/u/.ssh/",
+            "rsync --server --delete . /srv/u/trees/../.ssh/",
+            "rsync --server --delete . trees/r/a/",
+            "rsync --server --delete . /srv/u/treesx/a/",
+            "rsync --server --sender . /etc/passwd",
+            "rsync --server --copy-dest=/srv/u/.ssh . /srv/u/trees/r/a/",
+            "rsync --server --copy-dest=/srv/u/.local/state/slot/ws/00aa/sub . /srv/u/trees/r/a/",
+            "rsync --server --copy-dest=/srv/u/.local/state/slot/ws/../../../.ssh . /srv/u/trees/r/a/",
+            "rsync --server --copy-dest=/srv/u/trees/r/b . /srv/u/trees/r/a/",
+            "slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/.ssh",
+            "slot __siblings .local/state/slot/ws 0123abcd 00ff trees/r/a",
+            "slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/trees",
+            "slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/trees/../x",
+            "slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/trees/a /srv/u/trees/b",
+        ] {
+            assert!(same(bad).is_err(), "accepted: {bad}");
+        }
+        assert!(
+            p("slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/trees/r/a").is_err(),
+            "no root: no same-path sibling step"
+        );
     }
 
     #[test]

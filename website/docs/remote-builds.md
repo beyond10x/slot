@@ -218,6 +218,35 @@ the server's copy of the repository, for output a build writes into the source t
 does nothing. Fetching from `target/` needs slot 0.8.0 or later on the server, which reports the
 target directory when the job starts.
 
+## Mirror at the same path
+
+Tests and scripts that name an absolute path into the checkout (`/srv/u/src/app/scripts/check`)
+fail in `<ws-root>/<id>`, and the compile cache sees another working directory. When the server's
+account has the same home directory as the workstation's, the tree can be mirrored at its own
+absolute path instead:
+
+```console
+export SLOT_REMOTE_SAME_PATH=1
+```
+
+The sync then goes to the checkout's absolute path on the server and the job runs in the same
+directory as here. The server admits such a tree only below a directory it names, given to both
+`slot serve` and `slot shell` (repeat the option, or list them in `SLOT_SAME_PATH_ROOTS`
+separated by `:`):
+
+```text
+slot serve --same-path-root /srv/u
+command="/usr/local/bin/slot shell --same-path-root /srv/u",restrict ssh-ed25519 AAAA… workstation
+```
+
+A tree outside those roots is refused: `slot shell` refuses the sync, so the job runs on this
+machine's daemon, and a daemon without the root ends the job with exit 2 and `not below a
+--same-path-root`. `<ws-root>/<id>` becomes a link to the tree, so the next worktree of the same
+repository is still seeded from it (`--copy-dest=<ws-root>/<id>`), and the target directory stays
+`<cache-root>/target/<id>`. With `--sandbox`, the tree is bound writable at its own path.
+Eviction deletes the link and the target directory, never the tree. Needs this release of slot
+on both machines.
+
 ## Tests that need local services
 
 Tests that talk to docker, a database, a local cluster or a port on localhost fail on the server.

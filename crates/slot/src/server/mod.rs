@@ -168,6 +168,9 @@ pub struct Config {
     /// Run every job in this sandbox (`slot serve --sandbox`); `None` runs
     /// jobs as the daemon's user with its whole filesystem.
     pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// Directories under which a remote client may mirror its tree at its
+    /// own absolute path (`--same-path-root`); empty refuses such jobs.
+    pub same_path_roots: Vec<PathBuf>,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -1565,6 +1568,7 @@ impl Server {
     async fn fetch_once(
         &self,
         id: &str,
+        root: &Path,
         cwd: &Path,
         argv: &[String],
         env: &[String],
@@ -1572,6 +1576,7 @@ impl Server {
     ) -> Result<bool, String> {
         use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure};
         let ws_root = self.cfg.ws_root.clone();
+        let root = root.to_path_buf();
         let id = id.to_string();
         let cwd = cwd.to_path_buf();
         let cargo = cargo_of(argv);
@@ -1579,6 +1584,7 @@ impl Server {
         let out = tokio::task::spawn_blocking(move || {
             ensure(&Check {
                 ws_root: &ws_root,
+                root: &root,
                 id: &id,
                 cwd: &cwd,
                 cargo,
@@ -1672,6 +1678,33 @@ impl Server {
         (1, format!("slot: job {id} still stopping after 10s"))
     }
 
+    /// Where workspace `ws` is mirrored: `<ws-root>/<id>`, or for a
+    /// same-path mirror the client's own root, which must lie below a
+    /// `--same-path-root`.
+    fn tree(&self, ws: &crate::proto::Workspace) -> Result<PathBuf> {
+        if !ws.same_path {
+            return Ok(self.cfg.ws_root.join(&ws.id));
+        }
+        let root = Path::new(&ws.client_root);
+        let plain = root.is_absolute()
+            && root
+                .components()
+                .all(|c| matches!(c, Component::RootDir | Component::Normal(_)));
+        if plain
+            && self
+                .cfg
+                .same_path_roots
+                .iter()
+                .any(|r| root.starts_with(r) && root != r)
+        {
+            return Ok(root.to_path_buf());
+        }
+        bail!(
+            "same-path mirror `{}` is not below a --same-path-root of this server",
+            ws.client_root
+        )
+    }
+
     fn resolve(&self, req: &Request) -> Result<(PathBuf, String, String)> {
         let Some(ws) = &req.workspace else {
             let cwd = PathBuf::from(&req.cwd);
@@ -1683,7 +1716,7 @@ impl Server {
         if ws.id.is_empty() || ws.id.contains(['/', '.']) {
             bail!("bad workspace id");
         }
-        let root = self.cfg.ws_root.join(&ws.id);
+        let root = self.tree(ws)?;
         let mut cwd = root.clone();
         for c in Path::new(&ws.rel_cwd).components() {
             match c {
@@ -1732,7 +1765,11 @@ impl Server {
             && let Some(ws) = req.workspace.as_ref()
             && crate::cargo_fetch::applies(&req.argv)
         {
-            match self.fetch_once(&ws.id, &cwd, &req.argv, &base, &tx).await {
+            let root = PathBuf::from(&from);
+            match self
+                .fetch_once(&ws.id, &root, &cwd, &req.argv, &base, &tx)
+                .await
+            {
                 Ok(offline) => {
                     if offline && !req.env.iter().any(|e| e == crate::cargo_fetch::OFFLINE) {
                         req.env.push(crate::cargo_fetch::OFFLINE.to_string());
@@ -2128,7 +2165,7 @@ impl Server {
         // the sandbox hides.
         if let Some(sandbox) = &self.cfg.sandbox {
             env = crate::sandbox::Sandbox::env(env);
-            let workspace = req.workspace.as_ref().map(|w| self.cfg.ws_root.join(&w.id));
+            let workspace = req.workspace.as_ref().and_then(|w| self.tree(w).ok());
             let target_dir = match &req.workspace {
                 Some(w) => Some(self.cfg.cache_root.join("target").join(&w.id)),
                 None => crate::evict::target_dir(&shown, &env, &cwd),
@@ -2430,6 +2467,12 @@ impl Server {
                     .ok()
                     .and_then(|r| r.components().next())
                     .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .or_else(|| {
+                        if self.cfg.same_path_roots.is_empty() {
+                            return None;
+                        }
+                        crate::mirror::linked_id(&self.cfg.ws_root, Path::new(&l.job.cwd))
+                    })
             })
             .collect()
     }
