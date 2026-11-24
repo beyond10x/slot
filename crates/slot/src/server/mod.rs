@@ -690,6 +690,10 @@ impl Server {
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
                     }
+                } else if let Ok(a) = serde_json::from_str::<crate::phases::Amended>(&line)
+                    && let Some(d) = done.iter_mut().rev().find(|d| d.job.id == a.amend)
+                {
+                    a.apply(&mut d.job);
                 }
             }
         }
@@ -1278,6 +1282,7 @@ impl Server {
                         output: Vec::new(),
                         exited: l.exited,
                         conn: None,
+                        tests_at: l.out.tests_at(),
                     },
                     l.conn,
                     Arc::clone(&l.out),
@@ -1390,6 +1395,9 @@ impl Server {
             (tx, rx, None, Some(g))
         };
         let ring = Arc::new(Ring::from_tail(OUTPUT_KEEP, r.output));
+        if let Some(at) = r.tests_at {
+            ring.mark_tests(at);
+        }
         let pumps = self.start_pumps([out, err], &tx, &ring, &r.rewrite);
         {
             let mut g = self.inner.lock().expect("server lock");
@@ -1572,10 +1580,15 @@ impl Server {
         let Ok(req) = serde_json::from_str::<Request>(&line) else {
             return;
         };
-        if let Some(id) = req.cancel {
-            let (code, msg) = self.cancel(id, uid).await;
+        let short = match (req.cancel, req.amend) {
+            (Some(id), _) => Some(self.cancel(id, uid).await),
+            (None, Some(a)) => Some(self.amend(a)),
+            (None, None) => None,
+        };
+        if let Some((code, msg)) = short {
             let mut out = Vec::new();
-            for f in [Frame::Info { msg }, Frame::Exit { code }] {
+            let info = (!msg.is_empty()).then_some(Frame::Info { msg });
+            for f in info.into_iter().chain([Frame::Exit { code }]) {
                 if let Ok(b) = serde_json::to_vec(&f) {
                     out.extend(b);
                     out.push(b'\n');
@@ -1682,6 +1695,41 @@ impl Server {
             .map(|(k, v)| format!("{k}={v}"))
             .chain(req.env.iter().cloned())
             .collect()
+    }
+
+    /// Where the client of job `id`, handed to a node, writes what it
+    /// measured ([`crate::phases::FILE_ENV`]).
+    fn phases_file(&self, id: i64) -> PathBuf {
+        self.cfg.state_dir.join(format!("phases-{id}.json"))
+    }
+
+    /// Adds what a client measured after its remote job ended to the job's
+    /// record: in the kept jobs and as an [`crate::phases::Amended`] line of
+    /// the job log. Only an ended remote job whose record has no back time
+    /// yet takes it. `(exit code, message)`.
+    fn amend(&self, a: crate::proto::Amend) -> (i32, String) {
+        let job = {
+            let mut g = self.inner.lock().expect("server lock");
+            let Some(d) = g.done.iter_mut().rev().find(|d| d.job.id == a.id) else {
+                return (1, format!("slot: job {} is not among the ended jobs", a.id));
+            };
+            if !d.job.remote || d.job.back_ms.is_some() {
+                return (1, format!("slot: job {} takes no back time", a.id));
+            }
+            let line = crate::phases::Amended {
+                amend: a.id,
+                back_ms: a.back_ms,
+            };
+            line.apply(&mut d.job);
+            let job = d.job.clone();
+            if let Ok(mut b) = serde_json::to_vec(&line) {
+                b.push(b'\n');
+                let _ = g.log.write_all(&b);
+            }
+            job
+        };
+        self.send(&Event::Job { job });
+        (0, String::new())
     }
 
     /// `slot cancel <id>` from a client with user id `uid`: stops a queued
@@ -1974,6 +2022,13 @@ impl Server {
                 admission: crate::shares::Mode::Slots,
                 node: LOCAL_NODE.to_string(),
                 from_node: false,
+                sync_ms: req.workspace.as_ref().and(req.sync_ms),
+                sync_bytes: req.workspace.as_ref().and(req.sync_bytes),
+                back_ms: None,
+                compile_ms: None,
+                test_ms: None,
+                node_target_dir: None,
+                seeded_from: None,
             };
             g.active.insert(
                 id,
@@ -2021,7 +2076,16 @@ impl Server {
         }
         self.publish(id);
         if let Some(ws) = &req.workspace {
-            self.prepare_cache(&ws.id, &req.repo, &tx).await;
+            // What the job's target directory holds before it is seeded.
+            let target = self.job_target(ws);
+            let held = crate::phases::has_entries(&target);
+            let seeded = self.prepare_cache(&ws.id, &req.repo, &tx).await;
+            if tc.name() == "rust"
+                && let Some(l) = self.inner.lock().expect("server lock").active.get_mut(&id)
+            {
+                l.job.node_target_dir = Some(target.to_string_lossy().into_owned());
+                l.job.seeded_from = Some(crate::phases::seeded_from(seeded, held));
+            }
         }
 
         let ahead = self.pool.waiting_before(self.queued_level(id));
@@ -2397,6 +2461,7 @@ impl Server {
         };
         {
             let mut g = self.inner.lock().expect("server lock");
+            let mut seeded_from = None;
             if let Some(l) = g.active.get_mut(&id) {
                 l.pid = Some(pid);
                 l.job.started_ms = now_ms();
@@ -2405,8 +2470,13 @@ impl Server {
                 l.tracker.sample(&Snapshot::scan(), pid, &[], 0.0);
                 l.req = None;
                 l.pumps = pumps;
+                seeded_from.clone_from(&l.job.seeded_from);
             }
-            let _ = tx.send(Frame::Start { id, target_dir });
+            let _ = tx.send(Frame::Start {
+                id,
+                target_dir,
+                seeded_from,
+            });
         }
         self.publish(id);
         let done = self.supervise(id, pid, &tx, gone, false).await.map(drop);
@@ -2587,8 +2657,13 @@ impl Server {
     /// records the use, evicts least recently used target directories over
     /// the budget or the disk floor, and seeds a new workspace's target
     /// directory by reflink. Says what it did on the job's stderr and in the
-    /// journal.
-    async fn prepare_cache(&self, ws: &str, repo: &str, tx: &mpsc::UnboundedSender<Frame>) {
+    /// journal. Returns the workspace it seeded from, if it did.
+    async fn prepare_cache(
+        &self,
+        ws: &str,
+        repo: &str,
+        tx: &mpsc::UnboundedSender<Frame>,
+    ) -> Option<String> {
         let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
         let busy = self.busy_workspaces();
         let budget = self.cfg.cache_budget;
@@ -2610,7 +2685,7 @@ impl Server {
         })
         .await
         else {
-            return;
+            return None;
         };
         for (id, bytes) in gone {
             let msg = format!(
@@ -2628,9 +2703,14 @@ impl Server {
                 );
                 eprintln!("{msg}");
                 let _ = tx.send(Frame::Info { msg });
+                Some(src)
             }
-            Err(e) if e.contains("reflink") => eprintln!("slot: target directory not seeded: {e}"),
-            Err(_) => {}
+            Err(e) => {
+                if e.contains("reflink") {
+                    eprintln!("slot: target directory not seeded: {e}");
+                }
+                None
+            }
         }
     }
 
@@ -2869,6 +2949,21 @@ impl Server {
             live.job.state = end.state;
             live.job.exit = end.code;
             live.job.ended_ms = now_ms();
+            if live.job.started_ms > 0 && crate::phases::runs_tests(&live.job.argv) {
+                (live.job.compile_ms, live.job.test_ms) = crate::phases::split(
+                    live.job.started_ms,
+                    live.out.tests_at(),
+                    live.job.ended_ms,
+                );
+            }
+            // A job handed to a node: what its client measured.
+            if !matches!(live.job.node.as_str(), "" | LOCAL_NODE) && !live.job.from_node {
+                let path = self.phases_file(id);
+                if let Some(r) = crate::phases::Report::read(&path) {
+                    r.apply(&mut live.job);
+                }
+                let _ = std::fs::remove_file(&path);
+            }
             live.job.cpu_s = live.job.compile_server_cpu_s + end.cpu.unwrap_or(0.0);
             let ran_ms = live.job.ended_ms - live.job.started_ms;
             if live.job.share.is_some() && live.job.started_ms > 0 && ran_ms > 0 {
@@ -4963,6 +5058,9 @@ fn pump(
             return;
         }
         let s = String::from_utf8_lossy(&b).into_owned();
+        if out.tests_at().is_none() && crate::phases::starts_tests(&s) {
+            out.mark_tests(now_ms());
+        }
         out.write(t, s.clone());
         let f = if t == "out" {
             Frame::Out { b: s }

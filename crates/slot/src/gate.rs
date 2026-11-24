@@ -205,6 +205,10 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         nofile: None,
         fetch_once: false,
         local_reason: client.local_reason,
+        // A gated job runs on this machine, never synced.
+        sync_ms: None,
+        sync_bytes: None,
+        amend: None,
     }
 }
 

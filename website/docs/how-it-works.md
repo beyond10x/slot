@@ -664,6 +664,12 @@ A rust job's record also has `cache_env`, the variables that decide what the com
 do, and `warnings` when they switch the cache off or name an sccache server of its own: see
 [Environment variables](reference/environment.md#recorded-for-a-rust-job).
 
+The record says where a job's time went: a cargo `test`, `nextest` or `bench` job's compile and
+test time (`compile_ms`, `test_ms`), a remote job's sync of its tree (`sync_ms`, `sync_bytes`)
+and copy of its products and fetches back (`back_ms`), and a remote cargo job's target directory
+on the node and what that held when the job queued (`node_target_dir`, `seeded_from`): see
+[Environment variables](reference/environment.md#recorded-phases-of-a-job).
+
 The daemon reads the log back at start, so the web UI shows recent jobs across restarts.
 
 `project` is the namespace of the repository's git remote: every path segment of the origin URL

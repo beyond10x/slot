@@ -306,11 +306,14 @@ impl Server {
     ) -> Option<Ran> {
         let argv = child_argv(&installed_exe(), req);
         let env = child_env(&req.env, &t);
+        let phases = self.phases_file(id);
+        let _ = std::fs::remove_file(&phases);
         let spawned = Command::new(&argv[0])
             .args(&argv[1..])
             .current_dir(cwd)
             .env_clear()
             .envs(env.iter().filter_map(|e| e.split_once('=')))
+            .env(crate::phases::FILE_ENV, &phases)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -364,11 +367,14 @@ impl Server {
             let _ = tx.send(Frame::Start {
                 id,
                 target_dir: String::new(),
+                seeded_from: None,
             });
         }
         self.publish(id);
         let ran = self.supervise(id, pid, tx, gone, true).await?;
         if ran == Ran::Requeue {
+            let _ = std::fs::remove_file(&phases);
+            out.unmark_tests();
             {
                 let mut g = self.inner.lock().expect("server lock");
                 if let Some(l) = g.active.get_mut(&id) {

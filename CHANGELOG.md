@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- A job's record says where its time went. A remote job carries `sync_ms` and `sync_bytes` (the
+  tree to the node, as its client measured it) and `back_ms` (the cargo products and `--fetch`
+  paths back); a cargo `test`, `nextest` or `bench` job carries `compile_ms` and `test_ms`, split
+  where its output shows the first test binary (cargo's `Running …`/`Doc-tests …` line, nextest's
+  `Starting N tests across …` line or cargo's `build-finished` message); a remote cargo job
+  carries `node_target_dir` and `seeded_from` (the sibling workspace it was seeded from, `kept` or
+  `empty`). Each field is absent where it does not apply and in older lines, never 0. The node's
+  record gets the sync with the request; the back time arrives after the job in a second request
+  (`amend`) and is appended to the node's job log as `{"amend":<id>,"back_ms":<ms>}`, which
+  readers of job lines skip and the daemon applies when it reads the log back. A job the daemon
+  hands to a node gets the client's figures from the file in the new `SLOT_PHASES_FILE`. The
+  `start` frame names `seeded_from`.
+
 ## 0.35.0 — 2026-11-24
 
 - A job's output reaches the caller whole when another process sharing the caller's stdout has

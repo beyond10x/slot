@@ -24,6 +24,7 @@ pub mod jobserver;
 pub mod mirror;
 pub mod never_sync;
 pub mod paths;
+pub mod phases;
 pub mod policy;
 pub mod procstat;
 pub mod project;

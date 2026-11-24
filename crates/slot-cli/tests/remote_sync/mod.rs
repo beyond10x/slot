@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use super::{Daemon, SLOT};
 
 mod node_view;
+mod phases;
 mod safety;
 
 /// Files of the test repository and their size: 2 MiB that do not compress.

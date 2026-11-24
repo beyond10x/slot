@@ -5284,3 +5284,139 @@ fn with_fixed_paths_two_worktrees_build_at_the_same_paths() {
         started.elapsed()
     );
 }
+
+/// A synced cargo test job of workspace `ws`, repository `r`, whose client
+/// measured its sync; the command, `cargo-test` as a link to the shell,
+/// compiles for 300 ms into its target directory and then runs its tests
+/// for 200 ms.
+fn synced_test(f: &Fixture, ws: &str) -> Request {
+    std::fs::create_dir_all(f.root.join("ws").join(ws)).unwrap();
+    let script = "mkdir -p \"$CARGO_TARGET_DIR/debug\"; echo '   Compiling x v0.1.0' >&2; \
+                  sleep 0.3; echo '     Running unittests src/lib.rs (target/debug/deps/x-1)' >&2; \
+                  sleep 0.2; echo 'test adds ... ok'";
+    Request {
+        cwd: String::new(),
+        env: Vec::new(),
+        repo: "r".into(),
+        sync_ms: Some(1234),
+        sync_bytes: Some(5678),
+        workspace: Some(Workspace {
+            id: ws.into(),
+            rel_cwd: ".".into(),
+            client_root: "/srv/acct/r".into(),
+            ..Workspace::default()
+        }),
+        ..fake_build(&f.root, &f.root.join("unused"), script)
+    }
+}
+
+/// Runs `req` and returns its result and the `seeded_from` of its start
+/// frame.
+fn run_seeded(f: &Fixture, req: Request) -> (Res, Option<String>) {
+    let mut r = Res {
+        code: -999,
+        ..Res::default()
+    };
+    let mut seeded = None;
+    for line in BufReader::new(send(&f.socket, req)).lines() {
+        let Ok(line) = line else { break };
+        match serde_json::from_str::<Frame>(&line).unwrap() {
+            Frame::Out { b } => r.out += &b,
+            Frame::Err { b } => r.err += &b,
+            Frame::Info { msg } | Frame::Fallback { msg } => r.info += &msg,
+            Frame::Start { seeded_from, .. } => {
+                r.started = true;
+                seeded = seeded_from;
+            }
+            Frame::Exit { code } => {
+                r.code = code;
+                break;
+            }
+        }
+    }
+    (r, seeded)
+}
+
+/// A synced cargo test job's record carries the sync its client measured,
+/// the target directory it built into on this server and what that held
+/// when the job queued (also in its start frame), and its compile and test
+/// time split at the first test binary. The client's back time comes after
+/// the job, once, and is in the job log for the next start. A local job
+/// takes none of the sync fields, and a job that runs no tests has no split.
+#[test]
+fn a_jobs_record_names_its_sync_phases_and_seed_on_the_node() {
+    let f = start(1);
+    let target = f.root.join("cache/target/w1");
+    let (r, seeded) = run_seeded(&f, synced_test(&f, "w1"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(seeded.as_deref(), Some("empty"));
+    let first = last_logged(&f);
+    assert_eq!((first.sync_ms, first.sync_bytes), (Some(1234), Some(5678)));
+    assert_eq!(first.back_ms, None);
+    assert_eq!(
+        first.node_target_dir.as_deref(),
+        Some(target.to_str().unwrap())
+    );
+    assert_eq!(first.seeded_from.as_deref(), Some("empty"));
+    let (compile, test) = (first.compile_ms.unwrap(), first.test_ms.unwrap());
+    assert!(compile >= 250, "compile {compile} ms, test {test} ms");
+    assert!(test >= 150, "compile {compile} ms, test {test} ms");
+    assert_eq!(
+        compile + test,
+        u64::try_from(first.ended_ms - first.started_ms).unwrap()
+    );
+
+    let (r, seeded) = run_seeded(&f, synced_test(&f, "w1"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(seeded.as_deref(), Some("kept"));
+    assert_eq!(last_logged(&f).seeded_from.as_deref(), Some("kept"));
+
+    // A sibling of the same repository is seeded from w1 where the
+    // filesystem makes reflink copies, else it starts empty.
+    let (r, seeded) = run_seeded(&f, synced_test(&f, "w2"));
+    assert_eq!(r.code, 0, "{r:?}");
+    let want = if r.info.contains("seeded from workspace w1") {
+        "w1"
+    } else {
+        "empty"
+    };
+    assert_eq!(seeded.as_deref(), Some(want), "{}", r.info);
+    assert_eq!(last_logged(&f).seeded_from.as_deref(), Some(want));
+
+    let amend = |id, back_ms| Request {
+        amend: Some(crate::proto::Amend { id, back_ms }),
+        ..Request::default()
+    };
+    assert_eq!(run(&f, amend(first.id, Some(77))).code, 0);
+    assert_eq!(done_job(&f, first.id).back_ms, Some(77));
+    let r = run(&f, amend(first.id, Some(99)));
+    assert_eq!(r.code, 1, "once: {r:?}");
+    assert_eq!(done_job(&f, first.id).back_ms, Some(77));
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let line = format!(r#"{{"amend":{},"back_ms":77}}"#, first.id);
+    assert!(log.lines().any(|l| l == line), "{log}");
+
+    let mut local = fake_build(&f.root, &f.root.join("target"), "echo ran");
+    local.sync_ms = Some(1);
+    local.sync_bytes = Some(2);
+    assert_eq!(run(&f, local).code, 0);
+    let j = last_logged(&f);
+    assert_eq!((j.sync_ms, j.sync_bytes), (None, None));
+    assert_eq!((j.node_target_dir, j.seeded_from), (None, None));
+    assert_eq!(j.compile_ms.map(|_| ()), Some(()), "a cargo test job");
+    assert_eq!(j.test_ms, None, "no test binary ran");
+    let r = run(&f, amend(j.id, Some(5)));
+    assert_eq!(r.code, 1, "a local job: {r:?}");
+    assert_eq!(run(&f, sh(&f.root, "true")).code, 0);
+    let j = last_logged(&f);
+    assert_eq!((j.compile_ms, j.test_ms), (None, None));
+
+    let again = Server::new(config(&f.root, 1)).unwrap();
+    let read = again
+        .state()
+        .done
+        .into_iter()
+        .find(|j| j.id == first.id)
+        .unwrap();
+    assert_eq!(read.back_ms, Some(77), "the amend line, read at start");
+}

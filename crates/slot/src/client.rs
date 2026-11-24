@@ -14,7 +14,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::sync::{Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -249,18 +249,25 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                     ended => {
                         let ran = matches!(ended, Ended::Exit(_));
                         let mut code = ended.code();
+                        let back = Instant::now();
+                        let mut came_back = false;
                         if let (Some(p), Some(col), Some(top)) = (&plan, &collector, top.as_deref())
                             && ran
                             && (code == 0 || p.when == artifacts::When::AnyExit)
                         {
+                            came_back = true;
                             code = products_back(host, top, &cwd, s, col, code);
                         }
-                        return match (&req.workspace, top.as_deref()) {
+                        code = match (&req.workspace, top.as_deref()) {
                             (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
+                                came_back = true;
                                 fetch(host, top, &ws.id, s)
                             }
                             _ => code,
                         };
+                        let back_ms = came_back.then(|| millis(back.elapsed()));
+                        record_phases(host, s, &req, argv, back_ms);
+                        return code;
                     }
                 }
             }
@@ -277,6 +284,8 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         req.argv = argv.to_vec();
         req.workspace = None;
         req.fetch_once = false;
+        req.sync_ms = None;
+        req.sync_bytes = None;
         req.local_reason = sync_failed(&why);
         local_fields(&mut req, &cwd);
         return submit_local(&s.socket, &req, &Waits::of(s));
@@ -355,6 +364,13 @@ fn local_fields(req: &mut Request, cwd: &Path) {
 
 /// The job's target directory on the server, from its `start` frame.
 static JOB_TARGET: Mutex<String> = Mutex::new(String::new());
+
+/// The job's id on the server, from its `start` frame; 0 before it.
+static JOB_ID: AtomicI64 = AtomicI64::new(0);
+
+/// What the job's target directory on the server held when it queued, from
+/// its `start` frame.
+static JOB_SEED: Mutex<Option<String>> = Mutex::new(None);
 
 /// Where `slot --fetch <path>` reads `path` on the server: under the job's
 /// target directory for `target` and `target/…`, under the workspace mirror
@@ -492,6 +508,81 @@ fn products_back(
             if code == 0 { 1 } else { code }
         }
     }
+}
+
+/// How long the client waits for a server to take what it measured.
+const AMEND_WAIT: Duration = Duration::from_secs(10);
+
+/// Adds what this client measured of remote job `req` (command `argv`) to
+/// the job's records: the time its products and fetches took to come back
+/// (`back_ms`) to the record on `host`, whose request carried the sync; and
+/// every phase to the file [`crate::phases::FILE_ENV`] names, which the
+/// daemon that handed the job to `host` adds to its own record.
+fn record_phases(host: &str, s: &Settings, req: &Request, argv: &[String], back_ms: Option<u64>) {
+    let id = JOB_ID.load(Ordering::SeqCst);
+    if back_ms.is_some() && id > 0 {
+        amend(host, s, crate::proto::Amend { id, back_ms });
+    }
+    let Some(path) = std::env::var_os(crate::phases::FILE_ENV).filter(|v| !v.is_empty()) else {
+        return;
+    };
+    let cargo = toolchain::for_argv(argv, 1).name() == "rust";
+    let target = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
+    let report = crate::phases::Report {
+        sync_ms: req.sync_ms,
+        sync_bytes: req.sync_bytes,
+        back_ms,
+        node_target_dir: (cargo && !target.is_empty()).then_some(target),
+        seeded_from: if cargo {
+            JOB_SEED.lock().ok().and_then(|s| s.clone())
+        } else {
+            None
+        },
+    };
+    if let Err(e) = report.write(Path::new(&path)) {
+        eprintln!("slot: job phases not written: {e}");
+    }
+}
+
+/// Sends `a` to the daemon on `host` and waits up to [`AMEND_WAIT`] for its
+/// answer, printing nothing: a daemon that predates it answers "empty
+/// command", which is no concern of the caller.
+fn amend(host: &str, s: &Settings, a: crate::proto::Amend) {
+    let req = Request {
+        amend: Some(a),
+        ..Request::default()
+    };
+    let Ok(Conn {
+        reader,
+        mut writer,
+        mut closer,
+    }) = proxy(host, s)
+    else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_vec(&req) else {
+        return;
+    };
+    line.push(b'\n');
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if writer
+            .write_all(&line)
+            .and_then(|()| writer.flush())
+            .is_ok()
+        {
+            drop(writer);
+            for l in BufReader::new(reader).lines() {
+                let Ok(l) = l else { break };
+                if matches!(serde_json::from_str(&l), Ok(Frame::Exit { .. })) {
+                    break;
+                }
+            }
+        }
+        let _ = tx.send(());
+    });
+    let _ = rx.recv_timeout(AMEND_WAIT);
+    closer();
 }
 
 /// Whether the repository's `.slot.toml` lists `argv` under `local`, so it
@@ -856,6 +947,7 @@ fn remote(
         remote_slot: &s.remote_slot,
         same_path,
     };
+    let t0 = Instant::now();
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
     let target_dir = if same_path {
@@ -871,6 +963,8 @@ fn remote(
     } else {
         String::new()
     };
+    req.sync_ms = Some(millis(t0.elapsed()));
+    req.sync_bytes = synced.bytes;
     let (sent, held) = toolchain::remote_env(
         std::env::vars(),
         |k| tc.client_env(k),
@@ -890,6 +984,16 @@ fn remote(
         same_path,
         target_dir,
     });
+    proxy(host, s)
+}
+
+/// Whole milliseconds of `d`.
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// A connection to the daemon on `host` through `ssh host slot proxy`.
+fn proxy(host: &str, s: &Settings) -> Result<Conn> {
     let mut child: Child = Command::new(&s.ssh[0])
         .args(&s.ssh[1..])
         .arg(host)
@@ -997,10 +1101,18 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
                 started = true;
                 write_out(&mut stderr, b.as_bytes());
             }
-            Ok(Frame::Start { target_dir, .. }) => {
+            Ok(Frame::Start {
+                id,
+                target_dir,
+                seeded_from,
+            }) => {
                 started = true;
                 if let Ok(mut t) = JOB_TARGET.lock() {
                     *t = target_dir;
+                }
+                JOB_ID.store(id, Ordering::SeqCst);
+                if let Ok(mut s) = JOB_SEED.lock() {
+                    *s = seeded_from;
                 }
             }
             Ok(Frame::Info { msg }) => eprintln!("{msg}"),
@@ -1378,6 +1490,7 @@ mod tests {
                     Frame::Start {
                         id: 1,
                         target_dir: String::new(),
+                        seeded_from: None,
                     },
                     Frame::Exit { code: 7 },
                 ],
@@ -1404,6 +1517,7 @@ mod tests {
                 vec![Frame::Start {
                     id: 1,
                     target_dir: String::new(),
+                    seeded_from: None,
                 }],
                 vec![Frame::Exit { code: 0 }],
             ],
@@ -1487,6 +1601,7 @@ mod tests {
                 Frame::Start {
                     id: 1,
                     target_dir: String::new(),
+                    seeded_from: None,
                 },
                 Frame::Exit { code: 5 },
             ];
