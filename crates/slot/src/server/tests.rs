@@ -3433,7 +3433,10 @@ fn eviction_starts_at_the_disk_holds_mark_and_the_held_job_starts() {
     assert!(target.exists(), "60 GB free: nothing to delete");
 
     FREE.store(45 * GB, SeqCst);
-    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    // The job works in another tree: its own would keep the target.
+    let elsewhere = f.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (c, id) = submit(&f, sh(&elsewhere, "echo ran"));
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let r = collect(c);
     assert!(
@@ -3611,13 +3614,13 @@ fn the_idle_keep_is_set_at_run_time_and_applies_at_the_next_look() {
         .lock()
         .unwrap()
         .targets
-        .insert(target.clone(), ("recent".into(), now_ms() - 40 * 60_000));
+        .insert(target.clone(), ("recent".into(), now_ms() - 90 * 60_000));
     let v = evict_view(put_evict_below(&f, r#"{"evict_below_gb":50}"#));
     assert_eq!((v.evict_idle_s, v.idle_s), (None, 7200), "the default");
     wait_for_jobs(&f, "the look at the new mark", || {
         f.server.state().evict.checked_ms > 0
     });
-    assert!(target.exists(), "built 40 min ago: kept at 2 h");
+    assert!(target.exists(), "built 90 min ago: kept at 2 h");
 
     let v = evict_view(put_evict_below(&f, r#"{"evict_idle_s":1800}"#));
     assert_eq!((v.evict_idle_s, v.idle_s), (Some(1800), 1800));

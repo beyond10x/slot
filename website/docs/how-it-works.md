@@ -595,10 +595,15 @@ forget it).
 in `limits.json` like the mark, and is `evict_idle_s` (seconds) in the same `PUT` body; a field
 left out stays as it is, `null` forgets it. Eviction never deletes:
 
-- a target directory a queued or running job builds into, or one in the checkout a queued or
-  running job runs in (the directory above the target directory, or below it); another worktree
-  or clone of the same repository may go;
-- one built in the last 2 hours, or the idle keep set with `--idle`;
+- a target directory a queued or running job builds into, or one equal to, inside or holding the
+  one its `CARGO_TARGET_DIR` names;
+- one in the tree of a queued or running job: git's top level of its working directory, else the
+  working directory, with nested ones such as `target/ignite-test/rt` or `driver/target`; another
+  worktree or clone of the same repository may go;
+- one in the tree of any job that ran in the last hour, so the jobs of one long task keep their
+  target directories between them;
+- one built in the last 2 hours, or the idle keep set with `--idle` (never less than an hour);
+- one with a `.cargo-lock` anywhere in it that a process holds locked;
 - one whose deletion failed in the last hour, for example a managed worktree with a live session
   lease: the next look deletes the next candidates instead (the journal says
   `slot: disk: eviction leaves <path> out for 1h: its removal failed` once);

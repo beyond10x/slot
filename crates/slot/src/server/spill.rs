@@ -127,8 +127,7 @@ fn under_home_cache(req: &Request) -> bool {
         return false;
     }
     let cache = format!("{}/.cache/", home.trim_end_matches('/'));
-    format!("{}/", req.cwd).starts_with(&cache)
-        || req.argv.iter().any(|a| a.contains(&cache))
+    format!("{}/", req.cwd).starts_with(&cache) || req.argv.iter().any(|a| a.contains(&cache))
 }
 
 /// The spilled job's environment: the job's, with the node's `SLOT_HOST`,
