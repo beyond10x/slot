@@ -87,7 +87,8 @@ pub struct Config {
     /// Whether a headroom also sets `CPUQuota` on the daemon's systemd unit.
     pub cpu_quota: bool,
     /// Default thread count of test runners in a job (`RUST_TEST_THREADS`,
-    /// `NEXTEST_TEST_THREADS`, `GOMAXPROCS`) when the caller sets none.
+    /// `NEXTEST_TEST_THREADS`, `GOMAXPROCS`) when the caller sets none. A
+    /// remote job gets its width instead ([`crate::width`]).
     pub test_threads: usize,
     /// Jobserver FIFO and job log.
     pub state_dir: PathBuf,
@@ -457,6 +458,8 @@ struct Inner {
     /// The host's busy CPUs over the last seconds, in parts, for the CPU
     /// limit.
     host_busy: cpu_limit::RecentParts,
+    /// When the jobs that got a width started, for [`crate::width`].
+    starts: crate::width::Starts,
     /// When a job last started on the CPU hold's bound, Unix ms.
     cpu_bound_ms: i64,
     controller: policy::Controller,
@@ -757,6 +760,7 @@ impl Server {
                 title_pending: HashSet::new(),
                 last_census: HostCensus::default(),
                 host_busy: cpu_limit::RecentParts::default(),
+                starts: crate::width::Starts::default(),
                 cpu_bound_ms: 0,
                 controller: policy::Controller::new(policy::Settings::new(
                     cores as usize,
@@ -2029,6 +2033,7 @@ impl Server {
                 test_ms: None,
                 node_target_dir: None,
                 seeded_from: None,
+                width: None,
             };
             g.active.insert(
                 id,
@@ -2297,11 +2302,16 @@ impl Server {
             }
         };
 
+        // A job synced from another host runs on this machine as a node:
+        // its width follows the free cores. A local job keeps the
+        // workstation rule (`test_threads`, the pool's jobserver).
+        let width = req.workspace.is_some().then(|| self.job_width(id));
         let ctx = Context {
             jobserver_auth: self.pool.auth(),
             held,
             free_tokens: self.pool.free(),
             test_threads: self.cfg.test_threads,
+            width,
             cache_dir: if req.workspace.is_some() {
                 self.cfg.cache_root.to_string_lossy().into_owned()
             } else {
@@ -2324,9 +2334,15 @@ impl Server {
         }
         // The bound in force at the start is the job's, like its run-time
         // limit: a later `slot job-parallel` changes the jobs that start
-        // after it. With a bound the job gets no pool jobserver.
+        // after it. With a bound the job gets no pool jobserver. A job with
+        // a width raises a lower bound to it; without a bound its compilers
+        // draw from the pool's jobserver, which no width narrows.
         let own =
-            job_parallel::for_job(*self.job_parallel.lock().expect("job parallel lock"), held);
+            job_parallel::for_job(*self.job_parallel.lock().expect("job parallel lock"), held)
+                .map(|p| width.map_or(p, |w| w.max(p)));
+        if let Some(w) = width {
+            env = toolchain::set(env, crate::width::ENV, &w.to_string());
+        }
         if let Some(p) = own {
             env = toolchain::own_jobserver(env, p);
         }
@@ -3976,6 +3992,27 @@ impl Server {
             .expected_cores(repo, argv)
             .unwrap_or(cpu_limit::DEFAULT_CORES)
             .min(f64::from(self.cores))
+    }
+
+    /// The width of remote job `id` as it starts ([`crate::width`]),
+    /// written into its record: the host's free CPUs by the CPU limit's
+    /// figure (the last system sample while it has none), split over the
+    /// jobs that got a width in the last seconds. Under the server lock, so
+    /// two jobs that start at once count each other.
+    fn job_width(&self, id: i64) -> usize {
+        let now = now_ms();
+        let cores = f64::from(self.cores);
+        let mut g = self.inner.lock().expect("server lock");
+        let busy = match self.cpu_figure(&g, now) {
+            cpu_limit::Figure::Busy(parts) => parts.host(),
+            cpu_limit::Figure::Pending | cpu_limit::Figure::Unknown => g.sys_cpu * cores,
+        };
+        let recent = g.starts.record(now);
+        let w = crate::width::width(self.cores, cores - busy, recent);
+        if let Some(l) = g.active.get_mut(&id) {
+            l.job.width = u32::try_from(w).ok();
+        }
+        w
     }
 
     /// The host's busy CPUs as the CPU limit reads them: the mean of the

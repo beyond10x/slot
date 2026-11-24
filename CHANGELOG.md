@@ -14,6 +14,15 @@
   readers of job lines skip and the daemon applies when it reads the log back. A job the daemon
   hands to a node gets the client's figures from the file in the new `SLOT_PHASES_FILE`. The
   `start` frame names `seeded_from`.
+- A job on a build node gets a width when it starts: the node's free CPUs at that moment (CPUs
+  less the busy ones of the last seconds) divided by the jobs that started in the last 5 s, this
+  one counted, at least 1 and at most the node's CPUs. A job is on a node when it was synced from
+  another host. It gets the width as the new `SLOT_WIDTH` (for a Playwright or Vitest config),
+  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (a lower count the caller set is
+  raised to it) and go's `-p`; while `slot job-parallel` is on, a lower bound per job
+  (`CARGO_BUILD_JOBS`, `MAKEFLAGS=-j`) is raised to it. The job record carries it as `width`.
+  Before, every job got a quarter of the pool as test threads (16 on a node of 64 CPUs). Local
+  jobs keep `--test-threads`, the bound and the caller's counts.
 
 ## 0.35.0 — 2026-11-24
 

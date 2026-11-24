@@ -44,3 +44,4 @@ pub mod sync;
 pub mod toolchain;
 pub mod types;
 pub mod usage;
+pub mod width;

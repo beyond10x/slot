@@ -244,6 +244,15 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub seeded_from: Option<String>,
+    /// A remote job: its width, set once when it started (`crate::width`):
+    /// the node's free cores then, split over the jobs that started in the
+    /// last seconds, at least 1 and at most the node's CPUs. The job got it
+    /// as `SLOT_WIDTH`, test threads, `GOMAXPROCS`, go's `-p` and, with
+    /// `slot job-parallel` on, as its bound if that was lower. Absent for a
+    /// local job and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub width: Option<u32>,
 }
 
 /// Id of the daemon's own machine as a node.

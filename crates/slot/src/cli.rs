@@ -157,6 +157,9 @@ pub struct ServeArgs {
     /// Threads a test runner in a job may use when the caller sets none:
     /// `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS`
     /// (go jobs get their slot count). Default: a quarter of the pool, at least 2.
+    /// Local jobs only: a job synced from another host gets its width, the
+    /// free CPUs at its start split over the jobs that started in the last
+    /// 5 s, and a lower count its caller set is raised to it.
     #[arg(long)]
     pub test_threads: Option<usize>,
     /// Whether a headroom also sets systemd `CPUQuota` on the daemon unit, a
