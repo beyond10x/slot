@@ -951,7 +951,21 @@ mod tests {
         // A multi-call coreutils picks its tool by name: keep `sleep`.
         let bin = target.join("debug/sleep");
         std::fs::copy("/bin/sleep", &bin).unwrap();
-        let mut child = Command::new(&bin).arg("30").spawn().unwrap();
+        // Another test of this process may fork while the copy's write
+        // descriptor is open; the child holds it until its own exec, and an
+        // exec of the copy meanwhile fails with ETXTBSY. Try again.
+        let started = std::time::Instant::now();
+        let mut child = loop {
+            match Command::new(&bin).arg("30").spawn() {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && started.elapsed() < Duration::from_secs(10) =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                r => break r.unwrap(),
+            }
+        };
         // Until the child has called exec, its executable is this test's.
         let exe = PathBuf::from(format!("/proc/{}/exe", child.id()));
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
