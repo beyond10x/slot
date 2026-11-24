@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.35.0 — 2026-11-24
 
 - A node reports what only it knows, in its row of `GET /api/nodes`: the machine's boot
   (`booted_at`), the poweroff systemd has scheduled (`poweroff_at`), the CPUs busy on the whole
