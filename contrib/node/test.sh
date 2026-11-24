@@ -167,20 +167,29 @@ fp=$(ssh-keygen -lf "$W/setupkey.pub" | awk '{print $2}')
 conf
 echo "SETUP_KEY=$(cat "$W/setupkey.pub")" >>"$W/node.conf"
 run "$R" apply
-printf '%s\n' "Nov 25 00:00:01 node sshd[4242]: Accepted publickey for $me from 192.0.2.1 port 5 ssh2: ED25519 $fp" \
-  "Nov 25 00:00:02 node sshd[4343]: Accepted publickey for $me from 192.0.2.1 port 6 ssh2: ED25519 SHA256:BuildKeyFingerprint" \
-  "Nov 25 00:00:03 node sshd[4444]: Accepted publickey for $me from 192.0.2.1 port 7 ssh2: ED25519 $fp" >"$R/.state/sshd-journal"
-printf '4242\n4343\n' >"$R/.state/alive-pids"
+# journalctl -o short-unix lines. Older OpenSSH logs as sshd[<pid>]; from 9.8 the
+# per-connection process is sshd-session. Pid 4646 logged a setup login, ended, and its number
+# now belongs to another program; pid 4747's number was taken by a later connection.
+# alive-pids: pid, process name, start time.
+printf '%s\n' "1795600001.000000 node sshd[4242]: Accepted publickey for $me from 192.0.2.1 port 5 ssh2: ED25519 $fp" \
+  "1795600002.000000 node sshd[4343]: Accepted publickey for $me from 192.0.2.1 port 6 ssh2: ED25519 SHA256:BuildKeyFingerprint" \
+  "1795600003.000000 node sshd[4444]: Accepted publickey for $me from 192.0.2.1 port 7 ssh2: ED25519 $fp" \
+  "1795600004.000000 node sshd-session[4545]: Accepted publickey for $me from 192.0.2.1 port 8 ssh2: ED25519 $fp" \
+  "1795600005.000000 node sshd-session[4646]: Accepted publickey for $me from 192.0.2.1 port 9 ssh2: ED25519 $fp" \
+  "1795600006.000000 node sshd-session[4747]: Accepted publickey for $me from 192.0.2.1 port 10 ssh2: ED25519 $fp" >"$R/.state/sshd-journal"
+printf '4242 sshd 1795600001\n4343 sshd 1795600002\n4545 sshd-session 1795600004\n4646 bash 1795600005\n4747 sshd-session 1795609999\n' >"$R/.state/alive-pids"
 NODE_TEST=1 NODE_ROOT=$R sh "$P" check "$W/node.conf" --open >"$W/out" 2>"$W/err"
 grep -q 'setup key' "$W/out" && grep -q '^drift: keys: a login' "$W/out" && bad "while open, a setup login is drift: $(grep '^drift' "$W/out")" || ok "while the setup login is open, its connections are not drift"
 run "$R" check
 st=$?
 [ $st -eq 1 ] && grep -qx 'drift: keys: a login with the setup key is still connected: pid 4242' "$W/out" && ok "closed: a connected setup login is drift" || bad "closed setup login: exit $st $(cat "$W/out")"
-grep -q 'pid 4343\|pid 4444' "$W/out" && bad "a build login or an ended login is drift: $(grep pid "$W/out")" || ok "build logins and ended logins are not drift"
+grep -qx 'drift: keys: a login with the setup key is still connected: pid 4545' "$W/out" && ok "an sshd-session login is drift" || bad "sshd-session login not found: $(cat "$W/out")"
+grep -q 'pid 4343\|pid 4444\|pid 4646\|pid 4747' "$W/out" && bad "a build login, an ended login or a reused pid is drift: $(grep pid "$W/out")" || ok "build logins, ended logins and reused pids are not drift"
 : >"$R/.calls"
 run "$R" apply
 grep -qx 'kill 4242' "$R/.calls" && ok "apply ends the setup login's connection" || bad "no kill: $(cat "$R/.calls")"
-grep -q 'kill 4343' "$R/.calls" && bad "apply ended a build login" || ok "apply leaves the build login"
+grep -qx 'kill 4545' "$R/.calls" && ok "apply ends the sshd-session connection" || bad "no kill of 4545: $(cat "$R/.calls")"
+grep -q 'kill 4343\|kill 4646\|kill 4747' "$R/.calls" && bad "apply ended a build login or another program" || ok "apply leaves the build login and other programs"
 run "$R" check
 [ $? -eq 0 ] && ok "after the setup connection ended: 0 drift" || bad "after the kill: $(cat "$W/out")"
 rm -f "$R/.state/sshd-journal" "$R/.state/alive-pids"

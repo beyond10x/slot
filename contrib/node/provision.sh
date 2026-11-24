@@ -197,25 +197,40 @@ a_chown() {
   [ -n "$T" ] && return 0
   chown -h "$@"
 }
-# Pids of the sshd connections of this boot that logged in with the key of fingerprint $1 and
-# still run. sshd logs "sshd[<pid>]: Accepted publickey ... <fingerprint>" from the process that
-# holds the connection.
+# Pids of the ssh connections of this boot that logged in with the key of fingerprint $1 and
+# still run. The process that holds a connection logs "Accepted publickey ... <fingerprint>":
+# as sshd[<pid>] up to OpenSSH 9.7, as sshd-session[<pid>] from 9.8. A pid counts only while
+# its process is sshd or sshd-session and started no later than the line, so a pid number
+# reused by a later connection or another program is left alone.
 q_key_logins() {
-  if [ -n "$T" ]; then cat "$S/sshd-journal" 2>/dev/null; else journalctl -b -q --no-pager -t sshd 2>/dev/null; fi |
-    awk -v fp="$1" '/sshd\[[0-9]+\]: Accepted publickey for / && $NF == fp {
-      s = $0; sub(/.*sshd\[/, "", s); sub(/\].*/, "", s); print s }' | sort -un |
-    while read -r pid; do
+  if [ -n "$T" ]; then
+    cat "$S/sshd-journal" 2>/dev/null
+  else
+    journalctl -b -q --no-pager -o short-unix -t sshd -t sshd-session 2>/dev/null
+  fi |
+    awk -v fp="$1" '/sshd(-session)?\[[0-9]+\]: Accepted publickey for / && $NF == fp {
+      s = $0; sub(/.*sshd(-session)?\[/, "", s); sub(/\].*/, "", s)
+      t = $1; sub(/\..*/, "", t); print s, t }' | sort -un |
+    while read -r pid t; do
       if [ -n "$T" ]; then
-        grep -qx "$pid" "$S/alive-pids" 2>/dev/null && echo "$pid"
+        set -- $(awk -v p="$pid" '$1 == p { print $2, $3 }' "$S/alive-pids" 2>/dev/null)
+        comm=${1:-} st=${2:-}
       else
-        [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = sshd ] && echo "$pid"
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null)
+        ticks=$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)
+        st=
+        [ -n "$ticks" ] && st=$(($(awk '/^btime/ { print $2 }' /proc/stat) + ticks / $(getconf CLK_TCK)))
       fi
+      case $comm in sshd | sshd-session) ;; *) continue ;; esac
+      [ -n "$st" ] && [ "$st" -le $((t + 1)) ] && echo "$pid"
     done
 }
+# Ends one connection: the process that logged the login; its unprivileged child and the
+# commands under it lose the connection with it.
 a_kill() {
   if [ -n "$T" ]; then
     calls "kill $1"
-    grep -vx "$1" "$S/alive-pids" >"$S/alive-pids.n" 2>/dev/null
+    awk -v p="$1" '$1 != p' "$S/alive-pids" >"$S/alive-pids.n" 2>/dev/null
     mv "$S/alive-pids.n" "$S/alive-pids"
   else
     kill "$1"
