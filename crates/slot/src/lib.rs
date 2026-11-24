@@ -6,7 +6,9 @@
 //! syncs the repository to a build server over ssh first.
 
 pub mod admission;
+pub mod artifacts;
 pub mod call;
+pub mod cargo_fetch;
 pub mod cargo_lock;
 pub mod census;
 pub mod cli;

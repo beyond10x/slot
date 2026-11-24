@@ -65,6 +65,13 @@ pub struct Request {
     /// build server's limit applies there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nofile: Option<FileLimit>,
+    /// A remote cargo job: before it queues, the daemon fetches the crates
+    /// of the mirror's `Cargo.lock` once and runs it offline
+    /// (`cargo_fetch.rs`); when the fetch fails it answers with a
+    /// [`Frame::Fallback`], which only a client that sets this reads. A
+    /// daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fetch_once: bool,
 }
 
 impl Request {
@@ -242,6 +249,13 @@ pub enum Frame {
     Exit {
         /// Exit code; 128 + signal for a signalled process.
         code: i32,
+    },
+    /// The job did not start on this server and goes back to the client,
+    /// which runs it on its own machine's daemon. Sent only to a client
+    /// whose request set `fetch_once`, after its fetch failed.
+    Fallback {
+        /// Why, for the client's stderr.
+        msg: String,
     },
 }
 

@@ -148,6 +148,58 @@ next to a record `<workspace-id>.json` of its repository, last use and size.
   queued or running job is never deleted. The job's stderr and the journal name every deleted
   workspace. `--cache-budget 0` (the default) leaves only the disk floor.
 
+## Binaries and test binaries come back
+
+A remote `cargo build`, `cargo test`, `cargo bench` or `cargo rustc` copies what it built for
+the workspace's own packages into the local target directory, at the same relative paths, with
+modes and modification times:
+
+```console
+slot cargo build -p mytool
+./target/debug/mytool --version
+slot cargo test --no-run
+./target/debug/deps/mytest-1f2e3d4c5b6a7980
+```
+
+- **What.** Every executable cargo reports for a package of the workspace (binaries, unit and
+  integration test binaries, benches, examples), and the files of `cdylib` and `staticlib`
+  targets. Artifacts of dependencies, `.rlib` and `.rmeta` files and the rest of the target
+  directory stay on the server.
+- **When.** After a build that exits 0; after a test or bench run whatever its exit, so the
+  binaries of a failed run can be run again here. One line follows, for example
+  `slot: fetched 3 artifacts, 41.2 MB, in 0.9 s`. A copy that fails prints
+  `slot: artifacts not fetched: …` and turns exit 0 into 1.
+- **How.** slot adds `--message-format=json-render-diagnostics` to the command on the server and
+  reads cargo's `compiler-artifact` messages from its standard output. It takes those lines out
+  again, so you see what cargo would have shown: its diagnostics on stderr, a test's output on
+  stdout. If you pass `--message-format json…` yourself, your stream reaches you unchanged and
+  slot reads the same messages from it. With `--message-format short` or `human` nothing comes
+  back. One `rsync` copies every path.
+- **Where to.** `CARGO_TARGET_DIR` of your environment, else `target/` beside the nearest
+  `Cargo.lock` above the directory you called from. A `build.target-dir` in a cargo config file
+  and `--target-dir` are not read.
+- **Freshness.** A file that already matches in size and time is not sent again; a file cargo
+  reports as fresh but that is missing here is sent.
+
+## Crates are fetched once per Cargo.lock
+
+Parallel cargo jobs on one server wait in turn on cargo's package-cache lock while one of them
+downloads crates. Before a cargo job that builds (`build`, `check`, `clippy`, `test`, `bench`,
+`doc`, `rustc`, `nextest`, `llvm-cov`), the server daemon compares the digest of the mirror's
+`Cargo.lock` with the one it recorded for that mirror. When they differ it runs
+`cargo fetch --locked` once, under a lock per repository, records the digest, and prints
+`slot: new Cargo.lock on this mirror: cargo fetch --locked took 2.1 s; its cargo jobs run
+offline`. Every such job of the mirror then runs with `CARGO_NET_OFFLINE=true`.
+
+A fetch that fails (a `Cargo.lock` that does not match `Cargo.toml`, an unreachable registry) or
+takes longer than 5 minutes sends the job back to this machine's daemon with
+`slot: remote build on <host> did not start (cargo fetch --locked failed …); running it on this
+machine's daemon`. A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
+need the network themselves (`cargo update`, `add`, `install`, `fetch`) run online.
+
+The digests live in `<ws-root>/.cargo-fetch/` on the server and go with their mirror when it is
+evicted. Both features need this release of slot on the server and on the workstation.
+
 ## Fetch build output back
 
 Build output stays on the server. `--fetch PATH` copies a path back into the checkout after the
@@ -196,7 +248,8 @@ command="/usr/local/bin/slot shell",restrict ssh-ed25519 AAAA… workstation
 
 ssh then runs `slot shell` for every connection with that key, and it runs only the steps of
 remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
---sender` from the workspace root or the cache root's `target/`), `slot proxy`, `slot cancel
+--sender` of one or more paths, each in the workspace root or the cache root's `target/`),
+`slot proxy`, `slot cancel
 <id>` and the sibling step (`slot __siblings` on the server's own workspace root). Anything else
 exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
 `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and

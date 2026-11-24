@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- A remote `cargo build`, `test`, `bench` or `rustc` brings its products back into the local
+  target directory, at the same relative paths with modes and mtimes: every executable of the
+  workspace's own packages (binaries, unit and integration test binaries, benches, examples)
+  and the files of `cdylib` and `staticlib` targets; never a dependency's artifacts. The client
+  adds `--message-format=json-render-diagnostics` on the server when the caller named no
+  format, reads cargo's `compiler-artifact` messages and takes those lines out of stdout, so the
+  caller sees cargo's usual output. A build fetches after exit 0, a test or bench run whatever
+  its exit; one rsync copies every path and the client prints
+  `slot: fetched N artifacts, X MB, in T s`. A failed copy turns exit 0 into 1. `slot shell`
+  admits a fetch of several paths, each under the workspace root or the cache's `target/`.
+
+- Fetch once: before a remote cargo job that builds, the server daemon runs
+  `cargo fetch --locked` in the mirror when its `Cargo.lock` digest differs from the one recorded
+  for that mirror (`<ws-root>/.cargo-fetch/<id>`), under a lock per repository, and then runs
+  the job with `CARGO_NET_OFFLINE=true`. Parallel jobs no longer wait on cargo's package-cache
+  lock while one of them downloads. A fetch that fails or runs over 5 minutes sends the job back
+  to the client, which runs it on its own machine's daemon (a new `fallback` frame, sent only to
+  a client whose request sets `fetch_once`).
+
 ## 0.33.0 — 2026-11-24
 
 - `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is

@@ -46,6 +46,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `GOMAXPROCS` | slots held for go jobs; `--test-threads` for other jobs; unless the caller set it |
 | `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs |
 | `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
+| `CARGO_NET_OFFLINE` | `true`, for a remote cargo job that builds, once the server fetched the crates of the mirror's `Cargo.lock`; not set for a mirror without a `Cargo.lock`. See [Remote builds](../remote-builds.md#crates-are-fetched-once-per-cargolock). |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
 
 ## Dropped from the caller's environment

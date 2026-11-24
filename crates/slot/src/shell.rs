@@ -11,8 +11,9 @@
 //! it only if it is one of the steps of remote mode:
 //!
 //! - the sync: `rsync --server … . <ws-root>/<id>/`;
-//! - a fetch: `rsync --server --sender … . <path>` under the workspace root
-//!   or the cache root's `target/`;
+//! - a fetch: `rsync --server --sender … . <path>…`, each path under the
+//!   workspace root or the cache root's `target/` (a cargo job's products
+//!   come back in one fetch of several paths);
 //! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
 //!   <key>`, run by this binary whatever path the client named; the
 //!   workspace root must be this server's.
@@ -242,23 +243,27 @@ fn rsync(
             return Err(format!("rsync argument `{a}` before `.`"));
         }
     }
-    let [path] = paths.as_slice() else {
+    // A sync names its mirror; a fetch names one path, or, for the products
+    // of a cargo job, several (`artifacts.rs`).
+    if paths.is_empty() || (!sender && paths.len() > 1) {
         return Err("rsync must name one path".into());
-    };
-    let p = absolute(home, path)?;
+    }
     let ws = absolute(home, &ws_root.to_string_lossy())?;
     let target = absolute(home, &cache_root.join("target").to_string_lossy())?;
-    let under = |root: &Path| p.starts_with(root) && p != root;
-    if !(under(&ws) || (sender && under(&target))) {
-        return Err(format!(
-            "rsync path `{path}` is outside {}{}",
-            ws.display(),
-            if sender {
-                format!(" and {}", target.display())
-            } else {
-                String::new()
-            }
-        ));
+    for path in paths {
+        let p = absolute(home, path)?;
+        let under = |root: &Path| p.starts_with(root) && p != root;
+        if !(under(&ws) || (sender && under(&target))) {
+            return Err(format!(
+                "rsync path `{path}` is outside {}{}",
+                ws.display(),
+                if sender {
+                    format!(" and {}", target.display())
+                } else {
+                    String::new()
+                }
+            ));
+        }
     }
     Ok(args.to_vec())
 }
@@ -305,6 +310,27 @@ mod tests {
         let mirror =
             "rsync --server --sender -logDtpre.iLsfxCIvu . .local/state/slot/ws/0123abcd/bin/tool";
         assert!(matches!(p(mirror), Ok(Plan::Rsync(_))));
+    }
+
+    #[test]
+    fn a_fetch_of_products_names_several_paths_under_the_target_dir() {
+        let t = "/srv/u/.local/state/slot/cache/target/0123abcd/./debug";
+        let products =
+            format!("rsync --server --sender -logDtprRe.iLsfxCIvu . {t}/tiny {t}/deps/it-1f");
+        assert!(
+            matches!(p(&products), Ok(Plan::Rsync(_))),
+            "{:?}",
+            p(&products)
+        );
+        for bad in [
+            format!("rsync --server --sender -logDtprRe.iLsfxCIvu . {t}/tiny /srv/u/.ssh/id"),
+            format!("rsync --server --sender -logDtprRe.iLsfxCIvu . {t}/tiny {t}/../../../../x"),
+            "rsync --server -logDtprRe.iLsfxCIvu . .local/state/slot/ws/a/ .local/state/slot/ws/b/"
+                .to_string(),
+            "rsync --server --sender -logDtprRe.iLsfxCIvu .".to_string(),
+        ] {
+            assert!(p(&bad).is_err(), "accepted: {bad}");
+        }
     }
 
     #[test]
