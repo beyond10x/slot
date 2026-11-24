@@ -202,9 +202,9 @@ a_chown() {
 # in the user's area must have no symbolic link in it, and the user's files are written by the
 # user (as_user). Directly under STORE only root can create or replace entries.
 no_link() {
-  b=
-  [ -n "$R" ] && b=$(readlink -m "$R")
-  [ "$(readlink -m "$R$1")" = "$b$1" ]
+  nl=
+  [ -n "$R" ] && nl=$(readlink -m "$R")
+  [ "$(readlink -m "$R$1")" = "$nl$1" ]
 }
 as_user() {
   if [ -n "$T" ]; then "$@"; else runuser -u "$U" -- "$@"; fi
@@ -765,42 +765,56 @@ p_units() {
 }
 
 slot_paths() { echo "$STORE/bin/slot /usr/local/bin/slot $H/.local/bin/slot"; }
-install_slot() {
+# Downloads the release into directory $1 and prints the path of its binary. NODE_TEST=1: a stub
+# binary, or nothing when $R/.state-slot-fetch-fails exists.
+slot_fetch() {
+  a=slot-$SLOT_VERSION-x86_64-unknown-linux-gnu
   if [ -n "$T" ]; then
-    for p in "$@"; do
-      mkdir -p "$(dirname "$R$p")"
-      printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$R$p" && chmod 755 "$R$p"
-    done
-    calls "install slot $SLOT_VERSION:$*"
-    return 0
+    [ -e "$R/.state-slot-fetch-fails" ] && return 0
+    mkdir -p "$1/$a" && printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
+    calls "fetch slot $SLOT_VERSION"
+  else
+    u=https://github.com/beyond10x/slot/releases/download/$SLOT_VERSION
+    (cd "$1" && curl -fsSLO "$u/$a.tar.gz" && curl -fsSLO "$u/SHA256SUMS" &&
+      grep " $a.tar.gz\$" SHA256SUMS | sha256sum -c - >/dev/null && tar -xzf "$a.tar.gz") || return 0
   fi
-  a=slot-$SLOT_VERSION-x86_64-unknown-linux-gnu.tar.gz
-  u=https://github.com/beyond10x/slot/releases/download/$SLOT_VERSION
-  d=$(mktemp -d /var/tmp/slot-$SLOT_VERSION.XXXXXX) || return 1
-  if ! (cd "$d" && curl -fsSLO "$u/$a" && curl -fsSLO "$u/SHA256SUMS" &&
-    grep " $a\$" SHA256SUMS | sha256sum -c - >/dev/null && tar -xzf "$a"); then
+  echo "$1/$a/slot"
+}
+# Installs the release binary at each path given and reads each back: returns 1 when a path does
+# not answer `slot $SLOT_VERSION` afterwards.
+install_slot() {
+  if [ -n "$T" ]; then d=$(mktemp -d); else d=$(mktemp -d /var/tmp/slot-$SLOT_VERSION.XXXXXX); fi || return 1
+  sb=$(slot_fetch "$d")
+  if [ -z "$sb" ] || [ ! -x "$sb" ]; then
     rm -rf "$d"
-    failed slot "download or checksum of $a"
+    failed slot "download or checksum of slot $SLOT_VERSION"
     return 1
   fi
-  b=$(find "$d" -type f -name slot -perm -u+x | head -1)
-  chmod 755 "$d" "$(dirname "$b")"
+  chmod 755 "$d" "$(dirname "$sb")"
+  rc=0
   for p in "$@"; do
     case $p in
       "$STORE"/* | "$H"/*)
-        if no_link "$p"; then
-          as_user sh -c 'mkdir -p "$(dirname "$2")" && install -m 0755 "$1" "$2.slot-new" && mv "$2.slot-new" "$2"' sh "$b" "$p"
-        else
+        if ! no_link "$p"; then
           failed slot "$p has a symbolic link in it; not installed"
+          rc=1
+          continue
         fi
+        as_user sh -c 'mkdir -p "$(dirname "$2")" && install -m 0755 "$1" "$2.slot-new" && mv "$2.slot-new" "$2"' sh "$sb" "$R$p"
         ;;
       *)
-        mkdir -p "$(dirname "$p")"
-        install -m 0755 "$b" "$p.slot-new" && chown root:root "$p.slot-new" && mv "$p.slot-new" "$p"
+        mkdir -p "$(dirname "$R$p")"
+        install -m 0755 "$sb" "$R$p.slot-new" && { [ -n "$T" ] || chown root:root "$p.slot-new"; } && mv "$R$p.slot-new" "$R$p"
         ;;
     esac
+    v=$(as_user "$R$p" --version 2>/dev/null)
+    if [ "$v" != "slot $SLOT_VERSION" ]; then
+      failed slot "$p is '${v:-missing}' after the install"
+      rc=1
+    fi
   done
   rm -rf "$d"
+  return $rc
 }
 p_slot() {
   todo=

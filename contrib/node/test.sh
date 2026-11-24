@@ -138,6 +138,28 @@ grep -q '^drift: keys' "$W/out" && ok "an open setup key is drift" || bad "open 
 run "$R" apply
 grep -q 'SetupKeyForTheTest' "$k" && bad "apply left the setup key" || ok "apply removes the setup key"
 
+# 5b. Every slot path is read back after the install; a failed install is never reported as done.
+for p in srv/slot/bin/slot usr/local/bin/slot var/lib/builder/.local/bin/slot; do
+  printf '#!/bin/sh\necho slot 0.35.0\n' >"$R/$p"
+done
+run "$R" apply
+st=$?
+for p in /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot; do
+  [ "$("$R$p" --version 2>/dev/null)" = "slot 0.36.0" ] && ok "installed and read back: $p" || bad "not installed: $p"
+done
+[ $st -eq 0 ] && ok "apply that installs slot exits 0" || bad "apply that installs slot exit $st: $(cat "$W/err")"
+rm -f "$R/srv/slot/bin/slot"
+: >"$R/.state-slot-fetch-fails"
+run "$R" apply
+st=$?
+rm -f "$R/.state-slot-fetch-fails"
+[ $st -eq 1 ] && ok "a failed slot download: apply exits 1" || bad "a failed slot download: apply exit $st"
+grep -q '^failed: slot: download' "$W/err" && ok "a failed slot download is named" || bad "failed download not named: $(cat "$W/err")"
+grep -q '^changed: slot' "$W/out" && bad "a failed install is reported as changed" || ok "a failed install is not reported as changed"
+run "$R" apply
+run "$R" check
+[ $? -eq 0 ] && ok "after the download works: 0 drift" || bad "after the download: $(cat "$W/out")"
+
 # 6. The bundle is one self-contained script that gives the same answer.
 sh "$P" bundle "$W/node.conf" check >"$W/bundle.sh" 2>"$W/err"
 st=$?
