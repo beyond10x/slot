@@ -215,7 +215,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         req.fetch_once = crate::cargo_fetch::applies(argv);
         // A same-path job outside any git checkout mirrors its working
         // directory as the tree.
-        let top = top.or_else(|| s.same_path.then(|| cwd.clone()));
+        let top = top.or_else(|| keeps_path(s, &cwd).then(|| cwd.clone()));
         let why = match remote(host, top.as_deref(), &cwd, &mut req, s) {
             Ok(c) => {
                 let mut collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
@@ -366,11 +366,17 @@ pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String
     Ok(format!("{mirror}/{path}"))
 }
 
+/// Same-path mode is on and `top` lies under this home
+/// (`same_path::applies`); any other tree goes to the workspace root.
+fn keeps_path(s: &Settings, top: &Path) -> bool {
+    s.same_path && same_path::applies(top, std::env::var_os("HOME").as_deref().map(Path::new))
+}
+
 /// Copies every `--fetch` path back from `host` into the repository at
 /// `top`. Returns 0, or 1 after printing which path failed.
 fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
     let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
-    let mirror = if s.same_path {
+    let mirror = if keeps_path(s, top) {
         top.to_string_lossy().into_owned()
     } else {
         format!("{}/{id}", s.ws_root)
@@ -437,7 +443,7 @@ fn products_back(
     }
     // A same-path job built into the client's own target directory, at the
     // same path on the server.
-    let local = if s.same_path {
+    let local = if keeps_path(s, top) {
         PathBuf::from(&target_dir)
     } else {
         artifacts::local_target(cwd, top, std::env::var("CARGO_TARGET_DIR").ok().as_deref())
@@ -803,6 +809,7 @@ fn remote(
 ) -> Result<Conn> {
     let top = top.ok_or_else(|| anyhow!("remote mode needs a git repository"))?;
     let id = workspace_id(top);
+    let same_path = keeps_path(s, top);
     let rel = cwd
         .strip_prefix(top)
         .unwrap_or(Path::new(""))
@@ -814,11 +821,11 @@ fn remote(
         ssh: &s.ssh,
         ws_root: &s.ws_root,
         remote_slot: &s.remote_slot,
-        same_path: s.same_path,
+        same_path,
     };
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
-    let target_dir = if s.same_path {
+    let target_dir = if same_path {
         same_path_extras(top, cwd, tc.sync_excludes(), &target, s)?;
         same_path::target_dir(
             &req.argv,
@@ -840,7 +847,7 @@ fn remote(
         id,
         rel_cwd: rel,
         client_root: top.to_string_lossy().into_owned(),
-        same_path: s.same_path,
+        same_path,
         target_dir,
     });
     let mut child: Child = Command::new(&s.ssh[0])

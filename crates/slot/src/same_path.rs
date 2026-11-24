@@ -24,6 +24,14 @@ pub struct Extra {
     pub kind: Kind,
 }
 
+/// Whether a tree keeps its own path on the server: only under the client's
+/// home, which the server's account shares and its `slot shell` admits.
+/// Any other tree (a runner's work directory elsewhere) goes to the
+/// server's workspace root like a mirror.
+pub fn applies(top: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|h| plain(h) && h != Path::new("/") && plain(top) && top.starts_with(h))
+}
+
 /// Absolute, with no `.` or `..`.
 pub fn plain(p: &Path) -> bool {
     p.is_absolute()
@@ -181,6 +189,17 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn only_a_tree_under_home_keeps_its_path() {
+        let home = Some(Path::new("/srv/acct"));
+        assert!(applies(Path::new("/srv/acct/src/slot"), home));
+        assert!(!applies(Path::new("/var/runner/work/repo"), home));
+        assert!(!applies(Path::new("/srv/acct2/repo"), home));
+        assert!(!applies(Path::new("/srv/acct/../v/repo"), home));
+        assert!(!applies(Path::new("/srv/repo"), Some(Path::new("/"))));
+        assert!(!applies(Path::new("/srv/acct/repo"), None));
     }
 
     #[test]
