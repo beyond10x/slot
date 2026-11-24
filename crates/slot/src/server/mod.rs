@@ -1603,12 +1603,14 @@ impl Server {
         env: &[String],
         tx: &mpsc::UnboundedSender<Frame>,
     ) -> Result<bool, String> {
-        use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure};
+        use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure, label, locked};
         let ws_root = self.cfg.ws_root.clone();
         let root = root.to_path_buf();
         let id = id.to_string();
         let cwd = cwd.to_path_buf();
         let cargo = cargo_of(argv);
+        let locked = locked(argv);
+        let what = label(locked);
         let env = env.to_vec();
         let out = tokio::task::spawn_blocking(move || {
             ensure(&Check {
@@ -1618,18 +1620,19 @@ impl Server {
                 cwd: &cwd,
                 cargo,
                 env: &env,
+                locked,
                 limit: crate::cargo_fetch::LIMIT,
             })
         })
         .await
-        .map_err(|e| format!("cargo fetch --locked failed: {e}"))??;
+        .map_err(|e| format!("{what} failed: {e}"))??;
         Ok(match out {
             Outcome::NoLock => false,
             Outcome::Current => true,
             Outcome::Fetched(t) => {
                 let _ = tx.send(Frame::Info {
                     msg: format!(
-                        "slot: new Cargo.lock on this mirror: cargo fetch --locked took {:.1} s; its cargo jobs run offline",
+                        "slot: new Cargo.lock on this mirror: {what} took {:.1} s; its cargo jobs run offline",
                         t.as_secs_f64()
                     ),
                 });

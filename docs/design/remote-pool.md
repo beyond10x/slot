@@ -102,7 +102,7 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | output | streamed line by line; the mirror path is rewritten to the client's repository path | `rewrite.rs:1-2`, `server/mod.rs:1627-1654`, `:1475-1494` |
 | fetch | after exit 0 only, each `--fetch PATH` is copied back with `rsync -a --mkpath`; `target/…` is read from the job's target directory, which the host reports in its `start` frame | `client.rs:194`, `:230-298`, `server/mod.rs:2143-2169` |
 | products | a cargo `build`/`rustc` (after exit 0) or `test`/`bench` (any exit) runs with `--message-format=json-render-diagnostics` unless the caller named a format; the client strips cargo's JSON lines from stdout, keeps the `compiler-artifact` paths of `path+` packages, and copies them with one `rsync -a --relative` into the local target directory | `artifacts.rs`, `client.rs` (`products_back`) |
-| fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch --locked` when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository, then sets `CARGO_NET_OFFLINE=true`; a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
+| fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch` (`--locked` when the job passes `--locked` or `--frozen`) when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository, then sets `CARGO_NET_OFFLINE=true`; a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
 | measure | one stderr line per sync: bytes sent (rsync `--stats`) and seconds | `sync.rs` |
 | fallback | when the sync fails, stalls (no byte read or written for `SLOT_SYNC_STALL`, 60 s) or runs past `SLOT_SYNC_LIMIT` (5 min), or ssh cannot be started, the job goes to the local daemon with one stderr line; a stalled rsync is killed with its ssh | `client.rs:200-207`, `sync.rs` |
 | lost connection | `slot: connection to daemon lost`, exit 3, whether or not the job had started; the host cancels the job | `client.rs:190-192`, `:683-686`, design.md § 16 |
@@ -574,11 +574,14 @@ resolves under that lock, and one that downloads holds it for the whole download
    `CARGO_NET_OFFLINE=true`.
 4. Different: the daemon takes a `flock` per repository key (`.repo-keys/<id>`, else the
    workspace id) in the same directory, compares again (another mirror's job may have fetched),
-   runs `<cargo> [+toolchain] fetch --locked` in that directory with the job's environment, and
-   records the digest. Lock wait and fetch together are bounded at 5 minutes.
+   runs `<cargo> [+toolchain] fetch` in that directory with the job's environment, and records
+   the digest. Like cargo on the workstation, the fetch updates an out-of-date `Cargo.lock` (a
+   path dependency just added); a job whose own options before `--` include `--locked` or
+   `--frozen` gets `fetch --locked`, so it fails as it would locally. Lock wait and fetch
+   together are bounded at 5 minutes.
 5. A fetch that fails or runs over the bound answers with a `fallback` frame before the job is
    registered; the client prints `slot: remote build on <host> did not start (cargo fetch
-   --locked failed …); running it on this machine's daemon` and submits the original command
+   failed …); running it on this machine's daemon` and submits the original command
    locally. Only a client that set `fetch_once` gets the frame, so an older client never sees it.
 6. Eviction of a mirror removes its digest.
 

@@ -5,9 +5,12 @@
 //! while one of them downloaded, for up to 28 minutes. Before a cargo job of
 //! a synced workspace, the daemon compares the digest of the mirror's
 //! `Cargo.lock` with the one recorded for that mirror in
-//! `<ws-root>/.cargo-fetch/<id>`. When they differ it runs
-//! `cargo fetch --locked` there, under a lock per repository, and records
-//! the digest. Every such job then runs with `CARGO_NET_OFFLINE=true`, so it
+//! `<ws-root>/.cargo-fetch/<id>`. When they differ it runs `cargo fetch`
+//! there, under a lock per repository, and records the digest. Like the
+//! workstation's cargo, the fetch updates a `Cargo.lock` that is out of date
+//! (a path dependency just added); only a job that passes `--locked` or
+//! `--frozen` itself gets `cargo fetch --locked`, so it fails as it would
+//! locally. Every such job then runs with `CARGO_NET_OFFLINE=true`, so it
 //! takes the package-cache lock only for the moment it reads the cache. A
 //! fetch that fails sends the job back to the client, which runs it on its
 //! own machine's daemon.
@@ -55,6 +58,29 @@ pub fn applies(argv: &[String]) -> bool {
     })
 }
 
+/// Whether the job's own options, before a `--`, forbid a change of
+/// `Cargo.lock` (`--locked` or `--frozen`).
+pub fn locked(argv: &[String]) -> bool {
+    argv.iter()
+        .take_while(|a| *a != "--")
+        .any(|a| a == "--locked" || a == "--frozen")
+}
+
+/// The fetch command a job gets: `cargo fetch`, or `cargo fetch --locked`
+/// for a job that is `locked`.
+pub fn fetch_args(locked: bool) -> &'static [&'static str] {
+    if locked {
+        &["fetch", "--locked"]
+    } else {
+        &["fetch"]
+    }
+}
+
+/// `cargo fetch` or `cargo fetch --locked`, for messages.
+pub fn label(locked: bool) -> String {
+    format!("cargo {}", fetch_args(locked).join(" "))
+}
+
 /// The nearest directory from `cwd` up to `root` that holds a `Cargo.lock`.
 pub fn lock_dir(cwd: &Path, root: &Path) -> Option<PathBuf> {
     cwd.ancestors()
@@ -80,7 +106,7 @@ pub enum Outcome {
     NoLock,
     /// The recorded digest matches: the job runs offline.
     Current,
-    /// `cargo fetch --locked` ran this long; the job runs offline.
+    /// `cargo fetch` ran this long; the job runs offline.
     Fetched(Duration),
 }
 
@@ -99,6 +125,9 @@ pub struct Check<'a> {
     pub cargo: Vec<String>,
     /// The job's environment.
     pub env: &'a [String],
+    /// The job passes `--locked` or `--frozen` (`locked`): the fetch passes
+    /// `--locked` too.
+    pub locked: bool,
     /// Bound on the wait for another fetch and the fetch together.
     pub limit: Duration,
 }
@@ -136,16 +165,17 @@ pub fn ensure(c: &Check<'_>) -> Result<Outcome, String> {
         .map(|k| k.trim().to_string())
         .filter(|k| crate::mirror::valid_id(k))
         .unwrap_or_else(|| c.id.to_string());
+    let what = label(c.locked);
     let t0 = Instant::now();
     let _lock = crate::sync::lock_workspace(&store, "cargo-fetch", &key, c.limit)
-        .map_err(|e| format!("cargo fetch --locked failed: {e:#}"))?;
+        .map_err(|e| format!("{what} failed: {e:#}"))?;
     if recorded().as_deref() == Some(want.as_str()) {
         return Ok(Outcome::Current);
     }
     let (prog, args) = c.cargo.split_first().ok_or("no cargo")?;
     let mut child = Command::new(prog)
         .args(args)
-        .args(["fetch", "--locked"])
+        .args(fetch_args(c.locked))
         .current_dir(&dir)
         .env_clear()
         .envs(c.env.iter().filter_map(|e| e.split_once('=')))
@@ -154,7 +184,7 @@ pub fn ensure(c: &Check<'_>) -> Result<Outcome, String> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("cargo fetch --locked failed: {prog}: {e}"))?;
+        .map_err(|e| format!("{what} failed: {prog}: {e}"))?;
     let mut err = child.stderr.take().ok_or("cargo stderr")?;
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
@@ -170,8 +200,8 @@ pub fn ensure(c: &Check<'_>) -> Result<Outcome, String> {
     };
     match st {
         Ok(st) if st.success() => {}
-        Ok(st) => return Err(format!("cargo fetch --locked failed ({st}): {}", tail())),
-        Err(stop) => return Err(format!("cargo fetch --locked failed: {stop}")),
+        Ok(st) => return Err(format!("{what} failed ({st}): {}", tail())),
+        Err(stop) => return Err(format!("{what} failed: {stop}")),
     }
     std::fs::create_dir_all(&store).map_err(|e| format!("{}: {e}", store.display()))?;
     let tmp = store.join(format!(".{}.tmp", c.id));
@@ -244,6 +274,28 @@ mod tests {
         (d, ws)
     }
 
+    #[test]
+    fn only_a_job_that_passes_locked_or_frozen_is_locked() {
+        for yes in [
+            &["cargo", "--locked", "build"][..],
+            &["cargo", "test", "--frozen"],
+            &[
+                "cargo", "+nightly", "clippy", "--locked", "--", "-D", "warnings",
+            ],
+        ] {
+            assert!(locked(&v(yes)), "{yes:?}");
+        }
+        for no in [
+            &["cargo", "build"][..],
+            &["cargo", "test", "--", "--locked"],
+            &["cargo", "build", "--offline"],
+        ] {
+            assert!(!locked(&v(no)), "{no:?}");
+        }
+        assert_eq!(label(false), "cargo fetch");
+        assert_eq!(label(true), "cargo fetch --locked");
+    }
+
     fn check<'a>(ws: &'a Path, cwd: &'a Path, cargo: &Path, env: &'a [String]) -> Check<'a> {
         let root = cwd
             .ancestors()
@@ -256,6 +308,7 @@ mod tests {
             cwd,
             cargo: vec![cargo.to_string_lossy().into_owned()],
             env,
+            locked: false,
             limit: Duration::from_secs(10),
         }
     }
@@ -272,9 +325,39 @@ mod tests {
         std::fs::write(ws.join("00aa/Cargo.lock"), "version = 4\n").unwrap();
         assert!(matches!(ensure(&c), Ok(Outcome::Fetched(_))));
         let log = std::fs::read_to_string(d.path().join("log")).unwrap();
-        assert_eq!(log, "|fetch --locked\n|fetch --locked\n", "online, twice");
+        assert_eq!(log, "|fetch\n|fetch\n", "online, twice");
         forget(&ws, "00aa");
         assert!(matches!(ensure(&c), Ok(Outcome::Fetched(_))));
+    }
+
+    #[test]
+    fn a_job_without_locked_fetches_without_it() {
+        let (d, ws) = setup(0);
+        let cwd = ws.join("00aa");
+        let cargo = d.path().join("cargo");
+        let argv = v(&["cargo", "build", "--", "--locked"]);
+        let mut c = check(&ws, &cwd, &cargo, &[]);
+        c.locked = locked(&argv);
+        assert!(matches!(ensure(&c), Ok(Outcome::Fetched(_))));
+        let log = std::fs::read_to_string(d.path().join("log")).unwrap();
+        assert_eq!(
+            log, "|fetch\n",
+            "may update Cargo.lock, as cargo does locally"
+        );
+    }
+
+    #[test]
+    fn a_job_with_locked_or_frozen_fetches_with_locked() {
+        for flag in ["--locked", "--frozen"] {
+            let (d, ws) = setup(0);
+            let cwd = ws.join("00aa");
+            let cargo = d.path().join("cargo");
+            let mut c = check(&ws, &cwd, &cargo, &[]);
+            c.locked = locked(&v(&["cargo", flag, "test"]));
+            assert!(matches!(ensure(&c), Ok(Outcome::Fetched(_))), "{flag}");
+            let log = std::fs::read_to_string(d.path().join("log")).unwrap();
+            assert_eq!(log, "|fetch --locked\n", "{flag}");
+        }
     }
 
     #[test]
@@ -282,10 +365,14 @@ mod tests {
         let (d, ws) = setup(101);
         let cwd = ws.join("00aa");
         let cargo = d.path().join("cargo");
-        let c = check(&ws, &cwd, &cargo, &[]);
+        let mut c = check(&ws, &cwd, &cargo, &[]);
         let e = ensure(&c).unwrap_err();
-        assert!(e.starts_with("cargo fetch --locked failed"), "{e}");
+        assert!(e.starts_with("cargo fetch failed ("), "{e}");
         assert!(e.contains("no network"), "{e}");
+        assert!(!ws.join(DIR).join("00aa").exists());
+        c.locked = true;
+        let e = ensure(&c).unwrap_err();
+        assert!(e.starts_with("cargo fetch --locked failed ("), "{e}");
         assert!(!ws.join(DIR).join("00aa").exists());
     }
 
