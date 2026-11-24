@@ -1929,6 +1929,7 @@ impl Server {
                 compile_server_cpu_s: 0.0,
                 peak_rss: 0,
                 wait_reason: String::new(),
+                local_reason: spill::local_reason(&req, self.remotes.spills()),
                 target_dir: target_dir
                     .as_ref()
                     .map(|t| t.to_string_lossy().into_owned())
@@ -2179,6 +2180,9 @@ impl Server {
                         // By share the job waited in the queue with a
                         // reason; by slots it has none here.
                         l.job.wait_reason.clear();
+                        if l.spillable && l.job.local_reason.is_empty() {
+                            l.job.local_reason = spill::HERE_FIRST.into();
+                        }
                         l.waiter = None;
                         l.cpu_wait = false;
                         l.job.collected = 0;

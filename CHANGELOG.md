@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A job that runs or waits on this machine while a remote node is configured names why: the
+  job record's new `local_reason` (`/api/state`, job events, UI types) and a `  local: <reason>`
+  line under the job in `slot status`. Reasons: `local requested`, `cache rule`, `nested job`,
+  `gated job`, `remote job`, `sent back by a node`, `slots free here first`, `sync failed: <first
+  line>` (sent by a remote-mode client in the new request field `local_reason` when it falls back
+  to the local daemon), or the text of `SLOT_LOCAL_REASON`. A job with a named reason is not
+  handed to a node.
+
 - Spill-over: the daemon hands every queued local job to a remote node of the host
   configuration file while the node is Ready, before its deadline and has free slots by its last
   answer (less the jobs handed to it in the last 15 s), oldest first. The job's process is

@@ -336,6 +336,15 @@ environment, a remote client's job and a gate's hold. When the client ends with 
 or ssh failed, or the connection to the node was lost) the job goes back to the local queue once
 and runs here. A command that itself exits 3 is run a second time here too.
 
+A job that runs or waits here while a node takes jobs carries the reason in `local_reason`
+(`/api/state`), and `slot status` prints it under the job's line as `  local: <reason>`:
+`local requested` (`SLOT_NO_REMOTE=1`, or a command `.slot.toml` lists as local), `cache rule`
+(the working directory or an argument under the caller's `~/.cache`), `nested job`, `gated job`,
+`remote job`, `sent back by a node`, `slots free here first` (it got slots here before a node
+took it), or `sync failed: <first line of the error>` from a remote-mode client whose start
+failed and that ran the job on this machine's daemon instead. A wrapper sets its own reason with
+`SLOT_LOCAL_REASON=<text>`; a job with a reason is not handed to a node.
+
 ## Security
 
 Build scripts and tests run arbitrary code on the server. slot assumes the workstation and the
