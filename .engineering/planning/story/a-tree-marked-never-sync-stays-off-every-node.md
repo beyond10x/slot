@@ -7,7 +7,7 @@ title: A tree marked never-sync stays off every build node
 relations:
 - serves: vision:O2
 - decomposes: epic:compute-cluster
-revision: 2
+revision: 3
 ---
 # Story: a-tree-marked-never-sync-stays-off-every-node
 
@@ -21,7 +21,7 @@ A tree whose data must not leave the host (customer data, private records) is ne
 
 - A Python test step in a repository holding customer data was sent to a build node: the sync started before its owner stopped it.
 - The node already held a 469 MB copy of the tree (10,609 files) from an earlier sync the evening before; it was deleted by hand at 10:31 CET.
-- Four more trees with message content, security review findings and production configuration were found on the node and deleted at 10:33 CET (4.1 GB, 74,555 files).
+- Four more trees with message content, security review findings and production configuration were found on the node and deleted at 10:33 CET (about 5.0 GB, 74,555 files).
 
 ## Acceptance
 
