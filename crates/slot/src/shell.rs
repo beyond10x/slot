@@ -469,6 +469,13 @@ mod tests {
     fn a_sync_may_copy_from_sibling_mirrors_and_count_its_bytes() {
         let sync = "rsync --server -logDtpre.iLsfxCIvu --delete --stats --copy-dest ../00aa --copy-dest=../00bb/ --mkpath . .local/state/slot/ws/0123abcd/";
         assert!(matches!(p(sync), Ok(Plan::Rsync(_))), "{:?}", p(sync));
+        // What the client's `rsync -a --checksum` sends: `c` among the flags.
+        let checksum = "rsync --server -logDtprce.iLsfxCIvu --delete --stats --copy-dest=../00aa --mkpath . .local/state/slot/ws/0123abcd/";
+        assert!(
+            matches!(p(checksum), Ok(Plan::Rsync(_))),
+            "{:?}",
+            p(checksum)
+        );
         for bad in [
             "rsync --server --copy-dest ../../.ssh . .local/state/slot/ws/x/",
             "rsync --server --copy-dest /etc . .local/state/slot/ws/x/",

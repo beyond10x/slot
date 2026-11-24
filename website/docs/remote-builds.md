@@ -59,15 +59,20 @@ current directory.
    never share a mirror on the server.
 2. **Sync.** rsync copies the repository to `<host>:<SLOT_WSROOT>/<id>/` with `--delete`, a
    filter that applies every `.gitignore`, and excludes for `.git` and the toolchain's output
-   directories (`/target/`). Uncommitted changes are included. Over a persistent ssh connection
-   a rerun only sends the changed files. The client prints one line per sync, for example
-   `slot: synced to buildbox in 0.4 s, 81234 bytes sent, 1 sibling mirror as base`. Two calls
+   directories (`/target/`). Uncommitted changes are included. rsync compares every file by its
+   content (`--checksum`), not by size and modification time, so a file changed at the same size
+   and time is sent too; this reads every file on both sides on each sync. Over a persistent ssh
+   connection a rerun only sends the changed files. The client prints one line per sync, for
+   example
+   `slot: synced to buildbox in 0.4 s, 81234 bytes sent, at 1a2b3c4 + 3 changed files`:
+   the commit checked out and the number of files `git status --porcelain` lists. Two calls
    from one worktree sync one after the other; the second waits for the first.
 3. **Siblings.** Before the sync the client asks the server for other mirrors of the same
    repository (same `origin` URL, so every worktree and clone of it). rsync gets up to four of
    them as `--copy-dest`: a file the new mirror lacks is copied on the server when a sibling has
-   it unchanged, and a changed file is sent as a delta against the sibling's. The first sync of a
-   new worktree then sends what differs from its siblings, not the whole tree. A server whose
+   the same content, and a changed file is sent as a delta against the sibling's. The first sync
+   of a new worktree then sends what differs from its siblings, not the whole tree; the line then
+   names `1 sibling mirror as base`. A server whose
    slot does not know the step gets the plain sync; the line then says the bytes were not
    counted.
 4. **Run.** `slot` starts `ssh <host> slot proxy`, which connects to the server daemon's socket.

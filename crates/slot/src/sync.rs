@@ -6,6 +6,10 @@
 //! `--copy-dest`, and `--stats` for the count of bytes sent. A server whose
 //! slot does not know the step gets the plain sync of older clients.
 //!
+//! rsync compares files by content (`--checksum`), never by size and time
+//! alone, and the sync line names the commit and the count of changed files
+//! it sent, so a job is not run on content the caller did not have.
+//!
 //! A sync is watched: when rsync neither reads nor writes for the stall
 //! window (`SLOT_SYNC_STALL`, 60 s), or runs past the bound
 //! (`SLOT_SYNC_LIMIT`, 5 min), it is killed and the caller runs the job on
@@ -102,6 +106,72 @@ pub struct Synced {
     pub siblings: usize,
     /// How long it waited for another sync of the same worktree.
     pub waited: Duration,
+    /// What the checkout held when it was synced.
+    pub sources: Sources,
+}
+
+/// What the checkout held when it was synced, as git sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sources {
+    /// `HEAD`'s short commit (`None` before the first commit) and the number
+    /// of lines of `git status --porcelain`: changed tracked files and
+    /// untracked files git does not ignore.
+    Git {
+        /// Short commit of `HEAD`.
+        head: Option<String>,
+        /// Changed files.
+        changed: usize,
+    },
+    /// git could not be asked; why.
+    Unknown(String),
+}
+
+impl Sources {
+    /// Asks git about the checkout at `top`, without taking its index lock.
+    pub fn of(top: &Path) -> Self {
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .env("LC_ALL", "C")
+                .arg("--no-optional-locks")
+                .arg("-C")
+                .arg(top)
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+        };
+        let status = match git(&["status", "--porcelain"]) {
+            Ok(o) if o.status.success() => o.stdout,
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                let why = err.lines().next().unwrap_or("").trim();
+                return Self::Unknown(format!("git status exited with {}: {why}", o.status));
+            }
+            Err(e) => return Self::Unknown(format!("git: {e}")),
+        };
+        let head = git(&["rev-parse", "--short", "HEAD"])
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty());
+        Self::Git {
+            head,
+            changed: status
+                .split(|b| *b == b'\n')
+                .filter(|l| !l.is_empty())
+                .count(),
+        }
+    }
+
+    fn words(&self) -> String {
+        match self {
+            Self::Git { head, changed } => format!(
+                "at {} + {changed} changed file{}",
+                head.as_deref().unwrap_or("no commit"),
+                if *changed == 1 { "" } else { "s" }
+            ),
+            Self::Unknown(why) => format!("sources not named, git unavailable ({why})"),
+        }
+    }
 }
 
 impl Synced {
@@ -125,8 +195,9 @@ impl Synced {
             String::new()
         };
         format!(
-            "slot: synced to {host} in {:.1} s, {bytes}{sib}{waited}",
-            self.elapsed.as_secs_f64()
+            "slot: synced to {host} in {:.1} s, {bytes}{sib}{waited}, {}",
+            self.elapsed.as_secs_f64(),
+            self.sources.words()
         )
     }
 }
@@ -360,8 +431,12 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
 }
 
 /// Syncs the checkout at `top` to mirror `id` on the server, with the
-/// toolchain's `excludes`, within `b`.
+/// toolchain's `excludes`, within `b`. rsync compares every file by content
+/// (`--checksum`), not by size and time: a file changed at the same size and
+/// time, or a sibling's file of that size and time, would otherwise be taken
+/// as it is and the job would build the old content.
 pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
+    let sources = Sources::of(top);
     let asked = Instant::now();
     let _lock = crate::paths::runtime_dir()
         .map(|dir| lock_workspace(&dir, r.host, id, b.limit))
@@ -375,6 +450,7 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     // directories follow in syncs of their own (`sync_extra`).
     rsync.args([
         "-a",
+        "--checksum",
         "--delete",
         "--mkpath",
         "--filter=:- .gitignore",
@@ -406,6 +482,7 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         elapsed: t0.elapsed(),
         siblings: siblings.map_or(0, |s| s.len()),
         waited: t0.duration_since(asked),
+        sources,
     })
 }
 
@@ -428,21 +505,51 @@ mod tests {
             elapsed: Duration::from_millis(1250),
             siblings: 2,
             waited: Duration::ZERO,
+            sources: Sources::Git {
+                head: Some("1a2b3c4".into()),
+                changed: 3,
+            },
         };
         assert_eq!(
             s.line("node"),
-            "slot: synced to node in 1.2 s, 4096 bytes sent, 2 sibling mirrors as base"
+            "slot: synced to node in 1.2 s, 4096 bytes sent, 2 sibling mirrors as base, \
+             at 1a2b3c4 + 3 changed files"
         );
         let after = Synced {
             waited: Duration::from_millis(3400),
             ..s.clone()
         };
         assert!(
-            after
-                .line("node")
-                .ends_with(", after 3.4 s waiting for another sync of this worktree"),
+            after.line("node").ends_with(
+                ", after 3.4 s waiting for another sync of this worktree, at 1a2b3c4 + 3 changed files"
+            ),
             "{}",
             after.line("node")
+        );
+        let fresh = Synced {
+            sources: Sources::Git {
+                head: None,
+                changed: 1,
+            },
+            ..s.clone()
+        };
+        assert!(
+            fresh
+                .line("node")
+                .ends_with(", at no commit + 1 changed file"),
+            "{}",
+            fresh.line("node")
+        );
+        let nogit = Synced {
+            sources: Sources::Unknown("git: No such file or directory (os error 2)".into()),
+            ..s.clone()
+        };
+        assert!(
+            nogit.line("node").ends_with(
+                ", sources not named, git unavailable (git: No such file or directory (os error 2))"
+            ),
+            "{}",
+            nogit.line("node")
         );
         let old = Synced {
             bytes: None,
@@ -454,6 +561,55 @@ mod tests {
             "{}",
             old.line("node")
         );
+    }
+
+    #[test]
+    fn the_sources_are_the_head_and_the_changed_files_git_does_not_ignore() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().join("r");
+        std::fs::create_dir(&top).unwrap();
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(&top)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args([
+                    "-c",
+                    "commit.gpgSign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .stdout(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(top.join("a"), "1").unwrap();
+        assert_eq!(
+            Sources::of(&top),
+            Sources::Git {
+                head: None,
+                changed: 1
+            }
+        );
+        std::fs::write(top.join(".gitignore"), "out/\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "c"]);
+        std::fs::write(top.join("a"), "2").unwrap();
+        std::fs::write(top.join("new"), "n").unwrap();
+        std::fs::create_dir(top.join("out")).unwrap();
+        std::fs::write(top.join("out/x"), "ignored").unwrap();
+        let Sources::Git { head, changed } = Sources::of(&top) else {
+            panic!("{:?}", Sources::of(&top));
+        };
+        assert_eq!(changed, 2);
+        assert!(head.is_some_and(|h| h.len() >= 7 && h.chars().all(|c| c.is_ascii_hexdigit())));
+        assert!(matches!(
+            Sources::of(&d.path().join("missing")),
+            Sources::Unknown(_)
+        ));
     }
 
     #[test]

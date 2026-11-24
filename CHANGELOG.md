@@ -99,6 +99,19 @@
   to the client, which runs it on its own machine's daemon (a new `fallback` frame, sent only to
   a client whose request sets `fetch_once`).
 
+## 0.33.1 — 2026-11-24
+
+- Remote mode's sync compares every file by content (`rsync --checksum`), not by size and
+  modification time. A file changed at the same size and time was skipped, and through
+  `--copy-dest` a sibling mirror's file of the same size and time was taken as it was: a job then
+  built an older version of a source file and could pass. The cost is reading every file on both
+  sides: on a tree of 10,000 files (99 MB) a sync with nothing to send took 0.33 to 0.68 s instead
+  of 0.13 to 0.36 s with the files in the page cache, and up to 30 s on a heavily loaded machine.
+- The sync line names what was sent: `slot: synced to <host> in … s, … bytes sent, at 1a2b3c4 +
+  3 changed files`, the commit of `HEAD` and the lines of `git status --porcelain` (tracked
+  changes and untracked files git does not ignore). Without git it says the sources are not
+  named.
+
 ## 0.33.0 — 2026-11-24
 
 - `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is
