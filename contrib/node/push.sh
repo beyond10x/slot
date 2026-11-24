@@ -8,18 +8,51 @@
 #   push.sh check CONF   compare digests of the workstation's copies with the node's, from one
 #                        slot job on NODE_HOST run in the checkout NODE_RUN_DIR; print one
 #                        `drift: push: ...` line per difference and `<n> drift`; exit 0 or 1
+#   push.sh compare HERE NODE   the comparison of check, over two digest files
 #
 # CONF is the node config file of provision.sh (node.conf.example).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/conf.sh"
+
+# Compares the digest lines of the workstation (file $1) with the node's (file $2). Every line
+# counts both ways, except a `copy <dir>/<file> <size>` line only on the node: a job there may
+# add files to a copied directory such as a cache, and push copies without deleting.
+compare() {
+  nh=$(sed -n 's/^host //p' "$2")
+  hh=$(sed -n 's/^host //p' "$1")
+  if [ -z "$nh" ] || [ "$nh" = "$hh" ]; then
+    echo "push: the digest job did not run on the node (host '${nh:-none}')" >&2
+    return 2
+  fi
+  grep -v '^host ' "$1" | LC_ALL=C sort >"$1.s"
+  grep -v '^host ' "$2" | LC_ALL=C sort >"$2.s"
+  LC_ALL=C comm -3 "$1.s" "$2.s" | while IFS= read -r l; do
+    case $l in
+      "	copy "*) ;;
+      "	"*) echo "drift: push: only on the node: ${l#	}" ;;
+      *) echo "drift: push: workstation has: $l" ;;
+    esac
+  done >"$2.d"
+  rm -f "$1.s" "$2.s"
+  cat "$2.d"
+  n=$(grep -c . "$2.d")
+  rm -f "$2.d"
+  echo "$n drift"
+  [ "$n" -eq 0 ]
+}
+
 mode=${1:-}
 cf=${2:-}
 case $mode in
   apply) conf_read "$cf" BUILD_USER BUILD_HOME SLOT_VERSION NODE_SSH PUSH_HOST BUILD_UID BUILD_KEY || exit 2 ;;
   check) conf_read "$cf" BUILD_USER BUILD_HOME SLOT_VERSION NODE_SSH NODE_HOST NODE_RUN_DIR BUILD_UID BUILD_KEY || exit 2 ;;
+  compare)
+    compare "$2" "$3"
+    exit
+    ;;
   *)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2
+    sed -n '2,/^set -u/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//' >&2
     exit 2
     ;;
 esac
@@ -105,7 +138,8 @@ cd "\$HOME/.cargo/bin" 2>/dev/null && for b in *; do
   echo "bin \$b \$(stat -Lc %s "\$b")"
 done
 for p in $HOME_COPIES; do
-  echo "copy \$p \$(cd "\$HOME/\$p" 2>/dev/null && find . -type f -printf '%P %s\n' | LC_ALL=C sort | md5sum | cut -c1-12)"
+  [ -d "\$HOME/\$p" ] || { echo "copy \$p missing"; continue; }
+  (cd "\$HOME/\$p" && find . -type f -printf "copy \$p/%P %s\n")
 done
 EOF
 )
@@ -114,24 +148,4 @@ node_out=$(mktemp)
 trap 'rm -f "$here_out" "$node_out"' EXIT
 sh -c "$digest" sh "" "$HOME/.rustup" >"$here_out" 2>/dev/null
 (cd "$NODE_RUN_DIR" && SLOT_HOST=$NODE_HOST SLOT_SSH=$NODE_SSH SLOT_REMOTE=/usr/local/bin/slot slot sh -c "$digest" sh "" "$H/.rustup") >"$node_out" 2>/dev/null
-nh=$(sed -n 's/^host //p' "$node_out")
-hh=$(sed -n 's/^host //p' "$here_out")
-if [ -z "$nh" ] || [ "$nh" = "$hh" ]; then
-  echo "push: the digest job did not run on $NODE_HOST (host '${nh:-none}')" >&2
-  exit 2
-fi
-n=0
-grep -v '^host ' "$here_out" | LC_ALL=C sort >"$here_out.s"
-grep -v '^host ' "$node_out" | LC_ALL=C sort >"$node_out.s"
-LC_ALL=C comm -3 "$here_out.s" "$node_out.s" | while IFS= read -r l; do
-  case $l in
-    "	"*) echo "drift: push: only on the node: ${l#	}" ;;
-    *) echo "drift: push: workstation has: $l" ;;
-  esac
-done >"$node_out.d"
-rm -f "$here_out.s" "$node_out.s"
-cat "$node_out.d"
-n=$(grep -c . "$node_out.d")
-rm -f "$node_out.d"
-echo "$n drift"
-[ "$n" -eq 0 ]
+compare "$here_out" "$node_out"
