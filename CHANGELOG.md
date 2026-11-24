@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.33.0 — 2026-11-24
 
 - `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is
   read-only, in a pid and IPC namespace of the job's own. Writable are only the job's checkout
