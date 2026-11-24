@@ -168,7 +168,12 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
         .cache_root
         .clone()
         .unwrap_or_else(|| args.state_dir.join("cache"));
-    match slot::shell::plan(&line, &home, &ws, &cache) {
+    let roots = slot::shell::Roots {
+        ws: &ws,
+        cache: &cache,
+        same_path: &args.same_path_root,
+    };
+    match slot::shell::plan(&line, &home, &roots) {
         Ok(Plan::Rsync(rsync_args)) => {
             let e = std::process::Command::new("rsync").args(rsync_args).exec();
             eprintln!("slot shell: rsync: {e}");
@@ -184,7 +189,6 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             s.socket.clone_from(&args.socket);
             client::cancel(id, &s)
         }
-        Ok(Plan::Siblings { id, key }) => siblings(&ws, &id, &key),
         Ok(Plan::State) => match slot::server::nodes::state_step(&args.http) {
             Ok(s) => {
                 println!("{s}");
@@ -195,6 +199,15 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
                 1
             }
         },
+        Ok(Plan::Siblings { id, key, path }) => {
+            if let Some(p) = path
+                && let Err(e) = slot::mirror::link(&ws, &id, &p)
+            {
+                eprintln!("slot: {e}");
+                return 1;
+            }
+            siblings(&ws, &id, &key)
+        }
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126

@@ -92,6 +92,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         handover: true,
         sandbox: None,
         cluster_file: None,
+        same_path_roots: Vec::new(),
     }
 }
 
@@ -599,6 +600,7 @@ fn workspace_is_confined_and_paths_rewritten() {
             id: "../x".into(),
             rel_cwd: ".".into(),
             client_root: String::new(),
+            same_path: false,
         }),
         ..Request::default()
     };
@@ -609,6 +611,7 @@ fn workspace_is_confined_and_paths_rewritten() {
         workspace: Some(Workspace {
             id: "abc".into(),
             rel_cwd: "../../..".into(),
+            same_path: false,
             client_root: "/client".into(),
         }),
         ..Request::default()
@@ -631,6 +634,7 @@ fn remote_job_gets_server_path_and_client_flags() {
         env: vec!["RUSTFLAGS=-Cx".into()],
         workspace: Some(Workspace {
             id: "w1".into(),
+            same_path: false,
             rel_cwd: ".".into(),
             client_root: "/c".into(),
         }),
@@ -732,6 +736,7 @@ fn history_survives_restart() {
         handover: true,
         sandbox: None,
         cluster_file: None,
+        same_path_roots: Vec::new(),
     })
     .unwrap();
     let st = again.state();
@@ -1979,6 +1984,7 @@ fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
         cwd: String::new(),
         env: Vec::new(),
         workspace: Some(Workspace {
+            same_path: false,
             id: "w1".into(),
             rel_cwd: ".".into(),
             client_root: "/c".into(),
@@ -4973,6 +4979,7 @@ fn a_sandboxed_workspace_job_writes_only_what_it_builds() {
             id: "mine".into(),
             rel_cwd: ".".into(),
             client_root: "/client".into(),
+            same_path: false,
         }),
         ..Request::default()
     };

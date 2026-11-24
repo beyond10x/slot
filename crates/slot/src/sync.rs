@@ -40,6 +40,37 @@ pub struct Remote<'a> {
     pub ws_root: &'a str,
     /// slot executable on the server.
     pub remote_slot: &'a str,
+    /// Mirror the checkout at its own absolute path on the server
+    /// (`SLOT_REMOTE_SAME_PATH`), not under the workspace root.
+    pub same_path: bool,
+}
+
+impl Remote<'_> {
+    /// Where the sync of the checkout at `top`, mirror `id`, goes.
+    pub fn dest(&self, top: &Path, id: &str) -> String {
+        if self.same_path {
+            top.display().to_string()
+        } else {
+            format!("{}/{id}", self.ws_root)
+        }
+    }
+
+    /// How rsync names sibling mirror `id` for `--copy-dest`: relative to
+    /// the destination, `../<id>`; for a same-path mirror, whose parent is
+    /// not the workspace root, `<ws-root>/<id>` made absolute with this
+    /// machine's home, which the server's account shares.
+    pub fn copy_dest(&self, id: &str) -> Option<String> {
+        if !self.same_path {
+            return Some(format!("../{id}"));
+        }
+        let ws = Path::new(self.ws_root);
+        let ws = if ws.is_absolute() {
+            ws.to_path_buf()
+        } else {
+            Path::new(&std::env::var_os("HOME")?).join(ws)
+        };
+        Some(format!("{}/{id}", ws.display()))
+    }
 }
 
 /// When a sync is given up.
@@ -244,13 +275,20 @@ pub fn stats_bytes_sent(out: &str) -> Option<u64> {
 
 /// Asks the server for the sibling mirrors of `id`. `None` when it does not
 /// answer within `wait` or does not know the step (an older slot).
-fn ask_siblings(r: &Remote<'_>, id: &str, key: &str, wait: Duration) -> Option<Vec<String>> {
+fn ask_siblings(
+    r: &Remote<'_>,
+    top: &Path,
+    id: &str,
+    key: &str,
+    wait: Duration,
+) -> Option<Vec<String>> {
     let (ssh, opts) = r.ssh.split_first()?;
     let mut child = Command::new(ssh)
         .args(opts)
         .arg(r.host)
         .arg(r.remote_slot)
         .args(["__siblings", r.ws_root, id, key])
+        .args(r.same_path.then_some(top.as_os_str()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -283,7 +321,7 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     let t0 = Instant::now();
     let deadline = t0 + b.limit;
     let key = mirror::repo_key(top);
-    let siblings = ask_siblings(r, id, &key, b.stall.min(b.limit));
+    let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
     let mut rsync = Command::new("rsync");
     rsync.args([
         "-a",
@@ -298,14 +336,16 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     if let Some(sibs) = &siblings {
         rsync.arg("--stats");
         for s in sibs {
-            rsync.arg(format!("--copy-dest=../{s}"));
+            if let Some(d) = r.copy_dest(s) {
+                rsync.arg(format!("--copy-dest={d}"));
+            }
         }
     }
     rsync
         .arg("-e")
         .arg(r.ssh.join(" "))
         .arg(format!("{}/", top.display()))
-        .arg(format!("{}:{}/{id}/", r.host, r.ws_root))
+        .arg(format!("{}:{}/", r.host, r.dest(top, id)))
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped());

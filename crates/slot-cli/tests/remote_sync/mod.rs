@@ -74,11 +74,16 @@ fn script(path: &Path, body: &str) {
 /// A fake `ssh HOST WORDS…` that runs WORDS through `slot shell` against
 /// daemon `d`, as the forced command of the server's key does.
 fn forced_ssh(dir: &Path, d: &Daemon, before: &str) -> PathBuf {
+    forced_ssh_with(dir, d, before, "")
+}
+
+/// [`forced_ssh`] with `shell_args` added to `slot shell`.
+fn forced_ssh_with(dir: &Path, d: &Daemon, before: &str, shell_args: &str) -> PathBuf {
     let path = dir.join("ssh");
     script(
         &path,
         &format!(
-            "shift\necho \"$*\" >> {log}\n{before}\nSSH_ORIGINAL_COMMAND=\"$*\" exec {SLOT} shell --socket {sock} --state-dir {state}",
+            "shift\necho \"$*\" >> {log}\n{before}\nSSH_ORIGINAL_COMMAND=\"$*\" exec {SLOT} shell --socket {sock} --state-dir {state} {shell_args}",
             log = dir.join("ssh.log").display(),
             sock = d.socket().display(),
             state = d.dir.path().join("state").display(),
@@ -88,8 +93,20 @@ fn forced_ssh(dir: &Path, d: &Daemon, before: &str) -> PathBuf {
 }
 
 fn remote_call(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
+    remote_call_env(d, ssh, cwd, argv, &[])
+}
+
+fn remote_call_env(
+    d: &Daemon,
+    ssh: &Path,
+    cwd: &Path,
+    argv: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     Command::new(SLOT)
         .args(argv)
+        .env_remove("SLOT_REMOTE_SAME_PATH")
+        .envs(env.iter().copied())
         .current_dir(cwd)
         .env("SLOT_HOST", "node")
         .env("SLOT_SSH", ssh)
@@ -212,6 +229,90 @@ fn a_stalled_sync_is_killed_and_the_job_runs_here() {
 #[test]
 fn a_sync_whose_rsync_is_killed_runs_the_job_here() {
     falls_back("kill -9 $PPID; exec sleep 1", "rsync exited");
+}
+
+const SAME_PATH: &[(&str, &str)] = &[("SLOT_REMOTE_SAME_PATH", "1")];
+
+/// With `SLOT_REMOTE_SAME_PATH=1` the tree is synced to its own absolute
+/// path and the job runs there; a second worktree is seeded from the first
+/// through its link in the workspace root.
+#[test]
+fn a_same_path_job_runs_at_the_clients_absolute_path() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, b) = repository(&root);
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), root.as_os_str()]);
+    let ssh = forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", root.display()),
+    );
+    std::fs::create_dir(a.join("sub")).unwrap();
+    let out = remote_call_env(&d, &ssh, &a.join("sub"), &["pwd"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        a.join("sub").to_string_lossy(),
+        "{err}"
+    );
+    let log = std::fs::read_to_string(root.join("ssh.log")).unwrap();
+    let rsync = log.lines().find(|l| l.starts_with("rsync ")).unwrap();
+    assert!(
+        rsync.ends_with(&format!(" {}/", a.display())),
+        "synced elsewhere: {rsync}"
+    );
+    let ws = d.dir.path().join("state/ws");
+    let links: Vec<PathBuf> = std::fs::read_dir(&ws)
+        .unwrap()
+        .flatten()
+        .filter_map(|e| std::fs::read_link(e.path()).ok())
+        .collect();
+    assert_eq!(links, std::slice::from_ref(&a), "the mirror's link by id");
+
+    std::fs::write(b.join("note.txt"), "from b\n").unwrap();
+    let out = remote_call_env(&d, &ssh, &b, &["sh", "-c", "pwd; cat note.txt"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{}\nfrom b\n", b.display()),
+        "{err}"
+    );
+    assert!(err.contains("1 sibling mirror as base"), "{err}");
+}
+
+/// A same-path tree outside the server's `--same-path-root`: `slot shell`
+/// refuses the sync, and the daemon refuses the job.
+#[test]
+fn a_same_path_tree_outside_the_roots_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, _) = repository(&root);
+    let other = root.join("elsewhere");
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), other.as_os_str()]);
+    let ssh = forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", other.display()),
+    );
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("running it on this machine's daemon"), "{err}");
+
+    // The shell admits it, the daemon does not.
+    let ssh = forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", root.display()),
+    );
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("not below a --same-path-root"), "{err}");
 }
 
 /// A cargo package `tiny` in a git repository: one binary, one integration

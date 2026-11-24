@@ -58,6 +58,7 @@ slot serve [OPTIONS]
 - `--cluster-file`: The host configuration file: its `[remote.<name>]` tables are the remote nodes the daemon polls every 5 s and shows in `GET /api/nodes` and the web UI. `off` reads none (env `SLOT_CLUSTER_FILE`)
 - `--sandbox-write`: One more path a sandboxed job may write, for example a package manager's store; repeat for more
 - `--sandbox-fixed-paths`: With --sandbox: mount each job's checkout at /work/src and its target directory at /work/target, so every worktree of a repository builds at the same paths. The job then runs without a rustc wrapper: the compile cache server outside the sandbox cannot read sources at those paths (default `false`)
+- `--same-path-root`: A directory under which a remote client may mirror its tree at the tree's own absolute path (`SLOT_REMOTE_SAME_PATH=1` on the client), so absolute paths into the tree work on this server. Repeat for more; `SLOT_SAME_PATH_ROOTS` lists them separated by `:`. Give `slot shell` the same list (env `SLOT_SAME_PATH_ROOTS`)
 
 ### `slot proxy`
 
@@ -82,6 +83,7 @@ slot shell [OPTIONS]
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs of synced workspaces (default: `<state-dir>/cache`)
 - `--http`: The daemon's web address, for the `state` step (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+- `--same-path-root`: A directory under which a client may sync its tree to the tree's own absolute path and fetch from it, as with `slot serve`; repeat for more (env `SLOT_SAME_PATH_ROOTS`)
 
 ### `slot gate`
 

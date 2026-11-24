@@ -211,6 +211,11 @@ pub struct Workspace {
     pub rel_cwd: String,
     /// Repository root on the client, for path rewriting.
     pub client_root: String,
+    /// Mirrored at `client_root` itself, not under the workspace root
+    /// (`SLOT_REMOTE_SAME_PATH`); the server admits it only under a
+    /// `--same-path-root`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_path: bool,
 }
 
 /// One server message.

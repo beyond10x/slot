@@ -18,6 +18,11 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// A daemon with `args` added to `slot serve`.
+    fn start_with(args: &[&std::ffi::OsStr]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let child = Command::new(SLOT)
             .env("SLOT_CLUSTER_FILE", "off")
@@ -36,6 +41,7 @@ impl Daemon {
             .arg(dir.path().join("sock"))
             .arg("--state-dir")
             .arg(dir.path().join("state"))
+            .args(args)
             .env_remove("SLOT_JOB")
             .stdout(Stdio::null())
             .stderr(Stdio::null())

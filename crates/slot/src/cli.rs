@@ -279,6 +279,18 @@ pub struct ServeArgs {
     /// cache server outside the sandbox cannot read sources at those paths.
     #[arg(long, requires = "sandbox")]
     pub sandbox_fixed_paths: bool,
+    /// A directory under which a remote client may mirror its tree at the
+    /// tree's own absolute path (`SLOT_REMOTE_SAME_PATH=1` on the client), so
+    /// absolute paths into the tree work on this server. Repeat for more;
+    /// `SLOT_SAME_PATH_ROOTS` lists them separated by `:`. Give `slot shell`
+    /// the same list.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "SLOT_SAME_PATH_ROOTS",
+        value_delimiter = ':'
+    )]
+    pub same_path_root: Vec<PathBuf>,
 }
 
 /// `slot proxy` options.
@@ -307,6 +319,15 @@ pub struct ShellArgs {
     /// The daemon's web address, for the `state` step.
     #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
     pub http: String,
+    /// A directory under which a client may sync its tree to the tree's own
+    /// absolute path and fetch from it, as with `slot serve`; repeat for more.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "SLOT_SAME_PATH_ROOTS",
+        value_delimiter = ':'
+    )]
+    pub same_path_root: Vec<PathBuf>,
 }
 
 /// `slot gate` options.
@@ -797,6 +818,7 @@ impl ServeArgs {
             },
             cluster_file: (self.cluster_file.as_os_str() != "off")
                 .then(|| self.cluster_file.clone()),
+            same_path_roots: self.same_path_root.clone(),
         })
     }
 }

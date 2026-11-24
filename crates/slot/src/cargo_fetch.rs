@@ -91,6 +91,8 @@ pub struct Check<'a> {
     pub ws_root: &'a Path,
     /// Workspace id.
     pub id: &'a str,
+    /// The mirror's tree: `<ws-root>/<id>`, or a same-path mirror's own path.
+    pub root: &'a Path,
     /// The job's working directory in the mirror.
     pub cwd: &'a Path,
     /// `cargo` as the job names it, and a `+toolchain` when it has one.
@@ -113,8 +115,7 @@ pub fn cargo_of(argv: &[String]) -> Vec<String> {
 /// Brings the mirror's crates into the cargo home once per `Cargo.lock`.
 /// `Err` with the reason when the fetch fails or runs past the limit.
 pub fn ensure(c: &Check<'_>) -> Result<Outcome, String> {
-    let root = c.ws_root.join(c.id);
-    let Some(dir) = lock_dir(c.cwd, &root) else {
+    let Some(dir) = lock_dir(c.cwd, c.root) else {
         return Ok(Outcome::NoLock);
     };
     let Some(want) = digest(&dir.join("Cargo.lock")) else {
@@ -244,9 +245,14 @@ mod tests {
     }
 
     fn check<'a>(ws: &'a Path, cwd: &'a Path, cargo: &Path, env: &'a [String]) -> Check<'a> {
+        let root = cwd
+            .ancestors()
+            .find(|d| d.file_name().is_some_and(|n| n == "00aa"))
+            .unwrap();
         Check {
             ws_root: ws,
             id: "00aa",
+            root,
             cwd,
             cargo: vec![cargo.to_string_lossy().into_owned()],
             env,
