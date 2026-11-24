@@ -62,9 +62,9 @@ scope:
   path: website/docs/reference/cli.md
 revision: 31
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 4}
-- {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "human:timo", revision: 5}
-- {from: "active", to: "implemented", at: "2026-11-23T01:34:03Z", actor: "human:timo", revision: 31, decided_on: {"recorded":{"test_result":1}}}
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:43Z", actor: "agent:slot", revision: 4}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:43Z", actor: "agent:slot", revision: 5}
+- {from: "active", to: "implemented", at: "2026-11-23T01:34:03Z", actor: "agent:slot", revision: 31, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

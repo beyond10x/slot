@@ -387,6 +387,10 @@ Open, one line each, with where the design lives. A session starts with (e).
 
 - Never put private names, home paths, host names or planning ids in source, a page, a crate
   `description` or a commit: the repository is public.
+- Never run an `aep` command that writes without `AEP_ACTOR=agent:slot` in its environment.
+  Without it the store records `human:<login>` in each transition and evidence record. The 200
+  evidence files written before this rule still carry it: evidence is never rewritten, and
+  `aep plan artifact redact` does not reach them.
 - Never commit `ui/dist/`, `ui/node_modules/` or `website/build/`.
 - Never hand-edit `ui/src/generated/types.ts` or `website/docs/reference/cli.md`: run
   `task generate`.

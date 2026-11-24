@@ -9,7 +9,7 @@ relations:
 withholds: metric_observation
 revision: 2
 transitions:
-- {from: "open", to: "cleared", at: "2026-11-23T22:54:29Z", actor: "human:timo", revision: 2}
+- {from: "open", to: "cleared", at: "2026-11-23T22:54:29Z", actor: "agent:slot", revision: 2}
 ---
 # Decision blocker: the phase-0 node is a paid machine the operator starts
 
