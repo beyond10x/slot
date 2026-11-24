@@ -7,7 +7,7 @@ title: A job predicted to need more memory than the host has fails at once with 
 relations:
 - serves: vision:O2
 - informed_by: story:admission-waits-for-memory
-revision: 1
+revision: 2
 ---
 # Story: a-job-that-can-never-fit-fails-at-once
 
@@ -16,7 +16,7 @@ revision: 1
 A job whose predicted memory need is more than the host could ever offer (total memory minus the
 floor that stays free) is not queued. It ends at once with exit 3 and one line:
 `slot: this job is predicted to need <need> (peak of job <id>); this host offers at most <max>`,
-and how to run it anyway (`--memory-max`, which replaces the prediction with a bound).
+and how to run it anyway: `slot --memory-max <size> <command>` replaces the prediction with that bound and runs the job in a scope with `MemoryMax=<size>`. Today `--memory-max` exists only on `slot serve` (one bound for every job); the client rejects it.
 A single runaway peak does not set the prediction for every later job with the same key.
 
 ## Evidence (2026-11-24, a 124 GB build node)
@@ -24,6 +24,7 @@ A single runaway peak does not set the prediction for every later job with the s
 - One `cargo nextest run -E all()` in a mutation-testing copy ran 67 s and recorded `peak_rss`
   123.4 GB with 68 CPU-seconds and exit 100: a mutant that allocated until the host was full.
 - The next job with the same key (repository directory `copy` and the same argv) was queued for
+- A second job of the same key waited 16 min more until its owner stopped it; the owner could not bound it, since the client has no memory option.
   29 minutes and more with "the job needs about 123.4 GB and 4.0 GB stays free". It could never start.
 - Every mutation-testing copy is named `copy`, so all mutants of all repositories share one key.
 
@@ -40,3 +41,4 @@ A single runaway peak does not set the prediction for every later job with the s
 - A job whose prediction exceeds `total − floor` exits 3 within 1 s with the line; nothing is queued.
 - After one failed job with a 120 GB peak and four passed jobs with 2 GB peaks of the same key,
   the next job is predicted at about 2 GB and starts.
+- `slot --memory-max 8G run -- <cmd>` is accepted, the job is admitted against 8 GB instead of its prediction, and a process of the job that passes 8 GB is killed while the job's other processes and other jobs run on.
