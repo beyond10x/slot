@@ -843,6 +843,7 @@ mod tests {
             test_ms: None,
             node_target_dir: None,
             seeded_from: None,
+            width: None,
         }
     }
 

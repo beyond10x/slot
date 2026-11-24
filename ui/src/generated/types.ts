@@ -245,7 +245,16 @@ node_target_dir?: string,
  * `empty` (absent or empty, and not seeded) or `kept` (the directory
  * of an earlier job of the same tree).
  */
-seeded_from?: string, };
+seeded_from?: string, 
+/**
+ * A remote job: its width, set once when it started (`crate::width`):
+ * the node's free cores then, split over the jobs that started in the
+ * last seconds, at least 1 and at most the node's CPUs. The job got it
+ * as `SLOT_WIDTH`, test threads, `GOMAXPROCS`, go's `-p` and, with
+ * `slot job-parallel` on, as its bound if that was lower. Absent for a
+ * local job and from an older daemon.
+ */
+width?: number, };
 
 export type Unit = { 
 /**

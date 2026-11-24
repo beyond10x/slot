@@ -734,6 +734,56 @@ fn workspace_is_confined_and_paths_rewritten() {
     assert_eq!(r.out.trim(), "/client");
 }
 
+/// On an idle node of 64 CPUs a remote job gets the whole node as its
+/// width, past the 16 test threads of the workstation rule, and raises a
+/// lower count its caller sent; a second job started within the window
+/// gets half. A local job keeps the workstation rule.
+#[test]
+fn a_remote_job_on_an_idle_64_cpu_node_gets_the_free_cores() {
+    let f = start_cfg(64, |c| {
+        c.host_cpus = Some(64);
+        c.test_threads = 16;
+        c.cpu_busy = Some(|| Some(cpu_limit::Parts::default()));
+    });
+    std::fs::create_dir_all(f.root.join("ws/w1")).unwrap();
+    let show = "echo $RUST_TEST_THREADS $NEXTEST_TEST_THREADS w=$SLOT_WIDTH j=$CARGO_BUILD_JOBS";
+    let remote = || Request {
+        argv: vec!["sh".into(), "-c".into(), show.into()],
+        env: vec![
+            "RUST_TEST_THREADS=1".into(),
+            "NEXTEST_TEST_THREADS=4".into(),
+        ],
+        workspace: Some(Workspace {
+            id: "w1".into(),
+            rel_cwd: ".".into(),
+            client_root: "/c".into(),
+            ..Workspace::default()
+        }),
+        ..Request::default()
+    };
+    let r = run(&f, remote());
+    assert_eq!(r.out.trim(), "64 64 w=64 j=", "{r:?}");
+    let r = run(&f, remote());
+    assert_eq!(r.out.trim(), "32 32 w=32 j=", "{r:?}");
+    // A bound per job lower than the width is raised to it: the third
+    // start within the window gets a third of the free CPUs.
+    assert_eq!(set_job_parallel(&f, Some(4)), Some(4));
+    let r = run(&f, remote());
+    assert_eq!(r.out.trim(), "21 21 w=21 j=21", "{r:?}");
+    let widths: Vec<_> = f.server.state().done.iter().map(|j| j.width).collect();
+    assert_eq!(widths, [Some(64), Some(32), Some(21)], "oldest first");
+
+    let mut local = sh(&f.root, show);
+    local.env = std::env::vars()
+        .filter(|(k, _)| k == "PATH")
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(["NEXTEST_TEST_THREADS=4".to_string()])
+        .collect();
+    let r = run(&f, local);
+    assert_eq!(r.out.trim(), "16 4 w= j=4", "{r:?}");
+    assert_eq!(f.server.state().done.last().unwrap().width, None);
+}
+
 #[test]
 fn remote_job_gets_server_path_and_client_flags() {
     let f = start(1);

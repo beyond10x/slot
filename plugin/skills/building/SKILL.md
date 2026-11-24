@@ -51,7 +51,9 @@ prefix the build and test commands inside it, so a slot is held only while one o
 
 Test binaries in rust, go and wrapper jobs get `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and
 `GOMAXPROCS` from the daemon (a quarter of the pool; go jobs their slot count). Set them yourself
-only when a suite needs a specific value; yours is kept.
+only when a suite needs a specific value; yours is kept. A job that runs on a build node gets its
+width instead: the node's free cores at its start, split over the jobs started with it, also as
+`SLOT_WIDTH` for a Playwright or Vitest config; a lower count you set is raised to it there.
 
 Leave out commands that do not build: `git`, `cargo fmt`, `cargo metadata`, editors and
 rust-analyzer. When the command's own name is a slot subcommand (`serve`, `proxy`, `run`,

@@ -34,7 +34,7 @@ slot serve [OPTIONS]
 - `--http`: Web UI address; `off` disables it (default `127.0.0.1:7411`)
 - `--tokens`: Build slots in the pool (jobserver tokens); default: the number of CPUs
 - `--go-tokens`: Slots a go job holds; go's -p is set to match (default `4`)
-- `--test-threads`: Threads a test runner in a job may use when the caller sets none: `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (go jobs get their slot count). Default: a quarter of the pool, at least 2
+- `--test-threads`: Threads a test runner in a job may use when the caller sets none: `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (go jobs get their slot count). Default: a quarter of the pool, at least 2. Local jobs only: a job synced from another host gets its width, the free CPUs at its start split over the jobs that started in the last 5 s, and a lower count its caller set is raised to it
 - `--cpu-quota`: Whether a headroom also sets systemd `CPUQuota` on the daemon unit, a hard cap on every job together; `false` keeps only the token limit (default `true`)
 - `--state-dir`: Jobserver FIFO and job log
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)

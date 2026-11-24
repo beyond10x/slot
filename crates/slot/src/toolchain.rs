@@ -21,11 +21,16 @@ pub struct Context {
     /// Default parallelism of test runners that do not speak the jobserver
     /// protocol (libtest, nextest, Go test binaries); 0 means the free tokens.
     pub test_threads: usize,
+    /// The job's width on a node ([`crate::width`]); `None` for a local
+    /// job, which keeps `test_threads`.
+    pub width: Option<usize>,
 }
 
 impl Context {
     fn test_threads(&self) -> usize {
-        if self.test_threads > 0 {
+        if let Some(w) = self.width {
+            w
+        } else if self.test_threads > 0 {
             self.test_threads
         } else {
             self.free_tokens.max(2)
@@ -38,6 +43,22 @@ fn default_threads(mut env: Vec<String>, keys: &[&str], n: usize) -> Vec<String>
     for k in keys {
         if get(&env, k).is_none() {
             env.push(format!("{k}={n}"));
+        }
+    }
+    env
+}
+
+/// Sets each of `keys` to `n` unless the caller set it; for a job with a
+/// width (on a node) a caller's count below `n` is raised to `n`. A higher
+/// count, or one that is not a number, stays.
+fn threads(c: &Context, env: Vec<String>, keys: &[&str], n: usize) -> Vec<String> {
+    let mut env = default_threads(env, keys, n);
+    if c.width.is_some() {
+        for k in keys {
+            let have = get(&env, k).and_then(|v| v.trim().parse::<usize>().ok());
+            if have.is_some_and(|have| have < n) {
+                env = set(env, k, &n.to_string());
+            }
         }
     }
     env
@@ -256,7 +277,7 @@ impl Toolchain for Cargo {
             let dir = Path::new(&c.cache_dir).join("target").join(&c.workspace_id);
             env = set(env, "CARGO_TARGET_DIR", &dir.to_string_lossy());
         }
-        default_threads(env, RUST_TEST_VARS, c.test_threads())
+        threads(c, env, RUST_TEST_VARS, c.test_threads())
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -275,7 +296,8 @@ impl Toolchain for Cargo {
 }
 
 /// The go command. Not a jobserver client: the server takes `parallel`
-/// tokens up front and caps the go command's package parallelism to match.
+/// tokens up front and caps the go command's package parallelism to match;
+/// on a node `-p` and `GOMAXPROCS` follow the job's width instead.
 pub struct Go {
     /// Tokens a go job holds.
     pub parallel: usize,
@@ -296,7 +318,9 @@ impl Toolchain for Go {
 
     fn env(&self, c: &Context, env: Vec<String>) -> Vec<String> {
         let env = unset(env, STRIPPED);
-        let n = if c.held > 0 { c.held } else { self.tokens() };
+        let held = if c.held > 0 { c.held } else { self.tokens() };
+        // On a node the job's width, if more than the slots it holds.
+        let n = c.width.map_or(held, |w| w.max(held));
         let flags = match get(&env, "GOFLAGS") {
             Some(v) if !v.is_empty() => format!("{v} -p={n}"),
             _ => format!("-p={n}"),
@@ -306,7 +330,7 @@ impl Toolchain for Go {
             let dir = Path::new(&c.cache_dir).join("go-build");
             env = set(env, "GOCACHE", &dir.to_string_lossy());
         }
-        default_threads(env, &["GOMAXPROCS"], n)
+        threads(c, env, &["GOMAXPROCS"], n)
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -541,8 +565,8 @@ impl Toolchain for Generic {
             env = set(env, "GOCACHE", &go.to_string_lossy());
         }
         let n = c.test_threads();
-        let env = default_threads(env, RUST_TEST_VARS, n);
-        default_threads(env, &["GOMAXPROCS"], n)
+        let env = threads(c, env, RUST_TEST_VARS, n);
+        threads(c, env, &["GOMAXPROCS"], n)
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -680,6 +704,43 @@ mod tests {
         assert!(
             go.contains(&"GOMAXPROCS=2".to_string()) && !go.contains(&"GOMAXPROCS=4".to_string())
         );
+    }
+
+    #[test]
+    fn a_job_on_a_node_gets_its_width_and_a_lower_caller_count_is_raised() {
+        let node = Context {
+            jobserver_auth: "fifo:/p".into(),
+            held: 1,
+            free_tokens: 60,
+            test_threads: 16,
+            width: Some(40),
+            ..Context::default()
+        };
+        let workstation = Context {
+            width: None,
+            ..node.clone()
+        };
+        let caller = v(&["NEXTEST_TEST_THREADS=4", "GOMAXPROCS=64"]);
+        let cargo = Cargo.env(&node, caller.clone());
+        assert_eq!(get(&cargo, "RUST_TEST_THREADS"), Some("40"), "{cargo:?}");
+        assert_eq!(get(&cargo, "NEXTEST_TEST_THREADS"), Some("40"), "raised");
+        let generic = Generic.env(&node, caller.clone());
+        assert_eq!(get(&generic, "NEXTEST_TEST_THREADS"), Some("40"));
+        assert_eq!(
+            get(&generic, "GOMAXPROCS"),
+            Some("64"),
+            "a higher count stays"
+        );
+        let go = Go { parallel: 4 }.env(&node, v(&["GOMAXPROCS=2"]));
+        assert_eq!(get(&go, "GOMAXPROCS"), Some("40"), "{go:?}");
+        assert_eq!(get(&go, "GOFLAGS"), Some("-p=40"), "{go:?}");
+
+        let cargo = Cargo.env(&workstation, caller);
+        assert_eq!(get(&cargo, "RUST_TEST_THREADS"), Some("16"), "{cargo:?}");
+        assert_eq!(get(&cargo, "NEXTEST_TEST_THREADS"), Some("4"), "kept");
+        let go = Go { parallel: 4 }.env(&workstation, v(&["GOMAXPROCS=2"]));
+        assert_eq!(get(&go, "GOMAXPROCS"), Some("2"));
+        assert_eq!(get(&go, "GOFLAGS"), Some("-p=1"), "the slots it holds");
     }
 
     #[test]

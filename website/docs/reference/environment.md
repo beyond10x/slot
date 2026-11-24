@@ -46,10 +46,11 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_JOB` | the job id, used to attribute sccache CPU time to the job |
 | `SLOT_SANDBOX`, `TMPDIR` | `bwrap` and `/tmp` (a private tmpfs), for every job of a daemon started with [`slot serve --sandbox`](../remote-builds.md#run-every-job-in-a-sandbox) |
 | `MAKEFLAGS`, `CARGO_MAKEFLAGS` | `-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo`, for rust and other jobs; `fifo:<gate-dir>/jobserver.fifo` for a gated job; not set this way while `slot job-parallel` is on |
-| `CARGO_BUILD_JOBS`, `MAKEFLAGS` | only while [`slot job-parallel N`](../how-it-works.md#build-processes-per-job) is on, for every job: `<P>` and `-j<P>`, where P is N or the slots the job holds if those are more; `CARGO_MAKEFLAGS` and `MFLAGS` are then not set, and nothing names the pool's FIFO |
-| `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2); rust and other jobs, unless the caller set them |
-| `GOMAXPROCS` | slots held for go jobs; `--test-threads` for other jobs; unless the caller set it |
-| `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs |
+| `CARGO_BUILD_JOBS`, `MAKEFLAGS` | only while [`slot job-parallel N`](../how-it-works.md#build-processes-per-job) is on, for every job: `<P>` and `-j<P>`, where P is N or the slots the job holds if those are more, and for a remote job its width (`SLOT_WIDTH`) if that is more; `CARGO_MAKEFLAGS` and `MFLAGS` are then not set, and nothing names the pool's FIFO |
+| `SLOT_WIDTH` | for every remote job (synced from another host, so run on this machine as a node): its width, set once when it starts: the CPUs free at that moment (the host's CPUs less the busy ones, the mean of the last seconds) divided by the jobs that started in the last 5 s, this one counted, at least 1 and at most the host's CPUs. A Playwright or Vitest config reads it for its worker count (`workers: Number(process.env.SLOT_WIDTH ?? 2)`). The job's record carries it as `width`. Not set for a local job |
+| `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2) for local rust and other jobs, unless the caller set them; the width for a remote job, and a lower count the caller set is raised to it |
+| `GOMAXPROCS` | slots held for local go jobs; `--test-threads` for local other jobs; unless the caller set it. For a remote job the width (go jobs: or the slots held if more), and a lower count the caller set is raised to it |
+| `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs; for a remote go job `-p=<width>`, or the slots held if more |
 | `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
 | `CARGO_NET_OFFLINE` | `true`, for a remote cargo job that builds, once the server fetched the crates of the mirror's `Cargo.lock`; not set for a mirror without a `Cargo.lock`. See [Remote builds](../remote-builds.md#crates-are-fetched-once-per-cargolock). |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
