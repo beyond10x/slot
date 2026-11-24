@@ -125,6 +125,9 @@ pub struct Settings {
     /// to a node: the daemon answers at once and runs the job without the
     /// client, at its lowest level ([`Request::warm`]).
     pub warm: bool,
+    /// `SLOT_NO_PRODUCTS` set and not `0`: a remote cargo job's products
+    /// do not come back ([`artifacts::NO_PRODUCTS_ENV`]).
+    pub no_products: bool,
 }
 
 /// A duration from variable `name`, or `default` with a line on stderr when
@@ -145,7 +148,7 @@ fn duration_var(name: &str, default: Duration) -> Duration {
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
     /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`,
-    /// `SLOT_SYNC_LIMIT` and `SLOT_REMOTE_SAME_PATH`.
+    /// `SLOT_SYNC_LIMIT`, `SLOT_REMOTE_SAME_PATH` and `SLOT_NO_PRODUCTS`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
@@ -191,6 +194,7 @@ impl Settings {
             same_path: var("SLOT_REMOTE_SAME_PATH").is_some_and(|v| v != "0"),
             here: false,
             warm: false,
+            no_products: var(artifacts::NO_PRODUCTS_ENV).is_some_and(|v| v != "0"),
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
@@ -240,11 +244,18 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         remote_host(&mut req, s, || listed_local(top.as_deref(), argv))
     };
     if let Some(host) = host {
-        let plan = if s.warm {
+        let wanted = if s.warm {
             // A warm-up builds for the node: nothing comes back.
             None
         } else {
             artifacts::plan(argv)
+        };
+        // With `SLOT_NO_PRODUCTS` the command runs as written, and the plan
+        // only says when to print that nothing came back.
+        let (plan, skipped) = if s.no_products {
+            (None, wanted)
+        } else {
+            (wanted, None)
         };
         if let Some(p) = &plan {
             req.argv.clone_from(&p.argv);
@@ -269,6 +280,15 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                         {
                             came_back = true;
                             code = products_back(host, top, &cwd, s, col, code);
+                        }
+                        if let Some(p) = &skipped
+                            && ran
+                            && (code == 0 || p.when == artifacts::When::AnyExit)
+                        {
+                            eprintln!(
+                                "slot: artifacts not fetched: {} is set",
+                                artifacts::NO_PRODUCTS_ENV
+                            );
                         }
                         code = match (&req.workspace, top.as_deref()) {
                             (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
@@ -473,7 +493,8 @@ fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
 }
 
 /// Copies the products `col` collected from the job's target directory on
-/// `host` into the local target directory and prints one line. Returns
+/// `host` into the local target directory, removes the local files they
+/// supersede ([`artifacts::prune`]) and prints one line. Returns
 /// `code`, or 1 when the copy failed after a job that exited 0: the caller
 /// would run a stale binary.
 fn products_back(
@@ -512,7 +533,8 @@ fn products_back(
         target: &target_dir,
     };
     match artifacts::fetch(&src, &rels, &local, &s.sync) {
-        Ok(f) => {
+        Ok(mut f) => {
+            f.pruned = artifacts::prune(&local, &rels);
             eprintln!("{}", f.line());
             code
         }
