@@ -102,6 +102,9 @@ fn remote_call(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str]) -> Output {
     remote_call_env(d, ssh, cwd, argv, &[])
 }
 
+/// A remote job that cannot start runs on this machine's daemon only with this.
+const FALLBACK: &[(&str, &str)] = &[("SLOT_REMOTE_FALLBACK", "local")];
+
 /// The directory every test's tempdir lies in: the client keeps a tree's
 /// own path on the server only below its same-path root.
 fn temp_root() -> PathBuf {
@@ -294,7 +297,8 @@ fn a_server_without_the_sibling_step_gets_a_plain_sync() {
 }
 
 /// Starts a sync that never moves a byte, or whose rsync is killed by
-/// someone else, and checks that the job ran on this machine's daemon, not
+/// someone else, and checks that the job does not run without
+/// `SLOT_REMOTE_FALLBACK=local`, and with it ran on this machine's daemon, not
 /// on the server, and that no connection to the server's daemon was made.
 fn falls_back(rsync_step: &str, why: &str) {
     let d = Daemon::start();
@@ -308,8 +312,15 @@ fn falls_back(rsync_step: &str, why: &str) {
             t.path().join("ssh.log").display()
         ),
     );
-    let t0 = Instant::now();
+    // Without `SLOT_REMOTE_FALLBACK=local` the job does not run at all.
     let out = remote_call(&d, &ssh, &a, &["echo", "ran-here"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    assert!(err.contains("the job did not run"), "{err}");
+    assert!(err.contains(why), "{err}");
+    let t0 = Instant::now();
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran-here"], FALLBACK);
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "ran-here\n", "{err}");
@@ -401,7 +412,7 @@ fn a_same_path_tree_outside_the_roots_is_refused() {
         "",
         &format!("--same-path-root {}", other.display()),
     );
-    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], SAME_PATH);
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], &[SAME_PATH[0], FALLBACK[0]]);
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("running it on this machine's daemon"), "{err}");
 
@@ -778,7 +789,13 @@ fn a_job_whose_fetch_fails_runs_on_this_machines_daemon() {
     );
     let ssh = forced_ssh(t.path(), &d, "");
     let cargo = logging_cargo(t.path());
-    let out = remote_cargo(&d, &ssh, &repo, &[cargo.to_str().unwrap(), "check"]);
+    let out = remote_cargo_env(
+        &d,
+        &ssh,
+        &repo,
+        &[cargo.to_str().unwrap(), "check"],
+        FALLBACK,
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("cargo fetch failed") && err.contains("running it on this machine's daemon"),

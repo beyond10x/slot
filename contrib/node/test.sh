@@ -167,6 +167,9 @@ run "$R" check
 sh "$P" pins >"$W/pins" 2>"$W/err"
 grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
   ok "pins: wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
+# geckodriver at the release of the forge runner image of the browser test lanes (Firefox itself
+# is the workstation's, copied with /usr).
+grep -qx 'geckodriver 0.37.1' "$W/pins" && ok "pins: geckodriver 0.37.1" || bad "pins: no geckodriver 0.37.1: $(cat "$W/pins")"
 # ess is not pinned: it picks the release a repository pins itself (an exact `requires` runs
 # that release from its own digest-checked cache, a line pin runs the base binary), so the node's
 # base ess is the workstation's, copied by push.sh, and both choose the same for every repository.
@@ -188,6 +191,21 @@ run "$R" apply
 grep -q '^changed: tool:wasm-bindgen: wasm-bindgen 0.2.130 installed: wasm-bindgen$' "$W/out" && ok "apply installs the pinned wasm-bindgen" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
 run "$R" check
 [ $? -eq 0 ] && ok "after the tool install: 0 drift" || bad "after the tool install: $(cat "$W/out")"
+# A tool whose release tag is not its version (geckodriver's `v0.37.1`) and whose archive holds
+# the binary at its top; its `--version` says more than name and version on the first line.
+rm -f "$R/srv/slot/cargo/bin/geckodriver"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'fetch https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-linux64.tar.gz' "$R/.calls" &&
+  ok "geckodriver is fetched from its release tag v0.37.1" || bad "geckodriver URL: $(grep fetch "$R/.calls")"
+grep -q '^changed: tool:geckodriver: geckodriver 0.37.1 installed: geckodriver$' "$W/out" && ok "apply installs geckodriver 0.37.1" || bad "geckodriver apply: $(cat "$W/out" "$W/err" | grep tool)"
+printf '#!/bin/sh\necho "geckodriver 0.37.1 (0123abcdef01 2026-01-01 00:00 +0000)"\necho\necho "The source code of this program is available"\n' >"$R/srv/slot/cargo/bin/geckodriver"
+run "$R" check
+grep -q 'tool:geckodriver' "$W/out" && bad "a geckodriver whose first line names 0.37.1 is drift: $(grep tool "$W/out")" || ok "check reads the first line's name and version"
+printf '#!/bin/sh\necho "geckodriver 0.36.0 (0123abcdef01 2025-01-01 00:00 +0000)"\n' >"$R/srv/slot/cargo/bin/geckodriver"
+run "$R" check
+grep -q "^drift: tool:geckodriver: .*'geckodriver 0.36.0', want geckodriver 0.37.1" "$W/out" && ok "check names a geckodriver of another release" || bad "geckodriver 0.36.0: $(grep tool "$W/out")"
+run "$R" apply
 
 # 5c. Closing the setup login ends the connections still logged in with the setup key; the
 # build key's connections stay. The node's sshd log names each connection's pid and key.
@@ -268,12 +286,15 @@ if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "bundle check: 0 drift
 # 6b. push.sh compares file by file: a file a node job added to a copied directory (a cache)
 # is not drift; a file missing or of another size on the node is.
 U=$here/push.sh
-printf 'host ws\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\n' >"$W/here"
-printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\ncopy .cache/t/job-added 3\n' >"$W/node"
+# The node reports each pinned tool's release as `pin <name> <version>`; the workstation's lines
+# for them (it may not have them) are not compared.
+pins_ok=$(sh "$P" pins | sed 's/^/pin /')
+printf 'host ws\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\npin geckodriver missing\n' >"$W/here"
+printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\ncopy .cache/t/job-added 3\n%s\n' "$pins_ok" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>"$W/err"
 st=$?
 [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "a file a job added on the node is not drift" || bad "job-added file: exit $st $(cat "$W/out" "$W/err")"
-printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 6\nbin cargo-y 3\n' >"$W/node"
+printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 6\nbin cargo-y 3\n%s\n' "$pins_ok" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>"$W/err"
 st=$?
 [ $st -eq 1 ] && ok "compare with differences exits 1" || bad "compare with differences exit $st"
@@ -286,6 +307,15 @@ printf 'host node\nbin ess 10\nsum ess bbbb\n' >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
 st=$?
 [ $st -eq 1 ] && grep -qx 'drift: push: workstation has: sum ess aaaa' "$W/out" && ok "a node ess of the same size and another digest is drift" || bad "ess digest: exit $st $(cat "$W/out")"
+printf 'host ws\nbin cargo-x 10\n' >"$W/here"
+printf 'host node\nbin cargo-x 10\n%s\n' "$(echo "$pins_ok" | sed 's/^pin geckodriver .*/pin geckodriver 0.36.0/')" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: push: pin geckodriver: node has 'geckodriver 0.36.0', want geckodriver 0.37.1" "$W/out" && ok "push.sh check names a pinned tool of another release on the node" || bad "pin drift: exit $st $(cat "$W/out")"
+printf 'host node\nbin cargo-x 10\n%s\n' "$(echo "$pins_ok" | grep -v '^pin geckodriver ')" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: push: pin geckodriver: node has 'missing', want geckodriver 0.37.1" "$W/out" && ok "push.sh check names a pinned tool missing on the node" || bad "pin missing: exit $st $(cat "$W/out")"
 printf 'host ws\n' >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "a result from the workstation itself is refused" || bad "same host not refused"
