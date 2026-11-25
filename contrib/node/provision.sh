@@ -437,6 +437,7 @@ gen_cargo_config() {
   cat <<'EOF'
 [build]
 rustc-wrapper = "sccache"
+incremental = false
 [profile.dev]
 debug = false
 [target.x86_64-unknown-linux-gnu]

@@ -32,6 +32,9 @@
   the step that reads a credential while it runs, never for a whole task, and sends a step that
   needs docker or a local service to `.slot.toml` `local`. Before, it offered `--here` for the
   step, and callers sent whole tasks back to the workstation with it.
+- The node's cargo config turns incremental compilation off. The compile cache refuses every
+  incremental rustc call; on one node 2,929 calls in 3.7 hours were refused for that reason. A
+  job that sets `CARGO_INCREMENTAL` itself still overrides it.
 
 ## 0.36.0 — 2026-11-24
 
