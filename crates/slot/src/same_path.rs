@@ -32,6 +32,71 @@ pub fn applies(top: &Path, home: Option<&Path>) -> bool {
     home.is_some_and(|h| plain(h) && h != Path::new("/") && plain(top) && top.starts_with(h))
 }
 
+/// Why `top` may not be synced as a remote tree, if it may not. A tree is
+/// one repository's work tree, or a plain folder (a scratch copy) that holds
+/// no repository. Refused: `home` (the same-path root) or a directory above
+/// it; a folder directly under `home` that is no work tree (a group of
+/// repositories, a home-level folder); a folder that is no work tree and
+/// holds a repository within two levels. A folder that cannot be read is
+/// refused.
+pub fn tree_refusal(top: &Path, home: Option<&Path>) -> Option<String> {
+    let refuse = |why: String| {
+        Some(format!(
+            "{} is not one repository's work tree ({why}); nothing is synced",
+            top.display()
+        ))
+    };
+    if home.is_some_and(|h| h.starts_with(top)) {
+        return refuse("it is the same-path root or above it".into());
+    }
+    if std::fs::symlink_metadata(top.join(".git")).is_ok() {
+        return None;
+    }
+    if home.is_some_and(|h| top.parent() == Some(h)) {
+        return refuse("it lies directly under the same-path root".into());
+    }
+    let mut found = Vec::new();
+    if let Err(e) = repositories_within(top, Path::new(""), 2, &mut found) {
+        return refuse(format!("it cannot be read: {e}"));
+    }
+    if found.is_empty() {
+        return None;
+    }
+    found.sort();
+    let more = found.len().saturating_sub(5);
+    found.truncate(5);
+    let mut names = found.join(", ");
+    if more > 0 {
+        names = format!("{names} and {more} more");
+    }
+    refuse(format!("it holds the repositories {names}"))
+}
+
+/// The directories below `dir`, `depth` levels deep at most, that hold a
+/// `.git` entry, as paths relative to the first `dir`. Symbolic links are
+/// not followed.
+fn repositories_within(
+    dir: &Path,
+    rel: &Path,
+    depth: usize,
+    found: &mut Vec<String>,
+) -> std::io::Result<()> {
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        if !e.file_type()?.is_dir() {
+            continue;
+        }
+        let p = e.path();
+        let r = rel.join(e.file_name());
+        if std::fs::symlink_metadata(p.join(".git")).is_ok() {
+            found.push(r.to_string_lossy().into_owned());
+        } else if depth > 1 {
+            repositories_within(&p, &r, depth - 1, found)?;
+        }
+    }
+    Ok(())
+}
+
 /// Absolute, with no `.` or `..`.
 pub fn plain(p: &Path) -> bool {
     p.is_absolute()
@@ -189,6 +254,32 @@ mod tests {
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// A plain folder is a tree, also with a symlink to a repository in it
+    /// (links are not followed); a folder whose subfolder cannot be read is
+    /// refused.
+    #[test]
+    fn a_folder_that_cannot_be_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let top = home.join("g/scratch");
+        std::fs::create_dir_all(top.join("sub")).unwrap();
+        assert_eq!(tree_refusal(&top, Some(&home)), None);
+        std::fs::create_dir(home.join("repo")).unwrap();
+        std::fs::create_dir(home.join("repo/.git")).unwrap();
+        std::os::unix::fs::symlink(home.join("repo"), top.join("link")).unwrap();
+        assert_eq!(tree_refusal(&top, Some(&home)), None);
+        let locked = top.join("sub");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&locked).is_ok();
+        let got = tree_refusal(&top, Some(&home));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !readable {
+            let why = got.unwrap_or_default();
+            assert!(why.contains("it cannot be read"), "{why}");
+        }
     }
 
     #[test]
