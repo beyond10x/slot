@@ -35,14 +35,15 @@ for b in "$P/usr/local/bin/node" "$P/usr/bin/node"; do
 done
 # tool: the TypeScript and JavaScript tools the test lanes of the consumers call by name. A node has
 # them in /usr/local/bin (the archive pins of provision.sh); the workstation in /usr/bin or the
-# user's ~/.local/bin. ess, aep and cargo-about are in the cargo bin on both (the tool pins of
-# provision.sh), yq in /usr/local/bin on a node and in the user's ~/go/bin on the workstation.
+# user's ~/.local/bin. ess and cargo-about are in the cargo bin on both (the tool pins of
+# provision.sh), aep only on the workstation (no pin: its release needs a newer glibc than a node
+# has), yq in /usr/local/bin on a node and in the user's ~/go/bin on the workstation.
 # The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
 # runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
 for n in tsc prettier esbuild ess aep yq cargo-about; do
   for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.cargo/bin/$n" "$HOME/go/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
-    tv=$(cd / && env -u ESS_TOOLCHAIN "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
+    tv=$(cd / && env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
     echo "tool $n ${tv:-missing}"
     break
   done

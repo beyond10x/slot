@@ -151,11 +151,13 @@ rm -f "$R/.state/immutable/$(echo "$k" | tr / _)"
 echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAnotherKey other' >>"$k"
 printf '#!/bin/sh\necho slot 0.35.0\n' >"$R/srv/slot/bin/slot"
 rm -f "$R/var/lib/builder/.cargo"
+rm -f "$R/usr/bin/cargo"
+ln -sf /nowhere "$R/usr/bin/go"
 grep -v '^MaxSessions' "$R/etc/ssh/sshd_config" >"$W/s" && cat "$W/s" >"$R/etc/ssh/sshd_config"
 sed -i '\# /var/lib/builder/.cache$#d' "$R/.state/mounts"
 run "$R" check
 st=$?
-for item in unit:sccache-node.service fstab keys slot:/srv/slot/bin/slot link:/var/lib/builder/.cargo sshd binds; do
+for item in unit:sccache-node.service fstab keys slot:/srv/slot/bin/slot link:/var/lib/builder/.cargo link:/usr/bin/cargo link:/usr/bin/go sshd binds; do
   grep -q "^drift: $item" "$W/out" && ok "found: $item" || bad "not found: $item ($(cat "$W/out"))"
 done
 [ $st -eq 1 ] || bad "check with drift exits $st"
@@ -163,6 +165,18 @@ run "$R" apply
 run "$R" check
 st=$?
 if [ $st -eq 0 ]; then ok "apply closes every drift"; else bad "left after apply: $(cat "$W/out")"; fi
+# The shims of the workstation send the real binary by absolute path (/usr/bin/cargo, /usr/bin/go):
+# the node has those names as links to its own binaries.
+for l in cargo:/var/lib/builder/.cargo/bin/cargo rustc:/var/lib/builder/.cargo/bin/rustc rustup:/var/lib/builder/.cargo/bin/rustup cargo-clippy:/var/lib/builder/.cargo/bin/cargo-clippy go:/usr/local/bin/go gofmt:/usr/local/bin/gofmt; do
+  [ "$(readlink "$R/usr/bin/${l%%:*}")" = "${l#*:}" ] && ok "/usr/bin/${l%%:*} links to ${l#*:}" || bad "/usr/bin/${l%%:*}: '$(readlink "$R/usr/bin/${l%%:*}")'"
+done
+# A real file at one of those names is never replaced.
+rm -f "$R/usr/bin/rustc"
+printf 'real\n' >"$R/usr/bin/rustc"
+run "$R" apply
+grep -q '^failed: link:/usr/bin/rustc: is a real file; not replaced' "$W/err" && [ "$(cat "$R/usr/bin/rustc")" = real ] && ok "a real /usr/bin/rustc is not replaced" || bad "real rustc: $(cat "$W/err")"
+rm -f "$R/usr/bin/rustc"
+run "$R" apply
 grep -c 'AnotherKey' "$k" | grep -q '^0$' && ok "an extra key is removed" || bad "the extra key stayed"
 grep -q '/var/lib/builder/.cache none bind' "$R/etc/fstab" && bad "the fstab bind line stayed" || ok "fstab bind lines into the store are removed"
 
@@ -227,7 +241,7 @@ grep -qx 'geckodriver 0.37.1' "$W/pins" && ok "pins: geckodriver 0.37.1" || bad 
 grep -qx 'sccache 0.18.0' "$W/pins" && ok "pins: sccache 0.18.0" || bad "pins: no sccache 0.18.0: $(cat "$W/pins")"
 # ess at the release the workstation has on PATH (a dispatcher: a repository's exact `requires` runs
 # that release from the build user's ~/.cache/ess/toolchains, which ess downloads itself), and
-# cargo-about at the release substrate's CI installs.
+# cargo-about at the release a consumer's CI installs.
 grep -qx 'ess 0.99.2' "$W/pins" && ok "pins: ess 0.99.2" || bad "pins: no ess 0.99.2: $(cat "$W/pins")"
 grep -qx 'cargo-about 0.9.1' "$W/pins" && ok "pins: cargo-about 0.9.1" || bad "pins: no cargo-about 0.9.1: $(cat "$W/pins")"
 while read -r b v; do
@@ -236,7 +250,11 @@ done <"$W/pins"
 printf '#!/bin/sh\necho wasm-bindgen 0.2.129\n' >"$R/srv/slot/cargo/bin/wasm-bindgen"
 run "$R" check
 grep -q "^drift: tool:wasm-bindgen: .*'wasm-bindgen 0.2.129', want wasm-bindgen 0.2.130" "$W/out" && ok "check names a wasm-bindgen of another release" || bad "wasm-bindgen 0.2.129 not named: $(grep tool "$W/out")"
-grep -q '^drift: tool:ess' "$W/out" && bad "check names ess" || ok "check leaves ess to push.sh"
+printf '#!/bin/sh\necho ess 0.99.1\n' >"$R/srv/slot/cargo/bin/ess"
+printf '#!/bin/sh\necho cargo-about 0.9.0\n' >"$R/srv/slot/cargo/bin/cargo-about"
+run "$R" check
+grep -q "^drift: tool:ess: .*'ess 0.99.1', want ess 0.99.2" "$W/out" && ok "check names an ess of another release" || bad "ess 0.99.1 not named: $(grep tool "$W/out")"
+grep -q "^drift: tool:cargo-about: .*'cargo-about 0.9.0', want cargo-about 0.9.1" "$W/out" && ok "check names a cargo-about of another release" || bad "cargo-about 0.9.0 not named: $(grep tool "$W/out")"
 : >"$R/.state-tool-fetch-fails"
 run "$R" apply
 st=$?
@@ -332,7 +350,7 @@ run "$R5" check
 for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild; do
   [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
 done
-[ "$("$R5/usr/local/bin/prettier" --version)" = "3.8.1" ] && [ "$("$R5/usr/local/bin/esbuild" --version)" = "0.28.2" ] && ok "prettier and esbuild answer their release through the links" || bad "tool versions: $("$R5/usr/local/bin/prettier" --version 2>&1) $("$R5/usr/local/bin/esbuild" --version 2>&1)"
+[ "$("$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" --version)" = "3.8.1" ] && [ "$("$R5/usr/local/esbuild-0.28.2/bin/esbuild" --version)" = "0.28.2" ] && ok "prettier and esbuild answer their release (run by their tree path: a link names the real /usr/local)" || bad "tool versions: $("$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" --version 2>&1) $("$R5/usr/local/esbuild-0.28.2/bin/esbuild" --version 2>&1)"
 [ -x "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" ] && [ ! -L "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" ] && ok "a linked script the tarball ships without the execute bit is executable after apply" || bad "prettier.cjs mode: $(ls -l "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" 2>&1)"
 rm -f "$R5/usr/local/bin/prettier"
 rm -rf "$R5/usr/local/esbuild-0.28.2"
@@ -348,7 +366,7 @@ run "$R5" check
 # yq is the Go one of mikefarah: the release tarball names its binary yq_linux_amd64 (no leading
 # directory), linked as /usr/local/bin/yq; `yq --version` has the release as its last word.
 [ "$(readlink "$R5/usr/local/bin/yq")" = "/usr/local/yq-v4.30.8/yq_linux_amd64" ] && ok "/usr/local/bin/yq links to /usr/local/yq-v4.30.8/yq_linux_amd64" || bad "yq link: '$(readlink "$R5/usr/local/bin/yq")'"
-[ -x "$R5/usr/local/yq-v4.30.8/yq_linux_amd64" ] && [ "$("$R5/usr/local/bin/yq" --version)" = "v4.30.8" ] && ok "yq answers v4.30.8 through the link" || bad "yq: $("$R5/usr/local/bin/yq" --version 2>&1)"
+[ -x "$R5/usr/local/yq-v4.30.8/yq_linux_amd64" ] && [ "$("$R5/usr/local/yq-v4.30.8/yq_linux_amd64" --version)" = "v4.30.8" ] && ok "yq answers v4.30.8 (run by its tree path)" || bad "yq: $("$R5/usr/local/yq-v4.30.8/yq_linux_amd64" --version 2>&1)"
 rm -f "$R5/usr/local/bin/yq"
 rm -rf "$R5/usr/local/yq-v4.30.8"
 run "$R5" check
@@ -722,7 +740,7 @@ for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-next
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"
 [ ! -e "$W/ran" ] && ok "wrong SHA-256: no downloaded file runs" || bad "a downloaded file ran"
-[ "$(grep -c 'rustup-init\|go1.27.1\|node-v22\|task_linux\|nextest\|geckodriver\|wasm-bindgen\|sccache\|slot-0.36' "$W/curl.log")" -ge 9 ] && ok "wrong SHA-256: every download was attempted" || bad "curl calls: $(cat "$W/curl.log")"
+[ "$(grep -c 'rustup-init\|go1.27.1\|node-v22\|task_linux\|nextest\|geckodriver\|wasm-bindgen\|sccache\|slot-0.36\|ess-0.99.2\|cargo-about-0.9.1\|yq_linux_amd64' "$W/curl.log")" -ge 12 ] && ok "wrong SHA-256: every download was attempted" || bad "curl calls: $(cat "$W/curl.log")"
 # Control: with the SHA256SUMS line that matches the served file, tar is reached (so the stand-in
 # tar would record a call if the check had failed open above), with no owner taken from the archive.
 RG=$W/r6b

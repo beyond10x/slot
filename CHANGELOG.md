@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Node jobs started by the workstation's shims: they name the real binary by absolute path, so a
+  node without `/usr/bin/cargo` refused every cargo job ("cargo fetch --locked failed:
+  /usr/bin/cargo: No such file or directory"). `provision.sh` links `/usr/bin/cargo`,
+  `cargo-clippy`, `cargo-fmt`, `clippy-driver`, `rustc`, `rustdoc`, `rustfmt` and `rustup` to the
+  build user's rustup proxies and `/usr/bin/go`, `gofmt` to `/usr/local/bin`; it never replaces a
+  real file.
+
 - Node CLIs the workstation has on PATH: `provision.sh` installs `ess` 0.99.2 and `cargo-about`
   0.9.1 (tool pins, SHA-256 from the release's checksum file) and `yq` v4.30.8 of mikefarah
   (archive pin, linked as `yq`), the packages `glibc-static`, `bubblewrap` and `socat`, and puts

@@ -148,8 +148,8 @@ version of `go` and `node`; a missing link or another version is drift. `typescr
 `tsserver`), `prettier` and `esbuild` are archives of the same kind: the npm tarballs of those
 releases from `registry.npmjs.org` (esbuild's is its `@esbuild/linux-x64` package, the native
 binary), with `bin/prettier.cjs` linked as `prettier`; the consumers' test lanes call them by
-name. `toolchains.sh` prints one `tool <name> <version>` line for each of the three, and
-`push.sh check` compares those lines both ways. `zstd` and `python3` are base packages. An older directory of a
+name. `toolchains.sh` prints one `tool <name> <version>` line for each tool it finds (the list is
+below), and `push.sh check` compares those lines both ways. `zstd` and `python3` are base packages. An older directory of a
 former pin stays until someone removes it. Other releases are not installed: a consumer fetches its
 own (`GOTOOLCHAIN=auto`). The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
 
@@ -161,9 +161,15 @@ writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin 
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
 `aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
 
-`aep` has no pin: its 0.80.0 release binary needs glibc 2.39 and the node has 2.34. Packages
-`glibc-static` (substrate's `cc -static` tests), `bubblewrap` and `socat` are base packages, and
-`/usr/sbin` is in the job PATH of `slot-node.service` (`ip`).
+`aep` has no pin: its 0.80.0 release binary needs glibc 2.39 and the node has 2.34. Until the node
+has an `aep`, `push.sh check` prints `drift: push: workstation has: tool aep …` and exits 1; the
+same holds for any tool whose release the workstation changes before the pin does. Packages
+`glibc-static` (a consumer's `cc -static` tests), `bubblewrap` and `socat` are base packages, and
+`/usr/sbin` is in the job PATH of `slot-node.service` (`ip`). The workstation's `cargo` and `go`
+shims send the real binary by absolute path and the node runs that argv as sent, so `/usr/bin/cargo`,
+`cargo-clippy`, `cargo-fmt`, `clippy-driver`, `rustc`, `rustdoc`, `rustfmt`, `rustup` link to the
+build user's rustup proxies and `/usr/bin/go`, `gofmt` to `/usr/local/bin`; a real file at one of
+those names is left alone and reported as `failed`.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

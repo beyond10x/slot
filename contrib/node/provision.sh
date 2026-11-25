@@ -50,7 +50,7 @@ usage() {
 # binaries in it. The first line of each binary's `--version` starts with `<binary> <version>`.
 # ess: the release the workstation has on PATH, a dispatcher that downloads the release a
 # repository requires into the build user's ~/.cache/ess/toolchains (SHA-256 checked by ess).
-# cargo-about: the release substrate's CI installs, a static binary.
+# cargo-about: the release a consumer's CI installs, a static binary.
 # geckodriver: the release on the forge runner image of the browser test lanes.
 # sccache: the distribution has no package of it; the release the workstation runs.
 TOOL_PINS='wasm-bindgen 0.2.130 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f https://github.com/wasm-bindgen/wasm-bindgen/releases/download wasm-bindgen-%s-x86_64-unknown-linux-musl wasm-bindgen wasm-bindgen-test-runner wasm2es6js
@@ -876,6 +876,23 @@ p_links() {
       fi
     fi
   done
+  # The workstation's shims name the real binary by absolute path (/usr/bin/cargo, /usr/bin/go),
+  # and the node runs that argv as sent: /usr/bin/<name> links to the node's own binary, never
+  # over a real file.
+  for n in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup go gofmt; do
+    p=/usr/bin/$n
+    case $n in go | gofmt) t=/usr/local/bin/$n ;; *) t=$H/.cargo/bin/$n ;; esac
+    if [ "$(readlink "$R$p" 2>/dev/null)" != "$t" ]; then
+      drift "link:$p" "should point to $t"
+      if fixing; then
+        if [ -e "$R$p" ] && [ ! -L "$R$p" ]; then
+          failed "link:$p" "is a real file; not replaced"
+        else
+          mkdir -p "$R/usr/bin" && rm -f "$R$p" && ln -s "$t" "$R$p" && changed "link:$p" "-> $t"
+        fi
+      fi
+    fi
+  done
 }
 
 p_files() {
@@ -1001,7 +1018,7 @@ tool_fetch() {
 # The first two words of the first line of a binary's `--version`, run as the build user. A
 # first line that is only a version (task prints `3.54.0`) reads as `<binary> <version>`.
 tool_version() {
-  tv_l=$(as_user "$1" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f1,2)
+  tv_l=$(cd / && as_user "$1" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f1,2)
   case $tv_l in [0-9]*) tv_l="${1##*/} $tv_l" ;; esac
   echo "$tv_l"
 }

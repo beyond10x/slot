@@ -86,7 +86,7 @@ digest=$(
 echo "host \$(hostname)"
 cd "\$HOME/.cargo/bin" 2>/dev/null
 for b in $(sh "$here/provision.sh" pins | cut -d' ' -f1 | tr '\n' ' '); do
-  v=\$("./\$b" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f2)
+  v=\$(env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED "./\$b" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f2)
   echo "pin \$b \${v:-missing}"
 done
 EOF
