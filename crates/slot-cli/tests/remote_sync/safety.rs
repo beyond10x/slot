@@ -234,7 +234,10 @@ fn an_rsync_that_follows_outside_links_is_refused() {
         &ssh,
         &a,
         &["echo", "ran-here"],
-        &[("PATH", path.to_str().unwrap())],
+        &[
+            ("PATH", path.to_str().unwrap()),
+            ("SLOT_REMOTE_FALLBACK", "local"),
+        ],
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
