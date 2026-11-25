@@ -36,8 +36,9 @@ done
 # tool: the TypeScript and JavaScript tools the test lanes of the consumers call by name. A node has
 # them in /usr/local/bin (the archive pins of provision.sh); the workstation in /usr/bin or the
 # user's ~/.local/bin. ess and cargo-about are in the cargo bin on both (the tool pins of
-# provision.sh), aep only on the workstation (no pin: its release needs a newer glibc than a node
-# has), yq in /usr/local/bin on a node and in the user's ~/go/bin on the workstation.
+# provision.sh), aep too (on a node built from its release tag, SOURCE_PINS: its release binary
+# needs a newer glibc than a node has), yq in /usr/local/bin on a node and in the user's ~/go/bin on
+# the workstation.
 # The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
 # runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
 for n in tsc prettier esbuild ess aep yq cargo-about; do

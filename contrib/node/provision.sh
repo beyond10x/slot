@@ -81,8 +81,15 @@ RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
 RUST_TRIPLE=x86_64-unknown-linux-gnu
+# Tools built on the node from a git revision, as the build user, into the store's cargo bin. One
+# line each: name, version, repository URL, revision (the pin: a git object id; the release tag
+# peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
+# starts with `<binary> <version>`). aep: the release binary needs glibc 2.39 and a node has 2.34,
+# so the tag of the release the workstation runs is built here.
+SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5edee0da723bb72d9acb4 aep-cli 1.99.1 aep'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
+  echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
 }
 if [ "$mode" = pins ]; then
   pins
@@ -1067,6 +1074,60 @@ p_tools() {
 $TOOL_PINS
 EOF
 }
+# The tools of SOURCE_PINS: built by `cargo install --locked --git <url> --rev <rev>` as the build
+# user once the toolchain of the pin exists (the rust part runs first), read back with `--version`.
+# --force: a binary of another release or one cargo did not install is replaced. TMPDIR: the
+# store's tmp, not /tmp (a tmpfs, too small for the build). The build ends after 25 minutes.
+a_cargo_install() {
+  ai_v=$2
+  ai_b=$7
+  set -- "+$6" install --locked --force --git "$3" --rev "$4" "$5" --root "$STORE/cargo"
+  if [ -n "$T" ]; then
+    calls "cargo $*"
+    [ -e "$R/.state-tool-fetch-fails" ] && return 1
+    mkdir -p "$R$STORE/cargo/bin" && printf '#!/bin/sh\necho %s %s\n' "$ai_b" "$ai_v" >"$R$STORE/cargo/bin/$ai_b" &&
+      chmod 755 "$R$STORE/cargo/bin/$ai_b"
+  else
+    as_rust_user env TMPDIR="$STORE/tmp" timeout 1500 "$STORE/cargo/bin/cargo" "$@"
+  fi
+}
+p_source_tools() {
+  while read -r sn sv su sr sp st sb; do
+    [ -n "$sn" ] || continue
+    p=$STORE/cargo/bin/$sb
+    v=$(tool_version "$R$p")
+    [ "$v" = "$sb $sv" ] && continue
+    drift "tool:$sn" "$p is '${v:-missing}', want $sb $sv (built from $su at $sr)"
+    fixing || continue
+    if [ ! -x "$R$(rust_dir "$st")/bin/rustc" ]; then
+      failed "tool:$sn" "rust toolchain $st is not installed; $sn $sv not built"
+      continue
+    fi
+    if ! no_link "$p"; then
+      failed "tool:$sn" "$p has a symbolic link in it; not built"
+      continue
+    fi
+    if [ -n "$T" ]; then sl=$(mktemp); else sl=$(mktemp /var/tmp/slot-src.XXXXXX); fi || {
+      failed "tool:$sn" "no temporary file"
+      continue
+    }
+    if ! a_cargo_install "$sn" "$sv" "$su" "$sr" "$sp" "$st" "$sb" >"$sl" 2>&1; then
+      failed "tool:$sn" "cargo install of $sn $sv failed: $({ grep -m 3 '^error' "$sl"; tail -n 2 "$sl"; } | tr '\n' ' ')"
+      rm -f "$sl"
+      [ -n "$T" ] || rm -rf "$R$STORE"/tmp/cargo-install* 2>/dev/null
+      continue
+    fi
+    rm -f "$sl"
+    v=$(tool_version "$R$p")
+    if [ "$v" = "$sb $sv" ]; then
+      changed "tool:$sn" "$sn $sv built from $sr: $sb"
+    else
+      failed "tool:$sn" "$p is '${v:-missing}' after the build"
+    fi
+  done <<EOF
+$SOURCE_PINS
+EOF
+}
 
 # Rust: rustup for the build user in the store (~/.rustup and ~/.cargo link there), then each
 # toolchain of RUST_TOOLCHAINS with RUST_COMPONENTS and RUST_TARGETS. Nothing is copied from the
@@ -1531,6 +1592,7 @@ case $mode in
     p_archives
     [ -n "$imds_open" ] || p_keys
     p_services
+    [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"
       [ "$ndrift" -eq 0 ] || exit 1

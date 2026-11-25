@@ -161,9 +161,13 @@ writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin 
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
 `aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
 
-`aep` has no pin: its 0.80.0 release binary needs glibc 2.39 and the node has 2.34. Until the node
-has an `aep`, `push.sh check` prints `drift: push: workstation has: tool aep …` and exits 1; the
-same holds for any tool whose release the workstation changes before the pin does. Packages
+`aep` 0.80.0 is built on the node: its release binary needs glibc 2.39 and the node has 2.34. A
+source pin (`SOURCE_PINS` in `provision.sh`) names the repository, the git revision of the release
+tag (the pin: there is no archive to hash) and the rust toolchain; apply runs `cargo +1.99.1
+install --locked --git <url> --rev <rev> aep-cli --root <store>/cargo` as the build user after
+the rust part, and check reads `aep --version`. The build needs `github.com` over https (aep and
+its `entity-runtime` dependency are read without credentials). `push.sh check` exits 1 whenever the
+workstation has a tool whose release the node's pin does not match, `aep` included. Packages
 `glibc-static` (a consumer's `cc -static` tests), `bubblewrap` and `socat` are base packages, and
 `/usr/sbin` is in the job PATH of `slot-node.service` (`ip`). The workstation's `cargo` and `go`
 shims send the real binary by absolute path and the node runs that argv as sent, so `/usr/bin/cargo`,

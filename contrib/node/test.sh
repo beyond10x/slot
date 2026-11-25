@@ -255,11 +255,18 @@ printf '#!/bin/sh\necho cargo-about 0.9.0\n' >"$R/srv/slot/cargo/bin/cargo-about
 run "$R" check
 grep -q "^drift: tool:ess: .*'ess 0.99.1', want ess 0.99.2" "$W/out" && ok "check names an ess of another release" || bad "ess 0.99.1 not named: $(grep tool "$W/out")"
 grep -q "^drift: tool:cargo-about: .*'cargo-about 0.9.0', want cargo-about 0.9.1" "$W/out" && ok "check names a cargo-about of another release" || bad "cargo-about 0.9.0 not named: $(grep tool "$W/out")"
+# aep is built from its tag's commit on the node (SOURCE_PINS): its pin is a git revision.
+grep -qx 'aep 0.80.0' "$W/pins" && ok "pins: aep 0.80.0" || bad "pins: no aep 0.80.0: $(cat "$W/pins")"
+printf '#!/bin/sh\necho aep 0.79.0\n' >"$R/srv/slot/cargo/bin/aep"
+run "$R" check
+grep -q "^drift: tool:aep: .*'aep 0.79.0', want aep 0.80.0 (built from https://github.com/beyond10x/aep at af11af152de1732383a5edee0da723bb72d9acb4)" "$W/out" && ok "check names an aep of another release" || bad "aep 0.79.0 not named: $(grep tool "$W/out")"
 : >"$R/.state-tool-fetch-fails"
 run "$R" apply
 st=$?
 rm -f "$R/.state-tool-fetch-fails"
 [ $st -eq 1 ] && grep -q '^failed: tool:wasm-bindgen: download or checksum of wasm-bindgen 0.2.130' "$W/err" && ok "a failed tool download: apply exits 1 and names it" || bad "failed tool download: exit $st $(cat "$W/err")"
+grep -q '^failed: tool:aep: cargo install of aep 0.80.0 failed' "$W/err" && ok "a failed aep build is named" || bad "aep build failure not named: $(cat "$W/err")"
+grep -q '^changed: tool:aep' "$W/out" && bad "a failed aep build is reported as changed" || ok "a failed aep build is not reported as changed"
 grep -q '^changed: tool:wasm-bindgen' "$W/out" && bad "a failed tool install is reported as changed" || ok "a failed tool install is not reported as changed"
 run "$R" apply
 grep -q '^changed: tool:wasm-bindgen: wasm-bindgen 0.2.130 installed: wasm-bindgen$' "$W/out" && ok "apply installs the pinned wasm-bindgen" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
@@ -285,9 +292,12 @@ run "$R" apply
 # bare `3.54.0`, which check reads as `task 3.54.0`.
 grep -qx 'cargo-nextest 0.9.143' "$W/pins" && ok "pins: cargo-nextest 0.9.143" || bad "pins: no cargo-nextest 0.9.143: $(cat "$W/pins")"
 grep -qx 'task 3.54.0' "$W/pins" && ok "pins: task 3.54.0" || bad "pins: no task 3.54.0: $(cat "$W/pins")"
-rm -f "$R/srv/slot/cargo/bin/cargo-nextest" "$R/srv/slot/cargo/bin/task" "$R/srv/slot/cargo/bin/ess" "$R/srv/slot/cargo/bin/cargo-about"
+rm -f "$R/srv/slot/cargo/bin/cargo-nextest" "$R/srv/slot/cargo/bin/task" "$R/srv/slot/cargo/bin/ess" "$R/srv/slot/cargo/bin/cargo-about" "$R/srv/slot/cargo/bin/aep"
 : >"$R/.calls"
 run "$R" apply
+grep -qx 'cargo +1.99.1 install --locked --force --git https://github.com/beyond10x/aep --rev af11af152de1732383a5edee0da723bb72d9acb4 aep-cli --root /srv/slot/cargo' "$R/.calls" &&
+  ok "aep is built from the revision of its tag, on the pinned toolchain" || bad "aep install call: $(grep cargo "$R/.calls")"
+grep -q '^changed: tool:aep: aep 0.80.0 built from af11af152de1732383a5edee0da723bb72d9acb4: aep$' "$W/out" && ok "apply builds aep 0.80.0" || bad "aep apply: $(cat "$W/out" "$W/err" | grep aep)"
 grep -qx 'fetch https://github.com/beyond10x/ess/releases/download/0.99.2/ess-0.99.2-x86_64-unknown-linux-gnu.tar.gz' "$R/.calls" &&
   ok "ess is fetched from its release 0.99.2" || bad "ess URL: $(grep fetch "$R/.calls")"
 grep -qx 'fetch https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.1/cargo-about-0.9.1-x86_64-unknown-linux-musl.tar.gz' "$R/.calls" &&

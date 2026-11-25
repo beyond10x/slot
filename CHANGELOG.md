@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Node `aep` 0.80.0: `provision.sh` builds it on the node, as the build user, from the commit of
+  the release tag (`SOURCE_PINS`: `cargo install --locked --git … --rev …`), because the release
+  binary needs glibc 2.39 and the node has 2.34. `check` reads `aep --version`.
+
 - Node jobs started by the workstation's shims: they name the real binary by absolute path, so a
   node without `/usr/bin/cargo` refused every cargo job ("cargo fetch --locked failed:
   /usr/bin/cargo: No such file or directory"). `provision.sh` links `/usr/bin/cargo`,
@@ -13,8 +17,8 @@
   0.9.1 (tool pins, SHA-256 from the release's checksum file) and `yq` v4.30.8 of mikefarah
   (archive pin, linked as `yq`), the packages `glibc-static`, `bubblewrap` and `socat`, and puts
   `/usr/sbin` in the job PATH. `toolchains.sh` prints a `tool` line for `ess`, `aep`, `yq` and
-  `cargo-about`, so `push.sh check` names a difference. `aep` 0.80.0 has no pin: its release
-  binary needs glibc 2.39 and the node has 2.34.
+  `cargo-about`, so `push.sh check` names a difference. `aep` has no archive pin: its release
+  binary needs glibc 2.39 and the node has 2.34 (it is built from source, see above).
 
 - Node tools of the consumers' test lanes: `provision.sh` installs `typescript` 6.0.3 (`tsc`),
   `prettier` 3.8.1 and `esbuild` 0.28.2 from their npm tarballs (SHA-256 pinned, into
