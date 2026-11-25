@@ -469,20 +469,32 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
     run_watched(&mut rsync, b, deadline).map(drop)
 }
 
-/// Copies the directory `src` to `dest`, an absolute path on the server,
-/// within `b`: a git database of a job's git dependency (`git_deps.rs`).
-/// Adds to what `dest` holds (no `--delete`); `FETCH_HEAD` and git's lock
-/// files stay here.
-pub fn copy_dir(src: &Path, dest: &str, r: &Remote<'_>, b: &Bounds) -> Result<()> {
+/// The rsync filter of a git database copy: its objects, refs and `HEAD`,
+/// nothing else (no `config` with a login or a header, no hook, no
+/// `info/`, no `FETCH_HEAD`, no lock file of a running git).
+pub const DB_ENTRY_FILTER: [&str; 6] = [
+    "--exclude=*.lock",
+    "--include=/HEAD",
+    "--include=/packed-refs",
+    "--include=/objects/***",
+    "--include=/refs/***",
+    "--exclude=*",
+];
+
+/// Copies the git database `src` to entry `entry` of the server account's
+/// cargo git database (`git_deps::NODE_DB`, relative to its home), within
+/// `b`. Only [`DB_ENTRY_FILTER`] crosses; `-rt` without `-l`: a symbolic
+/// link is not sent. Adds to what the entry holds (no `--delete`).
+pub fn copy_db_entry(src: &Path, entry: &str, r: &Remote<'_>, b: &Bounds) -> Result<()> {
     let deadline = Instant::now() + b.limit;
     let mut rsync = Command::new("rsync");
     rsync
-        .args(["-a", "--mkpath"])
-        .args(["--exclude=/FETCH_HEAD", "--exclude=*.lock"])
+        .args(["-rt", "--mkpath"])
+        .args(DB_ENTRY_FILTER)
         .arg("-e")
         .arg(r.ssh.join(" "))
         .arg(format!("{}/", src.display()))
-        .arg(format!("{}:{dest}/", r.host));
+        .arg(format!("{}:{}/{entry}/", r.host, crate::git_deps::NODE_DB));
     run_watched(&mut rsync, b, deadline).map(drop)
 }
 

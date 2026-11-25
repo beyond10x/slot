@@ -22,10 +22,15 @@
 //!   <key> [<tree>]`, run by this binary whatever path the client named; the
 //!   workspace root must be this server's;
 //! - `slot __cargo-git <entry>:<rev>…`, read-only: which entries of this
-//!   account's cargo git database lack the revision; and the copy of one
-//!   such entry, `rsync --server … . <cargo-home>/git/db/<entry>/`, the git
-//!   dependencies of a job (`git_deps.rs`). The cargo home is `CARGO_HOME`,
-//!   else `~/.cargo`.
+//!   account's cargo git database lack the revision (entry names only, no
+//!   path; no git runs); and the copy of one such entry,
+//!   `rsync --server … . ~/.cargo/git/db/<entry>/`, the git dependencies of
+//!   a job (`git_deps.rs`). The database is always the one under the
+//!   account's home, never the session's `CARGO_HOME`. That copy takes no
+//!   option that keeps, follows or writes through a symbolic link
+//!   (`-l -L -k -K -R --copy-unsafe-links --safe-links`), deletes
+//!   (`--delete…`, `--force`) or writes in place (`--inplace`), and an
+//!   entry that is a symbolic link is refused.
 //!
 //! With `--same-path-root DIR`, a sync, a fetch and the sibling step may
 //! also name an absolute path below DIR: a tree mirrored at the client's own
@@ -291,6 +296,9 @@ fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>,
     let sender = args.iter().any(|a| a == "--sender");
     let mut paths = Vec::new();
     let mut dot = false;
+    // What a copy into the cargo git database may not carry.
+    let mut shorts = String::new();
+    let mut longs: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if dot {
@@ -327,6 +335,7 @@ fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>,
         } else if let Some(long) = a.strip_prefix("--") {
             let name = long.split_once('=').map_or(long, |(n, _)| n);
             let full = format!("--{name}");
+            longs.push(full.clone());
             let ok = if long.contains('=') {
                 RSYNC_LONG_VALUE.contains(&full.as_str())
             } else {
@@ -341,6 +350,7 @@ fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>,
             let flags = short
                 .split_once('.')
                 .map_or(short, |(f, _)| f.strip_suffix('e').unwrap_or(f));
+            shorts.push_str(flags);
             if let Some(c) = flags.chars().find(|c| !RSYNC_SHORT.contains(*c)) {
                 return Err(format!("rsync option `-{c}` is not allowed"));
             }
@@ -365,6 +375,9 @@ fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>,
             && p.file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(crate::git_deps::valid_entry);
+        if db_entry {
+            db_copy(&p, &shorts, &longs)?;
+        }
         if !(under(&ws) || same || (sender && under(&target)) || db_entry) {
             return Err(format!(
                 "rsync path `{path}` is outside {}{}",
@@ -378,6 +391,45 @@ fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>,
         }
     }
     Ok(args.to_vec())
+}
+
+/// rsync short options a copy into the cargo git database may not carry:
+/// the ones that keep, follow or write through symbolic links, and
+/// `--relative`.
+const DB_SHORT_REFUSED: &str = "lLkKR";
+
+/// rsync long options a copy into the cargo git database may not carry:
+/// it deletes nothing, writes no file in place, and takes no link.
+const DB_LONG_REFUSED: &[&str] = &[
+    "--delete",
+    "--delete-before",
+    "--delete-during",
+    "--delete-after",
+    "--delete-delay",
+    "--inplace",
+    "--force",
+    "--copy-unsafe-links",
+    "--safe-links",
+];
+
+/// Whether a copy into the database entry `entry` with these options may
+/// run: none of [`DB_SHORT_REFUSED`] or [`DB_LONG_REFUSED`], and the entry
+/// is not a symbolic link.
+fn db_copy(entry: &Path, shorts: &str, longs: &[String]) -> Result<(), String> {
+    if let Some(c) = shorts.chars().find(|c| DB_SHORT_REFUSED.contains(*c)) {
+        return Err(format!(
+            "rsync option `-{c}` is not allowed into the cargo git database"
+        ));
+    }
+    if let Some(l) = longs.iter().find(|l| DB_LONG_REFUSED.contains(&l.as_str())) {
+        return Err(format!(
+            "rsync option `{l}` is not allowed into the cargo git database"
+        ));
+    }
+    if std::fs::symlink_metadata(entry).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("`{}` is a symbolic link", entry.display()));
+    }
+    Ok(())
 }
 
 /// `path` made absolute against `home`, with `.` removed; `..` is refused.
@@ -421,6 +473,55 @@ mod tests {
     }
 
     #[test]
+    fn a_git_dependency_copy_follows_no_link_and_deletes_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let db = home.join(".cargo/git/db");
+        std::fs::create_dir_all(&db).unwrap();
+        let roots = Roots {
+            ws: &home.join("ws"),
+            cache: &home.join("cache"),
+            same_path: &[],
+            cargo_git_db: &db,
+        };
+        let p = |l: &str| plan(l, &home, &roots);
+        let ok = "rsync --server -rte.iLsfxCIvu --mkpath . .cargo/git/db/dep-00ff00ff00ff00ff/";
+        assert!(matches!(p(ok), Ok(Plan::Rsync(_))), "{:?}", p(ok));
+        for flags in [
+            "-logDtpre.iLsfxCIvu",
+            "-rtle.iLsfxCIvu",
+            "-rtLe.iLsfxCIvu",
+            "-rtKe.iLsfxCIvu",
+            "-rtke.iLsfxCIvu",
+            "-rtRe.iLsfxCIvu",
+        ] {
+            let l = format!("rsync --server {flags} . .cargo/git/db/dep-00ff00ff00ff00ff/");
+            assert!(p(&l).is_err(), "accepted: {l}");
+        }
+        for opt in [
+            "--delete",
+            "--delete-after",
+            "--inplace",
+            "--copy-unsafe-links",
+            "--safe-links",
+        ] {
+            let l = format!(
+                "rsync --server -rte.iLsfxCIvu {opt} . .cargo/git/db/dep-00ff00ff00ff00ff/"
+            );
+            assert!(p(&l).is_err(), "accepted: {l}");
+        }
+        std::fs::create_dir_all(home.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(home.join("elsewhere"), db.join("dep-11ee11ee11ee11ee"))
+            .unwrap();
+        let link = "rsync --server -rte.iLsfxCIvu . .cargo/git/db/dep-11ee11ee11ee11ee/";
+        assert!(p(link).is_err(), "an entry that is a link");
+        let sync = "rsync --server -logDtpre.iLsfxCIvu --delete --mkpath . ws/0123abcd/";
+        assert!(
+            matches!(p(sync), Ok(Plan::Rsync(_))),
+            "the sync keeps its flags"
+        );
+    }
+    #[test]
     fn a_git_dependency_is_asked_for_and_copied_into_the_cargo_git_database_only() {
         let rev = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(
@@ -438,18 +539,18 @@ mod tests {
             assert!(p(&bad).is_err(), "accepted: {bad}");
         }
         for ok in [
-            "rsync --server -logDtpre.iLsfxCIvu --mkpath . /srv/u/.cargo/git/db/dep-00ff00ff00ff00ff/",
-            "rsync --server -logDtpre.iLsfxCIvu --mkpath . .cargo/git/db/dep-00ff00ff00ff00ff",
+            "rsync --server -rte.iLsfxCIvu --mkpath . /srv/u/.cargo/git/db/dep-00ff00ff00ff00ff/",
+            "rsync --server -rte.iLsfxCIvu --mkpath . .cargo/git/db/dep-00ff00ff00ff00ff",
         ] {
             assert!(matches!(p(ok), Ok(Plan::Rsync(_))), "{ok}: {:?}", p(ok));
         }
         for bad in [
-            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/",
-            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/dep-1/objects",
-            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/.hidden-1",
-            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/../../.ssh",
-            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/credentials-1",
-            "rsync --server --sender -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/dep-1",
+            "rsync --server -rte.iLsfxCIvu . /srv/u/.cargo/git/db/",
+            "rsync --server -rte.iLsfxCIvu . /srv/u/.cargo/git/db/dep-1/objects",
+            "rsync --server -rte.iLsfxCIvu . /srv/u/.cargo/git/db/.hidden-1",
+            "rsync --server -rte.iLsfxCIvu . /srv/u/.cargo/git/db/../../.ssh",
+            "rsync --server -rte.iLsfxCIvu . /srv/u/.cargo/credentials-1",
+            "rsync --server --sender -rte.iLsfxCIvu . /srv/u/.cargo/git/db/dep-1",
         ] {
             assert!(p(bad).is_err(), "accepted: {bad}");
         }

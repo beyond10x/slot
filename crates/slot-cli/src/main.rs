@@ -199,7 +199,8 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
         .cache_root
         .clone()
         .unwrap_or_else(|| args.state_dir.join("cache"));
-    let git_db = slot::git_deps::db_dir(&slot::git_deps::cargo_home());
+    // The account's own database, never the session's `CARGO_HOME`.
+    let git_db = slot::git_deps::node_db(&home);
     let roots = slot::shell::Roots {
         ws: &ws,
         cache: &cache,
@@ -208,7 +209,12 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
     };
     match slot::shell::plan(&line, &home, &roots) {
         Ok(Plan::Rsync(rsync_args)) => {
-            let e = std::process::Command::new("rsync").args(rsync_args).exec();
+            // A relative path is the account home's, as the shell checked it
+            // and as sshd starts a session there.
+            let e = std::process::Command::new("rsync")
+                .args(rsync_args)
+                .current_dir(&home)
+                .exec();
             eprintln!("slot shell: rsync: {e}");
             127
         }
@@ -261,10 +267,11 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
     }
 }
 
-/// `slot __cargo-git`: prints this account's cargo git database and the
-/// entries of `wanted` that lack their revision.
+/// `slot __cargo-git`: prints the entries of `wanted` that the account's
+/// cargo git database (`~/.cargo/git/db`) lacks, by name.
 fn cargo_git(wanted: &[slot::git_deps::Wanted]) -> i32 {
-    let db = slot::git_deps::db_dir(&slot::git_deps::cargo_home());
+    let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/"), Into::into);
+    let db = slot::git_deps::node_db(&home);
     print!("{}", slot::git_deps::node_answer(&db, wanted));
     0
 }

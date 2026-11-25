@@ -4,20 +4,27 @@
 
 - The git dependencies of a remote job reach the node with it. Before the job is placed (remote
   mode, and a job the daemon hands to a node), the client reads every `Cargo.lock` the sync
-  sends, takes the `git+` sources and their locked revisions, runs `cargo fetch --locked` here
-  for a lock file whose revision is not in this machine's cargo git database, asks the node
-  which database entries lack their revision (`slot __cargo-git`), and copies only those into
-  the node's `$CARGO_HOME/git/db`: `slot: git dependencies: N copied to <host> in S s`. A
-  wrapper's inner cargo call on a node without a way to a private forge now finds its revision
-  there. `slot shell` admits the probe and a copy into one database entry. A node's copy list
-  needs no cargo git entries.
+  sends, takes the `git+` sources and their locked revisions, maps each to its cargo git
+  database entry with `cargo metadata`, runs `cargo fetch --locked` here for a lock file whose
+  revision is not in this machine's database, asks the node which entries lack their revision
+  (`slot __cargo-git`, answered with entry names only), and copies only those into the node
+  account's `~/.cargo/git/db`: `slot: git dependencies: N copied to <host> in S s`. Only
+  `objects/`, `refs/`, `packed-refs` and `HEAD` cross, never `config`. A node answer that names
+  an entry not asked for refuses the job. A wrapper's inner cargo call on a node without a way to
+  a private forge now finds its revision there. `slot shell` admits the probe and a copy into one
+  database entry that is not a symbolic link, without options that follow links or delete. A
+  node's copy list needs no cargo git entries.
 - A `git+` source on a remote deny list keeps the job on this machine with the reason
   `git dependency denied: <source>`. `remote-deny` and `$XDG_CONFIG_HOME/slot/remote-deny-origins`
   may each hold `/abs/path` lines (a `git+file` source under the prefix) and `origin:<pattern>`
-  lines, a shell pattern (`*`, `?`, `[...]`, as `case` matches) against the URL cargo fetches
-  (without `git+`, query and revision), e.g. `origin:*git.example.org[:/]team/*`. The tree check
-  of `remote-deny` skips `origin:` lines without a warning. With both files naming nothing no lock
-  file is read.
+  lines, a shell pattern (`*`, `?`, `[...]`, as `case` matches, without regard to case) against
+  the URL cargo fetches (without `git+`, query and revision), e.g.
+  `origin:*git.example.org[:/]team/*`. The URL is also matched normalised, after git's
+  `insteadOf` rewrite and with an ssh alias resolved. ` #` starts a comment; any other line
+  keeps every job here, as does a URL that cannot be taken apart, a lock file that does not parse
+  or a source without a full revision. The lists are checked again just before the copy. The
+  tree check of `remote-deny` skips `origin:` lines without a warning. With both files naming
+  nothing no lock file is read.
 - `slot serve --min-free-disk-light <GB>` is a second disk floor for a job whose last 5 runs of
   the same command in the same repository used no compile server (`compile_server_cpu_s` 0) and
   built into no target directory. Such a job waits only below this floor; every other job, a

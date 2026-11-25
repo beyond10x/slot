@@ -176,15 +176,24 @@ origin:*git.example.org[:/]team/*
 
 - `/abs/path`: a path prefix, as above. A `git+file` source whose path lies under it is denied.
 - `origin:<pattern>`: a shell pattern, matched as a shell's `case` matches it (`*` any run of
-  characters, `/` included; `?` one character; `[...]` and `[!...]` classes), against the whole
-  URL cargo fetches: the source without `git+`, its `?query` and its `#revision`
-  (`git+https://git.example.org/team/dep.git?branch=main#…` is
+  characters, `/` included; `?` one character; `[...]` and `[!...]` classes), without regard to
+  case, against the whole URL cargo fetches: the source without `git+`, its `?query` and its
+  `#revision` (`git+https://git.example.org/team/dep.git?branch=main#…` is
   `https://git.example.org/team/dep.git`). The pattern above denies that URL and
   `ssh://git@git.example.org/team/dep`, not `https://git.example.org/teamwork/dep.git`.
 
-Other lines are skipped; the tree check above ignores `origin:` lines. A job stays on this machine
-when a `git+` source of one of its checkout's `Cargo.lock` files is denied, with the reason
-`git dependency denied: <source>`:
+`origin` may be written in any case, with spaces around the `:`, and ` #` starts a comment. Any
+other line that is neither empty nor a comment keeps every job on this machine, with a reason
+naming the file and the line; the tree check above ignores `origin:` lines.
+
+Each URL is matched in several forms, and one denied form is enough: as written; normalised
+(scheme and host in lower case, without a trailing dot of the host, a default port or a doubled
+`/`, a `file` path percent-decoded, `user@host:path` as `ssh://user@host/path`); the URL git
+fetches after a `url.<base>.insteadOf` rule; and for ssh the host name `ssh -G` resolves an alias
+to. A URL that cannot be taken apart is denied, and so is a lock file that does not parse or a
+`git+` source without a full revision while either list names anything. A job stays on this
+machine when a `git+` source of one of its checkout's `Cargo.lock` files is denied, with the
+reason `git dependency denied: <source>`:
 
 ```text
 slot: git dependency denied: git+https://git.example.org/team/dep.git?branch=main: the tree is not synced to buildbox; running on this machine
@@ -352,20 +361,28 @@ a cargo command slot sends itself; a wrapper's inner cargo call (`task check`, `
 the server too.
 
 So before every remote job the client reads each `Cargo.lock` of the checkout that the sync sends,
-and takes the `git+` sources and their locked revisions. A revision missing from this machine's
-cargo git database (`$CARGO_HOME/git/db`) gets `cargo fetch --locked` in that lock file's
-directory here, with your credentials and outside the pool. The client then asks the server which
-of those database entries (`<name>-<hash>`) lack the revision, and copies only those into the
-server's `$CARGO_HOME/git/db` (`~/.cargo/git/db` when it sets none) over the same ssh and rsync:
+and takes the `git+` sources and their locked revisions. `cargo metadata --locked --offline` in
+that lock file's directory names the database entry (`<name>-<hash>`) cargo keeps for each
+source, so an entry of another URL with the same name and revision is never taken. A revision
+missing from this machine's cargo git database (`$CARGO_HOME/git/db`) gets `cargo fetch --locked`
+there, with your credentials and outside the pool. The client then asks the server which of those
+entries lack their revision, and copies only those into the server account's `~/.cargo/git/db`
+over the same ssh and rsync:
 
 ```text
 slot: git dependencies: 1 copied to buildbox in 0.4 s
 ```
 
 cargo on the server then finds the locked revision in its database and does not fetch it. A job
-whose entries are all on the server copies nothing and prints nothing. Only git objects cross:
-no credential, no `FETCH_HEAD`. A source on a deny list keeps the job here
+whose entries are all on the server copies nothing and prints nothing. Only `objects/`, `refs/`,
+`packed-refs` and `HEAD` of an entry cross: no `config` (it may hold a credential or an
+`http.extraHeader`), no hooks, no `FETCH_HEAD`. The deny lists are read again just before the
+copy, and a source on them keeps the job here
 ([above](#trees-that-never-leave-this-machine)).
+
+The server's answer names entries only, never a path. An answer that names an entry the client
+did not ask for, or a line it does not know, keeps the job here. On the server the copy goes into
+the account's own `~/.cargo/git/db`, whatever `CARGO_HOME` the ssh session sets.
 
 A step that fails does not stop the job: `slot: git dependency not here: …` names a revision this
 machine could not fetch, and `slot: git dependencies not copied to <host>: …` a probe or copy that
@@ -548,7 +565,9 @@ remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsyn
 `slot proxy`, `slot cancel <id>`, the sibling step (`slot __siblings` on the server's own
 workspace root), the read-only git dependency probe (`slot __cargo-git <entry>:<rev>…`) and the
 copy of one [git dependency](#git-dependencies-come-from-this-machine) (`rsync --server` into
-one entry directly under `$CARGO_HOME/git/db`, never read back) and the read-only `state` step (`slot state`: the server daemon's own row of
+one entry directly under the account's `~/.cargo/git/db`, never read back; the entry may not be a
+symbolic link, and `-l`, `-L`, `-k`, `-K`, `-R`, `--copy-unsafe-links`, `--safe-links`,
+`--force`, `--inplace` and every `--delete…` option are refused for it) and the read-only `state` step (`slot state`: the server daemon's own row of
 `/api/nodes` and its jobs, read from `--http`, for the
 [node poll](#show-the-server-in-the-web-view)) and the read-only `output` step (`slot output <id>
 [<from>]`: the kept output of one job from its chunk `<from>` on, read from `--http`). Anything else

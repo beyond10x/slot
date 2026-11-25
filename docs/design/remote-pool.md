@@ -617,20 +617,37 @@ editing `Cargo.lock` (or a sync of a new one) fetches again.
 Git dependencies come from the workstation (`git_deps.rs`). The fetch above runs on the node,
 which may hold no credential for a private forge, and only for a cargo command the client sends;
 a wrapper's inner cargo fetches on the node. So before every remote job, the spilled ones
-included (their process is this client), the client reads each `Cargo.lock` the sync sends,
-runs `cargo fetch --locked` on the workstation for a lock file whose locked revision is not in
-the workstation's cargo git database (outside the pool, `SLOT_SHIM_OFF=1`), asks the node with
-`slot __cargo-git <entry>:<rev>…` which entries lack their revision, and rsyncs only those into
-the node's `$CARGO_HOME/git/db/<entry>/`; `slot shell` admits exactly that path depth. cargo
-skips the fetch of a locked revision its database holds. `remote-deny` and `remote-deny-origins`
-may each hold `/abs/path` lines and `origin:<pattern>` lines.
-A `git+file` source under a path line, or a source whose fetch URL (without `git+`,
-`?query` and `#rev`) matches an `origin:` pattern as a shell `case` does (`*` crosses `/`, `?`,
-`[...]`, `[!...]`; e.g. `origin:*git.example.org[:/]team/*`), keeps the job on the workstation
-with `git dependency denied: <source>`, set as `local_reason` before submission, so the daemon
-never spills it. The matcher is `git_deps::glob_match`; no crate in the lock file does `case`
-matching. Not covered: a git dependency's submodules (cargo keeps them as entries of their own
-names) are not copied.
+included (their process is this client), the client reads each `Cargo.lock` the sync sends and
+maps each `git+` source to its database entry with `cargo metadata --locked --offline` (the path
+component after `/git/checkouts/` of the package's `manifest_path`), so an entry is taken only for
+the exact source URL it was made from. It runs `cargo fetch --locked` on the workstation for a
+lock file whose locked revision is in no such entry (outside the pool, `SLOT_SHIM_OFF=1`); the
+revision is looked up in the entry's pack indexes and loose objects without running git. It asks
+the node with `slot __cargo-git <entry>:<rev>…` which entries lack their revision; the node
+answers `missing <entry>` lines only (no path, no git run, a symbolic-link entry counts as
+missing), and an answer naming an entry not asked for, or any other line, refuses the job. Before
+the copy the deny lists are read and checked again. Only the entries named are rsynced
+(`-rt`, no `-l`; filter `/HEAD`, `/packed-refs`, `/objects/***`, `/refs/***`, nothing else, so no
+`config` with a credential or `http.extraHeader` crosses) into the node account's
+`~/.cargo/git/db/<entry>/`, whatever `CARGO_HOME` the ssh session sets; `slot shell` admits
+exactly that path depth, refuses a symbolic-link entry and refuses `-l -L -k -K -R`,
+`--copy-unsafe-links`, `--safe-links`, `--force`, `--inplace` and `--delete…` for it. cargo
+skips the fetch of a locked revision its database holds.
+
+`remote-deny` and `remote-deny-origins` may each hold `/abs/path` lines and `origin:<pattern>`
+lines (`origin` in any case, spaces around `:`, ` #` comments); any other line is a problem that
+keeps every job local, naming the file and line. A `git+file` source under a path line, or a
+source one of whose URL forms matches an `origin:` pattern as a shell `case` does, without regard
+to case (`*` crosses `/`, `?`, `[...]`, `[!...]`; e.g. `origin:*git.example.org[:/]team/*`),
+keeps the job on the workstation with `git dependency denied: <source>`, set as `local_reason`
+before submission, so the daemon never spills it. The forms: the fetch URL (without `git+`,
+`?query` and `#rev`) as written and normalised (scheme and host lower case, trailing dot, default
+port and `//` removed, `file` paths percent-decoded, scp form as `ssh://`), git's
+`url.<base>.insteadOf` rewrite (`git ls-remote --get-url`, no network) and an ssh alias's
+`HostName` (`ssh -G`). A URL that cannot be normalised, a lock file that does not parse and a
+`git+` source without a full revision are denied while either list names anything. The matcher
+is `git_deps::glob_match`; no crate in the lock file does `case` matching. Not covered: a git
+dependency's submodules (cargo keeps them as entries of their own names) are not copied.
 
 ## 6. Jobs that stay local
 

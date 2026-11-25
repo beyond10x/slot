@@ -87,7 +87,7 @@ impl List {
         for (i, line) in text.lines().enumerate() {
             // An `origin:` line is a rule for remote URLs (`git_deps.rs`),
             // not a tree.
-            if line.trim_start().starts_with("origin:") {
+            if crate::git_deps::origin_pattern(line).is_some() {
                 continue;
             }
             let line = line.split_once('#').map_or(line, |(l, _)| l).trim();

@@ -377,10 +377,13 @@ fn remote_host<'a>(
 }
 
 /// The `local_reason` of a job whose remote start failed with `why`:
-/// `sync failed: ` and the first line of the error.
+/// `sync failed: ` and the first line of the error; a git dependency's
+/// denial as it is.
 pub fn sync_failed(why: &str) -> String {
     let first = crate::server::spill::first_line(why);
-    if first.is_empty() {
+    if first.starts_with(crate::git_deps::REASON_PREFIX) {
+        first
+    } else if first.is_empty() {
         "sync failed".into()
     } else {
         format!("sync failed: {first}")
@@ -1041,11 +1044,17 @@ fn remote(
     req.sync_ms = Some(millis(t0.elapsed()));
     req.sync_bytes = synced.bytes;
     // The git dependencies the lock files name, from this machine's cargo
-    // git database: the node may have no way to their sources.
-    match crate::git_deps::carry(top, cwd, &req.argv, &target, &s.sync) {
+    // git database: the node may have no way to their sources. The lists
+    // are read again: what is copied is checked as it is copied.
+    let lists = crate::git_deps::lists()
+        .map_err(|e| anyhow!("{}list unreadable ({e})", crate::git_deps::REASON_PREFIX))?;
+    match crate::git_deps::carry(top, cwd, &req.argv, &lists, &target, &s.sync) {
         Ok(Some(line)) => eprintln!("{line}"),
         Ok(None) => {}
-        Err(e) => eprintln!("slot: git dependencies not copied to {host}: {e}"),
+        Err(crate::git_deps::CarryError::Skip(e)) => {
+            eprintln!("slot: git dependencies not copied to {host}: {e}");
+        }
+        Err(crate::git_deps::CarryError::Refuse(e)) => return Err(anyhow!("{e}")),
     }
     let (sent, held) = toolchain::remote_env(
         std::env::vars(),
