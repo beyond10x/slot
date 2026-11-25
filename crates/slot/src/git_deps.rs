@@ -332,6 +332,12 @@ pub fn git_source_replaced(files: &[PathBuf]) -> Option<String> {
         let Ok(table) = toml::from_str::<toml::Table>(&text) else {
             return Some(format!("cargo config {} does not parse", f.display()));
         };
+        if table.contains_key("include") {
+            return Some(format!(
+                "cargo config {} has `include`; the files it names are not read",
+                f.display()
+            ));
+        }
         let Some(source) = table.get("source") else {
             continue;
         };
@@ -406,10 +412,19 @@ fn collapse(path: &str) -> String {
 /// cannot be taken apart: no `scheme://`, no host, a port that is no
 /// number, a broken escape.
 pub fn normalise(url: &str) -> Option<String> {
-    // git's scp-like form, `user@host:path`, as the ssh URL it stands for.
+    // git's scp-like form, `user@host:path` or `[user@host:port]:path`, as
+    // the ssh URL it stands for.
     let scp;
-    let url = match url.split_once(':') {
-        Some((a, p)) if !url.contains("://") && !a.is_empty() && !a.contains('/') => {
+    let bracket = url
+        .strip_prefix('[')
+        .and_then(|r| r.split_once("]:"))
+        .filter(|(a, _)| !url.contains("://") && !a.is_empty() && !a.contains('/'));
+    let url = match (bracket, url.split_once(':')) {
+        (Some((a, p)), _) => {
+            scp = format!("ssh://{a}/{}", p.trim_start_matches('/'));
+            scp.as_str()
+        }
+        (None, Some((a, p))) if !url.contains("://") && !a.is_empty() && !a.contains('/') => {
             scp = format!("ssh://{a}/{}", p.trim_start_matches('/'));
             scp.as_str()
         }
@@ -715,7 +730,8 @@ pub fn forms(url: &str, more: &[String]) -> Option<Vec<String>> {
 }
 
 /// The bare forms of the normalised URL `n`: without user and port, the
-/// path without trailing `/` and `.git`, as `scheme://host/path` and as
+/// path without trailing `/` and `.git`, as `scheme://host/path` for its
+/// own scheme and every network scheme git fetches over, and as
 /// `host/path`; each also with `.git`, `/` and `.git/` after it, so a
 /// pattern written with or without them matches.
 fn bare(n: &str) -> Vec<String> {
@@ -736,8 +752,19 @@ fn bare(n: &str) -> Vec<String> {
     };
     let p = path.trim_end_matches('/');
     let p = p.strip_suffix(".git").unwrap_or(p).trim_end_matches('/');
-    let mut out = Vec::with_capacity(8);
-    for base in [format!("{scheme}://{host}{p}"), format!("{host}{p}")] {
+    // A network URL also in every scheme git fetches over, so a pattern
+    // that names one scheme denies the same repository over another.
+    let schemes: &[&str] = if scheme == "file" {
+        &["file"]
+    } else {
+        &["https", "http", "ssh", "git", "git+ssh", "ssh+git", scheme]
+    };
+    let mut out = Vec::with_capacity(4 * (schemes.len() + 1));
+    let bases = schemes
+        .iter()
+        .map(|s| format!("{s}://{host}{p}"))
+        .chain(std::iter::once(format!("{host}{p}")));
+    for base in bases {
         for end in ["", ".git", "/", ".git/"] {
             out.push(format!("{base}{end}"));
         }
@@ -1112,11 +1139,25 @@ fn cargo_cmd(cargo: &[String], dir: &Path, args: &[&str]) -> Command {
 
 /// The database entry cargo keeps each `git+` source of `cargo metadata`'s
 /// output in: `(source, entry)`, the entry read from the package's
-/// checkout path (`git/checkouts/<entry>/…`, the same name as its
-/// database).
-pub fn metadata_entries(json: &str) -> Vec<(String, String)> {
+/// checkout path: the first component below `checkouts`, this machine's
+/// `<cargo home>/git/checkouts` (the same name as its database). A
+/// manifest outside `checkouts` names no entry, and a path inside a
+/// checkout that itself holds `git/checkouts/` does not change the entry.
+pub fn metadata_entries(json: &str, checkouts: &Path) -> Vec<(String, String)> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
+    };
+    let canonical = checkouts.canonicalize().ok();
+    let below = |manifest: &Path| -> Option<String> {
+        let rest = manifest.strip_prefix(checkouts).ok().or_else(|| {
+            canonical
+                .as_deref()
+                .and_then(|c| manifest.strip_prefix(c).ok())
+        })?;
+        match rest.components().next()? {
+            std::path::Component::Normal(n) => n.to_str().map(str::to_string),
+            _ => None,
+        }
     };
     let mut out: Vec<(String, String)> = v
         .get("packages")
@@ -1128,10 +1169,8 @@ pub fn metadata_entries(json: &str) -> Vec<(String, String)> {
             if !source.starts_with("git+") {
                 return None;
             }
-            let manifest = p.get("manifest_path")?.as_str()?;
-            let (_, after) = manifest.rsplit_once("/git/checkouts/")?;
-            let entry = after.split('/').next()?;
-            valid_entry(entry).then(|| (source.to_string(), entry.to_string()))
+            let entry = below(Path::new(p.get("manifest_path")?.as_str()?))?;
+            valid_entry(&entry).then(|| (source.to_string(), entry))
         })
         .collect();
     out.sort();
@@ -1140,14 +1179,19 @@ pub fn metadata_entries(json: &str) -> Vec<(String, String)> {
 }
 
 /// What `cargo metadata --offline` in `dir` says about its git sources.
-fn cargo_entries(cargo: &[String], dir: &Path, deadline: Instant) -> Option<Vec<(String, String)>> {
+fn cargo_entries(
+    cargo: &[String],
+    dir: &Path,
+    checkouts: &Path,
+    deadline: Instant,
+) -> Option<Vec<(String, String)>> {
     let mut c = cargo_cmd(
         cargo,
         dir,
         &["metadata", "--format-version", "1", "--locked", "--offline"],
     );
     match run_bounded(&mut c, deadline) {
-        Ok((true, out, _)) => Some(metadata_entries(&out)),
+        Ok((true, out, _)) => Some(metadata_entries(&out, checkouts)),
         _ => None,
     }
 }
@@ -1166,6 +1210,7 @@ pub fn prepare(
 ) -> (Vec<Wanted>, Vec<String>) {
     let mut wanted = Vec::new();
     let mut notes = Vec::new();
+    let checkouts = db.with_file_name("checkouts");
     for (dir, sources) in locks {
         let pick = |map: &[(String, String)]| -> Vec<Option<String>> {
             sources
@@ -1179,13 +1224,13 @@ pub fn prepare(
                 })
                 .collect()
         };
-        let mut have = cargo_entries(cargo, dir, deadline)
+        let mut have = cargo_entries(cargo, dir, &checkouts, deadline)
             .map_or_else(|| vec![None; sources.len()], |m| pick(&m));
         if have.iter().any(Option::is_none) {
             let mut c = cargo_cmd(cargo, dir, &["fetch", "--locked"]);
             match run_bounded(&mut c, deadline) {
                 Ok((true, _, _)) => {
-                    have = cargo_entries(cargo, dir, deadline)
+                    have = cargo_entries(cargo, dir, &checkouts, deadline)
                         .map_or_else(|| vec![None; sources.len()], |m| pick(&m));
                 }
                 Ok((false, _, tail)) => notes.push(format!(
@@ -1507,6 +1552,18 @@ mod tests {
         ] {
             assert!(!lists.denies(&s(u)), "{u}");
         }
+        // git's scp form with a port in brackets, as an insteadOf target
+        // names it: the port leaves the path.
+        assert_eq!(
+            normalise("[git@Git.Example.org:2222]:team/dep.git").as_deref(),
+            Some("ssh://git@git.example.org:2222/team/dep.git")
+        );
+        assert_eq!(
+            normalise("git@git.example.org:team/dep.git").as_deref(),
+            Some("ssh://git@git.example.org/team/dep.git")
+        );
+        let f = forms("[git@git.example.org:2222]:team/dep.git", &[]).unwrap();
+        assert!(lists.denies_forms(&f), "{f:?}");
     }
 
     #[test]
@@ -1548,6 +1605,18 @@ mod tests {
                     "git+https://git.example.org/team/dep//",
                 ],
                 &["git+https://git.example.org/team/dep.gitx"],
+            ),
+            (
+                // A pattern that names a scheme denies the other schemes'
+                // URLs of the same host and path.
+                "https://git.example.org/team/*",
+                &[
+                    "git+ssh://git@git.example.org/team/x",
+                    "git+ssh://git@git.example.org:2222/team/x",
+                    "git+git://git.example.org/team/x",
+                    "git+http://git.example.org/team/x",
+                ],
+                &["git+ssh://git@git.example.org/other/x"],
             ),
         ] {
             let lists = DenyLists::parse([format!("origin:{pattern}\n").as_str()]);
@@ -1607,6 +1676,7 @@ mod tests {
         let fail = script(dir, "fail", "exit 1\n");
         let hang = script(dir, "hang", "exec sleep 5\n");
         let nameless = script(dir, "nameless", "printf 'user x\\n'\n");
+        let silent = script(dir, "silent", "exit 0\n");
         let base = Lookup {
             git: echo.clone(),
             ssh: same.clone(),
@@ -1662,6 +1732,14 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "git prints nothing",
+                &https,
+                Lookup {
+                    git: silent.clone(),
+                    ..base.clone()
+                },
+            ),
         ] {
             let t0 = Instant::now();
             let why = check_with(locks, &lists, &lk);
@@ -1671,6 +1749,44 @@ mod tests {
             );
             assert!(t0.elapsed() < Duration::from_secs(4), "{what}: bounded");
         }
+    }
+
+    /// A host that would be an ssh option is never handed to ssh, with or
+    /// without ssh on this machine: the lookup is undetermined.
+    #[test]
+    fn a_host_that_is_an_ssh_option_is_not_looked_up() {
+        let t = tempfile::tempdir().unwrap();
+        let ran = t.path().join("ran");
+        let lk = Lookup {
+            ssh: script(
+                t.path(),
+                "ssh",
+                &format!("touch {}\nprintf 'hostname x\\n'\n", ran.display()),
+            ),
+            ..lookup(t.path())
+        };
+        for host in ["-oProxyCommand=x", "-F/dev/null", ""] {
+            assert!(ssh_hostname(host, &lk).is_err(), "{host:?}");
+        }
+        assert!(!ran.exists(), "ssh ran");
+    }
+
+    /// A deny list that exists and cannot be read is an error, not an
+    /// empty list.
+    #[test]
+    fn an_unreadable_deny_list_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let f = t.path().join(ORIGINS_FILE);
+        std::fs::write(&f, "origin:*denied.example.org*\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_to_string(&f).is_ok();
+        let got = DenyLists::load(&[t.path().join("absent"), f.clone()]);
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if !readable {
+            assert!(got.is_err(), "an unreadable list was read as {got:?}");
+        }
+        assert!(DenyLists::load(&[t.path().join("absent")]).is_ok_and(|l| l.is_empty()));
     }
 
     #[test]
@@ -1829,11 +1945,30 @@ mod tests {
         );
         let plain = file("plain", "[build]\njobs = 1\n");
         let broken = file("broken", "[source.x\n");
+        // cargo's `include` pulls in files this check does not read: the
+        // replacement in `mirror.toml` would pass unseen.
+        file(
+            "mirror.toml",
+            "[source.pub]\ngit = \"https://h.example.org/g/dep\"\nreplace-with = \"int\"\n\
+             [source.int]\ngit = \"https://denied.example.org/team/dep\"\n",
+        );
+        let includes = file("includes", "include = [\"mirror.toml\"]\n");
+        let includes_one = file(
+            "includes-one",
+            "include = \"mirror.toml\"\n[build]\njobs = 1\n",
+        );
+        let includes_table = file(
+            "includes-table",
+            "[[include]]\npath = \"mirror.toml\"\noptional = true\n",
+        );
         for (what, files) in [
             ("a git source replaced", vec![git_replaced.clone()]),
             ("a registry replaced by a git source", vec![by_git]),
             ("split over two files", vec![half_a.clone(), half_b]),
             ("a file that does not parse", vec![plain.clone(), broken]),
+            ("an include list", vec![includes]),
+            ("an include string", vec![includes_one]),
+            ("an include table", vec![includes_table]),
         ] {
             assert!(git_source_replaced(&files).is_some(), "{what}");
         }
@@ -2139,14 +2274,36 @@ mod tests {
               {{"source":"git+https://h.example.org/g/bad#{REV}","manifest_path":"/c/.cargo/git/checkouts/../x/Cargo.toml"}}
             ]}}"#
         );
+        let checkouts = Path::new("/c/.cargo/git/checkouts");
         assert_eq!(
-            metadata_entries(&json),
+            metadata_entries(&json, checkouts),
             [(
                 format!("git+https://h.example.org/g/dep.git?branch=main#{REV}"),
                 "dep-00ff00ff00ff00ff".to_string()
             )]
         );
-        assert_eq!(metadata_entries("not json"), Vec::new());
+        assert_eq!(metadata_entries("not json", checkouts), Vec::new());
+    }
+
+    /// The entry is the first component below this machine's checkouts
+    /// directory: a crate inside a repository at a path that itself holds
+    /// `git/checkouts/<other>/` names its own entry, and a manifest outside
+    /// the checkouts directory names none.
+    #[test]
+    fn a_nested_checkouts_path_does_not_steer_the_entry() {
+        let json = format!(
+            r#"{{"packages":[
+              {{"source":"git+https://h.example.org/g/dep#{REV}","manifest_path":"/c/.cargo/git/checkouts/dep-00ff00ff00ff00ff/0123456/git/checkouts/fork-11ee11ee11ee11ee/x/Cargo.toml"}},
+              {{"source":"git+https://h.example.org/g/other#{REV}","manifest_path":"/elsewhere/git/checkouts/other-22dd22dd22dd22dd/0123456/Cargo.toml"}}
+            ]}}"#
+        );
+        assert_eq!(
+            metadata_entries(&json, Path::new("/c/.cargo/git/checkouts")),
+            [(
+                format!("git+https://h.example.org/g/dep#{REV}"),
+                "dep-00ff00ff00ff00ff".to_string()
+            )]
+        );
     }
 
     #[test]

@@ -188,17 +188,21 @@ naming the file and the line; the tree check above ignores `origin:` lines.
 
 Each URL is matched in several forms, and one denied form is enough: as written; normalised
 (scheme and host in lower case, without a trailing dot of the host, a default port or a doubled
-`/`, a `file` path percent-decoded, `user@host:path` as `ssh://user@host/path`); bare, without
-user and port and without a trailing `/` or `.git`, as `scheme://host/path` and as `host/path`;
-the URL git fetches after a `url.<base>.insteadOf` rule; and for ssh the host name `ssh -G`
-resolves an alias to. So a URL is denied when the pattern matches its full form or its host and
-path: `*git.example.org[:/]team/*` also denies `ssh://git@git.example.org:2222/team/dep`,
-`https://git.example.org/team/*` also denies `https://user@git.example.org/team/dep`, and a
-pattern ending in `dep.git` also denies the URL ending in `dep`. Write patterns without a user or
-a port: a pattern that names them matches only URLs that name them.
+`/`, a `file` path percent-decoded, `user@host:path` as `ssh://user@host/path` and
+`[user@host:port]:path` as `ssh://user@host:port/path`); bare, without user and port and without
+a trailing `/` or `.git`, as `scheme://host/path` for its own scheme and for `https`, `http`,
+`ssh`, `git`, `git+ssh` and `ssh+git`, and as `host/path`; the URL git fetches after a
+`url.<base>.insteadOf` rule; and for ssh the host name `ssh -G` resolves an alias to. So a URL
+is denied when the pattern matches its full form or its host and path:
+`*git.example.org[:/]team/*` also denies `ssh://git@git.example.org:2222/team/dep`,
+`https://git.example.org/team/*` also denies `https://user@git.example.org/team/dep` and
+`ssh://git@git.example.org/team/dep`, and a pattern ending in `dep.git` also denies the URL
+ending in `dep`. Write patterns without a user or a port: a pattern that names them matches only
+URLs that name them.
 
 Matching does not resolve names: an IP address or another DNS name for a denied host is not
-caught by an `origin:` pattern.
+caught by an `origin:` pattern. Nor is an HTTP redirect: git follows one from an allowed host to
+a denied one, and the check sees only the URL before it.
 
 A URL that cannot be taken apart is denied, and so is a lock file that does not parse or a `git+`
 source without a full revision while either list names anything. For a checkout with a
@@ -207,7 +211,8 @@ when the cargo home is not an absolute path (`CARGO_HOME` relative, or neither `
 `HOME` set), or when a cargo configuration replaces a git source (a `[source.<name>]` table with
 `replace-with` where it or its replacement has `git`, in a `.cargo/config.toml` of the checkout,
 above it or in the cargo home): cargo would then build another repository than the URL the lock
-file names. A job stays on this machine when a `git+` source of one of its checkout's
+file names. A cargo configuration with a top-level `include` keeps the job here too: the files
+it names are not read. A job stays on this machine when a `git+` source of one of its checkout's
 `Cargo.lock` files is denied, with the reason `git dependency denied: <source>`:
 
 ```text

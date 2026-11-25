@@ -27,8 +27,13 @@
   nothing no lock file is read.
 - An `origin:` pattern also matches a URL's host and path without user, port, trailing `/` or
   `.git`: `*git.example.org[:/]team/*` denies `ssh://git@git.example.org:2222/team/x`. A git or
-  ssh lookup that fails or runs over 10 s, a relative cargo home, or a cargo config that replaces
-  a git source keeps the job here.
+  ssh lookup that fails, prints nothing or runs over 10 s, a relative cargo home, a cargo config
+  that replaces a git source, or a cargo config with a top-level `include` keeps the job here. A
+  pattern that names a scheme (`https://h/team/*`) also denies the same host and path over
+  `ssh`, `git` and `http`, and git's `[user@host:port]:path` form is read with its port. The
+  database entry is the first component below this machine's `git/checkouts/`, never a later
+  `git/checkouts/` inside a checkout. `slot shell` refuses a copy when the cargo home, its `git/`
+  or `git/db` is a symbolic link.
 - The node's `ess` is the workstation's again: `ess` leaves `TOOL_PINS`, `push.sh` copies it, and
   `push.sh check` compares its SHA-256 (`sum ess …`). ess chooses the release per repository
   itself (an exact `requires` runs that release from its own cache, a line pin the base), so one

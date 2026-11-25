@@ -405,7 +405,8 @@ const DB_SHORT: &str = "rt";
 const DB_LONG: &[&str] = &["--server", "--mkpath"];
 
 /// Whether a copy into the database entry `entry` with these options may
-/// run: only [`DB_SHORT`] and [`DB_LONG`], and the entry is not a symbolic
+/// run: only [`DB_SHORT`] and [`DB_LONG`], and neither the entry nor the
+/// database, `git/` or the cargo home above it is a symbolic
 /// link.
 fn db_copy(entry: &Path, shorts: &str, longs: &[String]) -> Result<(), String> {
     if let Some(c) = shorts.chars().find(|c| !DB_SHORT.contains(*c)) {
@@ -418,8 +419,12 @@ fn db_copy(entry: &Path, shorts: &str, longs: &[String]) -> Result<(), String> {
             "rsync option `{l}` is not allowed into the cargo git database"
         ));
     }
-    if std::fs::symlink_metadata(entry).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(format!("`{}` is a symbolic link", entry.display()));
+    // The entry, the database, `git/` and the cargo home: a link at any of
+    // them would send the copy elsewhere.
+    for p in entry.ancestors().take(4) {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("`{}` is a symbolic link", p.display()));
+        }
     }
     Ok(())
 }
@@ -512,6 +517,36 @@ mod tests {
             matches!(p(sync), Ok(Plan::Rsync(_))),
             "the sync keeps its flags"
         );
+    }
+
+    /// A symbolic link at the database, at `git/` or at the cargo home
+    /// would send the copy outside the database: refused.
+    #[test]
+    fn a_link_above_the_database_entry_is_refused() {
+        for linked in [".cargo/git/db", ".cargo/git", ".cargo"] {
+            let t = tempfile::tempdir().unwrap();
+            let home = t.path().canonicalize().unwrap();
+            let elsewhere = home.join("elsewhere");
+            let real = elsewhere.join(".cargo/git/db");
+            std::fs::create_dir_all(&real).unwrap();
+            let link = home.join(linked);
+            std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(elsewhere.join(linked), &link).unwrap();
+            let db = home.join(".cargo/git/db");
+            let roots = Roots {
+                ws: &home.join("ws"),
+                cache: &home.join("cache"),
+                same_path: &[],
+                cargo_git_db: &db,
+            };
+            let l = "rsync --server -rte.iLsfxCIvu --mkpath . .cargo/git/db/dep-00ff00ff00ff00ff/";
+            let got = plan(l, &home, &roots);
+            assert!(
+                got.as_ref()
+                    .is_err_and(|e| e.contains("is a symbolic link")),
+                "{linked}: {got:?}"
+            );
+        }
     }
     #[test]
     fn a_copy_into_the_cargo_git_database_takes_only_the_clients_flags() {
