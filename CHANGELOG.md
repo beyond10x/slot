@@ -28,6 +28,10 @@
 - `provision.sh` runs under umask 022, so a bundle's umask 077 no longer leaves `/etc/slot-node`
   at mode 700, where the build user could not read the copy list and `push.sh apply` refused to
   copy. `check` reports the directory at any mode but 755 and `apply` sets it.
+- The node's line for a git or ssh call that asks for a credential names `slot --here` only for
+  the step that reads a credential while it runs, never for a whole task, and sends a step that
+  needs docker or a local service to `.slot.toml` `local`. Before, it offered `--here` for the
+  step, and callers sent whole tasks back to the workstation with it.
 
 ## 0.36.0 — 2026-11-24
 
