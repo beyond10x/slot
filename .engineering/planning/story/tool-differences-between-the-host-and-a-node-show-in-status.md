@@ -1,0 +1,61 @@
+---
+format: aep.planning-md/3
+id: story:tool-differences-between-the-host-and-a-node-show-in-status
+kind: story
+status: draft
+title: A difference in tsc, prettier or esbuild between the host and a node shows in slot status within a minute, and holds no job
+summary: The manifest comparison reports tool lines; slot status shows a drift line
+relations:
+- serves: vision:O6
+- decomposes: epic:compute-cluster
+- informed_by: story:node-installs-its-toolchains-by-script
+revision: 1
+---
+## Outcome
+
+A difference between the workstation's and a build node's TypeScript and JavaScript tools (`tsc`,
+`prettier`, `esbuild`) is seen within the manifest refresh period, without anyone running
+`push.sh check`. `slot status` shows one drift line naming each tool and both versions. No job is
+held for it.
+
+## Evidence (2026-11-25)
+
+- `toolchains.sh` prints a `tool <name> <version>` line for each of the three tools, and
+  `push.sh compare` reports a difference both ways (commit 5451f26 of branch `bare-node`).
+- The wrapper's `parity()` reads the `c`, `rust <active toolchain>`, `go` and `node` lines only. A
+  `tool` line holds no job.
+- `push.sh check` runs when somebody runs it. A node that is provisioned and then drifts (a tool
+  upgraded on the workstation only) is not noticed until a job fails in a test lane, for example
+  the one `esbuild` test of ess that needs the tool on `PATH`.
+- The refresh (`toolchains-refresh.sh`, every 60 s) already writes `toolchains-local.txt` and
+  `toolchains-node.txt`; both hold the `tool` lines once both machines run the new `toolchains.sh`.
+
+## Recommendation
+
+- The refresh compares the `tool` lines of the two manifests after each fetch and writes
+  `tool-drift.txt` beside them: one line per difference, `<tool> here <version|missing>, node
+  <version|missing>`; empty when they agree, removed when the node's manifest is older than 5
+  minutes.
+- The daemon reads that file with its other per-tick inputs and shows its lines in `slot status` and
+  in `/api/state` (a field with `#[serde(default)]`), under the node, as `drift: tool tsc here
+  6.0.3, node 6.0.2`.
+- No hold and no parity wait: the line is information. A tool a tree pins by name stays the
+  business of `story:a-job-whose-pinned-tool-a-node-lacks-fails-by-name`.
+- Which tools count is the list in `toolchains.sh`; a new tool there needs no change in the
+  daemon.
+
+## Acceptance
+
+- Workstation `tsc` 6.0.3, node `tsc` 6.0.2: within 2 refresh periods `slot status` shows
+  `drift: tool tsc here 6.0.3, node 6.0.2`, and a job on the node still starts at once.
+- Both equal: no drift line, and `tool-drift.txt` is empty.
+- A node whose manifest is older than 5 minutes: no tool drift line (the stale manifest has its own
+  line); a tool missing on the node shows `node missing`.
+- A test with two manifest files covers each case; the daemon test reads the file from a temporary
+  directory.
+
+## Open
+
+- Whether the comparison belongs in the refresh script (a host file, not in this repository) or in
+  the daemon, which would read both manifests itself. The refresh script is not in `contrib/`;
+  moving the comparison into the daemon makes it testable here.
