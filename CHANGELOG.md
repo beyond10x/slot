@@ -12,7 +12,7 @@
   Why: a test run of a script repository, a profiler or a documentation check writes next to
   nothing, but waited at the floor of a build.
 - `contrib/node/provision.sh` installs pinned cargo tools on the node at the release its
-  consumers' CI installs, from the release archive checked against its SHA-256: `ess` 0.99.0 and
+  consumers' CI installs, from the release archive checked against its SHA-256: `ess` 0.99.1 and
   `wasm-bindgen` 0.2.130 (with `wasm-bindgen-test-runner` and `wasm2es6js`). `check` reports a
   binary whose `--version` is another release; `provision.sh pins` lists them. `push.sh` no
   longer copies the workstation's binaries of those names; `push.sh bins` lists what it copies.
