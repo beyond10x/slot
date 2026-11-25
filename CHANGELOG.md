@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Node home trees: `provision.sh` installs the ess releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 in
+  `~/.local/share/ess-versions/<version>/ess` and `@types/node` 26.3.0 with `undici-types` 8.3.0 in
+  `~/.local/share/ess-node/node_modules` (`HOME_PINS`, SHA-256 pinned). A repository that calls an
+  ess release by that path, and the TypeScript cases of ess that read `ESS_TYPES_NODE`, found
+  nothing on the node.
+
 - Node rust default and `libubsan`: `provision.sh` runs `rustup default stable` when
   `RUST_TOOLCHAINS` has `stable` (rustup had made 1.85.0, the first toolchain installed, the
   default; the workstation's is `stable`); `check` names a different default (`rust:default`).

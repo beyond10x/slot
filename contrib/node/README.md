@@ -194,6 +194,15 @@ set again without a download, and a real file at either name is left alone and r
 `/usr/local/bin` is before `/usr/bin` in the job PATH, so only a job that names `/usr/bin/make` by
 path still gets 4.3.
 
+`HOME_PINS` in `provision.sh` lists trees that jobs read by path in the build user's home. The ess
+releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 are in `~/.local/share/ess-versions/<version>/ess`
+(a repository that pins an ess release calls that path; the SHA-256 is the one of the release's
+`SHA256SUMS`), and `@types/node` 26.3.0 with `undici-types` 8.3.0 is in
+`~/.local/share/ess-node/node_modules`, the directory `ESS_TYPES_NODE` names. Apply downloads each
+archive that is missing or of another version, checks its SHA-256, and the build user copies the
+tree into place; check runs `ess --version` or reads `package.json`. These steps are skipped while
+the metadata service is open, like the other downloads that run as the build user.
+
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),
 the `go` line (`go go1.27.1`: the bare version, so the workstation's `go1.27.1-X:nodwarf5` and

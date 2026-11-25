@@ -431,6 +431,34 @@ run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && ok "make has 0 drift after the repair" || bad "make after repair: $(cat "$W/out")"
 
+# The build user's home trees (HOME_PINS): the ess releases a repository pins by path, and the
+# @types/node of ESS_TYPES_NODE with its dependency.
+HP=$R5/var/lib/builder/.local/share
+for v in 0.97.4 0.98.0 0.99.1 0.99.4; do
+  [ "$("$HP/ess-versions/$v/ess" --version)" = "ess $v" ] && ok "ess $v is in ~/.local/share/ess-versions/$v/ess" || bad "ess $v: $("$HP/ess-versions/$v/ess" --version 2>&1)"
+done
+grep -q '"version": "26.3.0"' "$HP/ess-node/node_modules/@types/node/package.json" && grep -q '"version": "8.3.0"' "$HP/ess-node/node_modules/undici-types/package.json" && ok "@types/node 26.3.0 and undici-types 8.3.0 are in ess-node/node_modules" || bad "ess-node: $(ls -R "$HP/ess-node" 2>&1 | head -5)"
+rm -rf "$HP/ess-versions/0.99.1"
+printf '#!/bin/sh\necho "ess 0.1.0"\n' >"$HP/ess-versions/0.98.0/ess"
+rm -f "$HP/ess-node/node_modules/undici-types/package.json"
+run "$R5" check
+grep -q "^drift: home:ess@0.99.1: .*ess-versions/0.99.1 is 'missing', want ess 0.99.1" "$W/out" && grep -q "^drift: home:ess@0.98.0: .*ess-versions/0.98.0 is 'ess 0.1.0', want ess 0.98.0" "$W/out" && grep -q "^drift: home:undici-types@8.3.0: " "$W/out" && ok "check names a missing ess, an ess of another release and a missing package" || bad "home drift: $(grep home "$W/out")"
+grep -q 'home:ess@0.97.4\|home:ess@0.99.4\|home:@types' "$W/out" && bad "check names a tree that is right: $(grep home "$W/out")" || ok "check names only the trees that differ"
+: >"$R5/.calls"
+run "$R5" apply
+[ "$(grep -c '^fetch ' "$R5/.calls")" = 3 ] && grep -qx 'fetch https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz' "$R5/.calls" && grep -qx 'fetch https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz' "$R5/.calls" && ok "apply fetches the three trees that differ and no other" || bad "home fetches: $(grep '^fetch' "$R5/.calls")"
+grep -q '^changed: home:ess@0.99.1: ess 0.99.1 installed in /var/lib/builder/.local/share/ess-versions/0.99.1$' "$W/out" && ok "apply names the installed ess" || bad "home apply: $(grep home "$W/out" "$W/err")"
+run "$R5" check
+[ $? -eq 0 ] && ok "the home trees have 0 drift after apply" || bad "home after apply: $(cat "$W/out")"
+rm -rf "$HP/ess-versions/0.99.4"
+: >"$R5/.state-tool-fetch-fails"
+run "$R5" apply
+st=$?
+rm -f "$R5/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -qx 'failed: home:ess@0.99.4: download or checksum of ess 0.99.4' "$W/err" && ok "a failed ess download: apply exits 1 and names it" || bad "failed home download: exit $st $(grep home "$W/err")"
+[ ! -e "$HP/ess-versions/0.99.4" ] && ok "a failed download leaves no tree" || bad "a tree of a failed download: $(ls "$HP/ess-versions/0.99.4")"
+run "$R5" apply
+
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
 conf
@@ -459,6 +487,26 @@ run "$R2" apply
 grep -qx 'changed: rust:default: rustup default stable (stable-x86_64-unknown-linux-gnu)' "$W/out" && [ "$(grep -c '^rustup toolchain install' "$R2/.calls")" = 0 ] && ok "apply sets the default again and installs nothing" || bad "default apply: $(cat "$W/out" "$R2/.calls")"
 run "$R2" check
 [ $? -eq 0 ] && ok "rust default: 0 drift after apply" || bad "rust default after apply: $(cat "$W/out")"
+q="'"
+printf 'version = "12"\n  default_toolchain = %sstable-x86_64-unknown-linux-gnu%s # pinned\nprofile = "minimal"\n' "$q" "$q" >"$R2/srv/slot/rustup/settings.toml"
+run "$R2" check
+[ $? -eq 0 ] && ok "rust default: a single-quoted value with a comment and other keys is read" || bad "settings.toml variant: $(cat "$W/out")"
+printf 'version = "12"\ndefault_toolchain = "1.99.1-x86_64-unknown-linux-gnu"\n' >"$R2/srv/slot/rustup/settings.toml"
+: >"$R2/.state-default-fails"
+run "$R2" apply
+st=$?
+rm -f "$R2/.state-default-fails"
+[ $st -eq 1 ] && grep -qx 'failed: rust:default: rustup default stable' "$W/err" && ok "a failed rustup default: apply exits 1 and names it" || bad "failed rustup default: exit $st $(grep rust "$W/err")"
+run "$R2" apply
+RD=$W/rdefault
+mkdir -p "$RD"
+conf
+grep -v '^RUST_TOOLCHAINS=' "$W/node.conf" >"$W/c2" && mv "$W/c2" "$W/node.conf"
+printf 'RUST_TOOLCHAINS=1.99.1\n' >>"$W/node.conf"
+run "$RD" apply
+grep -q 'rust:default' "$W/out" "$W/err" && bad "no stable in RUST_TOOLCHAINS, yet rust:default: $(grep 'rust:default' "$W/out" "$W/err")" || ok "without stable in RUST_TOOLCHAINS the default is left to rustup"
+grep -q '^rustup default' "$RD/.calls" && bad "rustup default ran without stable: $(grep '^rustup default' "$RD/.calls")" || ok "without stable no rustup default call"
+conf
 rm -rf "$R2/srv/slot/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu"
 : >"$R2/.calls"
 run "$R2" check
@@ -802,7 +850,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:yq make; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:yq make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"

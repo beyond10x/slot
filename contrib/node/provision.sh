@@ -88,6 +88,19 @@ RUST_TRIPLE=x86_64-unknown-linux-gnu
 # so the tag of the release the workstation runs is built here.
 MAKE_PIN='make 4.4.1 dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3 https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz'
 SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5edee0da723bb72d9acb4 aep-cli 1.99.1 aep'
+# Trees in the build user's home that a job reads by path: the ess releases a repository pins by
+# path (`~/.local/share/ess-versions/<version>/ess`) and the @types/node that ESS_TYPES_NODE names
+# (`~/.local/share/ess-node/node_modules`, with its one dependency). One line each: name, version,
+# SHA-256 of the archive, URL, leading path components to strip, directory under BUILD_HOME, the
+# check (a binary of that directory that prints `<binary> <version>`, or `package.json`, whose
+# `version` is read). The ess checksums are those of the release's SHA256SUMS; the npm ones were
+# compared with the sha512 integrity of the workstation's package-lock.json.
+HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
+ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
+ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
+ess 0.99.4 3902d0f8a6dffe5255bd0a9c8f56608fabf52faf14b97d90b6e7f7ed3da7032d https://github.com/beyond10x/ess/releases/download/0.99.4/ess-0.99.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.4 ess
+@types/node 26.3.0 69b0a537007774b0d5a3bea12736d3506b6ef451241fbca46213fd9e474b0a17 https://registry.npmjs.org/@types/node/-/node-26.3.0.tgz 1 .local/share/ess-node/node_modules/@types/node package.json
+undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -1348,6 +1361,7 @@ p_rust() {
 a_rustup_default() {
   if [ -n "$T" ]; then
     calls "rustup default $1"
+    [ -e "$R/.state-default-fails" ] && return 1
     printf 'version = "12"\ndefault_toolchain = "%s"\nprofile = "minimal"\n' "$(basename "$(rust_dir "$1")")" >"$R$STORE/rustup/settings.toml"
   else
     as_rust_user "$STORE/cargo/bin/rustup" default "$1"
@@ -1357,7 +1371,7 @@ p_rust_default() {
   case " $RUST_TOOLCHAINS " in *" stable "*) ;; *) return 0 ;; esac
   [ -x "$R$(rust_dir stable)/bin/rustc" ] || return 0
   want=$(basename "$(rust_dir stable)")
-  got=$(sed -n 's/^default_toolchain *= *"\(.*\)"/\1/p' "$R$STORE/rustup/settings.toml" 2>/dev/null | head -n 1)
+  got=$(sed -n "s/^[[:space:]]*default_toolchain[[:space:]]*=[[:space:]]*[\"']\\([^\"']*\\)[\"'].*/\\1/p" "$R$STORE/rustup/settings.toml" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-')
   [ "$got" = "$want" ] && return 0
   drift "rust:default" "the default toolchain is '${got:-none}', want $want"
   fixing && [ -n "$rustup_ok" ] || return 0
@@ -1566,6 +1580,72 @@ $MAKE_PIN
 EOF
 }
 
+# The trees of HOME_PINS. Downloads the archive into directory $1, checks its SHA-256, unpacks it
+# into $1/tree and prints that path. Arguments: dir version sha256 url strip check. NODE_TEST=1:
+# a stub tree, or nothing when $R/.state-tool-fetch-fails exists.
+home_fetch() {
+  hd=$1 hv=$2 hs=$3 hu=$4 hk=$5 hc=$6
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    mkdir -p "$hd/tree" || return 0
+    case $hc in
+      package.json) printf '{\n  "name": "stub",\n  "version": "%s"\n}\n' "$hv" >"$hd/tree/package.json" ;;
+      *) printf '#!/bin/sh\necho "%s %s"\n' "$hc" "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
+    esac
+    calls "fetch $hu"
+  else
+    (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir tree && tar -xzf archive -C tree --strip-components="$hk" --no-same-owner) || return 0
+  fi
+  chmod -R go+rX,go-w,u-s,g-s "$hd/tree"
+  echo "$hd/tree"
+}
+# What the check of a HOME_PINS line reads in directory $1: `<binary> <version>` for a binary, the
+# `version` of package.json for package.json.
+home_got() {
+  case $2 in
+    package.json) sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$R$1/package.json" 2>/dev/null | head -n 1 ;;
+    *) tool_version "$R$1/$2" ;;
+  esac
+}
+p_home_pins() {
+  while read -r hn hv hs hu hk hd hc; do
+    [ -n "$hn" ] || continue
+    p=$H/$hd
+    case $hc in package.json) want=$hv ;; *) want="$hc $hv" ;; esac
+    got=$(home_got "$p" "$hc")
+    [ "$got" = "$want" ] && continue
+    drift "home:$hn@$hv" "$p is '${got:-missing}', want $want"
+    fixing || continue
+    if ! no_link "$p"; then
+      failed "home:$hn@$hv" "$p has a symbolic link in it; not installed"
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-home.XXXXXX); fi || {
+      failed "home:$hn@$hv" "no temporary directory"
+      continue
+    }
+    chmod 755 "$td"
+    src=$(home_fetch "$td" "$hv" "$hs" "$hu" "$hk" "$hc" </dev/null)
+    if [ -z "$src" ]; then
+      failed "home:$hn@$hv" "download or checksum of $hn $hv"
+    elif as_user sh -c 'set -e; mkdir -p "$(dirname "$2")"; rm -rf "$2.slot-new"; mkdir "$2.slot-new"; cp -a "$1/." "$2.slot-new/"; rm -rf "$2"; mv "$2.slot-new" "$2"' sh "$src" "$R$p" </dev/null; then
+      got=$(home_got "$p" "$hc")
+      if [ "$got" = "$want" ]; then
+        changed "home:$hn@$hv" "$hn $hv installed in $p"
+      else
+        failed "home:$hn@$hv" "$p is '${got:-missing}' after the install"
+      fi
+    else
+      as_user rm -rf "$R$p.slot-new" </dev/null
+      failed "home:$hn@$hv" "$p not written"
+    fi
+    rm -rf "$td"
+  done <<EOF
+$HOME_PINS
+EOF
+}
+
 p_keys() {
   k=$H/.ssh/authorized_keys
   if [ -d "$R$H/.ssh" ] && [ -f "$R$k" ] && gen_keys | cmp -s - "$R$k"; then
@@ -1711,6 +1791,7 @@ case $mode in
     [ -n "$imds_open" ] || p_tools
     p_archives
     p_make
+    [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
     p_services
     [ -n "$imds_open" ] || p_source_tools
