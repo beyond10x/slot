@@ -3,8 +3,8 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
-#   tool <tsc|prettier|esbuild> <version>: no line when the machine has none, `missing` as the
-#        version when the file is there and prints none
+#   tool <tsc|prettier|esbuild|ess|aep|yq|cargo-about> <version>: no line when the machine has none,
+#        `missing` as the version when the file is there and prints none
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
 # push.sh check compares the rust, go, node and tool lines; the C tools are for reading.
@@ -35,11 +35,14 @@ for b in "$P/usr/local/bin/node" "$P/usr/bin/node"; do
 done
 # tool: the TypeScript and JavaScript tools the test lanes of the consumers call by name. A node has
 # them in /usr/local/bin (the archive pins of provision.sh); the workstation in /usr/bin or the
-# user's ~/.local/bin. The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3).
-for n in tsc prettier esbuild; do
-  for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.local/bin/$n"; do
+# user's ~/.local/bin. ess, aep and cargo-about are in the cargo bin on both (the tool pins of
+# provision.sh), yq in /usr/local/bin on a node and in the user's ~/go/bin on the workstation.
+# The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
+# runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
+for n in tsc prettier esbuild ess aep yq cargo-about; do
+  for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.cargo/bin/$n" "$HOME/go/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
-    tv=$("$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
+    tv=$(cd / && env -u ESS_TOOLCHAIN "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
     echo "tool $n ${tv:-missing}"
     break
   done

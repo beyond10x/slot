@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Node CLIs the workstation has on PATH: `provision.sh` installs `ess` 0.99.2 and `cargo-about`
+  0.9.1 (tool pins, SHA-256 from the release's checksum file) and `yq` v4.30.8 of mikefarah
+  (archive pin, linked as `yq`), the packages `glibc-static`, `bubblewrap` and `socat`, and puts
+  `/usr/sbin` in the job PATH. `toolchains.sh` prints a `tool` line for `ess`, `aep`, `yq` and
+  `cargo-about`, so `push.sh check` names a difference. `aep` 0.80.0 has no pin: its release
+  binary needs glibc 2.39 and the node has 2.34.
+
 - Node tools of the consumers' test lanes: `provision.sh` installs `typescript` 6.0.3 (`tsc`),
   `prettier` 3.8.1 and `esbuild` 0.28.2 from their npm tarballs (SHA-256 pinned, into
   `/usr/local/<name>-<version>`, linked in `/usr/local/bin`; `path:name` in an `ARCHIVE_PINS` line

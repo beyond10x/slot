@@ -153,8 +153,17 @@ name. `toolchains.sh` prints one `tool <name> <version>` line for each of the th
 former pin stays until someone removes it. Other releases are not installed: a consumer fetches its
 own (`GOTOOLCHAIN=auto`). The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
 
-`ess` is not pinned and not installed by these scripts: it chooses the release for each
-repository itself, from its own digest-checked cache.
+`ess` 0.99.2 and `cargo-about` 0.9.1 are pinned like `task`, in the build user's cargo bin: `ess` is
+the release the workstation has on PATH. It is a dispatcher: in a tree whose `ess-inputs.yaml`
+requires another release it runs that release, which it downloads itself (SHA-256 checked) into
+the build user's `~/.cache/ess/toolchains`, so a node job needs `github.com` over https and a
+writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin (the tarball names
+its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
+`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
+
+`aep` has no pin: its 0.80.0 release binary needs glibc 2.39 and the node has 2.34. Packages
+`glibc-static` (substrate's `cc -static` tests), `bubblewrap` and `socat` are base packages, and
+`/usr/sbin` is in the job PATH of `slot-node.service` (`ip`).
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

@@ -94,7 +94,7 @@ if [ $st -eq 1 ] && [ "$n" -ge 15 ]; then ok "fresh machine: check exits 1 with 
 for item in storage binds packages user unit:slot-node.service unit:slot-storage.service keys sshd sudoers slot:/usr/local/bin/slot rustup rust:1.99.1 rust:stable; do
   grep -q "^drift: $item" "$W/out" || bad "fresh machine: no drift line for $item"
 done
-grep -q '^drift: packages: .*zstd' "$W/out" && grep -q '^drift: packages: .*python3' "$W/out" && ok "check names zstd and python3 as packages of a bare node" || bad "base packages: $(grep '^drift: packages' "$W/out" | cut -c1-200)"
+grep -q '^drift: packages: .*zstd' "$W/out" && grep -q '^drift: packages: .*python3' "$W/out" && grep -q '^drift: packages: .*glibc-static' "$W/out" && grep -q '^drift: packages: .*bubblewrap' "$W/out" && grep -q '^drift: packages: .*socat' "$W/out" && ok "check names zstd, python3, glibc-static, bubblewrap and socat as packages of a bare node" || bad "base packages: $(grep '^drift: packages' "$W/out" | cut -c1-200)"
 : >"$R/.calls"
 run "$R" apply
 cp "$W/out" "$W/first-apply.out"
@@ -116,6 +116,8 @@ for u in slot-node.service sccache-node.service; do
   grep -q '^Environment=PATH=/srv/slot/nodebin:/var/lib/builder/.cargo/bin:/usr/local/bin:/usr/bin:' "$R/etc/systemd/system/$u" && ok "$u PATH: nodebin, cargo, /usr/local/bin, /usr/bin" || bad "$u PATH: $(grep PATH "$R/etc/systemd/system/$u")"
   grep -q '/usr/local/go/bin' "$R/etc/systemd/system/$u" && bad "$u PATH still has /usr/local/go/bin" || ok "$u PATH: no /usr/local/go/bin (the go link is in /usr/local/bin)"
 done
+# `ip` and the other tools of /usr/sbin: jobs find them as they do on the workstation.
+grep -q '^Environment=PATH=[^ ]*:/usr/bin:/usr/sbin:' "$R/etc/systemd/system/slot-node.service" && ok "slot-node.service PATH has /usr/sbin" || bad "slot-node.service PATH: $(grep PATH "$R/etc/systemd/system/slot-node.service")"
 grep -qx 'ExecStart=/var/lib/builder/.cargo/bin/sccache' "$R/etc/systemd/system/sccache-node.service" && ok "sccache-node runs the pinned sccache in the store's cargo bin" || bad "sccache ExecStart: $(grep ExecStart "$R/etc/systemd/system/sccache-node.service")"
 [ -e "$R/srv/slot/rootfs" ] && bad "the rootfs directory is made" || ok "no rootfs directory"
 [ -e "$R/etc/slot-node/copies" ] && bad "the copy list file is written" || ok "no copy list file"
@@ -223,9 +225,11 @@ grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 
 grep -qx 'geckodriver 0.37.1' "$W/pins" && ok "pins: geckodriver 0.37.1" || bad "pins: no geckodriver 0.37.1: $(cat "$W/pins")"
 # sccache: the node has no /usr from the workstation, and the distribution has no package of it.
 grep -qx 'sccache 0.18.0' "$W/pins" && ok "pins: sccache 0.18.0" || bad "pins: no sccache 0.18.0: $(cat "$W/pins")"
-# ess is not pinned: it picks the release a repository pins itself (an exact `requires` runs
-# that release from its own digest-checked cache, a line pin runs the base binary).
-grep -q '^ess ' "$W/pins" && bad "ess is pinned on the node: $(grep '^ess ' "$W/pins")" || ok "ess is not pinned"
+# ess at the release the workstation has on PATH (a dispatcher: a repository's exact `requires` runs
+# that release from the build user's ~/.cache/ess/toolchains, which ess downloads itself), and
+# cargo-about at the release substrate's CI installs.
+grep -qx 'ess 0.99.2' "$W/pins" && ok "pins: ess 0.99.2" || bad "pins: no ess 0.99.2: $(cat "$W/pins")"
+grep -qx 'cargo-about 0.9.1' "$W/pins" && ok "pins: cargo-about 0.9.1" || bad "pins: no cargo-about 0.9.1: $(cat "$W/pins")"
 while read -r b v; do
   [ "$("$R/srv/slot/cargo/bin/$b" --version 2>/dev/null)" = "$b $v" ] && ok "pinned tool installed: $b $v" || bad "pinned tool $b: '$("$R/srv/slot/cargo/bin/$b" --version 2>&1)'"
 done <"$W/pins"
@@ -263,9 +267,14 @@ run "$R" apply
 # bare `3.54.0`, which check reads as `task 3.54.0`.
 grep -qx 'cargo-nextest 0.9.143' "$W/pins" && ok "pins: cargo-nextest 0.9.143" || bad "pins: no cargo-nextest 0.9.143: $(cat "$W/pins")"
 grep -qx 'task 3.54.0' "$W/pins" && ok "pins: task 3.54.0" || bad "pins: no task 3.54.0: $(cat "$W/pins")"
-rm -f "$R/srv/slot/cargo/bin/cargo-nextest" "$R/srv/slot/cargo/bin/task"
+rm -f "$R/srv/slot/cargo/bin/cargo-nextest" "$R/srv/slot/cargo/bin/task" "$R/srv/slot/cargo/bin/ess" "$R/srv/slot/cargo/bin/cargo-about"
 : >"$R/.calls"
 run "$R" apply
+grep -qx 'fetch https://github.com/beyond10x/ess/releases/download/0.99.2/ess-0.99.2-x86_64-unknown-linux-gnu.tar.gz' "$R/.calls" &&
+  ok "ess is fetched from its release 0.99.2" || bad "ess URL: $(grep fetch "$R/.calls")"
+grep -qx 'fetch https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.1/cargo-about-0.9.1-x86_64-unknown-linux-musl.tar.gz' "$R/.calls" &&
+  ok "cargo-about is fetched from its release 0.9.1" || bad "cargo-about URL: $(grep fetch "$R/.calls")"
+grep -q '^changed: tool:ess: ess 0.99.2 installed: ess$' "$W/out" && ok "apply installs ess 0.99.2" || bad "ess apply: $(cat "$W/out" "$W/err")"
 grep -qx 'fetch https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz' "$R/.calls" &&
   ok "cargo-nextest is fetched from its release tag" || bad "nextest URL: $(grep fetch "$R/.calls")"
 grep -qx 'fetch https://github.com/go-task/task/releases/download/v3.54.0/task_linux_amd64.tar.gz' "$R/.calls" &&
@@ -335,6 +344,20 @@ run "$R5" apply
 grep -qx 'fetch https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz' "$R5/.calls" && grep -qx 'fetch https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz' "$R5/.calls" && ok "apply fetches the npm tarballs of prettier and esbuild" || bad "npm URLs: $(grep fetch "$R5/.calls")"
 run "$R5" check
 [ $? -eq 0 ] && ok "after apply the npm tools have 0 drift" || bad "npm tools after apply: $(cat "$W/out")"
+
+# yq is the Go one of mikefarah: the release tarball names its binary yq_linux_amd64 (no leading
+# directory), linked as /usr/local/bin/yq; `yq --version` has the release as its last word.
+[ "$(readlink "$R5/usr/local/bin/yq")" = "/usr/local/yq-v4.30.8/yq_linux_amd64" ] && ok "/usr/local/bin/yq links to /usr/local/yq-v4.30.8/yq_linux_amd64" || bad "yq link: '$(readlink "$R5/usr/local/bin/yq")'"
+[ -x "$R5/usr/local/yq-v4.30.8/yq_linux_amd64" ] && [ "$("$R5/usr/local/bin/yq" --version)" = "v4.30.8" ] && ok "yq answers v4.30.8 through the link" || bad "yq: $("$R5/usr/local/bin/yq" --version 2>&1)"
+rm -f "$R5/usr/local/bin/yq"
+rm -rf "$R5/usr/local/yq-v4.30.8"
+run "$R5" check
+grep -q "^drift: archive:yq: /usr/local/bin/yq is 'missing', want a link to /usr/local/yq-v4.30.8/yq_linux_amd64" "$W/out" && ok "check names a missing yq" || bad "yq drift: $(grep archive "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx 'fetch https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz' "$R5/.calls" && ok "apply fetches the yq release tarball" || bad "yq URL: $(grep fetch "$R5/.calls")"
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply yq has 0 drift" || bad "yq after apply: $(cat "$W/out")"
 
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
@@ -457,6 +480,17 @@ HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^to
 printf '#!/bin/sh\nexit 1\n' >"$TC/home/.local/bin/esbuild"
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool esbuild missing" ] && ok "toolchains.sh: a tool that is there and prints no version is 'missing', not a line with a trailing space" || bad "broken tool line: '$(cat "$W/out2")'"
+# ess, aep, yq and cargo-about: the user's cargo bin and ~/go/bin are searched too. The command runs
+# in / and without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires (an
+# ess-inputs.yaml in the working directory, ESS_TOOLCHAIN in the environment), not its own.
+mkdir -p "$TC/home/.cargo/bin" "$TC/home/go/bin" "$TC/tree"
+printf '#!/bin/sh\n[ -e ess-inputs.yaml ] && { echo "ess 0.98.0"; exit 0; }\necho "ess ${ESS_TOOLCHAIN:-0.99.2}"\n' >"$TC/home/.cargo/bin/ess"
+printf '#!/bin/sh\necho "aep 0.80.0"\n' >"$TC/home/.cargo/bin/aep"
+printf '#!/bin/sh\necho "yq (https://github.com/mikefarah/yq/) version v4.30.8"\n' >"$TC/home/go/bin/yq"
+chmod 755 "$TC/home/.cargo/bin/ess" "$TC/home/.cargo/bin/aep" "$TC/home/go/bin/yq"
+: >"$TC/tree/ess-inputs.yaml"
+(cd "$TC/tree" && ESS_TOOLCHAIN=0.97.4 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool ess\|^tool aep\|^tool yq\|^tool cargo-about' | tr '\n' ',' >"$W/out2")
+[ "$(cat "$W/out2")" = "tool ess 0.99.2,tool aep 0.80.0,tool yq v4.30.8," ] && ok "toolchains.sh: ess, aep and yq lines from the user's cargo bin and ~/go/bin, ess from /, cargo-about missing has no line" || bad "ess, aep, yq lines: $(cat "$W/out2")"
 
 # 5c. Closing the setup login ends the connections still logged in with the setup key; the
 # build key's connections stay. The node's sshd log names each connection's pid and key.
@@ -683,7 +717,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:yq; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"
