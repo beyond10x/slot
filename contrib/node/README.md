@@ -155,7 +155,8 @@ version of `go` and `node`; a missing link or another version is drift. `typescr
 `tsserver`), `prettier` and `esbuild` are archives of the same kind: the npm tarballs of those
 releases from `registry.npmjs.org` (esbuild's is its `@esbuild/linux-x64` package, the native
 binary), with `bin/prettier.cjs` linked as `prettier`; the consumers' test lanes call them by
-name. `toolchains.sh` prints one `tool <name> <version>` line for each tool it finds (the list is
+name. `pnpm` 11.9.0 is the same kind (`pnpm` and `pnpx` link to its `bin/*.mjs`; it needs node
+22.13 or later). `toolchains.sh` prints one `tool <name> <version>` line for each tool it finds (the list is
 below), and `push.sh check` compares those lines both ways. `zstd` and `python3` are base packages. An older directory of a
 former pin stays until someone removes it. Other releases are not installed: a consumer fetches its
 own (`GOTOOLCHAIN=auto`). The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).

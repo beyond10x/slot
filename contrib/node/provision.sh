@@ -69,13 +69,15 @@ cargo-about 0.9.1 c0e7dc6f5d74b0beec5c0053d39ab24514c717d19acd91886907a22457ea9e
 # the binary at `path` as /usr/local/bin/<name>). Other releases: a consumer fetches its own
 # (GOTOOLCHAIN=auto). typescript, prettier and esbuild are the npm tarballs of those releases
 # (esbuild's is the native binary of its linux-x64 package), the releases the test lanes of the
-# consumers read (`tsc`, `prettier` and `esbuild` on PATH). yq is the Go one of mikefarah at the
+# consumers read (`tsc`, `prettier` and `esbuild` on PATH). pnpm is the npm tarball of the release
+# the workstation runs (its dist/ is bundled; it needs node 22.13 or later). yq is the Go one of mikefarah at the
 # release the workstation runs; its tarball names the binary yq_linux_amd64.
 ARCHIVE_PINS='go 1.27.1 63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 https://go.dev/dl/go1.27.1.linux-amd64.tar.gz 1 bin/go bin/gofmt
 node v22.23.3 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz 1 bin/node bin/npm bin/npx bin/corepack
 typescript 6.0.3 33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz 1 bin/tsc bin/tsserver
 prettier 3.8.1 5531dc6006ad06b642d5342438909f85dc53e87c50556753c908229b213fb4f4 https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz 1 bin/prettier.cjs:prettier
 esbuild 0.28.2 9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6 https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz 1 bin/esbuild
+pnpm 11.9.0 2b567aa66026238078ac2e0a33bec3febd60e962987aac697456f3180819b287 https://registry.npmjs.org/pnpm/-/pnpm-11.9.0.tgz 1 bin/pnpm.mjs:pnpm bin/pnpx.mjs:pnpx
 yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq'
 RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Node pnpm: `provision.sh` installs pnpm 11.9.0, the release the workstation runs, as an archive
+  pin (the npm tarball, SHA-256 pinned) and links `pnpm` and `pnpx` in `/usr/local/bin`. A
+  repository's `pnpm` step (spindle's `task ui`) exited 201 on the node.
+
 - Node home trees: `provision.sh` installs the ess releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 in
   `~/.local/share/ess-versions/<version>/ess` and `@types/node` 26.3.0 with `undici-types` 8.3.0 in
   `~/.local/share/ess-node/node_modules` (`HOME_PINS`, SHA-256 pinned). A repository that calls an
