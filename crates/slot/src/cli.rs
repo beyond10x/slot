@@ -141,6 +141,10 @@ pub enum Cmd {
     /// Show how the pool was shared: slot time, CPU time and queue wait per
     /// project, repository or session, from the job log.
     Usage(UsageArgs),
+    /// The compile cache: what the sccache servers did, from the counters
+    /// the daemon records once a minute.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Agent hooks: refuse a build command that would run outside the pool.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -760,6 +764,38 @@ pub struct UsageArgs {
     /// Rows to print.
     #[arg(long, default_value_t = 15)]
     pub top: usize,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `slot cache` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum CacheCmd {
+    /// The compiler calls the sccache servers refused to cache, per
+    /// repository and reason, with hits and misses, and what a repository
+    /// can do about each reason.
+    ///
+    /// Reads `cache.jsonl` and `jobs.jsonl` in the state directory. A
+    /// minute's calls belong to the jobs that ran in it with compile-server
+    /// CPU: to one repository exactly when all of them are its, else split
+    /// by each job's compile-server CPU rate times its time in the minute
+    /// (shared). Minutes no such job explains are counted apart.
+    Refused(CacheRefusedArgs),
+}
+
+/// `slot cache refused` options.
+#[derive(Debug, Clone, Args)]
+pub struct CacheRefusedArgs {
+    /// The daemon's state directory.
+    #[arg(long, default_value_os_t = paths::default_state_dir())]
+    pub state_dir: PathBuf,
+    /// Window ending now: a number followed by m, h or d.
+    #[arg(long, default_value = "24h")]
+    pub since: String,
+    /// Group by repo or project (the namespace of the repository's remote).
+    #[arg(long, default_value = "repo")]
+    pub by: String,
     /// Print JSON instead of text.
     #[arg(long)]
     pub json: bool,

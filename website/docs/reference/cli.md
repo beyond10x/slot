@@ -299,6 +299,29 @@ slot usage [OPTIONS]
 - `--top`: Rows to print (default `15`)
 - `--json`: Print JSON instead of text (default `false`)
 
+### `slot cache`
+
+The compile cache: what the sccache servers did, from the counters the daemon records once a minute
+
+```text
+slot cache [OPTIONS] <COMMAND>
+```
+
+#### `slot cache refused`
+
+The compiler calls the sccache servers refused to cache, per repository and reason, with hits and misses, and what a repository can do about each reason.
+
+Reads `cache.jsonl` and `jobs.jsonl` in the state directory. A minute's calls belong to the jobs that ran in it with compile-server CPU: to one repository exactly when all of them are its, else split by each job's compile-server CPU rate times its time in the minute (shared). Minutes no such job explains are counted apart.
+
+```text
+slot cache refused [OPTIONS]
+```
+
+- `--state-dir`: The daemon's state directory
+- `--since`: Window ending now: a number followed by m, h or d (default `24h`)
+- `--by`: Group by repo or project (the namespace of the repository's remote) (default `repo`)
+- `--json`: Print JSON instead of text (default `false`)
+
 ### `slot hook`
 
 Agent hooks: refuse a build command that would run outside the pool

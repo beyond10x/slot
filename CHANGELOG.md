@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `slot cache refused [--since 24h] [--by repo|project] [--json]` lists, per repository, the
+  compiler calls the sccache servers refused to cache by reason, with hits and misses, from
+  `cache.jsonl` and `jobs.jsonl` in the state directory. A minute's calls go to the jobs that ran
+  in it with compile-server CPU: to one repository exactly, or split across several by each job's
+  compile-server CPU rate times its time in the minute (shared, its own column). Minutes no job
+  explains get a line of their own, and every reason a line with its remedy.
 - `contrib/node/` provisions a cloud build node and reports where a running one differs from it.
   `provision.sh` (root on the node) sets up the instance store array, the job tmp filesystem,
   the binds of the same-path mirror roots, packages, the build user, the units, the build key and
