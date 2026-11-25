@@ -18,6 +18,13 @@ fn main() -> ExitCode {
         Cmd::Gate(args) => gate(&args),
         Cmd::Hold(args) => Ok(slot::gate::hold(&args.fifo)),
         Cmd::Siblings(args) => Ok(siblings(&args.ws_root, &args.id, &args.key)),
+        Cmd::CargoGit(args) => Ok(slot::git_deps::parse_words(&args.wanted).map_or_else(
+            || {
+                eprintln!("slot: __cargo-git takes `<entry>:<rev>` words");
+                2
+            },
+            |w| cargo_git(&w),
+        )),
         Cmd::Exec(args) => Ok(args
             .nofile
             .exec(&args.arg0, &args.command[0], &args.command[1..])),
@@ -192,14 +199,22 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
         .cache_root
         .clone()
         .unwrap_or_else(|| args.state_dir.join("cache"));
+    // The account's own database, never the session's `CARGO_HOME`.
+    let git_db = slot::git_deps::node_db(&home);
     let roots = slot::shell::Roots {
         ws: &ws,
         cache: &cache,
         same_path: &args.same_path_root,
+        cargo_git_db: &git_db,
     };
     match slot::shell::plan(&line, &home, &roots) {
         Ok(Plan::Rsync(rsync_args)) => {
-            let e = std::process::Command::new("rsync").args(rsync_args).exec();
+            // A relative path is the account home's, as the shell checked it
+            // and as sshd starts a session there.
+            let e = std::process::Command::new("rsync")
+                .args(rsync_args)
+                .current_dir(&home)
+                .exec();
             eprintln!("slot shell: rsync: {e}");
             127
         }
@@ -244,11 +259,21 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             }
             siblings(&ws, &id, &key)
         }
+        Ok(Plan::CargoGit(wanted)) => cargo_git(&wanted),
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126
         }
     }
+}
+
+/// `slot __cargo-git`: prints the entries of `wanted` that the account's
+/// cargo git database (`~/.cargo/git/db`) lacks, by name.
+fn cargo_git(wanted: &[slot::git_deps::Wanted]) -> i32 {
+    let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/"), Into::into);
+    let db = slot::git_deps::node_db(&home);
+    print!("{}", slot::git_deps::node_answer(&db, wanted));
+    0
 }
 
 /// `slot __siblings`: records mirror `id` of repository `key` and prints

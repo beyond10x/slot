@@ -469,6 +469,39 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
     run_watched(&mut rsync, b, deadline).map(drop)
 }
 
+/// The rsync filter of a git database copy: its objects, refs and `HEAD`,
+/// nothing else (no `config` with a login or a header, no hook, no
+/// `info/`, no `FETCH_HEAD`, no lock file of a running git, no
+/// `objects/info/alternates` or `http-alternates`, which name a path or
+/// URL of this machine).
+pub const DB_ENTRY_FILTER: [&str; 8] = [
+    "--exclude=*.lock",
+    "--exclude=/objects/info/alternates",
+    "--exclude=/objects/info/http-alternates",
+    "--include=/HEAD",
+    "--include=/packed-refs",
+    "--include=/objects/***",
+    "--include=/refs/***",
+    "--exclude=*",
+];
+
+/// Copies the git database `src` to entry `entry` of the server account's
+/// cargo git database (`git_deps::NODE_DB`, relative to its home), within
+/// `b`. Only [`DB_ENTRY_FILTER`] crosses; `-rt` without `-l`: a symbolic
+/// link is not sent. Adds to what the entry holds (no `--delete`).
+pub fn copy_db_entry(src: &Path, entry: &str, r: &Remote<'_>, b: &Bounds) -> Result<()> {
+    let deadline = Instant::now() + b.limit;
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-rt", "--mkpath"])
+        .args(DB_ENTRY_FILTER)
+        .arg("-e")
+        .arg(r.ssh.join(" "))
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}:{}/{entry}/", r.host, crate::git_deps::NODE_DB));
+    run_watched(&mut rsync, b, deadline).map(drop)
+}
+
 /// The fields of one line of `rsync --list-only`: the type letter of its
 /// mode (`d`, `-`, `l`, …) and what follows the time: the path relative to
 /// the listed directory, and for a link ` -> ` and its target.
@@ -640,6 +673,119 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// A node reached through a fake ssh that runs the server's command in
+    /// `<root>/node` (its home) and writes that command line to
+    /// `<root>/server-line`: `(home, ssh)`.
+    fn fake_node(root: &Path) -> (PathBuf, Vec<String>) {
+        let home = root.join("node");
+        std::fs::create_dir_all(&home).unwrap();
+        let script = root.join("ssh.sh");
+        std::fs::write(
+            &script,
+            "home=$1; shift 2; cd \"$home\" || exit 1\n\
+             printf '%s\\n' \"$*\" > \"$home/../server-line\"\nexec \"$@\"\n",
+        )
+        .unwrap();
+        let ssh = vec![
+            "sh".to_string(),
+            script.display().to_string(),
+            home.display().to_string(),
+        ];
+        (home, ssh)
+    }
+
+    /// Copies `src` to entry `entry` of the fake node at `root`.
+    fn copy_to_node(root: &Path, src: &Path, entry: &str) -> PathBuf {
+        let (home, ssh) = fake_node(root);
+        let r = Remote {
+            host: "node",
+            ssh: &ssh,
+            ws_root: ".local/state/slot/ws",
+            remote_slot: "slot",
+            same_path: false,
+        };
+        copy_db_entry(src, entry, &r, &Bounds::default()).unwrap();
+        home
+    }
+
+    #[test]
+    fn no_alternates_of_a_git_database_reach_the_node() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let src = root.join("db-here");
+        std::fs::create_dir_all(src.join("objects/info")).unwrap();
+        std::fs::create_dir_all(src.join("objects/ab")).unwrap();
+        std::fs::write(src.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(src.join("objects/ab/cd"), "x").unwrap();
+        std::fs::write(src.join("objects/info/alternates"), "/srv/here/objects\n").unwrap();
+        std::fs::write(src.join("objects/info/http-alternates"), "https://h/o\n").unwrap();
+        let home = copy_to_node(&root, &src, "dep-00ff00ff00ff00ff");
+        let entry = home
+            .join(crate::git_deps::NODE_DB)
+            .join("dep-00ff00ff00ff00ff");
+        assert!(entry.join("objects/ab/cd").is_file(), "the objects cross");
+        assert!(entry.join("HEAD").is_file());
+        for f in ["objects/info/alternates", "objects/info/http-alternates"] {
+            assert!(!entry.join(f).exists(), "{f} crossed");
+        }
+    }
+
+    #[test]
+    fn a_link_inside_a_node_entry_is_replaced_not_written_through() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let src = root.join("db-here");
+        std::fs::create_dir_all(src.join("objects/ab")).unwrap();
+        std::fs::create_dir_all(src.join("refs/heads")).unwrap();
+        std::fs::write(src.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(src.join("objects/ab/cd"), "x").unwrap();
+        std::fs::write(src.join("refs/heads/main"), "0123\n").unwrap();
+        // The node's entry already holds links out of it, where the copy
+        // writes a file and two directories.
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("file"), "keep\n").unwrap();
+        let entry = root
+            .join("node")
+            .join(crate::git_deps::NODE_DB)
+            .join("dep-00ff00ff00ff00ff");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::os::unix::fs::symlink(outside.join("file"), entry.join("HEAD")).unwrap();
+        std::os::unix::fs::symlink(&outside, entry.join("objects")).unwrap();
+        std::os::unix::fs::symlink(&outside, entry.join("refs")).unwrap();
+        let home = copy_to_node(&root, &src, "dep-00ff00ff00ff00ff");
+        let line = std::fs::read_to_string(root.join("server-line")).unwrap();
+        let roots = crate::shell::Roots {
+            ws: &home.join(".local/state/slot/ws"),
+            cache: &home.join(".local/state/slot/cache"),
+            same_path: &[],
+            cargo_git_db: &home.join(crate::git_deps::NODE_DB),
+        };
+        assert!(
+            matches!(
+                crate::shell::plan(line.trim(), &home, &roots),
+                Ok(crate::shell::Plan::Rsync(_))
+            ),
+            "the node admits the client's own copy: {line}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            1,
+            "nothing written outside the entry"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("file")).unwrap(),
+            "keep\n"
+        );
+        for (p, dir) in [("HEAD", false), ("objects", true), ("refs", true)] {
+            let m = std::fs::symlink_metadata(entry.join(p)).unwrap();
+            assert!(!m.file_type().is_symlink(), "{p} is still a link");
+            assert_eq!(m.is_dir(), dir, "{p}");
+        }
+        assert!(entry.join("objects/ab/cd").is_file());
+    }
 
     #[test]
     fn rsync_stats_give_the_bytes_sent() {

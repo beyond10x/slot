@@ -74,6 +74,9 @@ paths under the home outside its repositories its gates read, and add them in on
   workstation.
 - Leave out credentials, the agent's own configuration, and caches a build fills again by
   itself.
+- Leave out cargo git databases (`.cargo/git/db/…`): every remote job copies the entries its
+  `Cargo.lock` files name from the workstation, and only those (Remote builds, "Git dependencies
+  come from this machine").
 
 A root channel that takes one script, such as SSM Run Command, gets it from
 `provision.sh bundle CONF apply` (or `check`): one script with the config inside.

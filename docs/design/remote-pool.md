@@ -614,6 +614,75 @@ package-cache lock while it resolves, but only for the moment it reads the cache
 crate that cargo's cache cleaner removed after the digest was recorded fails the offline build;
 editing `Cargo.lock` (or a sync of a new one) fetches again.
 
+Git dependencies come from the workstation (`git_deps.rs`). The fetch above runs on the node,
+which may hold no credential for a private forge, and only for a cargo command the client sends;
+a wrapper's inner cargo fetches on the node. So before every remote job, the spilled ones
+included (their process is this client), the client reads each `Cargo.lock` the sync sends and
+maps each `git+` source to its database entry with `cargo metadata --locked --offline` (the path
+component after `/git/checkouts/` of the package's `manifest_path`), so an entry is taken only for
+the exact source URL it was made from. It runs `cargo fetch --locked` on the workstation for a
+lock file whose locked revision is in no such entry (outside the pool, `SLOT_SHIM_OFF=1`); the
+revision is looked up in the entry's pack indexes and loose objects without running git. It asks
+the node with `slot __cargo-git <entry>:<rev>…` which entries lack their revision; the node
+answers `missing <entry>` lines only (no path, no git run, a symbolic-link entry counts as
+missing), and an answer naming an entry not asked for, or any other line, refuses the job. The
+deny lists are read and checked again before each entry is copied. Only the entries named are
+rsynced (`-rt`, no `-l`; filter `/HEAD`, `/packed-refs`, `/objects/***`, `/refs/***`, nothing
+else, so no `config` with a credential or `http.extraHeader` crosses, and
+`objects/info/alternates` and `objects/info/http-alternates`, which name a path or URL of the
+workstation, are excluded) into the node account's `~/.cargo/git/db/<entry>/`, whatever
+`CARGO_HOME` the ssh session sets. `slot shell` admits exactly that path depth and exactly the
+client's options: the short flags `r` and `t`, `--server` and `--mkpath`; every other flag,
+`-a` (links, devices, special files) and `--copy-dest` among them, is refused, and so is a
+symbolic-link entry. A symbolic link already inside a node entry is replaced by the receiver, not
+written through: `-rt` writes a file to a temporary name and renames it, and replaces a link
+where it makes a directory (`sync::tests::a_link_inside_a_node_entry_is_replaced_not_written_through`).
+cargo skips the fetch of a locked revision its database holds.
+
+What runs where. Before the job is placed, on the workstation and outside the pool
+(`SLOT_SHIM_OFF=1`, the rule for network work, like the node's fetch-once step): `git ls-files`
+in the checkout, `git ls-remote --get-url` and `ssh -G` (the deny check, each bounded at 10 s),
+and `cargo metadata --format-version 1 --locked --offline` and, when a revision is missing,
+`cargo fetch --locked` (bounded with the probe and the copies at 5 minutes), in the directory of
+each lock file, with the job's cargo and `+toolchain`. cargo there reads that directory's
+`.cargo/config.toml` files and `rust-toolchain.toml`, so a checkout's `build.rustc-wrapper`
+(cargo asks rustc for its version through it), its credential providers and the toolchain rustup
+installs for it run on the workstation, outside the pool, even for a job that then builds on the
+node. They take no slot; they are not routed through the pool.
+
+`remote-deny` and `remote-deny-origins` may each hold `/abs/path` lines and `origin:<pattern>`
+lines (`origin` in any case, spaces around `:`, ` #` comments); any other line is a problem that
+keeps every job local, naming the file and line. A `git+file` source under a path line, or a
+source one of whose URL forms matches an `origin:` pattern as a shell `case` does, without regard
+to case (`*` crosses `/`, `?`, `[...]`, `[!...]`; e.g. `origin:*git.example.org[:/]team/*`),
+keeps the job on the workstation with `git dependency denied: <source>`, set as `local_reason`
+before submission, so the daemon never spills it. The forms: the fetch URL (without `git+`,
+`?query` and `#rev`) as written and normalised (scheme and host lower case, trailing dot, default
+port and `//` removed, `file` paths percent-decoded, scp form as `ssh://`); its bare forms, host
+and path without user and port and the path without trailing `/` and `.git`, both as
+`scheme://host/path` and as `host/path`, each also with `.git`, `/` and `.git/` appended; git's
+`url.<base>.insteadOf` rewrite (`git ls-remote --get-url -- <url>`, no network) and an ssh
+alias's `HostName` (`ssh -G`), each with its normalised and bare forms. So a URL is denied when
+the pattern matches its full form or its bare form: `*git.example.org[:/]team/*` denies
+`ssh://git@git.example.org:2222/team/x`, `https://git.example.org/team/*` denies
+`https://user@git.example.org/team/x`, and `*/team/dep.git` denies `https://h/team/dep`. A
+pattern that names a user or a port matches only URLs that name them. A URL that cannot be
+normalised, a git or ssh lookup that fails, prints nothing or runs over its 10 s, a lock file
+that does not parse and a `git+` source without a full revision are denied while either list
+names anything; so are, for a checkout with a lock file, a cargo home that is not absolute
+(`CARGO_HOME` relative, or neither it nor `HOME` set) and a cargo configuration that replaces a
+git source: a `[source.<name>]` table with `replace-with` where it or its replacement has a `git`
+key, merged over `.cargo/config.toml` and `.cargo/config` in each lock file's directory and the
+directories above it, in every directory of the checkout the sync sends, and in the cargo home.
+With such a replacement `cargo metadata` names the replacement's checkout for the URL the lock
+file names (`git_deps::tests::a_git_source_replaced_in_cargo_config_keeps_the_job_here`), so the
+entry copied would be another repository's. The matcher is `git_deps::glob_match`; no crate in
+the lock file does `case` matching. Not covered: a git dependency's submodules (cargo keeps them
+as entries of their own names) are not copied; an IP literal or another DNS name for a denied
+host is not caught by matching; a source replacement given as `--config` on the command line or
+in a `CARGO_*` environment variable is not read; the lists can change between the check of an
+entry and the end of its copy.
+
 ## 6. Jobs that stay local
 
 | class | why | how slot knows |

@@ -97,6 +97,11 @@ pub enum Cmd {
     /// can copy from. Run by remote clients only.
     #[command(name = "__siblings", hide = true)]
     Siblings(SiblingsArgs),
+    /// The step a remote client runs on the build server before a job: the
+    /// server's cargo git database, and which of the named entries lack
+    /// their revision. Run by remote clients only.
+    #[command(name = "__cargo-git", hide = true)]
+    CargoGit(CargoGitArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -422,6 +427,14 @@ pub struct SiblingsArgs {
     pub id: String,
     /// The repository key.
     pub key: String,
+}
+
+/// `slot __cargo-git` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct CargoGitArgs {
+    /// `<entry>:<rev>` per database entry.
+    #[arg(required = true)]
+    pub wanted: Vec<String>,
 }
 
 /// `slot run` arguments.

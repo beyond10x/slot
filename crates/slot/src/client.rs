@@ -217,13 +217,15 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     } = checkout_info(&cwd);
     let mut req = new_request(argv, s, repo, checkout);
     // The never-sync list holds whatever `SLOT_HOST` says: its reason also
-    // keeps the daemon from handing the job to a node.
+    // keeps the daemon from handing the job to a node. So does a git
+    // dependency of the checkout on a deny list.
     let never = never_sync::of_job(&never_sync::Job {
         cwd: &cwd,
         top: top.as_deref(),
         git_dirs: &git_dirs,
         argv,
-    });
+    })
+    .or_else(|| crate::git_deps::of_job(top.as_deref(), &cwd));
     if let Some(reason) = &never {
         req.local_reason.clone_from(reason);
     }
@@ -391,10 +393,13 @@ fn remote_host<'a>(
 }
 
 /// The `local_reason` of a job whose remote start failed with `why`:
-/// `sync failed: ` and the first line of the error.
+/// `sync failed: ` and the first line of the error; a git dependency's
+/// denial as it is.
 pub fn sync_failed(why: &str) -> String {
     let first = crate::server::spill::first_line(why);
-    if first.is_empty() {
+    if first.starts_with(crate::git_deps::REASON_PREFIX) {
+        first
+    } else if first.is_empty() {
         "sync failed".into()
     } else {
         format!("sync failed: {first}")
@@ -1062,6 +1067,19 @@ fn remote(
     };
     req.sync_ms = Some(millis(t0.elapsed()));
     req.sync_bytes = synced.bytes;
+    // The git dependencies the lock files name, from this machine's cargo
+    // git database: the node may have no way to their sources. The lists
+    // are read again: what is copied is checked as it is copied.
+    let lists = crate::git_deps::lists()
+        .map_err(|e| anyhow!("{}list unreadable ({e})", crate::git_deps::REASON_PREFIX))?;
+    match crate::git_deps::carry(top, cwd, &req.argv, &lists, &target, &s.sync) {
+        Ok(Some(line)) => eprintln!("{line}"),
+        Ok(None) => {}
+        Err(crate::git_deps::CarryError::Skip(e)) => {
+            eprintln!("slot: git dependencies not copied to {host}: {e}");
+        }
+        Err(crate::git_deps::CarryError::Refuse(e)) => return Err(anyhow!("{e}")),
+    }
     let (sent, held) = toolchain::remote_env(
         std::env::vars(),
         |k| tc.client_env(k),
