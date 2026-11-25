@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The node's `ess` is the workstation's again: `ess` leaves `TOOL_PINS`, `push.sh` copies it, and
+  `push.sh check` compares its SHA-256 (`sum ess …`). ess chooses the release per repository
+  itself (an exact `requires` runs that release from its own cache, a line pin the base), so one
+  base on both machines gives one choice. A single pinned ess 0.99.1 refused a repository whose
+  line pin `0.98` ran under `--strict-requires`.
+
 ## 0.38.0 — 2026-11-25
 
 - `slot serve --min-free-disk-light <GB>` is a second disk floor for a job whose last 5 runs of

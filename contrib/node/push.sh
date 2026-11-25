@@ -164,6 +164,9 @@ cd "\$HOME/.cargo/bin" 2>/dev/null && for b in *; do
   case " $SKIP_BINS " in *" \$b "*) continue ;; esac
   echo "bin \$b \$(stat -Lc %s "\$b")"
 done
+# ess chooses the release for every repository from its base binary: the node's must be the
+# workstation's byte for byte, not only of the same size.
+[ -f ess ] && echo "sum ess \$(sha256sum ess | cut -d' ' -f1)"
 for p in $HOME_COPIES; do
   [ -d "\$HOME/\$p" ] || { echo "copy \$p missing"; continue; }
   (cd "\$HOME/\$p" && find . -type f -printf "copy \$p/%P %s\n")
