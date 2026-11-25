@@ -368,7 +368,11 @@ short:
 
 - **Disk.** The filesystem of the job's directory, and of `CARGO_TARGET_DIR` when the job sets
   it, must have 25 GB free (`slot serve --min-free-disk`, in GB; 0 turns it off). A job that
-  waits for disk waits until space is freed.
+  waits for disk waits until space is freed. A job whose last 5 runs of the same command in the
+  same repository used no compile server and built into no target directory waits at a lower
+  floor, `--min-free-disk-light` (in GB, at most `--min-free-disk`; by default the same value).
+  A first run waits at `--min-free-disk`. The wait reason names the floor: `builds need 25.0 GB`
+  or `this job needs 10.0 GB (no compile in its last 5 runs)`.
 - **Memory.** Available memory (`MemAvailable`), less what jobs that started in the last 30
   seconds are still expected to take, must cover the job's expected peak plus 4 GB
   (`--min-free-memory`, in GB; 0 turns it off). The expected peak is the 90th percentile of the

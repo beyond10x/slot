@@ -960,6 +960,7 @@ fn a_job_waits_while_the_disk_is_short_and_can_be_cancelled() {
         crate::admission::Limits {
             min_free_memory: 0,
             min_free_disk: u64::MAX,
+            min_free_disk_light: 0,
         },
     );
     let c = send(&f.socket, sh(&f.root, "echo ran"));
@@ -984,6 +985,7 @@ fn memory_short_holds_a_job_only_while_another_runs() {
         crate::admission::Limits {
             min_free_memory: u64::MAX / 4,
             min_free_disk: 0,
+            min_free_disk_light: 0,
         },
     );
     let alone = run(&f, sh(&f.root, "echo alone"));
@@ -3648,6 +3650,90 @@ fn evict_below_0_stays_off_whatever_the_disk_hold_is() {
     let e = f.server.state().evict;
     assert_eq!((e.floor, e.checked_ms), (0, 0), "{e:?}");
     drop(c);
+}
+
+/// Records five ended runs of `sh -c echo light` in `repo`; the run at
+/// index `compiled` used a compile server for 3 s, the one at index
+/// `targeted` built into a target directory. Returns the command's request.
+fn give_light_history(
+    f: &Fixture,
+    repo: &str,
+    compiled: Option<usize>,
+    targeted: Option<usize>,
+) -> Request {
+    let mut req = sh(&f.root, "echo light");
+    req.repo = repo.into();
+    let mut j = serde_json::from_str::<Job>(
+        r#"{"id":1,"argv":[],"cwd":"/w","repo":"","toolchain":"other",
+        "remote":false,"tokens":1,"state":"ok","enqueued_ms":1,"started_ms":0,
+        "ended_ms":0,"exit":0,"cpu_s":1.0,"compile_server_cpu_s":0.0,"peak_rss":0}"#,
+    )
+    .unwrap();
+    j.repo = repo.into();
+    j.argv.clone_from(&req.argv);
+    let now = now_ms();
+    for i in 0..crate::admission::LIGHT_RUNS {
+        j.started_ms = now - 10_000 * (5 - i as i64);
+        j.ended_ms = j.started_ms + 2_000;
+        j.compile_server_cpu_s = if compiled == Some(i) { 3.0 } else { 0.0 };
+        j.target_dir = if targeted == Some(i) {
+            f.root.join("target").to_string_lossy().into_owned()
+        } else {
+            String::new()
+        };
+        f.server.inner.lock().unwrap().memory.record(&j);
+    }
+    req
+}
+
+/// With 20 GB free, `--min-free-disk 40` and `--min-free-disk-light 10`: a
+/// command whose last 5 runs compiled nothing and built into no target
+/// directory starts; the same command in a repository where it never ran
+/// waits at the build floor, and so does one with a compile or a target
+/// directory in its last 5 runs.
+#[test]
+fn a_job_that_compiled_nothing_in_its_last_5_runs_starts_above_the_light_floor() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(20 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 40 * GB;
+        c.admission.min_free_disk_light = 10 * GB;
+        c.resource_poll = Duration::from_millis(20);
+    });
+    let light = give_light_history(&f, "quiet", None, None);
+    let compiled = give_light_history(&f, "built-once", Some(4), None);
+    let targeted = give_light_history(&f, "targeted-once", None, Some(0));
+    let mut first = sh(&f.root, "echo light");
+    first.repo = "never-ran".into();
+
+    let mut held = Vec::new();
+    for req in [first, compiled, targeted] {
+        let (c, id) = submit(&f, req);
+        wait_for_jobs(&f, "the job to be held at the build floor", || {
+            reason_of(&f, id).contains("builds need 40.0 GB")
+        });
+        held.push((c, id));
+    }
+    let (c, id) = submit(&f, light);
+    // A held job sends nothing more: the read ends after 5 s.
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let r = collect(c);
+    assert_eq!(
+        (r.code, r.out.as_str()),
+        (0, "light\n"),
+        "job {id}: {r:?}, reason {:?}",
+        reason_of(&f, id)
+    );
+    assert!(!r.info.contains("waiting"), "started at once: {r:?}");
+    std::thread::sleep(Duration::from_millis(100));
+    for (_, id) in &held {
+        assert_eq!(state_of(&f, *id), JobState::Queued, "job {id}");
+    }
+    drop(held);
 }
 
 /// Status and text of the answer to `PUT /api/evict-below` with `body`.

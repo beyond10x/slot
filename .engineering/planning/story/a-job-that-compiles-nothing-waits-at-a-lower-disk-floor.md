@@ -2,11 +2,14 @@
 format: aep.planning-md/3
 id: story:a-job-that-compiles-nothing-waits-at-a-lower-disk-floor
 kind: story
-status: draft
+status: active
 title: A job that compiles nothing waits at a lower disk floor than a build
 relations:
 - serves: vision:O2
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-25T03:19:23Z", actor: "agent:slot", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-25T03:19:23Z", actor: "agent:slot", revision: 3}
 ---
 # A job that compiles nothing waits at a lower disk floor than a build
 

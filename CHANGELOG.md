@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `slot serve --min-free-disk-light <GB>` is a second disk floor for a job whose last 5 runs of
+  the same command in the same repository used no compile server (`compile_server_cpu_s` 0) and
+  built into no target directory. Such a job waits only below this floor; every other job, a
+  first run included, waits at `--min-free-disk`. No job starts below it: it is at most
+  `--min-free-disk`. The default is the value of `--min-free-disk`, so a daemon without the
+  option waits as before. A job held for disk says which floor holds it: `builds need 40.0 GB` or
+  `this job needs 10.0 GB (no compile in its last 5 runs)`, in its wait reason and `slot status`.
+  Why: a test run of a script repository, a profiler or a documentation check writes next to
+  nothing, but waited at the floor of a build.
 - `contrib/node/provision.sh` installs pinned cargo tools on the node at the release its
   consumers' CI installs, from the release archive checked against its SHA-256: `ess` 0.99.1 and
   `wasm-bindgen` 0.2.130 (with `wasm-bindgen-test-runner` and `wasm2es6js`). `check` reports a
