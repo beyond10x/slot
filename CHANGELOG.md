@@ -34,6 +34,13 @@
   database entry is the first component below this machine's `git/checkouts/`, never a later
   `git/checkouts/` inside a checkout. `slot shell` refuses a copy when the cargo home, its `git/`
   or `git/db` is a symbolic link.
+- A remote job whose tree is not one repository's work tree does not run: the same-path root or
+  a directory above it, a folder outside git directly under the same-path root, or a folder
+  outside git that holds a repository within two levels. `slot` prints `slot: remote build on
+  <host> did not start (<dir> is not one repository's work tree (…); nothing is synced)` and
+  exits with 3 before any sync. A folder that cannot be read is refused. Why: a `cargo` call
+  started in a folder of several repositories synced that whole folder to the build server,
+  git-ignored files included.
 - The node installs `geckodriver` 0.37.1 (`TOOL_PINS`), the release on the forge runner image of
   browser test lanes that run `wasm-bindgen-test-runner` in headless Firefox; Firefox is the
   workstation's, copied with `/usr` (159.0 on 2026-11-25; the forge image has 160.0). A pin's download directory may name the version with `%s`

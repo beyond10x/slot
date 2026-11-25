@@ -306,3 +306,54 @@ fn a_secret_looking_variable_does_not_cross() {
         "the job went to the server: {calls}"
     );
 }
+
+/// Same-path: a directory outside any checkout is a tree only when it is
+/// a plain folder. The same-path root itself, a folder directly under it,
+/// and a folder that holds a repository within two levels are refused:
+/// nothing is synced and the job does not run (exit 3). One repository in
+/// such a folder is still synced on its own.
+#[test]
+fn a_tree_root_that_is_not_one_repository_is_refused() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let home = super::temp_root();
+    assert_eq!(root.parent(), Some(home.as_path()));
+    let group = root.join("group");
+    std::fs::create_dir(&group).unwrap();
+    let (a, _) = repository(&group);
+    let deep = root.join("deep");
+    std::fs::create_dir_all(deep.join("x/r")).unwrap();
+    super::git(&deep.join("x/r"), &["init", "-q"]);
+    std::fs::write(deep.join("note.txt"), "here\n").unwrap();
+    let d = Daemon::start_with(&["--same-path-root".as_ref(), home.as_os_str()]);
+    let ssh = super::forced_ssh_with(
+        &root,
+        &d,
+        "",
+        &format!("--same-path-root {}", home.display()),
+    );
+    let cases: [(&Path, &str); 4] = [
+        (&home, "it is the same-path root or above it"),
+        (&root, "it lies directly under the same-path root"),
+        (&group, "it holds the repositories a, b"),
+        (&deep, "it holds the repositories x/r"),
+    ];
+    for (cwd, why) in cases {
+        let out = remote_call_env(&d, &ssh, cwd, &["echo", "ran"], super::SAME_PATH);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "{}: {err}", cwd.display());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+        let want = format!(
+            "{} is not one repository's work tree ({why})",
+            cwd.display()
+        );
+        assert!(err.contains(&want), "want {want:?} in {err}");
+    }
+    let calls = ssh_calls(&root);
+    assert!(!calls.contains("rsync"), "a sync ran: {calls}");
+
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], super::SAME_PATH);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "ran\n", "{err}");
+    assert!(err.contains("slot: synced to node"), "{err}");
+}

@@ -465,10 +465,15 @@ pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String
 /// (`SLOT_REMOTE_SAME_PATH_ROOT`, by default this home; `same_path::applies`);
 /// any other tree goes to the workspace root.
 fn keeps_path(s: &Settings, top: &Path) -> bool {
-    let root = std::env::var_os("SLOT_REMOTE_SAME_PATH_ROOT")
+    s.same_path && same_path::applies(top, same_path_root().as_deref())
+}
+
+/// `SLOT_REMOTE_SAME_PATH_ROOT`, by default this home.
+fn same_path_root() -> Option<PathBuf> {
+    std::env::var_os("SLOT_REMOTE_SAME_PATH_ROOT")
         .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os("HOME"));
-    s.same_path && same_path::applies(top, root.as_deref().map(Path::new))
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
 }
 
 /// Copies every `--fetch` path back from `host` into the repository at
@@ -1026,6 +1031,9 @@ fn remote(
     s: &Settings,
 ) -> Result<Conn> {
     let top = top.ok_or_else(|| anyhow!("remote mode needs a git repository"))?;
+    if let Some(why) = same_path::tree_refusal(top, same_path_root().as_deref()) {
+        return Err(anyhow!(why));
+    }
     let id = workspace_id(top);
     let same_path = keeps_path(s, top);
     let rel = cwd
