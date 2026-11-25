@@ -175,6 +175,15 @@ shims send the real binary by absolute path and the node runs that argv as sent,
 build user's rustup proxies and `/usr/bin/go`, `gofmt` to `/usr/local/bin`; a real file at one of
 those names is left alone and reported as `failed`.
 
+GNU Make 4.4.1 is built on the node (`MAKE_PIN` in `provision.sh`): the node's make 4.3 cannot
+parse the `--jobserver-auth=fifo:` form that the daemon puts in `MAKEFLAGS`, so a cmake or make
+build read the pool as no jobserver and ran with `-j` unbounded or serial. Apply downloads the
+tarball from `ftp.gnu.org`, checks its SHA-256, runs `./configure --disable-nls --without-guile`
+and `make` as the build user, installs the binary in `/usr/local/make-4.4.1/bin` and links it as
+`make` and `gmake` in `/usr/local/bin`; check reads `make --version`. `/usr/bin/make` (4.3) stays;
+`/usr/local/bin` is before `/usr/bin` in the job PATH, so only a job that names `/usr/bin/make` by
+path still gets 4.3.
+
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),
 the `go` line (`go go1.27.1`: the bare version, so the workstation's `go1.27.1-X:nodwarf5` and

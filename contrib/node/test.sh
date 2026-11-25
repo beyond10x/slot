@@ -387,6 +387,32 @@ grep -qx 'fetch https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_lin
 run "$R5" check
 [ $? -eq 0 ] && ok "after apply yq has 0 drift" || bad "yq after apply: $(cat "$W/out")"
 
+# GNU make 4.4.1 from its source tarball: the node's make 4.3 cannot parse the pool's `fifo:`
+# jobserver. The binary is in /usr/local/make-4.4.1/bin, linked as make and gmake.
+for l in make gmake; do
+  [ "$(readlink "$R5/usr/local/bin/$l")" = "/usr/local/make-4.4.1/bin/make" ] && ok "/usr/local/bin/$l links to /usr/local/make-4.4.1/bin/make" || bad "$l link: '$(readlink "$R5/usr/local/bin/$l")'"
+done
+[ "$("$R5/usr/local/make-4.4.1/bin/make" --version)" = "GNU Make 4.4.1" ] && ok "make 4.4.1 answers its release (run by its tree path)" || bad "make: $("$R5/usr/local/make-4.4.1/bin/make" --version 2>&1)"
+rm -f "$R5/usr/local/bin/gmake"
+printf '#!/bin/sh\necho "GNU Make 4.3"\n' >"$R5/usr/local/make-4.4.1/bin/make"
+run "$R5" check
+grep -q "^drift: make: /usr/local/bin/gmake is 'missing', want a link to /usr/local/make-4.4.1/bin/make" "$W/out" && ok "check names a missing gmake link" || bad "gmake drift: $(grep make "$W/out")"
+grep -q "^drift: make: /usr/local/make-4.4.1/bin/make says 'GNU Make 4.3', want GNU Make 4.4.1" "$W/out" && ok "check names a make of another release" || bad "make 4.3 drift: $(grep make "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx 'fetch https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz' "$R5/.calls" && ok "apply fetches the make source tarball" || bad "make URL: $(grep fetch "$R5/.calls")"
+grep -q '^changed: make: GNU Make 4.4.1 built, linked as make and gmake in /usr/local/bin$' "$W/out" && ok "apply builds make 4.4.1" || bad "make apply: $(cat "$W/out" "$W/err" | grep make)"
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply make has 0 drift" || bad "make after apply: $(cat "$W/out")"
+rm -f "$R5/usr/local/bin/make"
+: >"$R5/.state-tool-fetch-fails"
+run "$R5" apply
+st=$?
+rm -f "$R5/.state-tool-fetch-fails"
+grep -q '^failed: make: download, checksum or build of make 4.4.1' "$W/err" && ok "a failed make build is named" || bad "make failure not named: $(cat "$W/err")"
+grep -q '^changed: make' "$W/out" && bad "a failed make build is reported as changed" || ok "a failed make build is not reported as changed"
+run "$R5" apply
+
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
 conf
@@ -745,7 +771,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:yq; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:yq make; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"

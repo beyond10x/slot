@@ -86,6 +86,7 @@ RUST_TRIPLE=x86_64-unknown-linux-gnu
 # peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
 # starts with `<binary> <version>`). aep: the release binary needs glibc 2.39 and a node has 2.34,
 # so the tag of the release the workstation runs is built here.
+MAKE_PIN='make 4.4.1 dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3 https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz'
 SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5edee0da723bb72d9acb4 aep-cli 1.99.1 aep'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -1446,6 +1447,71 @@ $ARCHIVE_PINS
 EOF
 }
 
+# GNU make built from its source tarball (MAKE_PIN): the node's make is 4.3, which cannot parse the
+# `--jobserver-auth=fifo:` form of the pool's jobserver (make 4.4 added it), so every cmake or make
+# build of a job failed with "invalid --jobserver-auth string". The tarball is built by the build
+# user in a temporary directory; root installs the one binary into /usr/local/make-<version>/bin and
+# links it as make and gmake in /usr/local/bin, which the job PATH has before /usr/bin.
+# Prints the path of the built make; nothing when the download, the checksum or the build failed.
+make_build() {
+  mb_d=$1
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    calls "fetch $5"
+    printf '#!/bin/sh\necho "GNU Make %s"\n' "$3" >"$mb_d/make" && chmod 755 "$mb_d/make" && echo "$mb_d/make"
+    return 0
+  fi
+  chmod 755 "$mb_d"
+  (cd "$mb_d" && curl -fsSLo src.tar.gz "$5" && echo "$4  src.tar.gz" | sha256sum -c --strict - >/dev/null &&
+    mkdir src && tar -xf src.tar.gz -C src --strip-components=1 --no-same-owner &&
+    chown -R "$U:$U" src) || return 0
+  as_user sh -c 'cd "$1" && ./configure --disable-nls --without-guile && make' sh "$mb_d/src" </dev/null >&2 || return 0
+  [ -x "$mb_d/src/make" ] && echo "$mb_d/src/make"
+}
+p_make() {
+  while read -r mn mv ms mu; do
+    [ -n "$mn" ] || continue
+    dir=/usr/local/$mn-$mv
+    ok=1
+    for l in make gmake; do
+      got=$(readlink "$R/usr/local/bin/$l" 2>/dev/null)
+      [ "$got" = "$dir/bin/make" ] && continue
+      drift "make" "/usr/local/bin/$l is '${got:-missing}', want a link to $dir/bin/make"
+      ok=
+    done
+    v=$(as_user "$R$dir/bin/make" --version 2>/dev/null </dev/null | head -n 1)
+    case $v in
+      "GNU Make $mv"*) ;;
+      *)
+        drift "make" "$dir/bin/make says '${v:-missing}', want GNU Make $mv"
+        ok=
+        ;;
+    esac
+    fixing && [ -z "$ok" ] || continue
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-make.XXXXXX); fi || {
+      failed "make" "no temporary directory"
+      continue
+    }
+    ml=$(mktemp)
+    mk=$(make_build "$td" "$mn" "$mv" "$ms" "$mu" 2>"$ml")
+    if [ -z "$mk" ]; then
+      failed "make" "download, checksum or build of make $mv: $({ grep -m 3 -i 'error' "$ml"; tail -n 2 "$ml"; } | tr '\n' ' ')"
+    elif mkdir -p "$R$dir/bin" "$R/usr/local/bin" && install -m 0755 "$mk" "$R$dir/bin/make.slot-new" && mv "$R$dir/bin/make.slot-new" "$R$dir/bin/make" &&
+      ln -sfn "$dir/bin/make" "$R/usr/local/bin/make" && ln -sfn "$dir/bin/make" "$R/usr/local/bin/gmake"; then
+      v=$(as_user "$R$dir/bin/make" --version 2>/dev/null </dev/null | head -n 1)
+      case $v in
+        "GNU Make $mv"*) changed "make" "GNU Make $mv built, linked as make and gmake in /usr/local/bin" ;;
+        *) failed "make" "$dir/bin/make says '${v:-missing}' after the install" ;;
+      esac
+    else
+      failed "make" "$dir not written"
+    fi
+    rm -rf "$td" "$ml"
+  done <<EOF
+$MAKE_PIN
+EOF
+}
+
 p_keys() {
   k=$H/.ssh/authorized_keys
   if [ -d "$R$H/.ssh" ] && [ -f "$R$k" ] && gen_keys | cmp -s - "$R$k"; then
@@ -1590,6 +1656,7 @@ case $mode in
     [ -n "$imds_open" ] || p_rust
     [ -n "$imds_open" ] || p_tools
     p_archives
+    p_make
     [ -n "$imds_open" ] || p_keys
     p_services
     [ -n "$imds_open" ] || p_source_tools

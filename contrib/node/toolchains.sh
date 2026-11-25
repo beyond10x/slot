@@ -3,7 +3,7 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
-#   tool <tsc|prettier|esbuild|ess|aep|yq|cargo-about> <version>: no line when the machine has none,
+#   tool <tsc|prettier|esbuild|ess|aep|yq|cargo-about|make> <version>: no line when the machine has none,
 #        `missing` as the version when the file is there and prints none
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
@@ -41,7 +41,7 @@ done
 # the workstation.
 # The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
 # runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
-for n in tsc prettier esbuild ess aep yq cargo-about; do
+for n in tsc prettier esbuild ess aep yq cargo-about make; do
   for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.cargo/bin/$n" "$HOME/go/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
     tv=$(cd / && env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Node `make` 4.4.1: `provision.sh` builds GNU Make 4.4.1 from its SHA-256 pinned tarball and
+  links it as `make` and `gmake` in `/usr/local/bin`. The node's make 4.3 does not read the
+  `--jobserver-auth=fifo:` form of `MAKEFLAGS`, so cmake and make builds did not use the pool.
+  `toolchains.sh` prints a `tool make` line, so `push.sh check` names a difference.
+
 - Node `aep` 0.80.0: `provision.sh` builds it on the node, as the build user, from the commit of
   the release tag (`SOURCE_PINS`: `cargo install --locked --git … --rev …`), because the release
   binary needs glibc 2.39 and the node has 2.34. `check` reads `aep --version`.
