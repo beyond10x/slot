@@ -868,6 +868,52 @@ grep -q -- '--no-same-owner' "$W/tar.log" && ok "slot's tar takes no owner from 
 [ "$(grep -c 'no-same-owner' "$here/provision.sh")" -ge 3 ] && ok "every tar of provision.sh that runs as root has --no-same-owner" || bad "--no-same-owner count: $(grep -c 'no-same-owner' "$here/provision.sh")"
 [ "$(grep -c 'u-s,g-s' "$here/provision.sh")" -ge 3 ] && ok "unpacked trees lose setuid and setgid (static check)" || bad "u-s,g-s count: $(grep -c 'u-s,g-s' "$here/provision.sh")"
 
+# 6i-2. A home pin through the real download branch: a served tarball whose SHA-256 matches is
+# unpacked, its files lose group/other write and setuid, the tree carries .slot-sha256, and check
+# then reports no drift. A marker that differs from the pin is drift.
+mkdir -p "$W/hsrc/ess-9.9.9-x" "$W/stubbin2"
+printf '#!/bin/sh\necho "ess 9.9.9"\n' >"$W/hsrc/ess-9.9.9-x/ess"
+printf 'readme\n' >"$W/hsrc/ess-9.9.9-x/README.md"
+chmod 4777 "$W/hsrc/ess-9.9.9-x/ess"
+chmod 666 "$W/hsrc/ess-9.9.9-x/README.md"
+tar -czf "$W/home.tar.gz" -C "$W/hsrc" ess-9.9.9-x
+HSHA=$(sha256sum "$W/home.tar.gz" | cut -d' ' -f1)
+cat >"$W/stubbin2/curl" <<EOF
+#!/bin/sh
+out=
+url=
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -fsSLo) out=\$2; shift ;;
+    -*) ;;
+    *) url=\$1 ;;
+  esac
+  shift
+done
+case \$url in
+  https://home.test/ess.tar.gz) cp "$W/home.tar.gz" "\$out" ;;
+  *) printf 'junk\n' >"\$out" ;;
+esac
+EOF
+chmod 755 "$W/stubbin2/curl"
+HLINE="ess 9.9.9 $HSHA https://home.test/ess.tar.gz 1 .local/share/ess-versions/9.9.9 ess"
+homerun() { NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_TEST_HOME_PINS="$HLINE" NODE_ROOT=$RH PATH=$W/stubbin2:$PATH sh "$P" "$1" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+RH=$W/rh
+mkdir -p "$RH"
+homerun apply
+HT=$RH/var/lib/builder/.local/share/ess-versions/9.9.9
+grep -q 'changed: home:ess@9.9.9' "$W/out" && ok "home pin, real branch: apply installs the tree" || bad "home real branch: $(cat "$W/out" "$W/err")"
+[ "$(stat -c %a "$HT/ess" 2>/dev/null)" = 755 ] && ok "home pin: ess is mode 755 (setuid and group/other write dropped)" || bad "home ess mode: $(stat -c %a "$HT/ess" 2>&1)"
+[ -z "$(find "$HT" -perm /022 -o -perm /6000 2>/dev/null)" ] && ok "home pin: no group- or other-writable and no setuid file" || bad "home pin writable files: $(find "$HT" -perm /022 -o -perm /6000)"
+[ "$(cat "$HT/.slot-sha256" 2>/dev/null)" = "$HSHA" ] && ok "home pin: .slot-sha256 holds the archive's SHA-256" || bad "home marker: $(cat "$HT/.slot-sha256" 2>&1)"
+homerun check
+grep -q 'home:ess@9.9.9' "$W/out" && bad "home pin: drift after a matching install: $(cat "$W/out")" || ok "home pin: check reports no drift after the install"
+printf 'other\n' >"$HT/.slot-sha256"
+homerun check
+grep -q 'archive' "$W/out" && ok "home pin: a marker of another archive is drift" || bad "home marker drift: $(cat "$W/out")"
+homerun apply
+[ "$(cat "$HT/.slot-sha256" 2>/dev/null)" = "$HSHA" ] && [ ! -e "$HT.slot-new" ] && [ ! -e "$HT.slot-old" ] && ok "home pin: apply replaces a tree of another archive, no .slot-new or .slot-old left" || bad "home repair: $(ls -a "$RH/var/lib/builder/.local/share/ess-versions")"
+
 # 6j. After apply changed a unit file or replaced the slot binary, each running unit it affects
 # restarts: sccache-node always, slot-node when no job runs (else a pending line). check reports a
 # running unit whose loaded definition, process environment or slot binary is not what its file

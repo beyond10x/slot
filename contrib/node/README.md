@@ -200,8 +200,10 @@ releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 are in `~/.local/share/ess-versions/<
 `SHA256SUMS`), and `@types/node` 26.3.0 with `undici-types` 8.3.0 is in
 `~/.local/share/ess-node/node_modules`, the directory `ESS_TYPES_NODE` names. Apply downloads each
 archive that is missing or of another version, checks its SHA-256, and the build user copies the
-tree into place; check runs `ess --version` or reads `package.json`. These steps are skipped while
-the metadata service is open, like the other downloads that run as the build user.
+tree into place through a `.slot-new` directory, with group and other write and setuid removed, and
+writes the archive's SHA-256 to `.slot-sha256` in the tree. Check runs `ess --version` or reads
+`package.json`, and reports drift when `.slot-sha256` is not the pin's SHA-256. These steps are
+skipped while the metadata service is open, like the other downloads that run as the build user.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

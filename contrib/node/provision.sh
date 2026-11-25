@@ -1597,7 +1597,7 @@ home_fetch() {
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xzf archive -C tree --strip-components="$hk" --no-same-owner) || return 0
   fi
-  chmod -R go+rX,go-w,u-s,g-s "$hd/tree"
+  chmod -R u+rwX,go+rX,go-w,u-s,g-s "$hd/tree"
   echo "$hd/tree"
 }
 # What the check of a HOME_PINS line reads in directory $1: `<binary> <version>` for a binary, the
@@ -1614,8 +1614,9 @@ p_home_pins() {
     p=$H/$hd
     case $hc in package.json) want=$hv ;; *) want="$hc $hv" ;; esac
     got=$(home_got "$p" "$hc")
-    [ "$got" = "$want" ] && continue
-    drift "home:$hn@$hv" "$p is '${got:-missing}', want $want"
+    mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
+    [ "$got" = "$want" ] && [ "$mark" = "$hs" ] && continue
+    drift "home:$hn@$hv" "$p is '${got:-missing}', want $want$([ "$got" = "$want" ] && echo " from the archive $hs")"
     fixing || continue
     if ! no_link "$p"; then
       failed "home:$hn@$hv" "$p has a symbolic link in it; not installed"
@@ -1629,9 +1630,10 @@ p_home_pins() {
     src=$(home_fetch "$td" "$hv" "$hs" "$hu" "$hk" "$hc" </dev/null)
     if [ -z "$src" ]; then
       failed "home:$hn@$hv" "download or checksum of $hn $hv"
-    elif as_user sh -c 'set -e; mkdir -p "$(dirname "$2")"; rm -rf "$2.slot-new"; mkdir "$2.slot-new"; cp -a "$1/." "$2.slot-new/"; rm -rf "$2"; mv "$2.slot-new" "$2"' sh "$src" "$R$p" </dev/null; then
+    elif as_user sh -c 'set -e; mkdir -p "$(dirname "$2")"; rm -rf "$2.slot-new" "$2.slot-old"; mkdir "$2.slot-new"; cp -a "$1/." "$2.slot-new/"; printf "%s\n" "$3" >"$2.slot-new/.slot-sha256"; if [ -e "$2" ]; then mv "$2" "$2.slot-old"; fi; mv "$2.slot-new" "$2"; rm -rf "$2.slot-old"' sh "$src" "$R$p" "$hs" </dev/null; then
       got=$(home_got "$p" "$hc")
-      if [ "$got" = "$want" ]; then
+      mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
+      if [ "$got" = "$want" ] && [ "$mark" = "$hs" ]; then
         changed "home:$hn@$hv" "$hn $hv installed in $p"
       else
         failed "home:$hn@$hv" "$p is '${got:-missing}' after the install"
@@ -1791,6 +1793,7 @@ case $mode in
     [ -n "$imds_open" ] || p_tools
     p_archives
     p_make
+    [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
     p_services
