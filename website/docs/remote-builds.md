@@ -183,17 +183,23 @@ export SLOT_SSH="ssh -p 2222 -o ConnectTimeout=3"
 ## When the server is unreachable
 
 If the remote job cannot start (the host is down, ssh is refused, the sync fails, for example
-because the server disk is full), `slot` sends the job to this machine's daemon instead and prints
-`slot: remote build on <host> did not start (…); running it on this machine's daemon`. The job
-then waits for slots in the local pool like any other. Before 0.8.0 it ran the command directly,
-outside the pool. If the connection drops while the job runs, `slot` prints `slot: connection to
-daemon lost` and exits with 3; the daemon cancels the job.
+because the server disk is full), the job does not run, and `slot` exits with 3 and prints
+`slot: remote build on <host> did not start (…); the job did not run (set SLOT_REMOTE_FALLBACK=local
+to run it on this machine's daemon instead)`. A build you sent to a server stays off this machine
+unless you ask for it.
+
+With `SLOT_REMOTE_FALLBACK=local`, `slot` sends such a job to this machine's daemon instead and
+prints `slot: remote build on <host> did not start (…); running it on this machine's daemon`; the
+job then waits for slots in the local pool like any other. From 0.8.0 to 0.38.0 this was the
+default; before 0.8.0 the command ran directly, outside the pool. If the connection drops while
+the job runs, `slot` prints `slot: connection to daemon lost` and exits with 3; the daemon
+cancels the job.
 
 A slow link gets the same treatment. A sync whose rsync reads and writes no byte for
 `SLOT_SYNC_STALL` (default 60 s), or that runs longer than `SLOT_SYNC_LIMIT` (default 5 min), is
-killed with its ssh, and the job goes to this machine's daemon with `(sync killed: no byte moved
-for 60 s)` or `(sync killed: ran over 300 s)` in the line above. An rsync that someone else
-kills ends the same way. The job is never sent to the server after a sync that did not finish.
+killed with its ssh, with `(sync killed: no byte moved for 60 s)` or `(sync killed: ran over
+300 s)` in the line above. An rsync that someone else kills ends the same way. The job is never
+sent to the server after a sync that did not finish.
 
 ## Target directories on the server
 
@@ -308,10 +314,10 @@ after you add a path dependency. A job that passes `--locked` or `--frozen` itse
 `cargo fetch --locked` instead, so it fails on the server as it would locally.
 
 A fetch that fails (a `Cargo.toml` cargo cannot resolve, an unreachable registry, an out-of-date
-`Cargo.lock` under `--locked`) or takes longer than 5 minutes sends the job back to this
-machine's daemon with
-`slot: remote build on <host> did not start (cargo fetch failed …); running it on this
-machine's daemon`. A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
+`Cargo.lock` under `--locked`) or takes longer than 5 minutes is a job that did not start:
+`slot: remote build on <host> did not start (cargo fetch failed …)`, exit 3, or this machine's
+daemon with `SLOT_REMOTE_FALLBACK=local` ([When the server is
+unreachable](#when-the-server-is-unreachable)). A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
 need the network themselves (`cargo update`, `add`, `install`, `fetch`) run online.
 
 The digests live in `<ws-root>/.cargo-fetch/` on the server and go with their mirror when it is
@@ -466,7 +472,7 @@ A job that runs or waits here while a node takes jobs carries the reason in `loc
 (the working directory or an argument under the caller's `~/.cache`), `nested job`, `gated job`,
 `remote job`, `sent back by a node`, `slots free here first` (it got slots here before a node
 took it), or `sync failed: <first line of the error>` from a remote-mode client whose start
-failed and that ran the job on this machine's daemon instead. A wrapper sets its own reason with
+failed and that ran the job on this machine's daemon instead (`SLOT_REMOTE_FALLBACK=local`). A wrapper sets its own reason with
 `SLOT_LOCAL_REASON=<text>`; a job with a reason is not handed to a node.
 `slot --here <command>` keeps a job that needs this host's credentials while it runs (a clone, a
 fetch, a push) in this host's pool, whatever `SLOT_HOST` says, with the reason `here: needs this

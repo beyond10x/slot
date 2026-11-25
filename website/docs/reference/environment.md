@@ -14,8 +14,9 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_WSROOT` | `.local/state/slot/ws` | workspace root on the remote host, relative to its home directory; must match the server's `--ws-root` |
 | `SLOT_REMOTE` | `slot` | the slot executable on the remote host |
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
-| `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job runs on this machine's daemon: seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
-| `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job runs on this machine's daemon; same format |
+| `SLOT_REMOTE_FALLBACK` | unset | `local`: a remote job that cannot start runs on this machine's daemon instead; unset: it does not run and `slot` exits with 3. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
+| `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job did not start (see `SLOT_REMOTE_FALLBACK`): seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
+| `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job did not start; same format |
 | `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
 | `SLOT_REMOTE_SAME_PATH_ROOT` | `$HOME` | with `SLOT_REMOTE_SAME_PATH`, only a repository below this directory keeps its own path on the remote host; any other goes to the remote workspace root (`SLOT_WSROOT`) |
 | `SLOT_NO_PRODUCTS` | unset | `1`: a remote `cargo build`, `test`, `bench` or `rustc` copies nothing back into the local target directory; the command runs on the remote host unchanged, and the client prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` where it would have copied. Unset or `0`: the products come back. See [Remote builds](../remote-builds.md#binaries-and-test-binaries-come-back). |
