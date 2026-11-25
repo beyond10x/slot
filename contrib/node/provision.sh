@@ -1070,9 +1070,21 @@ a_rustup_init() {
     as_rust_user "$1" --no-modify-path --default-toolchain none --profile minimal -y
   fi
 }
+# The entries of list $2 (RUST_TARGETS or RUST_COMPONENTS) that apply to toolchain $1, one per
+# line: each bare entry, and each entry `<toolchain>:<name>,<name>` that names this toolchain.
+rust_entries() {
+  for rt_e in $2; do
+    case $rt_e in
+      *:*) [ "${rt_e%%:*}" = "$1" ] && printf '%s\n' "${rt_e#*:}" | tr ',' '\n' ;;
+      *) printf '%s\n' "$rt_e" ;;
+    esac
+  done | grep .
+}
+rust_targets() { rust_entries "$1" "$RUST_TARGETS"; }
+rust_components() { rust_entries "$1" "$RUST_COMPONENTS"; }
 rust_args() {
-  for c in $RUST_COMPONENTS; do printf ' -c %s' "$c"; done
-  for t in $RUST_TARGETS; do printf ' -t %s' "$t"; done
+  for c in $(rust_components "$1"); do printf ' -c %s' "$c"; done
+  for t in $(rust_targets "$1"); do printf ' -t %s' "$t"; done
 }
 rust_dir() {
   case $1 in
@@ -1088,9 +1100,9 @@ a_rustup_install() {
     mkdir -p "$d/bin" && printf '#!/bin/sh\necho "commit-hash: 0000000"\n' >"$d/bin/rustc" && chmod 755 "$d/bin/rustc"
     : >"$d/.components"
     : >"$d/.targets"
-    for c in $RUST_COMPONENTS; do echo "$c-$RUST_TRIPLE" >>"$d/.components"; done
+    for c in $(rust_components "$1"); do echo "$c-$RUST_TRIPLE" >>"$d/.components"; done
     echo "$RUST_TRIPLE" >>"$d/.targets"
-    for t in $RUST_TARGETS; do echo "$t" >>"$d/.targets"; done
+    for t in $(rust_targets "$1"); do echo "$t" >>"$d/.targets"; done
   else
     as_rust_user "$STORE/cargo/bin/rustup" toolchain install "$1" --profile minimal $2
   fi
@@ -1120,7 +1132,7 @@ a_rustup_add() {
 # one, apply adds those and no other.
 p_rust_extras() {
   for pe_k in component target; do
-    if [ "$pe_k" = component ]; then pe_want=$RUST_COMPONENTS; else pe_want=$RUST_TARGETS; fi
+    if [ "$pe_k" = component ]; then pe_want=$(rust_components "$1"); else pe_want=$(rust_targets "$1"); fi
     [ -n "$pe_want" ] || continue
     pe_have=$(q_rust_list "$pe_k" "$1")
     pe_missing=
@@ -1139,6 +1151,42 @@ p_rust_extras() {
     fi
     rm -f "$pe_l"
   done
+}
+# Removes targets: toolchain, names...
+a_rustup_remove() {
+  ar_n=$1
+  shift
+  if [ -n "$T" ]; then
+    calls "rustup target remove --toolchain $ar_n $*"
+    for ar_w in "$@"; do
+      grep -vxF "$ar_w" "$R$(rust_dir "$ar_n")/.targets" >"$R$(rust_dir "$ar_n")/.targets.new"
+      mv "$R$(rust_dir "$ar_n")/.targets.new" "$R$(rust_dir "$ar_n")/.targets"
+    done
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" target remove --toolchain "$ar_n" "$@"
+  fi
+}
+# A target that a toolchain has, other than the host's, and that no RUST_TARGETS entry names for it
+# is surplus: the node mirrors the workstation's targets per toolchain, so check names it and
+# apply removes it.
+p_rust_surplus() {
+  ps_want=$(rust_targets "$1")
+  ps_extra=
+  for ps_h in $(q_rust_list target "$1"); do
+    [ "$ps_h" = "$RUST_TRIPLE" ] && continue
+    echo "$ps_want" | grep -qxF "$ps_h" && continue
+    drift "rust:$1" "target $ps_h is not in RUST_TARGETS"
+    ps_extra="$ps_extra $ps_h"
+  done
+  fixing && [ -n "$ps_extra" ] && [ -n "$rustup_ok" ] || return 0
+  ps_l=$(mktemp)
+  if a_rustup_remove "$1" $ps_extra >"$ps_l" 2>&1; then
+    changed "rust:$1" "target removed:$ps_extra"
+  else
+    tail -n 5 "$ps_l" >&2
+    failed "rust:$1" "rustup target remove$ps_extra"
+  fi
+  rm -f "$ps_l"
 }
 p_rust() {
   [ -n "$RUST_TOOLCHAINS" ] || return 0
@@ -1169,10 +1217,11 @@ p_rust() {
       rm -rf "$rd"
     fi
   fi
-  ra=$(rust_args)
   for n in $RUST_TOOLCHAINS; do
+    ra=$(rust_args "$n")
     if [ -x "$R$(rust_dir "$n")/bin/rustc" ]; then
       p_rust_extras "$n"
+      p_rust_surplus "$n"
       continue
     fi
     drift "rust:$n" missing

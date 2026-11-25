@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Node parity of rust toolchains: the `rust` line of `toolchains.sh` lists the installed targets and
+  `clippy`, `rustfmt`, `rust-src` and `llvm-tools` (sorted, comma separated; `rust-docs` and the
+  manifests are left out) in place of a digest, so a difference in `push.sh check` names the
+  target. `RUST_TARGETS` and `RUST_COMPONENTS` take `<toolchain>:<name>,<name>` entries beside bare
+  names, so a node mirrors the targets and components each workstation toolchain has; a target a
+  toolchain has beyond its entries (the host's aside) is surplus: `check` names it and `apply`
+  removes it (`rustup target remove`).
+
 - Node provisioning, from a review: tests run the real download paths (slot, pinned tools,
   rustup-init, go and node) against a file with the wrong SHA-256 and see nothing unpacked or run;
   `apply` restarts `sccache-node` when its unit changed and `slot-node` when its unit, its

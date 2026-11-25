@@ -141,6 +141,7 @@ conf_check_forms() {
     eval "v=\${$k}"
     case $k in
       EXTRA_PACKAGES) case $v in *[!A-Za-z0-9._+\ -]*) v=\* ;; esac ;;
+      RUST_TARGETS | RUST_COMPONENTS) case $v in *[!A-Za-z0-9._:,\ -]* | *:-* | *,-*) v=\* ;; esac ;;
       *) case $v in *[!A-Za-z0-9._\ -]*) v=\* ;; esac ;;
     esac
     case " $v" in

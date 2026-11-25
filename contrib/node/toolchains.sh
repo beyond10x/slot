@@ -1,6 +1,7 @@
 #!/bin/sh
 # toolchains.sh <usr-prefix> <rustup-home>: one line per toolchain a build job can resolve to.
-#   rust <name> <rustc commit hash> <digest of the installed targets and components>
+#   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
+#        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
@@ -12,8 +13,10 @@ for d in "$R"/toolchains/*; do
   [ -x "$d/bin/rustc" ] || continue
   n=$(basename "$d")
   h=$("$d/bin/rustc" -vV 2>/dev/null | sed -n 's/^commit-hash: //p')
-  c=$(ls "$d/lib/rustlib" 2>/dev/null | grep -v '^multirust\|^rust-installer-version$' | sort | md5sum | cut -c1-12)
-  echo "rust $n ${h:-none} $c"
+  t=$(for x in "$d"/lib/rustlib/*/lib; do [ -d "$x" ] && basename "$(dirname "$x")"; done)
+  k=$(sed -n 's/^clippy-preview-.*/clippy/p; s/^rustfmt-preview-.*/rustfmt/p; s/^rust-src$/rust-src/p; s/^llvm-tools-preview-.*/llvm-tools/p' "$d/lib/rustlib/components" 2>/dev/null)
+  c=$(printf '%s\n%s\n' "$t" "$k" | grep . | sort | tr '\n' ',' | sed 's/,$//')
+  echo "rust $n ${h:-none} ${c:-none}"
 done
 # go: the bare version, `go version go1.27.1-X:nodwarf5 linux/amd64` (the workstation's build)
 # and `go version go1.27.1 linux/amd64` (the node's archive) both print as `go go1.27.1`.

@@ -53,7 +53,7 @@ conf
 printf 'RUST_COMPONENTS=clippy\nRUST_TARGETS=wasm32-unknown-unknown\n' >>"$W/node.conf"
 run "$W/r0" check
 if grep -q 'unknown key' "$W/err"; then bad "RUST_COMPONENTS and RUST_TARGETS are refused ($(cat "$W/err"))"; else ok "RUST_COMPONENTS and RUST_TARGETS are config keys"; fi
-for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARGETS=$(id)' 'RUST_TOOLCHAINS=1.99.1 -stable' 'EXTRA_PACKAGES=jq;id' 'EXTRA_PACKAGES=git --nogpgcheck' 'EXTRA_PACKAGES=a $(id)' 'EXTRA_PACKAGES=a*'; do
+for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARGETS=$(id)' 'RUST_TARGETS=1.99.1:-t' 'RUST_TARGETS=1.99.1:a,-b' 'RUST_TOOLCHAINS=1.99.1 -stable' 'EXTRA_PACKAGES=jq;id' 'EXTRA_PACKAGES=git --nogpgcheck' 'EXTRA_PACKAGES=a $(id)' 'EXTRA_PACKAGES=a*'; do
   conf
   echo "$bad_rust" >>"$W/node.conf"
   run "$W/r0" check
@@ -336,6 +336,23 @@ conf
 printf 'RUST_COMPONENTS=clippy\nRUST_TARGETS=wasm32-unknown-unknown x86_64-unknown-linux-musl\n' >>"$W/node.conf"
 run "$R3" apply
 grep -qx 'rustup toolchain install stable --profile minimal -c clippy -t wasm32-unknown-unknown -t x86_64-unknown-linux-musl' "$R3/.calls" && ok "RUST_COMPONENTS and RUST_TARGETS reach rustup" || bad "components and targets: $(grep rustup "$R3/.calls")"
+# A target after `<toolchain>:` goes to that toolchain only; a bare one goes to every toolchain.
+R3b=$W/r3b
+mkdir -p "$R3b"
+conf
+printf 'RUST_COMPONENTS=clippy 1.99.1:rust-src\nRUST_TARGETS=1.99.1:x86_64-unknown-linux-musl,wasm32-unknown-unknown wasm32-wasip1\n' >>"$W/node.conf"
+run "$R3b" apply
+grep -qx 'rustup toolchain install 1.99.1 --profile minimal -c clippy -c rust-src -t x86_64-unknown-linux-musl -t wasm32-unknown-unknown -t wasm32-wasip1' "$R3b/.calls" && grep -qx 'rustup toolchain install stable --profile minimal -c clippy -t wasm32-wasip1' "$R3b/.calls" && ok "RUST_TARGETS and RUST_COMPONENTS: <toolchain>:<names> reaches that toolchain, a bare name every one" || bad "per-toolchain targets: $(grep rustup "$R3b/.calls")"
+run "$R3b" check
+[ $? -eq 0 ] && ok "per-toolchain targets installed: 0 drift" || bad "per-toolchain targets, check: $(cat "$W/out")"
+# A target no entry names for its toolchain is surplus: check names it, apply removes it.
+echo x86_64-unknown-linux-musl >>"$R3b/srv/slot/rustup/toolchains/stable-x86_64-unknown-linux-gnu/.targets"
+run "$R3b" check
+grep -qx 'drift: rust:stable: target x86_64-unknown-linux-musl is not in RUST_TARGETS' "$W/out" && ! grep -q 'rust:1.99.1' "$W/out" && ok "check names a surplus target of the toolchain that has it" || bad "surplus target, check: $(cat "$W/out")"
+run "$R3b" apply
+grep -qx 'rustup target remove --toolchain stable x86_64-unknown-linux-musl' "$R3b/.calls" && ! grep -q 'rustup target remove --toolchain 1.99.1' "$R3b/.calls" && ok "apply removes the surplus target and no other" || bad "surplus target, apply: $(grep 'target remove' "$R3b/.calls")"
+run "$R3b" check
+[ $? -eq 0 ] && ok "after the removal: 0 drift" || bad "after the surplus removal: $(cat "$W/out")"
 R4=$W/r4
 mkdir -p "$R4"
 conf
@@ -347,14 +364,15 @@ conf
 # 5g. toolchains.sh: one line per rust toolchain; go, node and the C tools by the version they
 # print (the machine it runs on), no digest of /usr or /etc.
 TC=$W/tc
-mkdir -p "$TC/usr/bin" "$TC/usr/lib/go/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu"
+mkdir -p "$TC/usr/bin" "$TC/usr/lib/go/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib"
+printf 'rustc-x86_64-unknown-linux-gnu\nclippy-preview-x86_64-unknown-linux-gnu\nrustfmt-preview-x86_64-unknown-linux-gnu\nrust-docs-x86_64-unknown-linux-gnu\nrust-std-x86_64-unknown-linux-musl\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/components"
 printf '#!/bin/sh\necho "commit-hash: abc123"\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc"
 printf '#!/bin/sh\necho "go version go1.24.0 linux/amd64"\n' >"$TC/usr/lib/go/bin/go"
 printf '#!/bin/sh\necho v22.1.0\n' >"$TC/usr/bin/node"
 printf '#!/bin/sh\necho "gcc (stub) 13.2.0"\necho second line\n' >"$TC/usr/bin/gcc"
 chmod 755 "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc" "$TC/usr/lib/go/bin/go" "$TC/usr/bin/node" "$TC/usr/bin/gcc"
 sh "$here/toolchains.sh" "$TC" "$TC/rh" >"$W/out" 2>"$W/err"
-grep -q '^rust 1.99.1-x86_64-unknown-linux-gnu abc123 [0-9a-f]\{12\}$' "$W/out" && ok "toolchains.sh: a rust line with name, commit and digest" || bad "rust line: $(cat "$W/out" "$W/err")"
+grep -qx 'rust 1.99.1-x86_64-unknown-linux-gnu abc123 clippy,rustfmt,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl' "$W/out" && ok "toolchains.sh: a rust line with name, commit, targets and clippy/rustfmt, no rust-docs" || bad "rust line: $(cat "$W/out" "$W/err")"
 grep -qx 'go go1.24.0' "$W/out" && ok "toolchains.sh: go prints its bare version" || bad "go line: $(grep '^go' "$W/out")"
 # The workstation's Arch build prints `go1.27.1-X:nodwarf5`; the node's archive build `go1.27.1`.
 # Both give the same line. A node has go and node in /usr/local/bin (the archive pins).
@@ -707,7 +725,7 @@ ex=$here/node.conf.example
 sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "$RUST_TOOLCHAINS|$RUST_TARGETS|$EXTRA_PACKAGES"' sh "$here" >"$W/out" 2>"$W/err"
 IFS='|' read -r ex_tc ex_tg ex_pk <"$W/out"
 [ "$ex_tc" = "1.85.0 1.91.0 1.91.1 1.97 1.98.0 1.98.1 1.99.0 1.99.1 1.100.0 stable" ] && ok "example: the consumers' rust toolchains" || bad "example toolchains: '$ex_tc' $(cat "$W/err")"
-[ "$ex_tg" = "wasm32-unknown-unknown" ] && ok "example: the wasm target" || bad "example targets: '$ex_tg'"
+[ "$ex_tg" = "1.97:x86_64-unknown-linux-musl 1.98.1:wasm32-unknown-unknown,x86_64-unknown-linux-musl 1.99.1:x86_64-unknown-linux-musl" ] && ok "example: targets per toolchain" || bad "example targets: '$ex_tg'"
 for p in jq sqlite bzip2 unzip binutils rsync git gcc gcc-c++ make cmake clang clang-devel llvm20 llvm-devel alsa-lib-devel postgresql17 postgresql17-server java-21-amazon-corretto-devel java-17-amazon-corretto-devel java-11-amazon-corretto-devel java-1.8.0-amazon-corretto-devel maven xorg-x11-server-Xvfb gtk3 libnotify libXScrnSaver libXtst at-spi2-atk atk mesa-libgbm libxkbcommon nss; do
   case " $ex_pk " in *" $p "*) ;; *) bad "example EXTRA_PACKAGES lacks $p" ;; esac
 done
