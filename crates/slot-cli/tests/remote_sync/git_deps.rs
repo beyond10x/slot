@@ -400,8 +400,10 @@ fn an_entry_the_node_names_unasked_is_not_sent() {
     });
     let out = remote_call_env(&n.d, &n.ssh, &repo, &["echo", "f2"], &here_env(&here_home));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{err}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "f2\n", "{err}");
+    // A remote job that cannot start does not run here either.
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    assert!(err.contains("the job did not run"), "{err}");
     let crossed = crossed(&root, &n);
     assert!(
         !crossed.iter().any(|e| e.starts_with("evil-")),
@@ -485,8 +487,10 @@ fn a_source_denied_after_the_first_check_is_not_copied() {
     config(&n.d, "remote-deny-origins", "");
     let out = remote_call_env(&n.d, &n.ssh, &repo, &["echo", "f5"], &here_env(&here_home));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(0), "{err}");
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "f5\n", "{err}");
+    // A remote job that cannot start does not run here either.
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    assert!(err.contains("the job did not run"), "{err}");
     assert_eq!(crossed(&root, &n), Vec::<String>::new(), "{err}");
     assert!(
         err.contains(&format!("git dependency denied: git+{url}")),
