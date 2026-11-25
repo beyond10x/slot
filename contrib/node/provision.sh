@@ -1152,41 +1152,53 @@ p_rust_extras() {
     rm -f "$pe_l"
   done
 }
-# Removes targets: toolchain, names...
+# Removes components or targets: kind, toolchain, names...
 a_rustup_remove() {
-  ar_n=$1
-  shift
+  ar_k=$1 ar_n=$2
+  shift 2
   if [ -n "$T" ]; then
-    calls "rustup target remove --toolchain $ar_n $*"
+    calls "rustup $ar_k remove --toolchain $ar_n $*"
+    ar_f=$R$(rust_dir "$ar_n")/.${ar_k}s
     for ar_w in "$@"; do
-      grep -vxF "$ar_w" "$R$(rust_dir "$ar_n")/.targets" >"$R$(rust_dir "$ar_n")/.targets.new"
-      mv "$R$(rust_dir "$ar_n")/.targets.new" "$R$(rust_dir "$ar_n")/.targets"
+      if [ "$ar_k" = component ]; then ar_w=$ar_w-$RUST_TRIPLE; fi
+      grep -vxF "$ar_w" "$ar_f" >"$ar_f.new"
+      mv "$ar_f.new" "$ar_f"
     done
   else
-    as_rust_user "$STORE/cargo/bin/rustup" target remove --toolchain "$ar_n" "$@"
+    as_rust_user "$STORE/cargo/bin/rustup" "$ar_k" remove --toolchain "$ar_n" "$@"
   fi
 }
 # A target that a toolchain has, other than the host's, and that no RUST_TARGETS entry names for it
-# is surplus: the node mirrors the workstation's targets per toolchain, so check names it and
-# apply removes it.
+# is surplus; so is one of the components clippy, rustfmt, rust-src and llvm-tools (the ones the
+# manifest line of toolchains.sh carries) that no RUST_COMPONENTS entry names for it. The node
+# mirrors the workstation's per toolchain: with no entry at all, every non-host target is
+# surplus. check names each surplus item and apply removes it.
 p_rust_surplus() {
-  ps_want=$(rust_targets "$1")
-  ps_extra=
-  for ps_h in $(q_rust_list target "$1"); do
-    [ "$ps_h" = "$RUST_TRIPLE" ] && continue
-    echo "$ps_want" | grep -qxF "$ps_h" && continue
-    drift "rust:$1" "target $ps_h is not in RUST_TARGETS"
-    ps_extra="$ps_extra $ps_h"
+  for ps_k in target component; do
+    if [ "$ps_k" = component ]; then ps_want=$(rust_components "$1"); else ps_want=$(rust_targets "$1"); fi
+    ps_extra=
+    for ps_h in $(q_rust_list "$ps_k" "$1"); do
+      if [ "$ps_k" = component ]; then
+        ps_h=${ps_h%-"$RUST_TRIPLE"}
+        ps_h=${ps_h%-preview}
+        case $ps_h in clippy | rustfmt | rust-src | llvm-tools) ;; *) continue ;; esac
+      else
+        [ "$ps_h" = "$RUST_TRIPLE" ] && continue
+      fi
+      echo "$ps_want" | grep -qxF "$ps_h" && continue
+      drift "rust:$1" "$ps_k $ps_h is not in RUST_$(echo "$ps_k" | tr a-z A-Z)S"
+      ps_extra="$ps_extra $ps_h"
+    done
+    fixing && [ -n "$ps_extra" ] && [ -n "$rustup_ok" ] || continue
+    ps_l=$(mktemp)
+    if a_rustup_remove "$ps_k" "$1" $ps_extra >"$ps_l" 2>&1; then
+      changed "rust:$1" "$ps_k removed:$ps_extra"
+    else
+      tail -n 5 "$ps_l" >&2
+      failed "rust:$1" "rustup $ps_k remove$ps_extra"
+    fi
+    rm -f "$ps_l"
   done
-  fixing && [ -n "$ps_extra" ] && [ -n "$rustup_ok" ] || return 0
-  ps_l=$(mktemp)
-  if a_rustup_remove "$1" $ps_extra >"$ps_l" 2>&1; then
-    changed "rust:$1" "target removed:$ps_extra"
-  else
-    tail -n 5 "$ps_l" >&2
-    failed "rust:$1" "rustup target remove$ps_extra"
-  fi
-  rm -f "$ps_l"
 }
 p_rust() {
   [ -n "$RUST_TOOLCHAINS" ] || return 0

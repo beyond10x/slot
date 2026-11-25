@@ -13,7 +13,7 @@ for d in "$R"/toolchains/*; do
   [ -x "$d/bin/rustc" ] || continue
   n=$(basename "$d")
   h=$("$d/bin/rustc" -vV 2>/dev/null | sed -n 's/^commit-hash: //p')
-  t=$(for x in "$d"/lib/rustlib/*/lib; do [ -d "$x" ] && basename "$(dirname "$x")"; done)
+  t=$(for x in "$d"/lib/rustlib/*/lib; do [ -n "$(ls -A "$x" 2>/dev/null)" ] && basename "$(dirname "$x")"; done)
   k=$(sed -n 's/^clippy-preview-.*/clippy/p; s/^rustfmt-preview-.*/rustfmt/p; s/^rust-src$/rust-src/p; s/^llvm-tools-preview-.*/llvm-tools/p' "$d/lib/rustlib/components" 2>/dev/null)
   c=$(printf '%s\n%s\n' "$t" "$k" | grep . | sort | tr '\n' ',' | sed 's/,$//')
   echo "rust $n ${h:-none} ${c:-none}"

@@ -59,6 +59,16 @@ for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARG
   run "$W/r0" check
   if [ $? -eq 2 ] && grep -q "${bad_rust%%=*} must be names" "$W/err"; then ok "${bad_rust%%=*} with a shell character is refused"; else bad "${bad_rust%%=*} with a shell character is accepted ($(cat "$W/err"))"; fi
 done
+for bad_form in 'RUST_TARGETS=1.99:x86_64-unknown-linux-musl' 'RUST_COMPONENTS=nosuch:rust-src' 'RUST_TARGETS=a,b' 'RUST_COMPONENTS=clippy,rustfmt' 'RUST_TARGETS=1.99.1:a:b' 'RUST_TARGETS=1.99.1:' 'RUST_TARGETS=1.99.1:a,,b' 'RUST_TARGETS=1.99.1:,a'; do
+  conf
+  echo "$bad_form" >>"$W/node.conf"
+  run "$W/r0" check
+  if [ $? -eq 2 ] && grep -q "${bad_form%%=*} entry '${bad_form#*=}'" "$W/err"; then ok "$bad_form is refused by name"; else bad "$bad_form is accepted or not named ($(cat "$W/err"))"; fi
+done
+conf
+echo 'RUST_TARGETS=1.99.1:a,b stable:c wasm32-unknown-unknown' >>"$W/node.conf"
+run "$W/r0" check
+if [ $? -ne 2 ]; then ok "RUST_TARGETS: <toolchain>:<a>,<b> beside a bare name is accepted"; else bad "a valid per-toolchain entry is refused ($(cat "$W/err"))"; fi
 conf
 sed -i 's/^BUILD_UID=.*/BUILD_UID=10x1/' "$W/node.conf"
 run "$W/r0" check
@@ -344,7 +354,7 @@ printf 'RUST_COMPONENTS=clippy 1.99.1:rust-src\nRUST_TARGETS=1.99.1:x86_64-unkno
 run "$R3b" apply
 grep -qx 'rustup toolchain install 1.99.1 --profile minimal -c clippy -c rust-src -t x86_64-unknown-linux-musl -t wasm32-unknown-unknown -t wasm32-wasip1' "$R3b/.calls" && grep -qx 'rustup toolchain install stable --profile minimal -c clippy -t wasm32-wasip1' "$R3b/.calls" && ok "RUST_TARGETS and RUST_COMPONENTS: <toolchain>:<names> reaches that toolchain, a bare name every one" || bad "per-toolchain targets: $(grep rustup "$R3b/.calls")"
 run "$R3b" check
-[ $? -eq 0 ] && ok "per-toolchain targets installed: 0 drift" || bad "per-toolchain targets, check: $(cat "$W/out")"
+[ $? -eq 0 ] && ! grep -q 'target remove\|component remove' "$R3b/.calls" && ok "per-toolchain targets installed: 0 drift, and check removes nothing" || bad "per-toolchain targets, check: $(cat "$W/out") $(grep 'remove' "$R3b/.calls")"
 # A target no entry names for its toolchain is surplus: check names it, apply removes it.
 echo x86_64-unknown-linux-musl >>"$R3b/srv/slot/rustup/toolchains/stable-x86_64-unknown-linux-gnu/.targets"
 run "$R3b" check
@@ -353,6 +363,14 @@ run "$R3b" apply
 grep -qx 'rustup target remove --toolchain stable x86_64-unknown-linux-musl' "$R3b/.calls" && ! grep -q 'rustup target remove --toolchain 1.99.1' "$R3b/.calls" && ok "apply removes the surplus target and no other" || bad "surplus target, apply: $(grep 'target remove' "$R3b/.calls")"
 run "$R3b" check
 [ $? -eq 0 ] && ok "after the removal: 0 drift" || bad "after the surplus removal: $(cat "$W/out")"
+# The same for the four components the manifest line carries; other components are not judged.
+printf 'llvm-tools-x86_64-unknown-linux-gnu\nrust-docs-x86_64-unknown-linux-gnu\n' >>"$R3b/srv/slot/rustup/toolchains/stable-x86_64-unknown-linux-gnu/.components"
+run "$R3b" check
+grep -qx 'drift: rust:stable: component llvm-tools is not in RUST_COMPONENTS' "$W/out" && ! grep -q 'rust-docs' "$W/out" && ok "check names a surplus component of the manifest line, not rust-docs" || bad "surplus component, check: $(cat "$W/out")"
+run "$R3b" apply
+grep -qx 'rustup component remove --toolchain stable llvm-tools' "$R3b/.calls" && ok "apply removes the surplus component" || bad "surplus component, apply: $(grep 'component remove' "$R3b/.calls")"
+run "$R3b" check
+[ $? -eq 0 ] && ok "after the component removal: 0 drift" || bad "after the component removal: $(cat "$W/out")"
 R4=$W/r4
 mkdir -p "$R4"
 conf
@@ -365,14 +383,17 @@ conf
 # print (the machine it runs on), no digest of /usr or /etc.
 TC=$W/tc
 mkdir -p "$TC/usr/bin" "$TC/usr/lib/go/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib"
-printf 'rustc-x86_64-unknown-linux-gnu\nclippy-preview-x86_64-unknown-linux-gnu\nrustfmt-preview-x86_64-unknown-linux-gnu\nrust-docs-x86_64-unknown-linux-gnu\nrust-std-x86_64-unknown-linux-musl\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/components"
+: >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd.rlib"
+: >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib/libstd.rlib"
+mkdir -p "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-unknown-unknown/lib"
+printf 'rustc-x86_64-unknown-linux-gnu\nclippy-preview-x86_64-unknown-linux-gnu\nrustfmt-preview-x86_64-unknown-linux-gnu\nrust-docs-x86_64-unknown-linux-gnu\nrust-std-x86_64-unknown-linux-musl\nrust-src\nllvm-tools-preview-x86_64-unknown-linux-gnu\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/components"
 printf '#!/bin/sh\necho "commit-hash: abc123"\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc"
 printf '#!/bin/sh\necho "go version go1.24.0 linux/amd64"\n' >"$TC/usr/lib/go/bin/go"
 printf '#!/bin/sh\necho v22.1.0\n' >"$TC/usr/bin/node"
 printf '#!/bin/sh\necho "gcc (stub) 13.2.0"\necho second line\n' >"$TC/usr/bin/gcc"
 chmod 755 "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc" "$TC/usr/lib/go/bin/go" "$TC/usr/bin/node" "$TC/usr/bin/gcc"
 sh "$here/toolchains.sh" "$TC" "$TC/rh" >"$W/out" 2>"$W/err"
-grep -qx 'rust 1.99.1-x86_64-unknown-linux-gnu abc123 clippy,rustfmt,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl' "$W/out" && ok "toolchains.sh: a rust line with name, commit, targets and clippy/rustfmt, no rust-docs" || bad "rust line: $(cat "$W/out" "$W/err")"
+grep -qx 'rust 1.99.1-x86_64-unknown-linux-gnu abc123 clippy,llvm-tools,rust-src,rustfmt,x86_64-unknown-linux-gnu,x86_64-unknown-linux-musl' "$W/out" && ok "toolchains.sh: a rust line with name, commit, targets and clippy/llvm-tools/rust-src/rustfmt, no rust-docs" || bad "rust line: $(cat "$W/out" "$W/err")"
 grep -qx 'go go1.24.0' "$W/out" && ok "toolchains.sh: go prints its bare version" || bad "go line: $(grep '^go' "$W/out")"
 # The workstation's Arch build prints `go1.27.1-X:nodwarf5`; the node's archive build `go1.27.1`.
 # Both give the same line. A node has go and node in /usr/local/bin (the archive pins).

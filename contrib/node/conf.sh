@@ -154,6 +154,37 @@ conf_check_forms() {
         return 2
         ;;
     esac
+    case $k in
+      RUST_TARGETS | RUST_COMPONENTS)
+        for w in $v; do
+          case $w in
+            *:*:*)
+              conf_fail "$1: $k entry '$w' has more than one colon; the form is <toolchain>:<name>,<name>"
+              return 2
+              ;;
+            *:*)
+              case " $RUST_TOOLCHAINS " in
+                *" ${w%%:*} "*) ;;
+                *)
+                  conf_fail "$1: $k entry '$w' names '${w%%:*}', which is not a word of RUST_TOOLCHAINS"
+                  return 2
+                  ;;
+              esac
+              case ${w#*:} in
+                '' | , | ,* | *, | *,,*)
+                  conf_fail "$1: $k entry '$w' has an empty name after the colon"
+                  return 2
+                  ;;
+              esac
+              ;;
+            *,*)
+              conf_fail "$1: $k entry '$w' has a comma but no '<toolchain>:'; a bare entry is one name"
+              return 2
+              ;;
+          esac
+        done
+        ;;
+    esac
   done
   for d in $MIRROR_DIRS; do
     case $d in
