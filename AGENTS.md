@@ -206,11 +206,10 @@ under the operator's standing instruction of 2026-11-12 ("from time to time you 
 commits of your own code and cut releases"; "always update your documentation when you make a
 release"). Every commit still goes through the bot and a pull request below.
 
-Merges are the operator's: from 2026-11-25 the operator session of `~/.claude/CLAUDE.md`
-§ Host operator merges every slot pull request after its own scan of the diff. A session sends it
-one line, `beyond10x/slot#<n> <full head sha>`, and does not merge through the bot itself. A
-change that widens what the node accepts (`slot shell`, a copy path to a node, a deny list) gets
-a read-only security review before the merge; its findings come back as red tests to write first.
+Merges are the operator's: a session sends the operator one line,
+`beyond10x/slot#<n> <full head sha>`, when the checks are green, and does not merge itself; the
+operator merges after its own scan of the diff. A change that widens what the node accepts
+(`slot shell`, a copy path to a node, a deny list) gets a read-only review first.
 
 `main` takes changes only through a pull request whose required checks passed
 (`common / Security and privacy`, `gate`, `Build documentation`); a direct push is refused.
@@ -219,7 +218,7 @@ a read-only security review before the merge; its findings come back as red test
    beyond10x/slot -- pr create --base main --head <branch> --title … --body-file <file>`.
 2. `gh pr checks <n> -R beyond10x/slot --required --watch`, run in the background: the session
    must not block on it.
-3. Send the PR line to the operator session, which merges (above). How the merge is made, for
+3. Send the PR line to the operator, who merges (above). How the merge is made, for
    reference: as the bot with a merge commit through the API:
    `{"merge_method":"merge","sha":"<head>"}`
    to `PUT /repos/beyond10x/slot/pulls/<n>/merge` with `b10x-gates api`. `gh pr merge` refuses
