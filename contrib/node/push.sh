@@ -3,7 +3,7 @@
 # `provision.sh apply` installs everything its jobs use (packages, rust toolchains, pinned tools,
 # the slot release); nothing is copied from the workstation to a node. Runs on the workstation.
 #
-#   push.sh check CONF   compare the workstation's rust, go and node lines of toolchains.sh and the
+#   push.sh check CONF   compare the workstation's rust, go, node and tool lines of toolchains.sh and the
 #                        release of each pinned tool (`provision.sh pins`) with the node's, from
 #                        one slot job on NODE_HOST run in the checkout NODE_RUN_DIR; print one
 #                        `drift: push: ...` line per difference and `<n> drift`; exit 0 or 1
@@ -18,8 +18,10 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/conf.sh"
 
-# Compares the digest lines of the workstation (file $1) with the node's (file $2). The rust, go
-# and node lines count both ways; the C tools differ between machines and are not compared. A
+# Compares the digest lines of the workstation (file $1) with the node's (file $2). The rust, go,
+# node and tool lines count both ways, except a rust toolchain the node has and the workstation lacks
+# (no job resolves to it: the shim compares the active toolchain's line); the C tools differ
+# between machines and are not compared. A
 # `pin <name> <version>` line is the release of a tool provision.sh installs (`provision.sh
 # pins`): the node's must be that release, and the workstation's is not compared.
 compare() {
@@ -34,15 +36,21 @@ compare() {
     rm -f "$nf"
     return 2
   fi
-  grep '^rust \|^go \|^node ' "$1" | LC_ALL=C sort >"$1.s"
-  grep '^rust \|^go \|^node ' "$nf" | LC_ALL=C sort >"$2.s"
+  grep '^rust \|^go \|^node \|^tool ' "$1" | LC_ALL=C sort >"$1.s"
+  grep '^rust \|^go \|^node \|^tool ' "$nf" | LC_ALL=C sort >"$2.s"
   {
     sh "$here/provision.sh" pins | while read -r pb pv; do
       got=$(sed -n "s/^pin $pb //p" "$nf" | head -n 1)
       [ "$got" = "$pv" ] || echo "drift: push: pin $pb: node has '$([ -n "$got" ] && echo "$pb $got" || echo missing)', want $pb $pv"
     done
+    wn=" $(sed -n 's/^rust \([^ ]*\) .*/\1/p' "$1" | tr '\n' ' ')"
     LC_ALL=C comm -3 "$1.s" "$2.s" | while IFS= read -r l; do
       case $l in
+        "	rust "*)
+          rn=${l#	rust }
+          rn=${rn%% *}
+          case $wn in *" $rn "*) echo "drift: push: only on the node: ${l#	}" ;; esac
+          ;;
         "	"*) echo "drift: push: only on the node: ${l#	}" ;;
         *) echo "drift: push: workstation has: $l" ;;
       esac

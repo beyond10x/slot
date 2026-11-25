@@ -61,10 +61,16 @@ task 3.54.0 680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb htt
 # that jobs resolve the same toolchain on both sides (a distribution package is older). One line
 # each: name, version, SHA-256 of the archive, its URL, the leading path components to strip,
 # the binaries to link (paths in the unpacked tree; the first one answers the version check:
-# `go version` has a `go<version>` word, any other `--version` is the version). Other releases:
-# a consumer fetches its own (GOTOOLCHAIN=auto).
+# `go version` has a `go<version>` word, any other `--version` is the version; `path:name` links
+# the binary at `path` as /usr/local/bin/<name>). Other releases: a consumer fetches its own
+# (GOTOOLCHAIN=auto). typescript, prettier and esbuild are the npm tarballs of those releases
+# (esbuild's is the native binary of its linux-x64 package), the releases the test lanes of the
+# consumers read (`tsc`, `prettier` and `esbuild` on PATH).
 ARCHIVE_PINS='go 1.27.1 63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 https://go.dev/dl/go1.27.1.linux-amd64.tar.gz 1 bin/go bin/gofmt
-node v22.23.3 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz 1 bin/node bin/npm bin/npx bin/corepack'
+node v22.23.3 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz 1 bin/node bin/npm bin/npx bin/corepack
+typescript 6.0.3 33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz 1 bin/tsc bin/tsserver
+prettier 3.8.1 5531dc6006ad06b642d5342438909f85dc53e87c50556753c908229b213fb4f4 https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz 1 bin/prettier.cjs:prettier
+esbuild 0.28.2 9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6 https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz 1 bin/esbuild'
 RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
@@ -78,7 +84,7 @@ if [ "$mode" = pins ]; then
 fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
-BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony'
+BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3'
 SSHD_LINES='MaxSessions 200
 MaxStartups 100:30:200
 ClientAliveInterval 15
@@ -1254,12 +1260,22 @@ p_rust() {
 # Downloads the archive into directory $1, checks its SHA-256, unpacks it into $1/tree and prints
 # that path. Arguments: dir name version sha256 url strip binaries... NODE_TEST=1: stub binaries,
 # or nothing when $R/.state-tool-fetch-fails exists.
+# A binary word of an ARCHIVE_PINS line: its path in the unpacked tree, and the name it is linked
+# as in /usr/local/bin (the last path component, or the word after a colon).
+archive_src() { echo "${1%%:*}"; }
+archive_link() {
+  case $1 in
+    *:*) echo "${1#*:}" ;;
+    *) echo "${1##*/}" ;;
+  esac
+}
 archive_fetch() {
   fd=$1 fn=$2 fv=$3 fs=$4 fu=$5 fk=$6
   shift 6
   if fake_fetch; then
     [ -e "$R/.state-tool-fetch-fails" ] && return 0
     for b in "$@"; do
+      b=$(archive_src "$b")
       mkdir -p "$fd/tree/$(dirname "$b")" || return 0
       if [ "$fn" = go ]; then
         printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
@@ -1275,6 +1291,8 @@ archive_fetch() {
   fi
   chmod -R go-w,u-s,g-s "$fd/tree"
   chmod -R a+rX "$fd/tree"
+  # A script of an npm tarball that is not marked executable there (prettier's bin/prettier.cjs).
+  for b in "$@"; do chmod a+x "$fd/tree/$(archive_src "$b")"; done
   echo "$fd/tree"
 }
 # The first line of the version of binary $2 of archive $1, run as the build user.
@@ -1285,12 +1303,14 @@ p_archives() {
   while read -r an av as au ak ab; do
     [ -n "$an" ] || continue
     dir=/usr/local/$an-$av
-    first=${ab%% *}
+    first=$(archive_src "${ab%% *}")
     todo=
     for b in $ab; do
-      got=$(readlink "$R/usr/local/bin/${b##*/}" 2>/dev/null)
+      ln_=$(archive_link "$b")
+      b=$(archive_src "$b")
+      got=$(readlink "$R/usr/local/bin/$ln_" 2>/dev/null)
       [ "$got" = "$dir/$b" ] && continue
-      drift "archive:$an" "/usr/local/bin/${b##*/} is '${got:-missing}', want a link to $dir/$b"
+      drift "archive:$an" "/usr/local/bin/$ln_ is '${got:-missing}', want a link to $dir/$b"
       todo=1
     done
     wv=$av
@@ -1321,7 +1341,7 @@ p_archives() {
       continue
     fi
     rm -rf "$td"
-    for b in $ab; do ln -sfn "$dir/$b" "$R/usr/local/bin/${b##*/}"; done
+    for b in $ab; do ln -sfn "$dir/$(archive_src "$b")" "$R/usr/local/bin/$(archive_link "$b")"; done
     v=$(archive_version "$an" "$R$dir/$first")
     vok=
     for w in $v; do [ "$w" = "$wv" ] && vok=1; done

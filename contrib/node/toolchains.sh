@@ -3,9 +3,10 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
+#   tool <tsc|prettier|esbuild> <version>: no line when the machine has none
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
-# push.sh check compares the rust, go and node lines; the C tools are for reading.
+# push.sh check compares the rust, go, node and tool lines; the C tools are for reading.
 export LC_ALL=C
 P=$1
 R=${2:-$HOME/.rustup}
@@ -30,6 +31,16 @@ for b in "$P/usr/local/bin/node" "$P/usr/bin/node"; do
   [ -x "$b" ] || continue
   echo "node $("$b" --version 2>/dev/null </dev/null | head -n 1)"
   break
+done
+# tool: the TypeScript and JavaScript tools the test lanes of the consumers call by name. A node has
+# them in /usr/local/bin (the archive pins of provision.sh); the workstation in /usr/bin or the
+# user's ~/.local/bin. The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3).
+for n in tsc prettier esbuild; do
+  for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.local/bin/$n"; do
+    [ -x "$b" ] || continue
+    echo "tool $n $("$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')"
+    break
+  done
 done
 # C side: the compilers and cross compilers a job resolves through /usr/bin, and the compile cache
 # (a node has it in the build user's cargo bin) with the server that runs it (the process

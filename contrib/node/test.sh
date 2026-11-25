@@ -90,6 +90,7 @@ if [ $st -eq 1 ] && [ "$n" -ge 15 ]; then ok "fresh machine: check exits 1 with 
 for item in storage binds packages user unit:slot-node.service unit:slot-storage.service keys sshd sudoers slot:/usr/local/bin/slot rustup rust:1.99.1 rust:stable; do
   grep -q "^drift: $item" "$W/out" || bad "fresh machine: no drift line for $item"
 done
+grep -q '^drift: packages: .*zstd' "$W/out" && grep -q '^drift: packages: .*python3' "$W/out" && ok "check names zstd and python3 as packages of a bare node" || bad "base packages: $(grep '^drift: packages' "$W/out" | cut -c1-200)"
 : >"$R/.calls"
 run "$R" apply
 cp "$W/out" "$W/first-apply.out"
@@ -312,6 +313,24 @@ run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && ok "after the download works: archive pins 0 drift" || bad "archive after the download: $(cat "$W/out")"
 
+# typescript, prettier and esbuild are archives of the same kind (the npm tarballs of the releases
+# the consumers' test lanes read): each binary is linked as /usr/local/bin/<name>, prettier's
+# bin/prettier.cjs as `prettier`, and the script is executable.
+for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild; do
+  [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
+done
+[ "$("$R5/usr/local/bin/prettier" --version)" = "3.8.1" ] && [ "$("$R5/usr/local/bin/esbuild" --version)" = "0.28.2" ] && ok "prettier and esbuild answer their release through the links" || bad "tool versions: $("$R5/usr/local/bin/prettier" --version 2>&1) $("$R5/usr/local/bin/esbuild" --version 2>&1)"
+rm -f "$R5/usr/local/bin/prettier"
+rm -rf "$R5/usr/local/esbuild-0.28.2"
+run "$R5" check
+grep -q "^drift: archive:prettier: /usr/local/bin/prettier is 'missing', want a link to /usr/local/prettier-3.8.1/bin/prettier.cjs" "$W/out" && ok "check names a missing prettier link" || bad "prettier drift: $(grep archive "$W/out")"
+grep -q "^drift: archive:esbuild: " "$W/out" && ok "check names a missing esbuild tree" || bad "esbuild drift: $(grep archive "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx 'fetch https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz' "$R5/.calls" && grep -qx 'fetch https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz' "$R5/.calls" && ok "apply fetches the npm tarballs of prettier and esbuild" || bad "npm URLs: $(grep fetch "$R5/.calls")"
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply the npm tools have 0 drift" || bad "npm tools after apply: $(cat "$W/out")"
+
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
 conf
@@ -416,6 +435,20 @@ grep -qx 'node v22.1.0' "$W/out" && ok "toolchains.sh: node prints its version" 
 grep -qx 'c gcc gcc (stub) 13.2.0' "$W/out" && ok "toolchains.sh: gcc prints the first line of its version" || bad "gcc line: $(grep '^c gcc' "$W/out")"
 grep -qx 'c clang missing' "$W/out" && ok "toolchains.sh: a missing compiler is named" || bad "clang line: $(grep '^c clang' "$W/out")"
 grep -q '^c usr \|^c etc \|^c mingw-sysroot' "$W/out" && bad "toolchains.sh still digests /usr, /etc or the mingw sysroot: $(grep '^c usr\|^c etc\|^c mingw' "$W/out")" || ok "toolchains.sh: no digest of /usr, /etc or the mingw sysroot"
+# tsc, prettier and esbuild: a `tool` line each, from /usr/local/bin first (the node), then
+# /usr/bin, then the user's ~/.local/bin (the workstation); the version is the last word.
+mkdir -p "$TC/p3/usr/local/bin" "$TC/p3/usr/bin" "$TC/home"
+printf '#!/bin/sh\necho "Version 5.0.0"\n' >"$TC/p3/usr/bin/tsc"
+printf '#!/bin/sh\necho "Version 6.0.3"\n' >"$TC/p3/usr/local/bin/tsc"
+printf '#!/bin/sh\necho 3.8.1\n' >"$TC/p3/usr/bin/prettier"
+chmod 755 "$TC/p3/usr/bin/tsc" "$TC/p3/usr/local/bin/tsc" "$TC/p3/usr/bin/prettier"
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool ' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool tsc 6.0.3,tool prettier 3.8.1," ] && ok "toolchains.sh: tool lines from /usr/local/bin first, a missing tool has no line" || bad "tool lines: $(cat "$W/out2")"
+mkdir -p "$TC/home/.local/bin"
+printf '#!/bin/sh\necho 0.28.2\n' >"$TC/home/.local/bin/esbuild"
+chmod 755 "$TC/home/.local/bin/esbuild"
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool esbuild 0.28.2" ] && ok "toolchains.sh: esbuild from the user's ~/.local/bin" || bad "esbuild line: $(cat "$W/out2")"
 
 # 5c. Closing the setup login ends the connections still logged in with the setup key; the
 # build key's connections stay. The node's sshd log names each connection's pid and key.
@@ -513,6 +546,28 @@ grep -qx 'drift: push: workstation has: rust 1.99.1-x86_64-unknown-linux-gnu abc
 grep -qx 'drift: push: workstation has: go go1.24.0 linux/amd64' "$W/out" && grep -qx 'drift: push: only on the node: go go1.25.0 linux/amd64' "$W/out" && ok "another go version is drift" || bad "go: $(cat "$W/out")"
 grep -qx 'drift: push: workstation has: node v22.1.0' "$W/out" && ok "a node missing on the node is drift" || bad "node: $(cat "$W/out")"
 grep -q '^5 drift$' "$W/out" && ok "five differences: 5 drift" || bad "count: $(cat "$W/out")"
+printf 'host ws\nrust 1.99.1-x aaa t1\nrust 1.98.1-x bbb t2\nnode v22.1.0\n' >"$W/here"
+printf 'host node\nrust 1.99.1-x aaa t1\nrust 1.98.1-x bbb t2\nrust 1.85.0-x ccc t3\nnode v22.1.0\n%s\n' "$pins_ok" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 0 ] && grep -qx '0 drift' "$W/out" && ok "a rust toolchain only the node has (1.85.0) is not drift" || bad "node-only toolchain: exit $st $(cat "$W/out")"
+printf 'host node\nrust 1.99.1-x aaa t1\nrust 1.85.0-x ccc t3\nnode v22.1.0\n%s\n' "$pins_ok" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: push: workstation has: rust 1.98.1-x bbb t2' "$W/out" && grep -qx '1 drift' "$W/out" && ok "a workstation toolchain missing on the node is drift" || bad "missing toolchain: exit $st $(cat "$W/out")"
+printf 'host node\nrust 1.99.1-x aaa t1\nrust 1.98.1-x bbb t9\nnode v22.1.0\n%s\n' "$pins_ok" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: push: only on the node: rust 1.98.1-x bbb t9' "$W/out" && grep -qx '2 drift' "$W/out" && ok "the same toolchain with another line is drift on both sides" || bad "changed toolchain: exit $st $(cat "$W/out")"
+printf 'host ws\ntool tsc 6.0.3\ntool esbuild 0.28.2\n' >"$W/here"
+printf 'host node\ntool tsc 6.0.2\n%s\n' "$pins_ok" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: push: workstation has: tool tsc 6.0.3' "$W/out" && grep -qx 'drift: push: only on the node: tool tsc 6.0.2' "$W/out" && grep -qx 'drift: push: workstation has: tool esbuild 0.28.2' "$W/out" && grep -qx '3 drift' "$W/out" && ok "a tool version that differs, and a tool missing on the node, are drift" || bad "tool lines: exit $st $(cat "$W/out")"
+printf 'host node\ntool tsc 6.0.3\ntool esbuild 0.28.2\n%s\n' "$pins_ok" >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 0 ] && grep -qx '0 drift' "$W/out" && ok "equal tool lines: 0 drift" || bad "equal tool lines: exit $st $(cat "$W/out")"
 printf 'host ws\nrust a b c\n' >"$W/here"
 printf 'host node\nrust a b c\n%s\n' "$(echo "$pins_ok" | sed 's/^pin geckodriver .*/pin geckodriver 0.36.0/')" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
@@ -620,7 +675,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task rustup archive:go archive:node; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"

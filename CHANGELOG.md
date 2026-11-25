@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Node tools of the consumers' test lanes: `provision.sh` installs `typescript` 6.0.3 (`tsc`),
+  `prettier` 3.8.1 and `esbuild` 0.28.2 from their npm tarballs (SHA-256 pinned, into
+  `/usr/local/<name>-<version>`, linked in `/usr/local/bin`; `path:name` in an `ARCHIVE_PINS` line
+  names the link), and `zstd` and `python3` as base packages. `toolchains.sh` prints a
+  `tool <name> <version>` line for each tool and `push.sh check` compares them. `push.sh check`
+  no longer reports a rust toolchain that only the node has (1.85.0 for an MSRV job).
+
 - Node parity of rust toolchains: the `rust` line of `toolchains.sh` lists the installed targets and
   `clippy`, `rustfmt`, `rust-src` and `llvm-tools` (sorted, comma separated; `rust-docs` and the
   manifests are left out) in place of a digest, so a difference in `push.sh check` names the

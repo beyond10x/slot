@@ -144,7 +144,12 @@ downloads each archive from its official site (go from `go.dev/dl`, node from `n
 checks its SHA-256 with `sha256sum -c --strict`, unpacks it as root into `/usr/local/<name>-<version>`
 (group and others cannot write there, so the build user cannot replace it) and links `go`,
 `gofmt`, `node`, `npm`, `npx` and `corepack` into `/usr/local/bin`. `check` reads each link and the
-version of `go` and `node`; a missing link or another version is drift. An older directory of a
+version of `go` and `node`; a missing link or another version is drift. `typescript` (`tsc`,
+`tsserver`), `prettier` and `esbuild` are archives of the same kind: the npm tarballs of those
+releases from `registry.npmjs.org` (esbuild's is its `@esbuild/linux-x64` package, the native
+binary), with `bin/prettier.cjs` linked as `prettier`; the consumers' test lanes call them by
+name. `toolchains.sh` prints one `tool <name> <version>` line for each of the three, and
+`push.sh check` compares those lines both ways. `zstd` and `python3` are base packages. An older directory of a
 former pin stays until someone removes it. Other releases are not installed: a consumer fetches its
 own (`GOTOOLCHAIN=auto`). The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
 
