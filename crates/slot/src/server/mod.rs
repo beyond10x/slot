@@ -2790,7 +2790,14 @@ impl Server {
             .iter()
             .filter_map(|p| disk_free(p).map(|f| (p.display().to_string(), f)))
             .collect();
-        if let Some(r) = admission::disk_wait(&free, limits) {
+        // A job whose last runs compiled nothing waits at the light floor.
+        let light = {
+            let g = self.inner.lock().expect("server lock");
+            g.active
+                .get(&id)
+                .is_some_and(|l| g.memory.compiles_nothing(&l.job.repo, &l.job.argv))
+        };
+        if let Some(r) = admission::disk_wait(&free, limits, light) {
             // Eviction starts where the disk hold starts: its mark is at
             // least `--min-free-disk`.
             self.evict_wake.notify_one();

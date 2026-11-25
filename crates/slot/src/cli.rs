@@ -224,6 +224,13 @@ pub struct ServeArgs {
     /// Above `--evict-below`, eviction starts here instead.
     #[arg(long, default_value_t = 25.0, value_name = "GB")]
     pub min_free_disk: f64,
+    /// The disk floor of a job whose last 5 runs of the same command in the
+    /// same repository used no compile server and built into no target
+    /// directory, GB; at most `--min-free-disk`, and no job starts below it.
+    /// A first run waits at `--min-free-disk`. 0 lets such a job start on
+    /// any free space. Default: the value of `--min-free-disk`.
+    #[arg(long, value_name = "GB")]
+    pub min_free_disk_light: Option<f64>,
     /// A job waits while available memory, less what jobs that started in
     /// the last 30 s still take, is below its expected peak (from earlier
     /// runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway.
@@ -859,6 +866,9 @@ impl ServeArgs {
             admission: crate::admission::Limits {
                 min_free_memory: gb_bytes(self.min_free_memory),
                 min_free_disk: gb_bytes(self.min_free_disk),
+                min_free_disk_light: gb_bytes(
+                    self.min_free_disk_light.unwrap_or(self.min_free_disk),
+                ),
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             promote_after: std::time::Duration::from_secs(self.promote_after),
