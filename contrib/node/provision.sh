@@ -20,6 +20,9 @@
 # Tests: NODE_ROOT prefixes every path, and NODE_TEST=1 makes the system queries and actions
 # read and write files under NODE_ROOT/.state (test.sh).
 set -u
+# A bundle unpacks under umask 077 so its copy of the config stays private. Every file written here
+# gets its mode by chmod; the directories this run creates get 755 from this umask.
+umask 022
 here=$(cd "$(dirname "$0")" && pwd)
 . "$here/conf.sh"
 
@@ -791,8 +794,14 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
-  # The copy list this run approved: push.sh copies only while its own list equals it.
+  # The copy list this run approved: push.sh copies only while its own list equals it. The build
+  # user reads it over the setup login, so its directory is 755 (node.conf in it stays 600).
   want_file libexec /etc/slot-node/copies 644 root:root echo "$HOME_COPIES"
+  dm=$(stat -c %a "$R/etc/slot-node" 2>/dev/null)
+  if [ -n "$dm" ] && [ "$dm" != 755 ]; then
+    drift libexec "/etc/slot-node is mode $dm, want 755 (push.sh reads the copy list)"
+    if fixing; then chmod 755 "$R/etc/slot-node" && changed libexec "/etc/slot-node mode 755"; fi
+  fi
   # Each bound /etc entry needs a target of the same type as its copy from the workstation.
   for e in $ETC_LIST $ETC_EXTRA; do
     src=$R$STORE/rootfs/etc/$e

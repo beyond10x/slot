@@ -275,9 +275,20 @@ tail -1 "$W/ssh.log" | grep -q -- '-O exit node-setup' && ok "apply ends the con
 grep -qx '.m2/repository go/bin' "$R/etc/slot-node/copies" 2>/dev/null && bad "copies written before the key exists" || :
 conf
 printf 'HOME_COPIES=.m2/repository go/bin\n' >>"$W/node.conf"
-run "$R" apply
+# A bundle runs provision.sh under umask 077 (its unpacked config stays private); the directory
+# that holds the copy list must still be readable, or push.sh reads no list on the node.
+rm -rf "$R/etc/slot-node"
+(umask 077 && run "$R" apply)
 [ "$(cat "$R/etc/slot-node/copies" 2>/dev/null)" = ".m2/repository go/bin" ] && ok "apply writes the approved copy list" || bad "copies: $(cat "$R/etc/slot-node/copies" 2>&1)"
 [ "$(stat -c %a "$R/etc/slot-node/copies" 2>/dev/null)" = 644 ] && ok "the copy list is readable by the build user" || bad "copies mode $(stat -c %a "$R/etc/slot-node/copies" 2>&1)"
+[ "$(stat -c %a "$R/etc/slot-node" 2>/dev/null)" = 755 ] && ok "under umask 077 apply makes /etc/slot-node 755" || bad "/etc/slot-node mode $(stat -c %a "$R/etc/slot-node" 2>&1) under umask 077"
+[ "$(stat -c %a "$R/etc/slot-node/node.conf" 2>/dev/null)" = 600 ] && ok "node.conf stays 600" || bad "node.conf mode $(stat -c %a "$R/etc/slot-node/node.conf" 2>&1)"
+# A node that ran an older apply has the directory at 700: check reports it, apply opens it.
+chmod 700 "$R/etc/slot-node"
+run "$R" check
+grep -q 'drift: libexec: /etc/slot-node is mode 700' "$W/out" && ok "check reports /etc/slot-node at 700" || bad "check missed the directory mode: $(grep slot-node "$W/out" | head -2)"
+run "$R" apply
+[ "$(stat -c %a "$R/etc/slot-node" 2>/dev/null)" = 755 ] && ok "apply sets an existing /etc/slot-node to 755" || bad "/etc/slot-node mode $(stat -c %a "$R/etc/slot-node" 2>&1) after apply"
 printf '#!/bin/sh\necho "$*" >>"%s"\ncase "$*" in *"cat /etc/slot-node/copies"*) cat "%s"; exit 0 ;; esac\nexit 1\n' "$W/ssh.log" "$W/node-copies" >"$W/fake-ssh"
 printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
 echo '.m2/repository go/bin .cache/other' >"$W/node-copies"

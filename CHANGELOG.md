@@ -25,6 +25,9 @@
   connection; found by the key's fingerprint in the sshd log. `check` reports them.
 - `provision.sh apply` writes the approved `HOME_COPIES` to `/etc/slot-node/copies`;
   `push.sh apply` prints its copy list and refuses to copy when it differs from the node's.
+- `provision.sh` runs under umask 022, so a bundle's umask 077 no longer leaves `/etc/slot-node`
+  at mode 700, where the build user could not read the copy list and `push.sh apply` refused to
+  copy. `check` reports the directory at any mode but 755 and `apply` sets it.
 
 ## 0.36.0 — 2026-11-24
 
