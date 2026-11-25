@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:a-remote-tree-is-one-repository
 kind: story
-status: active
+status: implemented
 title: A remote job's tree is one repository's work tree
 summary: a job started in a folder of several repositories, or at the same-path root, is refused before any sync
 relations:
@@ -20,10 +20,11 @@ scope:
   path: docs/design.md
 - confidence: cited
   path: website/docs/remote-builds.md
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-11-25T09:19:34Z", actor: "agent:slot", revision: 2}
 - {from: "proposed", to: "active", at: "2026-11-25T09:19:34Z", actor: "agent:slot", revision: 3}
+- {from: "active", to: "implemented", at: "2026-11-25T10:12:32Z", actor: "agent:slot", revision: 10, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 
