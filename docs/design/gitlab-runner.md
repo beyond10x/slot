@@ -294,8 +294,17 @@ Ultimate and the job router leaves experiment.
 ## 11. Decisions for the operator
 
 - **D1 scope**: which projects get the runner. Default proposal: one project of § 9 phase 1.
+  Open: it registers a runner.
 - **D2 the runner token**: created by which account, held on the workstation in `config.toml`.
+  Open: it creates a credential.
 - **D3 protected refs**: `ref_protected` (only protected branches and tags) or `not_protected`
-  (merge request pipelines too, from every developer's branch).
-- **D4 the compile cache of CI jobs**: a second sccache store on the node, or none.
+  (merge request pipelines too, from every developer's branch). Taken 2026-11-25 by the
+  operator: `ref_protected`. A branch that is not protected does not run its code on the node.
+- **D4 the compile cache of CI jobs**: a second sccache store on the node, or none. Taken
+  2026-11-25 by the operator: a second store, apart from the agent jobs' store, so neither kind
+  of job reads what the other wrote.
 - **D5 the workstation**: no CI job runs there (proposed), or it serves CI jobs while no node runs.
+  Taken 2026-11-25 by the operator: no CI job runs on the workstation.
+
+The decisions taken change no state: no runner is registered, nothing is installed, no token
+exists, and nothing calls the cloud provider until D1 and D2 are taken.
