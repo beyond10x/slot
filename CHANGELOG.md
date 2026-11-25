@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- A remote job whose tree is not one repository's work tree does not run: the same-path root or
+  a directory above it, a folder outside git directly under the same-path root, or a folder
+  outside git that holds a repository within two levels. `slot` prints `slot: remote build on
+  <host> did not start (<dir> is not one repository's work tree (…); nothing is synced)` and
+  exits with 3 before any sync. A folder that cannot be read is refused. Why: a `cargo` call
+  started in a folder of several repositories synced that whole folder to the build server,
+  git-ignored files included.
 - Breaking: a remote job that cannot start (ssh refused or timed out, a failed sync or fetch)
   no longer runs on this machine's daemon. `slot` prints `slot: remote build on <host> did not
   start (…); the job did not run (set SLOT_REMOTE_FALLBACK=local …)` and exits with 3. The

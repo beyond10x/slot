@@ -131,7 +131,11 @@ A same-path job runs as on a CI runner (`same_path.rs`). The tree sync keeps a l
 outside it) follow in syncs of their own at their paths, `*.lock` excluded, one at a time per
 directory and host. A working directory the tree sync leaves out (under a toolchain exclude or
 `git check-ignore`) is synced on its own with the `.gitignore` filter and `--exclude=/target/`.
-Outside any git checkout the working directory is the tree. The request carries
+Outside any git checkout the working directory is the tree, unless it is the same-path root or
+above it, lies directly under it, or holds a repository within two levels
+(`same_path::tree_refusal`, checked before any sync; a folder that cannot be read is refused):
+the job ends with exit 3 and nothing is synced. A folder of several repositories was once synced
+whole, with every git-ignored file in it. The request carries
 `workspace.target_dir`: `CARGO_TARGET_DIR` of the client, else `cargo metadata`'s
 `target_directory` for the command's manifest, else `target` beside the nearest lock file; empty
 for a command that is not cargo. The daemon admits it only below a `--same-path-root`, sets

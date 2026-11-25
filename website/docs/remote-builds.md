@@ -381,7 +381,11 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
   `--same-path-root` too.
 - A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
   directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
-- A directory outside any git checkout (a scratch copy) is the tree itself.
+- A directory outside any git checkout (a scratch copy) is the tree itself, unless it is the
+  same-path root or above it, lies directly under the same-path root, or holds a repository
+  within two levels (`a/.git`, `a/b/.git`). Such a job does not run: `slot: remote build on
+  <host> did not start (<dir> is not one repository's work tree (…); nothing is synced)`, exit 3.
+  A folder that cannot be read is refused too. Start the job in the repository.
 
 With `--sandbox`, the tree and the target directory are bound writable at their own paths; the
 git directory is read-only. Files the command names outside the tree are not synced: a job that
