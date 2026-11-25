@@ -18,6 +18,11 @@
   (without `git+`, query and revision), e.g. `origin:*git.example.org[:/]team/*`. The tree check
   of `remote-deny` skips `origin:` lines without a warning. With both files naming nothing no lock
   file is read.
+- `contrib/node/provision.sh` installs pinned cargo tools on the node at the release its
+  consumers' CI installs, from the release archive checked against its SHA-256: `ess` 0.99.0 and
+  `wasm-bindgen` 0.2.130 (with `wasm-bindgen-test-runner` and `wasm2es6js`). `check` reports a
+  binary whose `--version` is another release; `provision.sh pins` lists them. `push.sh` no
+  longer copies the workstation's binaries of those names; `push.sh bins` lists what it copies.
 
 ## 0.37.0 — 2026-11-25
 

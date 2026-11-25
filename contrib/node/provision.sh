@@ -12,6 +12,8 @@
 #                                     print one self-contained script (this script, conf.sh,
 #                                     toolchains.sh and CONF) that runs MODE, for a root channel
 #                                     that takes one script, such as SSM Run Command
+#   provision.sh pins                 print the cargo tools the node installs at a pinned
+#                                     release, one `<binary> <version>` line each
 #
 # CONF is a node config file (KEY=value, see node.conf.example and README.md). The instance
 # store is empty after every stop and start; slot-storage.service rebuilds the array at boot and
@@ -35,9 +37,23 @@ open=
 case ${3:-} in --open) open=1 ;; esac
 
 usage() {
-  sed -n '2,15p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,17p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
+
+# Cargo tools the node installs at the release its consumers' CI installs, instead of copying the
+# workstation's: a node job then runs the release its CI runs, and push.sh leaves these binaries
+# out. One line each: name, version, SHA-256 of the release archive, download directory, archive
+# name (%s is the version), the binaries in it. Each binary answers `<binary> <version>`.
+TOOL_PINS='ess 0.99.0 238d64266e3014ccf98e190b6525433c90686b6ef9c9a5cd5dd1a852cb4fdf32 https://github.com/beyond10x/ess/releases/download ess-%s-x86_64-unknown-linux-gnu ess
+wasm-bindgen 0.2.130 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f https://github.com/wasm-bindgen/wasm-bindgen/releases/download wasm-bindgen-%s-x86_64-unknown-linux-musl wasm-bindgen wasm-bindgen-test-runner wasm2es6js'
+pins() {
+  echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
+}
+if [ "$mode" = pins ]; then
+  pins
+  exit 0
+fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
 ETC_LIST='fonts localtime locale.conf ssl ca-certificates nsswitch.conf ld.so.conf ld.so.conf.d mime.types protocols services os-release'
@@ -913,6 +929,71 @@ p_slot() {
   fi
 }
 
+# Downloads the release archive of a pinned tool into directory $1, checks its SHA-256 and prints
+# the directory that holds its binaries. Arguments: dir version sha256 base archive-format
+# binaries... NODE_TEST=1: stub binaries, or nothing when $R/.state-tool-fetch-fails exists.
+tool_fetch() {
+  fd=$1 fv=$2 fs=$3 fu=$4
+  fa=$(printf "$5" "$fv")
+  shift 5
+  if [ -n "$T" ]; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    mkdir -p "$fd/$fa" || return 0
+    for b in "$@"; do printf '#!/bin/sh\necho %s %s\n' "$b" "$fv" >"$fd/$fa/$b" && chmod 755 "$fd/$fa/$b"; done
+    calls "fetch $fa"
+  else
+    (cd "$fd" && curl -fsSLO "$fu/$fv/$fa.tar.gz" &&
+      echo "$fs  $fa.tar.gz" | sha256sum -c --strict - >/dev/null && tar -xzf "$fa.tar.gz") || return 0
+  fi
+  chmod -R go+rX "$fd"
+  echo "$fd/$fa"
+}
+# The pinned tools (TOOL_PINS) in the store's cargo bin, the build user's ~/.cargo/bin: each
+# binary answers `<binary> <version>`; apply installs the ones that do not and reads them back.
+p_tools() {
+  while read -r tn tv ts tu tf tb; do
+    [ -n "$tn" ] || continue
+    todo=
+    for b in $tb; do
+      p=$STORE/cargo/bin/$b
+      v=$(as_user "$R$p" --version 2>/dev/null </dev/null)
+      [ "$v" = "$b $tv" ] && continue
+      drift "tool:$tn" "$p is '${v:-missing}', want $b $tv"
+      todo="$todo $b"
+    done
+    fixing && [ -n "$todo" ] || continue
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-tool.XXXXXX); fi || {
+      failed "tool:$tn" "no temporary directory"
+      continue
+    }
+    src=$(tool_fetch "$td" "$tv" "$ts" "$tu" "$tf" $tb </dev/null)
+    if [ -z "$src" ]; then
+      rm -rf "$td"
+      failed "tool:$tn" "download or checksum of $tn $tv"
+      continue
+    fi
+    done_ok=1
+    for b in $todo; do
+      p=$STORE/cargo/bin/$b
+      if ! no_link "$p"; then
+        failed "tool:$tn" "$p has a symbolic link in it; not installed"
+        done_ok=
+        continue
+      fi
+      as_user sh -c 'mkdir -p "$(dirname "$2")" && install -m 0755 "$1" "$2.slot-new" && mv "$2.slot-new" "$2"' sh "$src/$b" "$R$p" </dev/null
+      v=$(as_user "$R$p" --version 2>/dev/null </dev/null)
+      if [ "$v" != "$b $tv" ]; then
+        failed "tool:$tn" "$p is '${v:-missing}' after the install"
+        done_ok=
+      fi
+    done
+    rm -rf "$td"
+    [ -n "$done_ok" ] && changed "tool:$tn" "$tn $tv installed:$todo"
+  done <<EOF
+$TOOL_PINS
+EOF
+}
+
 p_keys() {
   k=$H/.ssh/authorized_keys
   if [ -d "$R$H/.ssh" ] && [ -f "$R$k" ] && gen_keys | cmp -s - "$R$k"; then
@@ -1013,6 +1094,7 @@ case $mode in
     p_files
     p_units
     p_slot
+    p_tools
     p_keys
     p_imds
     p_services
