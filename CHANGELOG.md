@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The node installs `geckodriver` 0.37.1 (`TOOL_PINS`), the release on the forge runner image of
+  browser test lanes that run `wasm-bindgen-test-runner` in headless Firefox; Firefox is the
+  workstation's, copied with `/usr` (159.0 on 2026-11-25; the forge image has 160.0). A pin's download directory may name the version with `%s`
+  (`…/download/v%s`), its archive may hold the binary at its top, and `check` reads the first
+  line of `--version`. `push.sh check` prints `pin <name> <version>` for each pinned tool on the
+  node and reports another release or a missing one as drift.
 - Breaking: a remote job that cannot start (ssh refused or timed out, a failed sync or fetch)
   no longer runs on this machine's daemon. `slot` prints `slot: remote build on <host> did not
   start (…); the job did not run (set SLOT_REMOTE_FALLBACK=local …)` and exits with 3. The
