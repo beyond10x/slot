@@ -35,6 +35,11 @@ How a tool shares the pool depends on whether it speaks the jobserver protocol:
 - **Crosses to a remote server:** `CARGO_*` except `CARGO_TARGET_DIR`, `CARGO_HOME` and
   `CARGO_BUILD_JOBS`; `RUST*`; `NEXTEST_*`; `INSTA_*`; `SQLX_OFFLINE`.
 - **Not synced:** `/target/`.
+- **Known, not slot's:** `cargo nextest run --stress-count N` (cargo-nextest 0.9.143) exits by
+  its last iteration only: a test that fails in iteration 1 of 3 and passes after gives exit 0;
+  one that fails in iteration 3 of 3 gives exit 100. Read 2026-11-25, the same with and without
+  slot. A gate that runs a stress count reads the `Summary` line (`stress run iterations: N
+  passed, M failed`; red when M > 0) instead of the exit.
 
 ## go
 
