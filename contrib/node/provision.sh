@@ -5,7 +5,7 @@
 #   provision.sh check CONF           print one `drift: <part>: <what>` line per difference,
 #                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise
 #   provision.sh apply CONF [--open]  change every part that drifts, print `changed: ...` per
-#                                     change; --open also lets SETUP_KEY in (for push.sh)
+#                                     change; --open also lets SETUP_KEY in (a setup login)
 #   provision.sh storage CONF         the boot step of slot-storage.service: instance store
 #                                     array, its mount, the job tmp filesystem and the binds
 #   provision.sh bundle CONF MODE [--open]
@@ -15,9 +15,11 @@
 #   provision.sh pins                 print the cargo tools the node installs at a pinned
 #                                     release, one `<binary> <version>` line each
 #
-# CONF is a node config file (KEY=value, see node.conf.example and README.md). The instance
-# store is empty after every stop and start; slot-storage.service rebuilds the array at boot and
-# push.sh fills it again from the workstation.
+# CONF is a node config file (KEY=value, see node.conf.example and README.md). A node starts as a
+# bare Amazon Linux 2023 image and `apply` makes it complete: packages, rustup and the rust
+# toolchains, the pinned tools, the slot release. Nothing is copied from the workstation. The
+# instance store is empty after every stop and start; slot-storage.service rebuilds the array at
+# boot and `apply` installs what lived on it again.
 #
 # Tests: NODE_ROOT prefixes every path, and NODE_TEST=1 makes the system queries and actions
 # read and write files under NODE_ROOT/.state (test.sh).
@@ -41,20 +43,74 @@ usage() {
   exit 2
 }
 
-# Cargo tools the node installs at the release its consumers' CI installs, instead of copying the
-# workstation's: a node job then runs the release its CI runs, and push.sh leaves these binaries
-# out. One line each: name, version, SHA-256 of the release archive (.tar.gz), download directory
-# (the version's directory under it, or with %s the version's directory itself), archive name (%s
-# is the version), the binaries in it. The first line of each binary's `--version` starts with
-# `<binary> <version>`.
-# Not ess: it runs the release a repository pins exactly from its own digest-checked cache, so the
-# node's base ess is the workstation's (push.sh) and both choose the same for every repository.
-# geckodriver: the release on the forge runner image of the browser test lanes; Firefox itself is
-# the workstation's, copied with /usr.
+# Tools the node installs at a pinned release into the store's cargo bin, the release its
+# consumers' CI installs: a node job then runs the release its CI runs. One line each: name,
+# version, SHA-256 of the release archive (.tar.gz), download directory (the version's directory
+# under it, or with %s the version's directory itself), archive name (%s is the version), the
+# binaries in it. The first line of each binary's `--version` starts with `<binary> <version>`.
+# ess: the release the workstation has on PATH, a dispatcher that downloads the release a
+# repository requires into the build user's ~/.cache/ess/toolchains (SHA-256 checked by ess).
+# cargo-about: the release a consumer's CI installs, a static binary.
+# geckodriver: the release on the forge runner image of the browser test lanes.
+# sccache: the distribution has no package of it; the release the workstation runs.
 TOOL_PINS='wasm-bindgen 0.2.130 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f https://github.com/wasm-bindgen/wasm-bindgen/releases/download wasm-bindgen-%s-x86_64-unknown-linux-musl wasm-bindgen wasm-bindgen-test-runner wasm2es6js
-geckodriver 0.37.1 e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e https://github.com/mozilla/geckodriver/releases/download/v%s geckodriver-v%s-linux64 geckodriver'
+geckodriver 0.37.1 e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e https://github.com/mozilla/geckodriver/releases/download/v%s geckodriver-v%s-linux64 geckodriver
+sccache 0.18.0 45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89 https://github.com/mozilla/sccache/releases/download/v%s sccache-v%s-x86_64-unknown-linux-musl sccache
+cargo-nextest 0.9.143 66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-%s cargo-nextest-%s-x86_64-unknown-linux-gnu cargo-nextest
+task 3.54.0 680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb https://github.com/go-task/task/releases/download/v%s task_linux_amd64 task
+ess 0.99.2 8b32cb02ac156929a873f4a1faf4c8c6d686d45565ce567ce2d360b9072dc42e https://github.com/beyond10x/ess/releases/download/%s ess-%s-x86_64-unknown-linux-gnu ess
+cargo-about 0.9.1 c0e7dc6f5d74b0beec5c0053d39ab24514c717d19acd91886907a22457ea9e98 https://github.com/EmbarkStudios/cargo-about/releases/download/%s cargo-about-%s-x86_64-unknown-linux-musl cargo-about'
+# Archives the node unpacks as root into /usr/local/<name>-<version> (the build user cannot
+# replace them) and links into /usr/local/bin: the go and node releases the workstation runs, so
+# that jobs resolve the same toolchain on both sides (a distribution package is older). One line
+# each: name, version, SHA-256 of the archive, its URL, the leading path components to strip,
+# the binaries to link (paths in the unpacked tree; the first one answers the version check:
+# `go version` has a `go<version>` word, any other `--version` is the version; `path:name` links
+# the binary at `path` as /usr/local/bin/<name>). Other releases: a consumer fetches its own
+# (GOTOOLCHAIN=auto). typescript, prettier and esbuild are the npm tarballs of those releases
+# (esbuild's is the native binary of its linux-x64 package), the releases the test lanes of the
+# consumers read (`tsc`, `prettier` and `esbuild` on PATH). yq is the Go one of mikefarah at the
+# release the workstation runs; its tarball names the binary yq_linux_amd64.
+ARCHIVE_PINS='go 1.27.1 63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 https://go.dev/dl/go1.27.1.linux-amd64.tar.gz 1 bin/go bin/gofmt
+node v22.23.3 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz 1 bin/node bin/npm bin/npx bin/corepack
+typescript 6.0.3 33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz 1 bin/tsc bin/tsserver
+prettier 3.8.1 5531dc6006ad06b642d5342438909f85dc53e87c50556753c908229b213fb4f4 https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz 1 bin/prettier.cjs:prettier
+esbuild 0.28.2 9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6 https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz 1 bin/esbuild
+yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq'
+RUSTUP_VERSION=1.29.3
+RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
+RUST_TRIPLE=x86_64-unknown-linux-gnu
+# Tools built on the node from a git revision, as the build user, into the store's cargo bin. One
+# line each: name, version, repository URL, revision (the pin: a git object id; the release tag
+# peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
+# starts with `<binary> <version>`). aep: the release binary needs glibc 2.39 and a node has 2.34,
+# so the tag of the release the workstation runs is built here.
+MAKE_PIN='make 4.4.1 dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3 https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz'
+SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5edee0da723bb72d9acb4 aep-cli 1.99.1 aep'
+# Trees in the build user's home that a job reads by path: the ess releases a repository pins by
+# path (`~/.local/share/ess-versions/<version>/ess`) and the @types/node that ESS_TYPES_NODE names
+# (`~/.local/share/ess-node/node_modules`, with its one dependency). One line each: name, version,
+# SHA-256 of the archive, URL, leading path components to strip, directory under BUILD_HOME, the
+# check (a binary of that directory that prints `<binary> <version>`, or `package.json`, whose
+# `version` is read). The ess checksums are those of the release's SHA256SUMS; the npm ones were
+# compared with the sha512 integrity of the workstation's package-lock.json. A line whose strip
+# field is `zip` is a Playwright browser (the Chrome for Testing headless shell of a revision; the
+# browsers.json of playwright-core 1.65.0 says 1254 is 158.0.8127.18, 1.62.1 says 1234 is
+# 151.0.7922.34): unzipped without stripping, with the INSTALLATION_COMPLETE and
+# DEPENDENCIES_VALIDATED markers, checked by the version `--version` prints. The libraries the
+# binary needs come from EXTRA_PACKAGES, and `unzip` too.
+HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
+ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
+ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
+ess 0.99.4 3902d0f8a6dffe5255bd0a9c8f56608fabf52faf14b97d90b6e7f7ed3da7032d https://github.com/beyond10x/ess/releases/download/0.99.4/ess-0.99.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.4 ess
+@types/node 26.3.0 69b0a537007774b0d5a3bea12736d3506b6ef451241fbca46213fd9e474b0a17 https://registry.npmjs.org/@types/node/-/node-26.3.0.tgz 1 .local/share/ess-node/node_modules/@types/node package.json
+undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json
+chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb53b0fde4bdfc4bd075d6 https://cdn.playwright.dev/builds/cft/158.0.8127.18/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1254 chrome-headless-shell-linux64/chrome-headless-shell
+chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
+  echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
 }
 if [ "$mode" = pins ]; then
   pins
@@ -62,8 +118,7 @@ if [ "$mode" = pins ]; then
 fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
-ETC_LIST='fonts localtime locale.conf ssl ca-certificates nsswitch.conf ld.so.conf ld.so.conf.d mime.types protocols services os-release'
-BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony'
+BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan unzip'
 SSHD_LINES='MaxSessions 200
 MaxStartups 100:30:200
 ClientAliveInterval 15
@@ -150,6 +205,40 @@ q_running_args() {
     [ -n "$p" ] && [ "$p" != 0 ] && tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | sed 's/ *$//'
   fi
 }
+# The Environment= and BindReadOnlyPaths= settings of a unit file, one `Key=item` per line, sorted:
+# what the manager loads from it and what a process of it must have started with.
+unit_defs() {
+  awk '/^(Environment|BindReadOnlyPaths)=/ { k = $0; sub(/=.*/, "", k); v = substr($0, length(k) + 2)
+    n = split(v, a, " "); for (i = 1; i <= n; i++) print k "=" a[i] }' "$R/etc/systemd/system/$1" 2>/dev/null | sort
+}
+# The same settings as the manager has them loaded (`systemctl show`).
+q_loaded() {
+  if [ -n "$T" ]; then
+    cat "$S/loaded/$1" 2>/dev/null
+  else
+    for qp in Environment BindReadOnlyPaths; do
+      systemctl show -p "$qp" --value "$1" 2>/dev/null | tr ' ' '\n' | sed "/^\$/d;s/^/$qp=/"
+    done | sort
+  fi
+}
+# The environment of the running main process, as `Environment=NAME=value` lines.
+q_procenv() {
+  if [ -n "$T" ]; then
+    cat "$S/procenv/$1" 2>/dev/null
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    [ -n "$qm" ] && [ "$qm" != 0 ] && tr '\0' '\n' <"/proc/$qm/environ" 2>/dev/null | sed 's/^/Environment=/'
+  fi
+}
+# The version line of the slot binary the running unit executes (not the file at the path now).
+q_running_version() {
+  if [ -n "$T" ]; then
+    cat "$S/running-version/$1" 2>/dev/null
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    [ -n "$qm" ] && [ "$qm" != 0 ] && as_user "/proc/$qm/exe" --version 2>/dev/null </dev/null | head -n 1
+  fi
+}
 q_jobs() {
   if [ -n "$T" ]; then
     cat "$S/jobs" 2>/dev/null || echo 0
@@ -199,14 +288,23 @@ a_enable() {
 a_start() {
   if [ -n "$T" ]; then
     st_touch active "$1"
-    mkdir -p "$S/running"
+    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version"
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" >"$S/running/$1"
+    unit_defs "$1" >"$S/loaded/$1"
+    unit_defs "$1" | grep '^Environment=' >"$S/procenv/$1"
+    [ "$1" = slot-node.service ] && "$R$STORE/bin/slot" --version >"$S/running-version/$1" 2>/dev/null
+    return 0
   else
     systemctl start "$1"
   fi
 }
 a_restart() {
-  if [ -n "$T" ]; then a_start "$1"; else systemctl restart "$1"; fi
+  if [ -n "$T" ]; then
+    calls "systemctl restart $1"
+    a_start "$1"
+  else
+    systemctl restart "$1"
+  fi
 }
 a_chattr() {
   if [ -n "$T" ]; then
@@ -303,19 +401,26 @@ no_link() {
   [ -n "$R" ] && nl=$(readlink -m "$R")
   [ "$(readlink -m "$R$1")" = "$nl$1" ]
 }
+user_path() { echo "$STORE/nodebin:$H/.cargo/bin:/usr/local/bin:/usr/bin:/bin"; }
+# A command of the build user runs with a clean environment (nothing of root's or of this run's
+# variables), the units' PATH, and its own session when setpriv can make one.
 as_user() {
-  if [ -n "$T" ]; then "$@"; else runuser -u "$U" -- "$@"; fi
+  if [ -n "$T" ]; then
+    env -i HOME="$H" PATH="$(user_path)" LANG=C.UTF-8 "$@"
+  elif command -v setpriv >/dev/null 2>&1 && setpriv --help 2>&1 | grep -q -- --setsid; then
+    runuser -u "$U" -- setpriv --setsid env -i HOME="$H" PATH="$(user_path)" LANG=C.UTF-8 "$@"
+  else
+    runuser -u "$U" -- env -i HOME="$H" PATH="$(user_path)" LANG=C.UTF-8 "$@"
+  fi
 }
+# NODE_TEST_REAL_FETCH=1 (test.sh): the download functions take their real branch under NODE_TEST.
+fake_fetch() { [ -n "$T" ] && [ -z "${NODE_TEST_REAL_FETCH:-}" ]; }
 root_name() {
   if [ -n "$T" ]; then id -un; else echo root; fi
 }
 
 # ---- expected content ----
 
-etc_binds() {
-  echo "BindReadOnlyPaths=$STORE/rootfs/etc/ld.so.cache:/etc/ld.so.cache"
-  for e in $ETC_LIST $ETC_EXTRA; do echo "BindReadOnlyPaths=$STORE/rootfs/etc/$e:/etc/$e"; done
-}
 tokens() {
   if [ -n "$TOKENS" ]; then echo "$TOKENS"; else q_nproc; fi
 }
@@ -346,17 +451,14 @@ EOF
     slot-node.service)
       cat <<EOF
 [Unit]
-Description=slot build pool (workstation /usr)
+Description=slot build pool
 After=network-online.target local-fs.target slot-storage.service sccache-node.service
 Requires=slot-storage.service
-ConditionPathExists=$STORE/rootfs/usr/bin
 [Service]
 User=$U
 Group=$U
 Environment=HOME=$H XDG_RUNTIME_DIR=/run/user/$BUILD_UID
-Environment=PATH=$STORE/nodebin:$H/.bun/bin:$H/.cargo/bin:/usr/bin:/usr/local/go/bin:$H/go/bin:$H/.local/bin:/usr/local/bin:/bin GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=$STORE/nodebin/no-credentials SSH_ASKPASS=$STORE/nodebin/no-credentials TMPDIR=$STORE/tmp$(go_env)
-BindReadOnlyPaths=$STORE/rootfs/usr:/usr
-$(etc_binds)
+Environment=PATH=$STORE/nodebin:$H/.cargo/bin:/usr/local/bin:/usr/bin:/usr/sbin:$H/.bun/bin:$H/go/bin:$H/.local/bin:/bin GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=$STORE/nodebin/no-credentials SSH_ASKPASS=$STORE/nodebin/no-credentials TMPDIR=$STORE/tmp$(go_env)
 ExecStart=$(serve_args)
 ExecReload=/bin/kill -HUP \$MAINPID
 KillMode=control-group
@@ -369,19 +471,16 @@ EOF
     sccache-node.service)
       cat <<EOF
 [Unit]
-Description=sccache for slot-node jobs (workstation /usr)
+Description=sccache for slot-node jobs
 After=slot-storage.service
 Requires=slot-storage.service
 Before=slot-node.service
-ConditionPathExists=$STORE/rootfs/usr/bin/sccache
 [Service]
 User=$U
 Group=$U
 Environment=HOME=$H XDG_RUNTIME_DIR=/run/user/$BUILD_UID SCCACHE_NO_DAEMON=1 SCCACHE_START_SERVER=1 SCCACHE_IDLE_TIMEOUT=0
-Environment=PATH=$STORE/nodebin:$H/.cargo/bin:/usr/bin:/usr/local/bin:/bin TMPDIR=$STORE/tmp
-BindReadOnlyPaths=$STORE/rootfs/usr:/usr
-BindReadOnlyPaths=$STORE/rootfs/etc/ld.so.cache:/etc/ld.so.cache
-ExecStart=/usr/bin/sccache
+Environment=PATH=$STORE/nodebin:$H/.cargo/bin:/usr/local/bin:/usr/bin:/bin TMPDIR=$STORE/tmp
+ExecStart=$H/.cargo/bin/sccache
 LimitNOFILE=65536
 Restart=always
 [Install]
@@ -428,7 +527,7 @@ Description=Toolchain manifest of this node for the workstation's parity check
 [Service]
 Type=oneshot
 User=$U
-ExecStart=/bin/sh -c 'd=$H/.local/state/slot; /bin/sh $LIBEXEC/slot-toolchains.sh $STORE/rootfs $STORE/rustup > \$d/toolchains-node.txt.tmp && [ -s \$d/toolchains-node.txt.tmp ] && mv \$d/toolchains-node.txt.tmp \$d/toolchains-node.txt'
+ExecStart=/bin/sh -c 'd=$H/.local/state/slot; /bin/sh $LIBEXEC/slot-toolchains.sh "" $STORE/rustup > \$d/toolchains-node.txt.tmp && [ -s \$d/toolchains-node.txt.tmp ] && mv \$d/toolchains-node.txt.tmp \$d/toolchains-node.txt'
 EOF
       ;;
     slot-toolchains-manifest.timer)
@@ -705,7 +804,7 @@ p_dirs() {
       if fixing; then a_chown root:root "$R$p" && chmod 755 "$R$p" && changed dirs "$p owner root"; fi
     fi
   done
-  for d in bin cargo nodebin rootfs rustup sccache state tmp $(for m in $MIRROR_DIRS; do echo "home/$m"; done); do
+  for d in bin cargo nodebin rustup sccache state tmp $(for m in $MIRROR_DIRS; do echo "home/$m"; done); do
     p=$STORE/$d
     if [ ! -d "$R$p" ]; then
       drift dirs "$p missing"
@@ -805,6 +904,23 @@ p_links() {
       fi
     fi
   done
+  # The workstation's shims name the real binary by absolute path (/usr/bin/cargo, /usr/bin/go),
+  # and the node runs that argv as sent: /usr/bin/<name> links to the node's own binary, never
+  # over a real file.
+  for n in cargo cargo-clippy cargo-fmt clippy-driver rustc rustdoc rustfmt rustup go gofmt; do
+    p=/usr/bin/$n
+    case $n in go | gofmt) t=/usr/local/bin/$n ;; *) t=$H/.cargo/bin/$n ;; esac
+    if [ "$(readlink "$R$p" 2>/dev/null)" != "$t" ]; then
+      drift "link:$p" "should point to $t"
+      if fixing; then
+        if [ -e "$R$p" ] && [ ! -L "$R$p" ]; then
+          failed "link:$p" "is a real file; not replaced"
+        else
+          mkdir -p "$R/usr/bin" && rm -f "$R$p" && ln -s "$t" "$R$p" && changed "link:$p" "-> $t"
+        fi
+      fi
+    fi
+  done
 }
 
 p_files() {
@@ -817,45 +933,10 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
-  # The copy list this run approved: push.sh copies only while its own list equals it. The build
-  # user reads it over the setup login, so its directory is 755 (node.conf in it stays 600).
-  want_file libexec /etc/slot-node/copies 644 root:root echo "$HOME_COPIES"
-  dm=$(stat -c %a "$R/etc/slot-node" 2>/dev/null)
-  if [ -n "$dm" ] && [ "$dm" != 755 ]; then
-    drift libexec "/etc/slot-node is mode $dm, want 755 (push.sh reads the copy list)"
-    if fixing; then chmod 755 "$R/etc/slot-node" && changed libexec "/etc/slot-node mode 755"; fi
-  fi
-  # Each bound /etc entry needs a target of the same type as its copy from the workstation.
-  for e in $ETC_LIST $ETC_EXTRA; do
-    src=$R$STORE/rootfs/etc/$e
-    t=$R/etc/$e
-    if [ ! -e "$src" ]; then
-      [ -e "$t" ] && continue
-      drift etc "/etc/$e missing (bind target); made once push.sh has copied it"
-      fixing && echo "pending: etc: /etc/$e is made once push.sh has copied it" >&2
-      continue
-    fi
-    if [ -d "$src" ]; then want=d; else want=f; fi
-    if [ -d "$t" ]; then got=d; elif [ -e "$t" ]; then got=f; else got=; fi
-    [ "$got" = "$want" ] && continue
-    drift etc "/etc/$e ${got:+is the wrong type}${got:-missing} (bind target)"
-    fixing || continue
-    if [ -n "$got" ]; then
-      if [ "$got" = f ] && [ ! -s "$t" ] && [ ! -L "$t" ]; then
-        rm -f "$t"
-      elif [ "$got" = d ] && rmdir "$t" 2>/dev/null; then
-        :
-      else
-        failed etc "/etc/$e is in use with another type; not replaced"
-        continue
-      fi
-    fi
-    if [ "$want" = d ]; then mkdir -p "$t"; else : >"$t"; fi
-    changed etc "/etc/$e created"
-  done
 }
 
 units_changed=
+slot_replaced=
 p_units() {
   for u in $UNITS; do
     if ! want_file "unit:$u" "/etc/systemd/system/$u" 644 root:root gen_unit "$u"; then
@@ -875,14 +956,15 @@ slot_paths() { echo "$STORE/bin/slot /usr/local/bin/slot $H/.local/bin/slot"; }
 # binary, or nothing when $R/.state-slot-fetch-fails exists.
 slot_fetch() {
   a=slot-$SLOT_VERSION-x86_64-unknown-linux-gnu
-  if [ -n "$T" ]; then
+  if fake_fetch; then
     [ -e "$R/.state-slot-fetch-fails" ] && return 0
     mkdir -p "$1/$a" && printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
     calls "fetch slot $SLOT_VERSION"
   else
     u=https://github.com/beyond10x/slot/releases/download/$SLOT_VERSION
     (cd "$1" && curl -fsSLO "$u/$a.tar.gz" && curl -fsSLO "$u/SHA256SUMS" &&
-      grep " $a.tar.gz\$" SHA256SUMS | sha256sum -c - >/dev/null && tar -xzf "$a.tar.gz") || return 0
+      grep " $a.tar.gz\$" SHA256SUMS | sha256sum -c --strict - >/dev/null &&
+      tar -xzf "$a.tar.gz" --no-same-owner && chmod -R u-s,g-s "$a") || return 0
   fi
   echo "$1/$a/slot"
 }
@@ -931,7 +1013,7 @@ p_slot() {
     todo="$todo $p"
   done
   if fixing && [ -n "$todo" ]; then
-    install_slot $todo && changed slot "slot $SLOT_VERSION installed at$todo"
+    install_slot $todo && changed slot "slot $SLOT_VERSION installed at$todo" && slot_replaced=1
   fi
 }
 
@@ -946,22 +1028,27 @@ tool_fetch() {
     *%s*) fl=$(printf "$fu" "$fv")/$fa.tar.gz ;;
     *) fl=$fu/$fv/$fa.tar.gz ;;
   esac
-  if [ -n "$T" ]; then
+  if fake_fetch; then
     [ -e "$R/.state-tool-fetch-fails" ] && return 0
     mkdir -p "$fd/$fa" || return 0
     for b in "$@"; do printf '#!/bin/sh\necho %s %s\n' "$b" "$fv" >"$fd/$fa/$b" && chmod 755 "$fd/$fa/$b"; done
     calls "fetch $fl"
   else
     (cd "$fd" && curl -fsSLO "$fl" &&
-      echo "$fs  $fa.tar.gz" | sha256sum -c --strict - >/dev/null && tar -xzf "$fa.tar.gz") || return 0
+      echo "$fs  $fa.tar.gz" | sha256sum -c --strict - >/dev/null &&
+      tar -xzf "$fa.tar.gz" --no-same-owner) || return 0
   fi
   chmod -R go+rX "$fd"
+  chmod -R u-s,g-s "$fd"
   # An archive that holds its binaries at its top has no directory of its own name.
   if [ -d "$fd/$fa" ]; then echo "$fd/$fa"; else echo "$fd"; fi
 }
-# The first two words of the first line of a binary's `--version`, run as the build user.
+# The first two words of the first line of a binary's `--version`, run as the build user. A
+# first line that is only a version (task prints `3.54.0`) reads as `<binary> <version>`.
 tool_version() {
-  as_user "$1" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f1,2
+  tv_l=$(cd / && as_user "$1" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f1,2)
+  case $tv_l in [0-9]*) tv_l="${1##*/} $tv_l" ;; esac
+  echo "$tv_l"
 }
 # The pinned tools (TOOL_PINS) in the store's cargo bin, the build user's ~/.cargo/bin: each
 # binary answers `<binary> <version>`; apply installs the ones that do not and reads them back.
@@ -1006,6 +1093,573 @@ p_tools() {
     [ -n "$done_ok" ] && changed "tool:$tn" "$tn $tv installed:$todo"
   done <<EOF
 $TOOL_PINS
+EOF
+}
+# The tools of SOURCE_PINS: built by `cargo install --locked --git <url> --rev <rev>` as the build
+# user once the toolchain of the pin exists (the rust part runs first), read back with `--version`.
+# --force: a binary of another release or one cargo did not install is replaced. TMPDIR: the
+# store's tmp, not /tmp (a tmpfs, too small for the build). The build ends after 25 minutes.
+a_cargo_install() {
+  ai_v=$2
+  ai_b=$7
+  set -- "+$6" install --locked --force --git "$3" --rev "$4" "$5" --root "$STORE/cargo"
+  if [ -n "$T" ]; then
+    calls "cargo $*"
+    [ -e "$R/.state-tool-fetch-fails" ] && return 1
+    mkdir -p "$R$STORE/cargo/bin" && printf '#!/bin/sh\necho %s %s\n' "$ai_b" "$ai_v" >"$R$STORE/cargo/bin/$ai_b" &&
+      chmod 755 "$R$STORE/cargo/bin/$ai_b"
+  else
+    as_rust_user env TMPDIR="$STORE/tmp" timeout 1500 "$STORE/cargo/bin/cargo" "$@"
+  fi
+}
+p_source_tools() {
+  while read -r sn sv su sr sp st sb; do
+    [ -n "$sn" ] || continue
+    p=$STORE/cargo/bin/$sb
+    v=$(tool_version "$R$p")
+    [ "$v" = "$sb $sv" ] && continue
+    drift "tool:$sn" "$p is '${v:-missing}', want $sb $sv (built from $su at $sr)"
+    fixing || continue
+    if [ ! -x "$R$(rust_dir "$st")/bin/rustc" ]; then
+      failed "tool:$sn" "rust toolchain $st is not installed; $sn $sv not built"
+      continue
+    fi
+    if ! no_link "$p"; then
+      failed "tool:$sn" "$p has a symbolic link in it; not built"
+      continue
+    fi
+    if [ -n "$T" ]; then sl=$(mktemp); else sl=$(mktemp /var/tmp/slot-src.XXXXXX); fi || {
+      failed "tool:$sn" "no temporary file"
+      continue
+    }
+    if ! a_cargo_install "$sn" "$sv" "$su" "$sr" "$sp" "$st" "$sb" >"$sl" 2>&1; then
+      failed "tool:$sn" "cargo install of $sn $sv failed: $({ grep -m 3 '^error' "$sl"; tail -n 2 "$sl"; } | tr '\n' ' ')"
+      rm -f "$sl"
+      [ -n "$T" ] || rm -rf "$R$STORE"/tmp/cargo-install* 2>/dev/null
+      continue
+    fi
+    rm -f "$sl"
+    v=$(tool_version "$R$p")
+    if [ "$v" = "$sb $sv" ]; then
+      changed "tool:$sn" "$sn $sv built from $sr: $sb"
+    else
+      failed "tool:$sn" "$p is '${v:-missing}' after the build"
+    fi
+  done <<EOF
+$SOURCE_PINS
+EOF
+}
+
+# Rust: rustup for the build user in the store (~/.rustup and ~/.cargo link there), then each
+# toolchain of RUST_TOOLCHAINS with RUST_COMPONENTS and RUST_TARGETS. Nothing is copied from the
+# workstation. A toolchain is present when its rustc exists in the store's rustup home.
+# Downloads rustup-init into directory $1, checks its SHA-256 and prints its path.
+# NODE_TEST=1: a stub, or nothing when $R/.state-tool-fetch-fails exists.
+rustup_fetch() {
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    printf '#!/bin/sh\necho rustup-init\n' >"$1/rustup-init" || return 0
+    calls "fetch $RUSTUP_URL"
+  else
+    (cd "$1" && curl -fsSLO "$RUSTUP_URL" &&
+      echo "$RUSTUP_SHA256  rustup-init" | sha256sum -c --strict - >/dev/null) || return 0
+  fi
+  chmod 755 "$1" "$1/rustup-init"
+  echo "$1/rustup-init"
+}
+# Runs a command as the build user with the store's rust homes, from a directory it can read.
+as_rust_user() {
+  (cd / && as_user env HOME="$H" RUSTUP_HOME="$STORE/rustup" CARGO_HOME="$STORE/cargo" \
+    RUSTUP_INIT_SKIP_PATH_CHECK=yes PATH="$STORE/cargo/bin:/usr/local/bin:/usr/bin:/bin" "$@" </dev/null)
+}
+a_rustup_init() {
+  if [ -n "$T" ]; then
+    calls "rustup-init --no-modify-path --default-toolchain none --profile minimal -y"
+    mkdir -p "$R$STORE/cargo/bin" && printf '#!/bin/sh\necho rustup\n' >"$R$STORE/cargo/bin/rustup" &&
+      chmod 755 "$R$STORE/cargo/bin/rustup"
+  else
+    as_rust_user "$1" --no-modify-path --default-toolchain none --profile minimal -y
+  fi
+}
+# The entries of list $2 (RUST_TARGETS or RUST_COMPONENTS) that apply to toolchain $1, one per
+# line: each bare entry, and each entry `<toolchain>:<name>,<name>` that names this toolchain.
+rust_entries() {
+  for rt_e in $2; do
+    case $rt_e in
+      *:*) [ "${rt_e%%:*}" = "$1" ] && printf '%s\n' "${rt_e#*:}" | tr ',' '\n' ;;
+      *) printf '%s\n' "$rt_e" ;;
+    esac
+  done | grep .
+}
+rust_targets() { rust_entries "$1" "$RUST_TARGETS"; }
+rust_components() { rust_entries "$1" "$RUST_COMPONENTS"; }
+rust_args() {
+  for c in $(rust_components "$1"); do printf ' -c %s' "$c"; done
+  for t in $(rust_targets "$1"); do printf ' -t %s' "$t"; done
+}
+rust_dir() {
+  case $1 in
+    *-$RUST_TRIPLE) echo "$STORE/rustup/toolchains/$1" ;;
+    *) echo "$STORE/rustup/toolchains/$1-$RUST_TRIPLE" ;;
+  esac
+}
+a_rustup_install() {
+  if [ -n "$T" ]; then
+    calls "rustup toolchain install $1 --profile minimal$2"
+    [ -e "$R/.state-tool-fetch-fails" ] && return 1
+    d=$R$(rust_dir "$1")
+    mkdir -p "$d/bin" && printf '#!/bin/sh\necho "commit-hash: 0000000"\n' >"$d/bin/rustc" && chmod 755 "$d/bin/rustc"
+    : >"$d/.components"
+    : >"$d/.targets"
+    for c in $(rust_components "$1"); do echo "$c-$RUST_TRIPLE" >>"$d/.components"; done
+    echo "$RUST_TRIPLE" >>"$d/.targets"
+    for t in $(rust_targets "$1"); do echo "$t" >>"$d/.targets"; done
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" toolchain install "$1" --profile minimal $2
+  fi
+}
+# The components or targets (kind $1: component or target) installed on toolchain $2, one per line.
+q_rust_list() {
+  if [ -n "$T" ]; then
+    cat "$R$(rust_dir "$2")/.$1s" 2>/dev/null
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" "$1" list --installed --toolchain "$2" 2>/dev/null
+  fi
+}
+# Adds components or targets: kind, toolchain, names...
+a_rustup_add() {
+  ra_k=$1 ra_n=$2
+  shift 2
+  if [ -n "$T" ]; then
+    calls "rustup $ra_k add --toolchain $ra_n $*"
+    for ra_w in "$@"; do
+      if [ "$ra_k" = component ]; then echo "$ra_w-$RUST_TRIPLE" >>"$R$(rust_dir "$ra_n")/.components"; else echo "$ra_w" >>"$R$(rust_dir "$ra_n")/.targets"; fi
+    done
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" "$ra_k" add --toolchain "$ra_n" "$@"
+  fi
+}
+# A toolchain that is there has every RUST_COMPONENTS and RUST_TARGETS: check names each missing
+# one, apply adds those and no other.
+p_rust_extras() {
+  for pe_k in component target; do
+    if [ "$pe_k" = component ]; then pe_want=$(rust_components "$1"); else pe_want=$(rust_targets "$1"); fi
+    [ -n "$pe_want" ] || continue
+    pe_have=$(q_rust_list "$pe_k" "$1")
+    pe_missing=
+    for pe_w in $pe_want; do
+      echo "$pe_have" | grep -qxF -e "$pe_w" -e "$pe_w-$RUST_TRIPLE" && continue
+      drift "rust:$1" "$pe_k $pe_w missing"
+      pe_missing="$pe_missing $pe_w"
+    done
+    fixing && [ -n "$pe_missing" ] && [ -n "$rustup_ok" ] || continue
+    pe_l=$(mktemp)
+    if a_rustup_add "$pe_k" "$1" $pe_missing >"$pe_l" 2>&1; then
+      changed "rust:$1" "$pe_k added:$pe_missing"
+    else
+      tail -n 5 "$pe_l" >&2
+      failed "rust:$1" "rustup $pe_k add$pe_missing"
+    fi
+    rm -f "$pe_l"
+  done
+}
+# Removes components or targets: kind, toolchain, names...
+a_rustup_remove() {
+  ar_k=$1 ar_n=$2
+  shift 2
+  if [ -n "$T" ]; then
+    calls "rustup $ar_k remove --toolchain $ar_n $*"
+    ar_f=$R$(rust_dir "$ar_n")/.${ar_k}s
+    for ar_w in "$@"; do
+      if [ "$ar_k" = component ]; then ar_w=$ar_w-$RUST_TRIPLE; fi
+      grep -vxF "$ar_w" "$ar_f" >"$ar_f.new"
+      mv "$ar_f.new" "$ar_f"
+    done
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" "$ar_k" remove --toolchain "$ar_n" "$@"
+  fi
+}
+# A target that a toolchain has, other than the host's, and that no RUST_TARGETS entry names for it
+# is surplus; so is one of the components clippy, rustfmt, rust-src and llvm-tools (the ones the
+# manifest line of toolchains.sh carries) that no RUST_COMPONENTS entry names for it. The node
+# mirrors the workstation's per toolchain: with no entry at all, every non-host target is
+# surplus. check names each surplus item and apply removes it.
+p_rust_surplus() {
+  for ps_k in target component; do
+    if [ "$ps_k" = component ]; then ps_want=$(rust_components "$1"); else ps_want=$(rust_targets "$1"); fi
+    ps_extra=
+    for ps_h in $(q_rust_list "$ps_k" "$1"); do
+      if [ "$ps_k" = component ]; then
+        ps_h=${ps_h%-"$RUST_TRIPLE"}
+        ps_h=${ps_h%-preview}
+        case $ps_h in clippy | rustfmt | rust-src | llvm-tools) ;; *) continue ;; esac
+      else
+        [ "$ps_h" = "$RUST_TRIPLE" ] && continue
+      fi
+      echo "$ps_want" | grep -qxF "$ps_h" && continue
+      drift "rust:$1" "$ps_k $ps_h is not in RUST_$(echo "$ps_k" | tr a-z A-Z)S"
+      ps_extra="$ps_extra $ps_h"
+    done
+    fixing && [ -n "$ps_extra" ] && [ -n "$rustup_ok" ] || continue
+    ps_l=$(mktemp)
+    if a_rustup_remove "$ps_k" "$1" $ps_extra >"$ps_l" 2>&1; then
+      changed "rust:$1" "$ps_k removed:$ps_extra"
+    else
+      tail -n 5 "$ps_l" >&2
+      failed "rust:$1" "rustup $ps_k remove$ps_extra"
+    fi
+    rm -f "$ps_l"
+  done
+}
+p_rust() {
+  [ -n "$RUST_TOOLCHAINS" ] || return 0
+  rb=$STORE/cargo/bin/rustup
+  rustup_ok=1
+  if [ ! -x "$R$rb" ]; then
+    drift rustup missing
+    rustup_ok=
+    if fixing; then
+      if [ -n "$T" ]; then rd=$(mktemp -d); else rd=$(mktemp -d /var/tmp/slot-rustup.XXXXXX); fi || {
+        failed rustup "no temporary directory"
+        return 0
+      }
+      rf=$(rustup_fetch "$rd")
+      if [ -z "$rf" ]; then
+        failed rustup "download or checksum of rustup-init $RUSTUP_VERSION"
+      else
+        rl=$(mktemp)
+        if a_rustup_init "$rf" >"$rl" 2>&1 && [ -x "$R$rb" ]; then
+          rustup_ok=1
+          changed rustup "rustup $RUSTUP_VERSION installed in $STORE/rustup"
+        else
+          tail -n 5 "$rl" >&2
+          failed rustup "rustup-init $RUSTUP_VERSION did not install rustup"
+        fi
+        rm -f "$rl"
+      fi
+      rm -rf "$rd"
+    fi
+  fi
+  for n in $RUST_TOOLCHAINS; do
+    ra=$(rust_args "$n")
+    if [ -x "$R$(rust_dir "$n")/bin/rustc" ]; then
+      p_rust_extras "$n"
+      p_rust_surplus "$n"
+      continue
+    fi
+    drift "rust:$n" missing
+    fixing && [ -n "$rustup_ok" ] || continue
+    rl=$(mktemp)
+    if a_rustup_install "$n" "$ra" >"$rl" 2>&1 && [ -x "$R$(rust_dir "$n")/bin/rustc" ]; then
+      changed "rust:$n" "toolchain $n installed"
+    else
+      tail -n 5 "$rl" >&2
+      failed "rust:$n" "rustup toolchain install $n"
+    fi
+    rm -f "$rl"
+  done
+  p_rust_default
+}
+
+# The default toolchain is `stable` when RUST_TOOLCHAINS has it, like the workstation's: a job that
+# names no toolchain (`cargo` with no `+<toolchain>` and no rust-toolchain file) runs it. Without
+# this rustup makes the first toolchain it installs the default (1.85.0 on a node). check reads
+# `default_toolchain` of the rustup home's settings.toml, apply runs `rustup default stable`.
+a_rustup_default() {
+  if [ -n "$T" ]; then
+    calls "rustup default $1"
+    [ -e "$R/.state-default-fails" ] && return 1
+    printf 'version = "12"\ndefault_toolchain = "%s"\nprofile = "minimal"\n' "$(basename "$(rust_dir "$1")")" >"$R$STORE/rustup/settings.toml"
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" default "$1"
+  fi
+}
+p_rust_default() {
+  case " $RUST_TOOLCHAINS " in *" stable "*) ;; *) return 0 ;; esac
+  [ -x "$R$(rust_dir stable)/bin/rustc" ] || return 0
+  want=$(basename "$(rust_dir stable)")
+  got=$(sed -n "s/^[[:space:]]*default_toolchain[[:space:]]*=[[:space:]]*[\"']\\([^\"']*\\)[\"'].*/\\1/p" "$R$STORE/rustup/settings.toml" 2>/dev/null | head -n 1 | tr -cd 'A-Za-z0-9._-')
+  [ "$got" = "$want" ] && return 0
+  drift "rust:default" "the default toolchain is '${got:-none}', want $want"
+  fixing && [ -n "$rustup_ok" ] || return 0
+  rl=$(mktemp)
+  if a_rustup_default stable >"$rl" 2>&1; then
+    changed "rust:default" "rustup default stable ($want)"
+  else
+    tail -n 5 "$rl" >&2
+    failed "rust:default" "rustup default stable"
+  fi
+  rm -f "$rl"
+}
+
+# The pinned archives (ARCHIVE_PINS): unpacked as root into /usr/local/<name>-<version>, each
+# binary linked into /usr/local/bin. check reads each link and the version of the first binary.
+# Downloads the archive into directory $1, checks its SHA-256, unpacks it into $1/tree and prints
+# that path. Arguments: dir name version sha256 url strip binaries... NODE_TEST=1: stub binaries,
+# or nothing when $R/.state-tool-fetch-fails exists.
+# A binary word of an ARCHIVE_PINS line: its path in the unpacked tree, and the name it is linked
+# as in /usr/local/bin (the last path component, or the word after a colon).
+archive_src() { echo "${1%%:*}"; }
+archive_link() {
+  case $1 in
+    *:*) echo "${1#*:}" ;;
+    *) echo "${1##*/}" ;;
+  esac
+}
+archive_fetch() {
+  fd=$1 fn=$2 fv=$3 fs=$4 fu=$5 fk=$6
+  shift 6
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    for b in "$@"; do
+      fm=755
+      # A word with a link name stands for a script that a tarball ships without the execute bit.
+      case $b in *:*) fm=644 ;; esac
+      b=$(archive_src "$b")
+      mkdir -p "$fd/tree/$(dirname "$b")" || return 0
+      if [ "$fn" = go ]; then
+        printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
+      else
+        printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
+      fi
+      chmod "$fm" "$fd/tree/$b"
+    done
+    calls "fetch $fu"
+  else
+    (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir tree && tar -xf archive -C tree --strip-components="$fk" --no-same-owner) || return 0
+  fi
+  chmod -R go-w,u-s,g-s "$fd/tree"
+  chmod -R a+rX "$fd/tree"
+  # A script of an npm tarball that is not marked executable there (prettier's bin/prettier.cjs).
+  # A symbolic link is left alone: chmod would follow it out of the tree.
+  for xb in "$@"; do
+    xp=$fd/tree/$(archive_src "$xb")
+    [ -L "$xp" ] || chmod a+x "$xp"
+  done
+  echo "$fd/tree"
+}
+# The first line of the version of binary $2 of archive $1, run as the build user.
+archive_version() {
+  if [ "$1" = go ]; then as_user "$2" version; else as_user "$2" --version; fi 2>/dev/null </dev/null | head -n 1
+}
+p_archives() {
+  while read -r an av as au ak ab; do
+    [ -n "$an" ] || continue
+    dir=/usr/local/$an-$av
+    first=$(archive_src "${ab%% *}")
+    todo=
+    for b in $ab; do
+      ln_=$(archive_link "$b")
+      b=$(archive_src "$b")
+      got=$(readlink "$R/usr/local/bin/$ln_" 2>/dev/null)
+      [ "$got" = "$dir/$b" ] && continue
+      drift "archive:$an" "/usr/local/bin/$ln_ is '${got:-missing}', want a link to $dir/$b"
+      todo=1
+    done
+    wv=$av
+    [ "$an" = go ] && wv=go$av
+    v=$(archive_version "$an" "$R$dir/$first")
+    vok=
+    for w in $v; do [ "$w" = "$wv" ] && vok=1; done
+    if [ -z "$vok" ]; then
+      drift "archive:$an" "$dir/$first says '${v:-missing}', want $wv"
+      todo=1
+    fi
+    fixing && [ -n "$todo" ] || continue
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-archive.XXXXXX); fi || {
+      failed "archive:$an" "no temporary directory"
+      continue
+    }
+    src=$(archive_fetch "$td" "$an" "$av" "$as" "$au" "$ak" $ab </dev/null)
+    if [ -z "$src" ]; then
+      rm -rf "$td"
+      failed "archive:$an" "download or checksum of $an $av"
+      continue
+    fi
+    mkdir -p "$R/usr/local/bin"
+    rm -rf "$R$dir.slot-new"
+    if ! { mv "$src" "$R$dir.slot-new" && rm -rf "$R$dir" && mv "$R$dir.slot-new" "$R$dir"; }; then
+      rm -rf "$td"
+      failed "archive:$an" "$dir not written"
+      continue
+    fi
+    rm -rf "$td"
+    for b in $ab; do ln -sfn "$dir/$(archive_src "$b")" "$R/usr/local/bin/$(archive_link "$b")"; done
+    v=$(archive_version "$an" "$R$dir/$first")
+    vok=
+    for w in $v; do [ "$w" = "$wv" ] && vok=1; done
+    if [ -n "$vok" ]; then
+      changed "archive:$an" "$an $av installed in $dir, linked in /usr/local/bin"
+    else
+      failed "archive:$an" "$dir/$first says '${v:-missing}' after the install"
+    fi
+  done <<EOF
+$ARCHIVE_PINS
+EOF
+}
+
+# GNU make built from its source tarball (MAKE_PIN): the node's make is 4.3, which cannot parse the
+# `--jobserver-auth=fifo:` form of the pool's jobserver (make 4.4 added it), so every cmake or make
+# build of a job failed with "invalid --jobserver-auth string". The tarball is built by the build
+# user in a temporary directory; root installs the one binary into /usr/local/make-<version>/bin and
+# links it as make and gmake in /usr/local/bin, which the job PATH has before /usr/bin.
+# Prints the path of the built make; nothing when the download, the checksum or the build failed.
+make_build() {
+  mb_d=$1
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    calls "fetch $5"
+    printf '#!/bin/sh\necho "GNU Make %s"\n' "$3" >"$mb_d/make" && chmod 755 "$mb_d/make" && echo "$mb_d/make"
+    return 0
+  fi
+  chmod 755 "$mb_d"
+  (cd "$mb_d" && curl -fsSLo src.tar.gz "$5" && echo "$4  src.tar.gz" | sha256sum -c --strict - >/dev/null &&
+    mkdir src && tar -xf src.tar.gz -C src --strip-components=1 --no-same-owner &&
+    chown -R "$U:$U" src) || return 0
+  [ -x /usr/bin/make ] || {
+    echo "error: /usr/bin/make (the package's make, which builds this one) is missing" >&2
+    return 0
+  }
+  as_user timeout 600 sh -c 'cd "$1" && ./configure --disable-nls --without-guile && /usr/bin/make' sh "$mb_d/src" </dev/null >&2 || return 0
+  # root copies the binary into the temporary directory (root's, the build user cannot write there)
+  # and checks the copy: a symbolic link left by the build is copied as a link and refused.
+  cp -P "$mb_d/src/make" "$mb_d/make" 2>/dev/null && chown root:root "$mb_d/make" &&
+    [ -f "$mb_d/make" ] && [ ! -L "$mb_d/make" ] && [ -x "$mb_d/make" ] && echo "$mb_d/make"
+}
+p_make() {
+  while read -r mn mv ms mu; do
+    [ -n "$mn" ] || continue
+    dir=/usr/local/$mn-$mv
+    binok=1
+    linkok=1
+    real=
+    for l in make gmake; do
+      got=$(readlink "$R/usr/local/bin/$l" 2>/dev/null)
+      [ "$got" = "$dir/bin/make" ] && continue
+      drift "make" "/usr/local/bin/$l is '${got:-missing}', want a link to $dir/bin/make"
+      linkok=
+      if [ -e "$R/usr/local/bin/$l" ] && [ ! -L "$R/usr/local/bin/$l" ]; then real="$real /usr/local/bin/$l"; fi
+    done
+    v=$(as_user "$R$dir/bin/make" --version 2>/dev/null </dev/null | head -n 1)
+    case $v in
+      "GNU Make $mv" | "GNU Make $mv "*) ;;
+      *)
+        drift "make" "$dir/bin/make says '${v:-missing}', want GNU Make $mv"
+        binok=
+        ;;
+    esac
+    fixing && { [ -z "$binok" ] || [ -z "$linkok" ]; } || continue
+    if [ -n "$real" ]; then
+      failed "make" "${real# } is a real file; not replaced"
+      continue
+    fi
+    if [ -n "$binok" ]; then
+      if ln -sfn "$dir/bin/make" "$R/usr/local/bin/make" && ln -sfn "$dir/bin/make" "$R/usr/local/bin/gmake"; then
+        changed "make" "linked make and gmake in /usr/local/bin to $dir/bin/make"
+      else
+        failed "make" "link in /usr/local/bin"
+      fi
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-make.XXXXXX); fi || {
+      failed "make" "no temporary directory"
+      continue
+    }
+    ml=$(mktemp)
+    mk=$(make_build "$td" "$mn" "$mv" "$ms" "$mu" 2>"$ml")
+    if [ -z "$mk" ]; then
+      failed "make" "download, checksum or build of make $mv: $({ grep -m 3 -i 'error' "$ml"; tail -n 2 "$ml"; } | tr '\n' ' ')"
+    elif mkdir -p "$R$dir/bin" "$R/usr/local/bin" && install -m 0755 "$mk" "$R$dir/bin/make.slot-new" && mv "$R$dir/bin/make.slot-new" "$R$dir/bin/make" &&
+      ln -sfn "$dir/bin/make" "$R/usr/local/bin/make" && ln -sfn "$dir/bin/make" "$R/usr/local/bin/gmake"; then
+      v=$(as_user "$R$dir/bin/make" --version 2>/dev/null </dev/null | head -n 1)
+      case $v in
+        "GNU Make $mv" | "GNU Make $mv "*) changed "make" "GNU Make $mv built, linked as make and gmake in /usr/local/bin" ;;
+        *) failed "make" "$dir/bin/make says '${v:-missing}' after the install" ;;
+      esac
+    else
+      rm -f "$R$dir/bin/make.slot-new"
+      failed "make" "$dir not written"
+    fi
+    rm -rf "$td" "$ml"
+  done <<EOF
+$MAKE_PIN
+EOF
+}
+
+# The trees of HOME_PINS. Downloads the archive into directory $1, checks its SHA-256, unpacks it
+# into $1/tree and prints that path. Arguments: dir version sha256 url strip check. NODE_TEST=1:
+# a stub tree, or nothing when $R/.state-tool-fetch-fails exists.
+home_fetch() {
+  hd=$1 hv=$2 hs=$3 hu=$4 hk=$5 hc=$6
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    mkdir -p "$hd/tree" || return 0
+    case $hc in
+      package.json) printf '{\n  "name": "stub",\n  "version": "%s"\n}\n' "$hv" >"$hd/tree/package.json" ;;
+      *chrome-headless-shell) mkdir -p "$hd/tree/${hc%/*}" && printf '#!/bin/sh\necho "Google Chrome for Testing %s"\n' "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
+      *) printf '#!/bin/sh\necho "%s %s"\n' "$hc" "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
+    esac
+    calls "fetch $hu"
+  elif [ "$hk" = zip ]; then
+    (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir tree && unzip -q archive -d tree) || return 0
+  else
+    (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir tree && tar -xzf archive -C tree --strip-components="$hk" --no-same-owner) || return 0
+  fi
+  # A zip is a Playwright browser: its directory needs the two marker files Playwright looks for.
+  if [ "$hk" = zip ]; then : >"$hd/tree/INSTALLATION_COMPLETE" && : >"$hd/tree/DEPENDENCIES_VALIDATED" || return 0; fi
+  chmod -R u+rwX,go+rX,go-w,u-s,g-s "$hd/tree"
+  echo "$hd/tree"
+}
+# What the check of a HOME_PINS line reads in directory $1: `<binary> <version>` for a binary, the
+# `version` of package.json for package.json, the last word of the first line of `--version` for a
+# chrome-headless-shell.
+home_got() {
+  case $2 in
+    package.json) sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$R$1/package.json" 2>/dev/null | head -n 1 ;;
+    *chrome-headless-shell) (cd / && as_user "$R$1/$2" --version 2>/dev/null </dev/null | head -n 1 | awk '{print $NF}') ;;
+    *) tool_version "$R$1/$2" ;;
+  esac
+}
+p_home_pins() {
+  while read -r hn hv hs hu hk hd hc; do
+    [ -n "$hn" ] || continue
+    p=$H/$hd
+    case $hc in package.json | *chrome-headless-shell) want=$hv ;; *) want="$hc $hv" ;; esac
+    got=$(home_got "$p" "$hc")
+    mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
+    [ "$got" = "$want" ] && [ "$mark" = "$hs" ] && continue
+    drift "home:$hn@$hv" "$p is '${got:-missing}', want $want$([ "$got" = "$want" ] && echo " from the archive $hs")"
+    fixing || continue
+    if ! no_link "$p"; then
+      failed "home:$hn@$hv" "$p has a symbolic link in it; not installed"
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-home.XXXXXX); fi || {
+      failed "home:$hn@$hv" "no temporary directory"
+      continue
+    }
+    chmod 755 "$td"
+    src=$(home_fetch "$td" "$hv" "$hs" "$hu" "$hk" "$hc" </dev/null)
+    if [ -z "$src" ]; then
+      failed "home:$hn@$hv" "download or checksum of $hn $hv"
+    elif as_user sh -c 'set -e; mkdir -p "$(dirname "$2")"; rm -rf "$2.slot-new" "$2.slot-old"; mkdir "$2.slot-new"; cp -a "$1/." "$2.slot-new/"; printf "%s\n" "$3" >"$2.slot-new/.slot-sha256"; if [ -e "$2" ]; then mv "$2" "$2.slot-old"; fi; mv "$2.slot-new" "$2"; rm -rf "$2.slot-old"' sh "$src" "$R$p" "$hs" </dev/null; then
+      got=$(home_got "$p" "$hc")
+      mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
+      if [ "$got" = "$want" ] && [ "$mark" = "$hs" ]; then
+        changed "home:$hn@$hv" "$hn $hv installed in $p"
+      else
+        failed "home:$hn@$hv" "$p is '${got:-missing}' after the install"
+      fi
+    else
+      as_user rm -rf "$R$p.slot-new" </dev/null
+      failed "home:$hn@$hv" "$p not written"
+    fi
+    rm -rf "$td"
+  done <<EOF
+$HOME_PINS
 EOF
 }
 
@@ -1055,45 +1709,85 @@ p_keys() {
   rm -f "$lf"
 }
 
+imds_open=
 p_imds() {
   q_imds && return 0
   drift imds "the metadata service is open to other users than root"
   if fixing; then
     a_start slot-imds-root-only.service
-    [ -n "$T" ] && : >"$S/imds"
-    changed imds "slot-imds-root-only.service started"
+    [ -n "$T" ] && [ ! -e "$R/.state-imds-stays-open" ] && : >"$S/imds"
+    if q_imds; then
+      changed imds "slot-imds-root-only.service started"
+    else
+      failed imds "slot-imds-root-only.service started and the metadata service is still open to other users than root; no key, rust or pinned tool is installed"
+      imds_open=1
+    fi
   fi
 }
 
+# Why the running process of $1 is not what its unit file and the config say; nothing when it is.
+stale_reason() {
+  sr_want=$(unit_defs "$1")
+  sr_got=$(q_loaded "$1")
+  if [ "$sr_want" != "$sr_got" ]; then
+    echo "the loaded definition is not the unit file's"
+    return 0
+  fi
+  sr_env=$(q_procenv "$1")
+  if [ -n "$sr_env" ]; then
+    sr_f=$(mktemp)
+    echo "$sr_env" >"$sr_f"
+    sr_miss=$(echo "$sr_want" | grep '^Environment=' | grep -vxF -f "$sr_f" | head -n 1)
+    rm -f "$sr_f"
+    if [ -n "$sr_miss" ]; then
+      echo "the process started without ${sr_miss#Environment=}"
+      return 0
+    fi
+  fi
+  if [ "$1" = slot-node.service ]; then
+    sr_v=$(q_running_version "$1")
+    if [ -n "$sr_v" ] && [ "$sr_v" != "slot $SLOT_VERSION" ]; then
+      echo "it runs '$sr_v', the config says slot $SLOT_VERSION"
+      return 0
+    fi
+  fi
+  return 0
+}
+
 p_services() {
+  started=
   for u in slot-storage.service slot-imds-root-only.service slot-toolchains-manifest.timer sccache-node.service slot-node.service; do
     q_active "$u" && continue
     drift "unit:$u" "not active"
-    if fixing; then
-      case $u in
-        sccache-node.service | slot-node.service)
-          if [ ! -d "$R$STORE/rootfs/usr/bin" ]; then
-            echo "pending: unit:$u: starts after push.sh has filled $STORE/rootfs" >&2
-            continue
-          fi
-          ;;
-      esac
-      a_start "$u" && changed "unit:$u" "started"
-    fi
+    if fixing; then a_start "$u" && changed "unit:$u" "started" && started="$started $u"; fi
   done
-  q_active slot-node.service || return 0
-  want=$(serve_args)
-  got=$(q_running_args slot-node.service)
-  [ "$got" = "$want" ] && return 0
-  drift running "slot-node runs '$got', its unit says '$want'"
-  if fixing; then
-    j=$(q_jobs)
-    if [ "${j:-1}" = 0 ]; then
-      a_restart slot-node.service && changed running "slot-node restarted with '$want'"
-    else
-      echo "pending: running: slot-node restarts when no job runs ($j now)" >&2
+  # A running unit that is not what its file and the config say restarts: sccache-node at once,
+  # slot-node when no job runs (it holds the build user's jobs).
+  for u in sccache-node.service slot-node.service; do
+    q_active "$u" || continue
+    case " $started " in *" $u "*) continue ;; esac
+    why=$(stale_reason "$u")
+    if [ -z "$why" ]; then
+      case " $units_changed " in *" $u "*) fixing && why="its unit file changed" ;; esac
+      [ "$u" = slot-node.service ] && [ -n "$slot_replaced" ] && why="the slot binary was replaced"
     fi
-  fi
+    if [ -z "$why" ] && [ "$u" = slot-node.service ]; then
+      want=$(serve_args)
+      got=$(q_running_args "$u")
+      [ "$got" = "$want" ] || why="it runs '$got', its unit says '$want'"
+    fi
+    [ -n "$why" ] || continue
+    drift running "$u: $why"
+    fixing || continue
+    if [ "$u" = slot-node.service ]; then
+      j=$(q_jobs)
+      if [ "${j:-1}" != 0 ]; then
+        echo "pending: running: slot-node restarts when no job runs ($j now): $why" >&2
+        continue
+      fi
+    fi
+    a_restart "$u" && changed running "$u restarted: $why"
+  done
 }
 
 case $mode in
@@ -1108,11 +1802,17 @@ case $mode in
     p_links
     p_files
     p_units
-    p_slot
-    p_tools
-    p_keys
     p_imds
+    p_slot
+    [ -n "$imds_open" ] || p_rust
+    [ -n "$imds_open" ] || p_tools
+    p_archives
+    p_make
+    [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
+    [ -n "$imds_open" ] || p_home_pins
+    [ -n "$imds_open" ] || p_keys
     p_services
+    [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"
       [ "$ndrift" -eq 0 ] || exit 1

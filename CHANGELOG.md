@@ -2,6 +2,98 @@
 
 ## Unreleased
 
+- Node home trees: `provision.sh` installs the ess releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 in
+  `~/.local/share/ess-versions/<version>/ess` and `@types/node` 26.3.0 with `undici-types` 8.3.0 in
+  `~/.local/share/ess-node/node_modules` (`HOME_PINS`, SHA-256 pinned). A repository that calls an
+  ess release by that path, and the TypeScript cases of ess that read `ESS_TYPES_NODE`, found
+  nothing on the node. The Playwright browsers are in the same list: the Chrome for Testing
+  headless shell of revision 1254 (Playwright 1.65.0, 158.0.8127.18) and 1234 (1.62.1,
+  151.0.7922.34) in `~/.cache/ms-playwright/chromium_headless_shell-<revision>`, from the pinned
+  zip with the two marker files Playwright looks for. Playwright's own `install` does not know
+  Amazon Linux. `unzip` is a base package.
+
+- Node rust default and `libubsan`: `provision.sh` runs `rustup default stable` when
+  `RUST_TOOLCHAINS` has `stable` (rustup had made 1.85.0, the first toolchain installed, the
+  default; the workstation's is `stable`); `check` names a different default (`rust:default`).
+  `libubsan` is a base package.
+
+- Node `make` 4.4.1: `provision.sh` builds GNU Make 4.4.1 from its SHA-256 pinned tarball and
+  links it as `make` and `gmake` in `/usr/local/bin`. The node's make 4.3 does not read the
+  `--jobserver-auth=fifo:` form of `MAKEFLAGS`, so cmake and make builds did not use the pool.
+  `toolchains.sh` prints a `tool make` line, so `push.sh check` names a difference.
+
+- Node `aep` 0.80.0: `provision.sh` builds it on the node, as the build user, from the commit of
+  the release tag (`SOURCE_PINS`: `cargo install --locked --git … --rev …`), because the release
+  binary needs glibc 2.39 and the node has 2.34. `check` reads `aep --version`.
+
+- Node jobs started by the workstation's shims: they name the real binary by absolute path, so a
+  node without `/usr/bin/cargo` refused every cargo job ("cargo fetch --locked failed:
+  /usr/bin/cargo: No such file or directory"). `provision.sh` links `/usr/bin/cargo`,
+  `cargo-clippy`, `cargo-fmt`, `clippy-driver`, `rustc`, `rustdoc`, `rustfmt` and `rustup` to the
+  build user's rustup proxies and `/usr/bin/go`, `gofmt` to `/usr/local/bin`; it never replaces a
+  real file.
+
+- Node CLIs the workstation has on PATH: `provision.sh` installs `ess` 0.99.2 and `cargo-about`
+  0.9.1 (tool pins, SHA-256 from the release's checksum file) and `yq` v4.30.8 of mikefarah
+  (archive pin, linked as `yq`), the packages `glibc-static`, `bubblewrap` and `socat`, and puts
+  `/usr/sbin` in the job PATH. `toolchains.sh` prints a `tool` line for `ess`, `aep`, `yq` and
+  `cargo-about`, so `push.sh check` names a difference. `aep` has no archive pin: its release
+  binary needs glibc 2.39 and the node has 2.34 (it is built from source, see above).
+
+- Node tools of the consumers' test lanes: `provision.sh` installs `typescript` 6.0.3 (`tsc`),
+  `prettier` 3.8.1 and `esbuild` 0.28.2 from their npm tarballs (SHA-256 pinned, into
+  `/usr/local/<name>-<version>`, linked in `/usr/local/bin`; `path:name` in an `ARCHIVE_PINS` line
+  names the link), and `zstd` and `python3` as base packages. `toolchains.sh` prints a
+  `tool <name> <version>` line for each tool and `push.sh check` compares them. `push.sh check`
+  no longer reports a rust toolchain that only the node has (1.85.0 for an MSRV job).
+
+- Node parity of rust toolchains: the `rust` line of `toolchains.sh` lists the installed targets and
+  `clippy`, `rustfmt`, `rust-src` and `llvm-tools` (sorted, comma separated; `rust-docs` and the
+  manifests are left out) in place of a digest, so a difference in `push.sh check` names the
+  target. `RUST_TARGETS` and `RUST_COMPONENTS` take `<toolchain>:<name>,<name>` entries beside bare
+  names, so a node mirrors the targets and components each workstation toolchain has; the prefix
+  must be a word of `RUST_TOOLCHAINS`, and an entry with a comma but no prefix, with two colons or
+  with an empty name is refused. A target a toolchain has beyond its entries (the host's aside),
+  and a clippy, rustfmt, rust-src or llvm-tools component beyond them, is surplus: `check` names
+  it and `apply` removes it (`rustup target remove`, `rustup component remove`).
+
+- Node provisioning, from a review: tests run the real download paths (slot, pinned tools,
+  rustup-init, go and node) against a file with the wrong SHA-256 and see nothing unpacked or run;
+  `apply` restarts `sccache-node` when its unit changed and `slot-node` when its unit, its
+  arguments or the slot binary changed and no job runs (else `pending: running: ...`), and `check`
+  names a running unit whose loaded definition (`systemctl show`), process environment or slot
+  version is not what its file and the config say; each rust toolchain that is there gets the
+  `RUST_COMPONENTS` and `RUST_TARGETS` it lacks (`rustup component add`, `rustup target add`);
+  `tar` as root takes no owner from an archive and unpacked trees lose setuid and setgid; commands
+  of the build user run with a clean environment (`env -i`, the units' `PATH`) and their own
+  session (`setpriv --setsid`); the metadata service is closed and read back before the key,
+  rustup or a pinned tool goes in (`failed: imds:` otherwise); the units' `PATH` puts the store's
+  `nodebin`, the user's `~/.cargo/bin` and `/usr/local/bin` ahead of `/usr/bin` and drops
+  `/usr/local/go/bin`; `push.sh` drops control characters from the node's output and is documented
+  as a version parity report, not an integrity check; `EXTRA_PACKAGES` is validated like the
+  `RUST_*` keys (letters, digits, `.`, `_`, `+`, `-`, no leading dash).
+
+- A build node starts bare and `provision.sh apply` makes it complete; nothing is copied from the
+  workstation to a node any more. `slot-node` and `sccache-node` use the node's own `/usr` and
+  `/etc` (no `rootfs` binds, no wait for a copy) and start on the first `apply`. New `p_rust`
+  installs rustup 1.29.3 (checked against its SHA-256) for the build user into the store, then
+  each toolchain of `RUST_TOOLCHAINS` with `RUST_COMPONENTS` (default `clippy rustfmt`) and
+  `RUST_TARGETS`; `check` names `rustup` and `rust:<name>` when missing. `sccache` joins the
+  pinned tools and `sccache-node.service` runs it from the store's cargo bin. Everything else
+  comes from `EXTRA_PACKAGES`. `toolchains.sh` prints go, node and the C tools by version and
+  drops the digests of `/usr`, `/etc` and the mingw sysroot. `push.sh` keeps only `check`
+  (the rust, go and node lines and the pinned tools' releases) and `compare`; `apply` and `bins`
+  are gone, and so are the config keys `HOME_COPIES`, `ETC_EXTRA` and `SKIP_BINS` (a config file
+  that sets one is refused) and `/etc/slot-node/copies`.
+- The node carries the workstation's go and node releases: `ARCHIVE_PINS` in `provision.sh` (go
+  1.27.1 from go.dev/dl, node v22.23.3 from nodejs.org/dist) are checked with `sha256sum -c
+  --strict`, unpacked as root into `/usr/local/<name>-<version>` and linked into `/usr/local/bin`;
+  `check` names a missing link or another version. `cargo-nextest` 0.9.143 and `task` 3.54.0 join
+  the pinned tools (`task --version` prints the bare version, read as `task <version>`).
+  `toolchains.sh` prints the go line as the bare version (`go go1.27.1`, cut at the first `-`) and
+  looks in `/usr/local/bin` first. `node.conf.example` lists the consumers' rust toolchains, the
+  `wasm32-unknown-unknown` target and the dnf packages; a job that needs a package Amazon Linux
+  2023 lacks (mingw, `musl-gcc`, `dash`, `mawk`, `erlang`, `elixir`, `odin`, `gh`) is held by name.
 - The git dependencies of a remote job reach the node with it. Before the job is placed (remote
   mode, and a job the daemon hands to a node), the client reads every `Cargo.lock` the sync
   sends, takes the `git+` sources and their locked revisions, maps each to its cargo git
