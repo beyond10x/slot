@@ -310,6 +310,13 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
             eprintln!("slot: remote build on {host} did not start ({why})");
             return crate::server::spill::INFRA_EXIT;
         }
+        // A job sent to a server runs here only when the caller asks for it.
+        if !local_fallback() {
+            eprintln!(
+                "slot: remote build on {host} did not start ({why}); the job did not run (set {FALLBACK_ENV}=local to run it on this machine's daemon instead)"
+            );
+            return crate::server::spill::INFRA_EXIT;
+        }
         eprintln!(
             "slot: remote build on {host} did not start ({why}); running it on this machine's daemon"
         );
@@ -324,6 +331,15 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     }
     local_fields(&mut req, &cwd);
     submit_local(&s.socket, &req, &Waits::of(s))
+}
+
+/// Names the one value, `local`, that lets a remote job that cannot start
+/// run on this machine's daemon instead.
+pub const FALLBACK_ENV: &str = "SLOT_REMOTE_FALLBACK";
+
+/// Whether `SLOT_REMOTE_FALLBACK=local` is set.
+fn local_fallback() -> bool {
+    std::env::var(FALLBACK_ENV).is_ok_and(|v| v.trim() == "local")
 }
 
 /// The request for `argv` before its route is known. With `--here` it

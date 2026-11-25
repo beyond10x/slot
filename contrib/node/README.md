@@ -119,7 +119,10 @@ consumers' CI installs (`TOOL_PINS` in `provision.sh`, listed by `provision.sh p
 release archive checked against its SHA-256. `check` reads the first line of each one's
 `--version`. A consumer that moves its CI to a new release needs a new pin, and a bundle with
 it. `geckodriver` is pinned at the release of the forge runner image that browser test lanes run
-on; the browser itself is the workstation's Firefox, copied with `/usr`.
+on; the browser itself is the workstation's Firefox, copied with `/usr`. Known difference, read
+2026-11-25: the workstation and the node run Firefox 159.0, the forge image (ubuntu-24.04,
+20261116.376.1) Firefox 160.0 with Geckodriver 0.37.1. A lane that passes on the forge and fails
+on the node on a browser feature points here first.
 
 `ess` is never pinned: it chooses the release for each repository itself. An exact `requires: ess
 X.Y.Z` in the repository's `ess-inputs.yaml` runs that release from ess's own cache (downloaded
