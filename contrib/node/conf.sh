@@ -157,9 +157,19 @@ conf_check_forms() {
     case $k in
       RUST_TARGETS | RUST_COMPONENTS)
         for w in $v; do
+          case $k:$w in
+            RUST_COMPONENTS:*-preview | RUST_COMPONENTS:*-preview,*)
+              conf_fail "$1: $k entry '$w' uses the -preview spelling; write clippy, rustfmt or llvm-tools"
+              return 2
+              ;;
+          esac
           case $w in
             *:*:*)
               conf_fail "$1: $k entry '$w' has more than one colon; the form is <toolchain>:<name>,<name>"
+              return 2
+              ;;
+            :*)
+              conf_fail "$1: $k entry '$w' has an empty toolchain before the colon"
               return 2
               ;;
             *:*)

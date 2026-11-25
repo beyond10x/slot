@@ -59,12 +59,16 @@ for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARG
   run "$W/r0" check
   if [ $? -eq 2 ] && grep -q "${bad_rust%%=*} must be names" "$W/err"; then ok "${bad_rust%%=*} with a shell character is refused"; else bad "${bad_rust%%=*} with a shell character is accepted ($(cat "$W/err"))"; fi
 done
-for bad_form in 'RUST_TARGETS=1.99:x86_64-unknown-linux-musl' 'RUST_COMPONENTS=nosuch:rust-src' 'RUST_TARGETS=a,b' 'RUST_COMPONENTS=clippy,rustfmt' 'RUST_TARGETS=1.99.1:a:b' 'RUST_TARGETS=1.99.1:' 'RUST_TARGETS=1.99.1:a,,b' 'RUST_TARGETS=1.99.1:,a'; do
+for bad_form in 'RUST_TARGETS=1.99:x86_64-unknown-linux-musl' 'RUST_COMPONENTS=nosuch:rust-src' 'RUST_TARGETS=a,b' 'RUST_COMPONENTS=clippy,rustfmt' 'RUST_TARGETS=1.99.1:a:b' 'RUST_TARGETS=1.99.1:' 'RUST_TARGETS=1.99.1:a,,b' 'RUST_TARGETS=1.99.1:,a' 'RUST_COMPONENTS=llvm-tools-preview' 'RUST_COMPONENTS=stable:clippy-preview,rustfmt'; do
   conf
   echo "$bad_form" >>"$W/node.conf"
   run "$W/r0" check
   if [ $? -eq 2 ] && grep -q "${bad_form%%=*} entry '${bad_form#*=}'" "$W/err"; then ok "$bad_form is refused by name"; else bad "$bad_form is accepted or not named ($(cat "$W/err"))"; fi
 done
+conf
+printf 'RUST_TOOLCHAINS=1.99.1  stable\nRUST_TARGETS=:x\n' >>"$W/node.conf"
+run "$W/r0" check
+if [ $? -eq 2 ] && grep -q "RUST_TARGETS entry ':x' has an empty toolchain" "$W/err"; then ok "an empty toolchain before the colon is refused, also with a double space in RUST_TOOLCHAINS"; else bad "':x' is accepted ($(cat "$W/err"))"; fi
 conf
 echo 'RUST_TARGETS=1.99.1:a,b stable:c wasm32-unknown-unknown' >>"$W/node.conf"
 run "$W/r0" check
@@ -385,7 +389,7 @@ TC=$W/tc
 mkdir -p "$TC/usr/bin" "$TC/usr/lib/go/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib"
 : >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd.rlib"
 : >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-musl/lib/libstd.rlib"
-mkdir -p "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-unknown-unknown/lib"
+mkdir -p "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/wasm32-unknown-unknown/lib/self-contained"
 printf 'rustc-x86_64-unknown-linux-gnu\nclippy-preview-x86_64-unknown-linux-gnu\nrustfmt-preview-x86_64-unknown-linux-gnu\nrust-docs-x86_64-unknown-linux-gnu\nrust-std-x86_64-unknown-linux-musl\nrust-src\nllvm-tools-preview-x86_64-unknown-linux-gnu\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/components"
 printf '#!/bin/sh\necho "commit-hash: abc123"\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc"
 printf '#!/bin/sh\necho "go version go1.24.0 linux/amd64"\n' >"$TC/usr/lib/go/bin/go"
