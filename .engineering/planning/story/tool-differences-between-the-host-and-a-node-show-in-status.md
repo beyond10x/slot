@@ -9,7 +9,7 @@ relations:
 - serves: vision:O6
 - decomposes: epic:compute-cluster
 - informed_by: story:node-installs-its-toolchains-by-script
-revision: 1
+revision: 2
 ---
 ## Outcome
 
@@ -30,32 +30,29 @@ held for it.
 - The refresh (`toolchains-refresh.sh`, every 60 s) already writes `toolchains-local.txt` and
   `toolchains-node.txt`; both hold the `tool` lines once both machines run the new `toolchains.sh`.
 
+## Decision (host operator, 2026-11-25)
+
+The comparison lives in the daemon, not in the host's refresh script: it is testable in this
+repository and needs no host file.
+
 ## Recommendation
 
-- The refresh compares the `tool` lines of the two manifests after each fetch and writes
-  `tool-drift.txt` beside them: one line per difference, `<tool> here <version|missing>, node
-  <version|missing>`; empty when they agree, removed when the node's manifest is older than 5
-  minutes.
-- The daemon reads that file with its other per-tick inputs and shows its lines in `slot status` and
-  in `/api/state` (a field with `#[serde(default)]`), under the node, as `drift: tool tsc here
-  6.0.3, node 6.0.2`.
+- The daemon reads the two manifest files (`toolchains-local.txt`, `toolchains-node.txt`) on its
+  census tick, compares their `tool` lines and keeps one drift line per difference: `<tool> here
+  <version|missing>, node <version|missing>`. Nothing is written to disk; an unreadable or empty
+  node manifest gives no tool line, and a node manifest older than 5 minutes gives none either.
+- `slot status` and `/api/state` show the lines under the node (a field with `#[serde(default)]`),
+  as `drift: tool tsc here 6.0.3, node 6.0.2`.
 - No hold and no parity wait: the line is information. A tool a tree pins by name stays the
   business of `story:a-job-whose-pinned-tool-a-node-lacks-fails-by-name`.
-- Which tools count is the list in `toolchains.sh`; a new tool there needs no change in the
-  daemon.
+- Which tools count is the set of `tool` lines the manifests carry; a new tool in `toolchains.sh`
+  needs no change in the daemon.
 
 ## Acceptance
 
 - Workstation `tsc` 6.0.3, node `tsc` 6.0.2: within 2 refresh periods `slot status` shows
   `drift: tool tsc here 6.0.3, node 6.0.2`, and a job on the node still starts at once.
-- Both equal: no drift line, and `tool-drift.txt` is empty.
-- A node whose manifest is older than 5 minutes: no tool drift line (the stale manifest has its own
-  line); a tool missing on the node shows `node missing`.
-- A test with two manifest files covers each case; the daemon test reads the file from a temporary
-  directory.
-
-## Open
-
-- Whether the comparison belongs in the refresh script (a host file, not in this repository) or in
-  the daemon, which would read both manifests itself. The refresh script is not in `contrib/`;
-  moving the comparison into the daemon makes it testable here.
+- Both equal: no drift line.
+- A node manifest older than 5 minutes: no tool drift line; a tool missing on the node shows
+  `node missing`.
+- A daemon test with two manifest files in a temporary directory covers each case.
