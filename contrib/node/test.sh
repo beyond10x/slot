@@ -165,23 +165,23 @@ run "$R" check
 # 5e. Cargo tools pinned in provision.sh (the release a consumer's CI installs) are installed at
 # that release in the store's cargo bin and read back; check names one of another release.
 sh "$P" pins >"$W/pins" 2>"$W/err"
-grep -qx 'ess 0.99.0' "$W/pins" && grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
-  ok "pins: ess 0.99.0, wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
+grep -qx 'ess 0.99.1' "$W/pins" && grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
+  ok "pins: ess 0.99.1, wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
 while read -r b v; do
   [ "$("$R/srv/slot/cargo/bin/$b" --version 2>/dev/null)" = "$b $v" ] && ok "pinned tool installed: $b $v" || bad "pinned tool $b: '$("$R/srv/slot/cargo/bin/$b" --version 2>&1)'"
 done <"$W/pins"
 printf '#!/bin/sh\necho ess 0.98.0\n' >"$R/srv/slot/cargo/bin/ess"
 run "$R" check
-grep -q "^drift: tool:ess: .*'ess 0.98.0', want ess 0.99.0" "$W/out" && ok "check names an ess of another release" || bad "ess 0.98.0 not named: $(grep tool "$W/out")"
+grep -q "^drift: tool:ess: .*'ess 0.98.0', want ess 0.99.1" "$W/out" && ok "check names an ess of another release" || bad "ess 0.98.0 not named: $(grep tool "$W/out")"
 grep -q '^drift: tool:wasm-bindgen' "$W/out" && bad "check names a tool at its pinned release" || ok "a tool at its pinned release is no drift"
 : >"$R/.state-tool-fetch-fails"
 run "$R" apply
 st=$?
 rm -f "$R/.state-tool-fetch-fails"
-[ $st -eq 1 ] && grep -q '^failed: tool:ess: download or checksum of ess 0.99.0' "$W/err" && ok "a failed tool download: apply exits 1 and names it" || bad "failed tool download: exit $st $(cat "$W/err")"
+[ $st -eq 1 ] && grep -q '^failed: tool:ess: download or checksum of ess 0.99.1' "$W/err" && ok "a failed tool download: apply exits 1 and names it" || bad "failed tool download: exit $st $(cat "$W/err")"
 grep -q '^changed: tool:ess' "$W/out" && bad "a failed tool install is reported as changed" || ok "a failed tool install is not reported as changed"
 run "$R" apply
-grep -q '^changed: tool:ess: ess 0.99.0 installed: ess$' "$W/out" && ok "apply installs the pinned ess" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
+grep -q '^changed: tool:ess: ess 0.99.1 installed: ess$' "$W/out" && ok "apply installs the pinned ess" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
 run "$R" check
 [ $? -eq 0 ] && ok "after the tool install: 0 drift" || bad "after the tool install: $(cat "$W/out")"
 

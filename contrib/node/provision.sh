@@ -45,7 +45,7 @@ usage() {
 # workstation's: a node job then runs the release its CI runs, and push.sh leaves these binaries
 # out. One line each: name, version, SHA-256 of the release archive, download directory, archive
 # name (%s is the version), the binaries in it. Each binary answers `<binary> <version>`.
-TOOL_PINS='ess 0.99.0 238d64266e3014ccf98e190b6525433c90686b6ef9c9a5cd5dd1a852cb4fdf32 https://github.com/beyond10x/ess/releases/download ess-%s-x86_64-unknown-linux-gnu ess
+TOOL_PINS='ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download ess-%s-x86_64-unknown-linux-gnu ess
 wasm-bindgen 0.2.130 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f https://github.com/wasm-bindgen/wasm-bindgen/releases/download wasm-bindgen-%s-x86_64-unknown-linux-musl wasm-bindgen wasm-bindgen-test-runner wasm2es6js'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
