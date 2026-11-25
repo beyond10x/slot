@@ -578,7 +578,17 @@ Before a job takes slots, `Server::short_of` checks, in this order:
 - **Disk.** `statvfs` of the job's directory and of its `CARGO_TARGET_DIR` (relative to the
   directory when relative), at the nearest existing ancestor. Under `--min-free-disk` (GB,
   default 25, 0 off) the job waits. Disk does not come back by waiting for other jobs, so a job
-  alone waits too, until space is freed.
+  alone waits too, until space is freed. A job whose last 5 runs of the same `(repo, argv)`
+  (`admission::History`, from `jobs.jsonl`) all had `compile_server_cpu_s` 0 and no
+  `target_dir` waits at `--min-free-disk-light` instead (GB, default the value of
+  `--min-free-disk`, at most that value; 0 lets it start on any free space). A first run, a job
+  without a repository and a job with a compile in its last 5 wait at `--min-free-disk`. The
+  reason names the floor: `builds need 40.0 GB` or `this job needs 10.0 GB (no compile in its
+  last 5 runs)`. Why: toolchain `other` covers `task check`, whose cargo calls run inside the
+  job, so the toolchain cannot tell a build from a job that writes next to nothing; its own
+  record can. Risk: a script that starts compiling after 5 runs without writes fills the disk
+  down to the light floor before its record shows the compile; the light floor is the hard
+  floor no job starts below.
 - **Memory.** `MemAvailable` less a reservation must cover the job's expected peak plus
   `--min-free-memory` (GB, default 4, 0 off). The reservation is, for each job that started in the
   last 30 s, its expected peak less its sampled memory: a burst of jobs admitted together would
