@@ -98,7 +98,7 @@ if [ "$mode" = pins ]; then
 fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
-BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat'
+BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan'
 SSHD_LINES='MaxSessions 200
 MaxStartups 100:30:200
 ClientAliveInterval 15
@@ -1338,6 +1338,37 @@ p_rust() {
     fi
     rm -f "$rl"
   done
+  p_rust_default
+}
+
+# The default toolchain is `stable` when RUST_TOOLCHAINS has it, like the workstation's: a job that
+# names no toolchain (`cargo` with no `+<toolchain>` and no rust-toolchain file) runs it. Without
+# this rustup makes the first toolchain it installs the default (1.85.0 on a node). check reads
+# `default_toolchain` of the rustup home's settings.toml, apply runs `rustup default stable`.
+a_rustup_default() {
+  if [ -n "$T" ]; then
+    calls "rustup default $1"
+    printf 'version = "12"\ndefault_toolchain = "%s"\nprofile = "minimal"\n' "$(basename "$(rust_dir "$1")")" >"$R$STORE/rustup/settings.toml"
+  else
+    as_rust_user "$STORE/cargo/bin/rustup" default "$1"
+  fi
+}
+p_rust_default() {
+  case " $RUST_TOOLCHAINS " in *" stable "*) ;; *) return 0 ;; esac
+  [ -x "$R$(rust_dir stable)/bin/rustc" ] || return 0
+  want=$(basename "$(rust_dir stable)")
+  got=$(sed -n 's/^default_toolchain *= *"\(.*\)"/\1/p' "$R$STORE/rustup/settings.toml" 2>/dev/null | head -n 1)
+  [ "$got" = "$want" ] && return 0
+  drift "rust:default" "the default toolchain is '${got:-none}', want $want"
+  fixing && [ -n "$rustup_ok" ] || return 0
+  rl=$(mktemp)
+  if a_rustup_default stable >"$rl" 2>&1; then
+    changed "rust:default" "rustup default stable ($want)"
+  else
+    tail -n 5 "$rl" >&2
+    failed "rust:default" "rustup default stable"
+  fi
+  rm -f "$rl"
 }
 
 # The pinned archives (ARCHIVE_PINS): unpacked as root into /usr/local/<name>-<version>, each

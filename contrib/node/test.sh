@@ -94,7 +94,7 @@ if [ $st -eq 1 ] && [ "$n" -ge 15 ]; then ok "fresh machine: check exits 1 with 
 for item in storage binds packages user unit:slot-node.service unit:slot-storage.service keys sshd sudoers slot:/usr/local/bin/slot rustup rust:1.99.1 rust:stable; do
   grep -q "^drift: $item" "$W/out" || bad "fresh machine: no drift line for $item"
 done
-grep -q '^drift: packages: .*zstd' "$W/out" && grep -q '^drift: packages: .*python3' "$W/out" && grep -q '^drift: packages: .*glibc-static' "$W/out" && grep -q '^drift: packages: .*bubblewrap' "$W/out" && grep -q '^drift: packages: .*socat' "$W/out" && ok "check names zstd, python3, glibc-static, bubblewrap and socat as packages of a bare node" || bad "base packages: $(grep '^drift: packages' "$W/out" | cut -c1-200)"
+grep -q '^drift: packages: .*zstd' "$W/out" && grep -q '^drift: packages: .*python3' "$W/out" && grep -q '^drift: packages: .*glibc-static' "$W/out" && grep -q '^drift: packages: .*bubblewrap' "$W/out" && grep -q '^drift: packages: .*socat' "$W/out" && grep -q '^drift: packages: .*libubsan' "$W/out" && ok "check names zstd, python3, glibc-static, bubblewrap, socat and libubsan as packages of a bare node" || bad "base packages: $(grep '^drift: packages' "$W/out" | cut -c1-200)"
 : >"$R/.calls"
 run "$R" apply
 cp "$W/out" "$W/first-apply.out"
@@ -450,6 +450,15 @@ run "$R2" apply
 run "$R2" check
 [ $? -eq 0 ] && ok "rust: after the download works, 0 drift" || bad "rust after the download: $(cat "$W/out")"
 [ -x "$R2/srv/slot/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc" ] && [ -x "$R2/srv/slot/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" ] && ok "toolchains are in the store's rustup home" || bad "toolchain dirs: $(ls "$R2/srv/slot/rustup/toolchains" 2>&1)"
+grep -qx 'rustup default stable' "$R2/.calls" && grep -qx 'default_toolchain = "stable-x86_64-unknown-linux-gnu"' "$R2/srv/slot/rustup/settings.toml" && ok "apply makes stable the default toolchain" || bad "rust default: $(cat "$R2/.calls" "$R2/srv/slot/rustup/settings.toml" 2>&1 | grep -i 'default')"
+sed 's/stable-x86_64/1.99.1-x86_64/' "$R2/srv/slot/rustup/settings.toml" >"$R2/settings.new" && mv "$R2/settings.new" "$R2/srv/slot/rustup/settings.toml"
+run "$R2" check
+grep -qx "drift: rust:default: the default toolchain is '1.99.1-x86_64-unknown-linux-gnu', want stable-x86_64-unknown-linux-gnu" "$W/out" && ok "check names a default toolchain other than stable" || bad "default drift: $(grep rust "$W/out")"
+: >"$R2/.calls"
+run "$R2" apply
+grep -qx 'changed: rust:default: rustup default stable (stable-x86_64-unknown-linux-gnu)' "$W/out" && [ "$(grep -c '^rustup toolchain install' "$R2/.calls")" = 0 ] && ok "apply sets the default again and installs nothing" || bad "default apply: $(cat "$W/out" "$R2/.calls")"
+run "$R2" check
+[ $? -eq 0 ] && ok "rust default: 0 drift after apply" || bad "rust default after apply: $(cat "$W/out")"
 rm -rf "$R2/srv/slot/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu"
 : >"$R2/.calls"
 run "$R2" check

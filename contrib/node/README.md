@@ -113,6 +113,13 @@ it lacks: `check` names each one (`rust:<name>: component rustfmt missing`) and 
 `rustup component add` or `rustup target add` for those only. A failed download is a `failed:`
 line and exit status 1.
 
+The default toolchain is `stable` when `RUST_TOOLCHAINS` has it, as on the workstation: without
+it rustup makes the first toolchain it installs the default (1.85.0), and a job that names none
+(`cargo` with no `+<toolchain>` and no `rust-toolchain.toml`) ran that one. `check` reads
+`default_toolchain` in `STORE/rustup/settings.toml` and names a difference
+(`rust:default: the default toolchain is '…', want stable-x86_64-unknown-linux-gnu`); `apply` runs
+`rustup default stable` (a first run on a node reads the rustup output for what it did).
+
 The metadata service is closed first: `apply` starts `slot-imds-root-only.service` and reads the
 firewall back before it installs a key, rustup, a pinned tool or anything else the build user
 runs. A start that does not close it is a `failed: imds:` line, and those parts wait for the next
@@ -168,7 +175,8 @@ install --locked --git <url> --rev <rev> aep-cli --root <store>/cargo` as the bu
 the rust part, and check reads `aep --version`. The build needs `github.com` over https (aep and
 its `entity-runtime` dependency are read without credentials). `push.sh check` exits 1 whenever the
 workstation has a tool whose release the node's pin does not match, `aep` included. Packages
-`glibc-static` (a consumer's `cc -static` tests), `bubblewrap` and `socat` are base packages, and
+`glibc-static` (a consumer's `cc -static` tests), `bubblewrap`, `socat` and `libubsan` (the
+undefined-behaviour sanitizer runtime of a consumer's sanitizer build) are base packages, and
 `/usr/sbin` is in the job PATH of `slot-node.service` (`ip`). The workstation's `cargo` and `go`
 shims send the real binary by absolute path and the node runs that argv as sent, so `/usr/bin/cargo`,
 `cargo-clippy`, `cargo-fmt`, `clippy-driver`, `rustc`, `rustdoc`, `rustfmt`, `rustup` link to the

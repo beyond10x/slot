@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Node rust default and `libubsan`: `provision.sh` runs `rustup default stable` when
+  `RUST_TOOLCHAINS` has `stable` (rustup had made 1.85.0, the first toolchain installed, the
+  default; the workstation's is `stable`); `check` names a different default (`rust:default`).
+  `libubsan` is a base package.
+
 - Node `make` 4.4.1: `provision.sh` builds GNU Make 4.4.1 from its SHA-256 pinned tarball and
   links it as `make` and `gmake` in `/usr/local/bin`. The node's make 4.3 does not read the
   `--jobserver-auth=fifo:` form of `MAKEFLAGS`, so cmake and make builds did not use the pool.
