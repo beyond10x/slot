@@ -180,7 +180,9 @@ parse the `--jobserver-auth=fifo:` form that the daemon puts in `MAKEFLAGS`, so 
 build read the pool as no jobserver and ran with `-j` unbounded or serial. Apply downloads the
 tarball from `ftp.gnu.org`, checks its SHA-256, runs `./configure --disable-nls --without-guile`
 and `make` as the build user, installs the binary in `/usr/local/make-4.4.1/bin` and links it as
-`make` and `gmake` in `/usr/local/bin`; check reads `make --version`. `/usr/bin/make` (4.3) stays;
+`make` and `gmake` in `/usr/local/bin`; check reads `make --version`. A link that alone drifts is
+set again without a download, and a real file at either name is left alone and reported as
+`failed`. The build runs `/usr/bin/make` under `timeout 600`. `/usr/bin/make` (4.3) stays;
 `/usr/local/bin` is before `/usr/bin` in the job PATH, so only a job that names `/usr/bin/make` by
 path still gets 4.3.
 

@@ -405,13 +405,31 @@ grep -q '^changed: make: GNU Make 4.4.1 built, linked as make and gmake in /usr/
 run "$R5" check
 [ $? -eq 0 ] && ok "after apply make has 0 drift" || bad "make after apply: $(cat "$W/out")"
 rm -f "$R5/usr/local/bin/make"
+: >"$R5/.calls"
+run "$R5" apply
+grep -q '^fetch .*make-' "$R5/.calls" && bad "a missing link fetched the make tarball again" || ok "a missing link alone does not fetch or build"
+grep -q '^changed: make: linked make and gmake in /usr/local/bin to /usr/local/make-4.4.1/bin/make$' "$W/out" && ok "a missing link alone is relinked" || bad "make relink: $(cat "$W/out" "$W/err" | grep make)"
+rm -f "$R5/usr/local/bin/make"
+printf '#!/bin/sh\necho "real file"\n' >"$R5/usr/local/bin/make"
+run "$R5" apply
+st=$?
+grep -q '^failed: make: /usr/local/bin/make is a real file; not replaced$' "$W/err" && ok "a real file at /usr/local/bin/make is not replaced" || bad "make real file: $(cat "$W/err")"
+[ ! -L "$R5/usr/local/bin/make" ] && [ "$st" -eq 1 ] && ok "the real file stays and apply exits 1" || bad "real file replaced or exit $st"
+rm -f "$R5/usr/local/bin/make"
+printf '#!/bin/sh\necho "GNU Make 4.3"\n' >"$R5/usr/local/make-4.4.1/bin/make"
+printf 'stale\n' >"$R5/usr/local/make-4.4.1/bin/make.slot-new"
 : >"$R5/.state-tool-fetch-fails"
 run "$R5" apply
 st=$?
 rm -f "$R5/.state-tool-fetch-fails"
 grep -q '^failed: make: download, checksum or build of make 4.4.1' "$W/err" && ok "a failed make build is named" || bad "make failure not named: $(cat "$W/err")"
+[ "$st" -eq 1 ] && ok "a failed make build exits 1" || bad "failed make build exit $st"
 grep -q '^changed: make' "$W/out" && bad "a failed make build is reported as changed" || ok "a failed make build is not reported as changed"
+[ "$("$R5/usr/local/make-4.4.1/bin/make" --version)" = "GNU Make 4.3" ] && ok "a failed make build leaves the binary as it was" || bad "make binary changed by a failed build"
 run "$R5" apply
+[ ! -e "$R5/usr/local/make-4.4.1/bin/make.slot-new" ] && ok "a leftover make.slot-new does not survive the next apply" || bad "make.slot-new left"
+run "$R5" check
+[ $? -eq 0 ] && ok "make has 0 drift after the repair" || bad "make after repair: $(cat "$W/out")"
 
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
@@ -513,6 +531,10 @@ sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go \|^node ' | t
 rm -f "$TC/p2/usr/local/bin/go"
 sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go ' >"$W/out2"
 [ "$(cat "$W/out2")" = "go go1.27.1" ] && ok "toolchains.sh: go1.27.1-X:nodwarf5 prints as go1.27.1" || bad "nodwarf5 line: $(cat "$W/out2")"
+printf '#!/bin/sh\necho "GNU Make 4.4.1"\n' >"$TC/p2/usr/local/bin/make"
+chmod 755 "$TC/p2/usr/local/bin/make"
+sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^tool make ' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool make 4.4.1" ] && ok "toolchains.sh: a tool line for make" || bad "make tool line: $(cat "$W/out2")"
 grep -qx 'node v22.1.0' "$W/out" && ok "toolchains.sh: node prints its version" || bad "node line: $(grep '^node' "$W/out")"
 grep -qx 'c gcc gcc (stub) 13.2.0' "$W/out" && ok "toolchains.sh: gcc prints the first line of its version" || bad "gcc line: $(grep '^c gcc' "$W/out")"
 grep -qx 'c clang missing' "$W/out" && ok "toolchains.sh: a missing compiler is named" || bad "clang line: $(grep '^c clang' "$W/out")"

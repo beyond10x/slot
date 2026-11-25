@@ -1465,29 +1465,51 @@ make_build() {
   (cd "$mb_d" && curl -fsSLo src.tar.gz "$5" && echo "$4  src.tar.gz" | sha256sum -c --strict - >/dev/null &&
     mkdir src && tar -xf src.tar.gz -C src --strip-components=1 --no-same-owner &&
     chown -R "$U:$U" src) || return 0
-  as_user sh -c 'cd "$1" && ./configure --disable-nls --without-guile && make' sh "$mb_d/src" </dev/null >&2 || return 0
-  [ -x "$mb_d/src/make" ] && echo "$mb_d/src/make"
+  [ -x /usr/bin/make ] || {
+    echo "error: /usr/bin/make (the package's make, which builds this one) is missing" >&2
+    return 0
+  }
+  as_user timeout 600 sh -c 'cd "$1" && ./configure --disable-nls --without-guile && /usr/bin/make' sh "$mb_d/src" </dev/null >&2 || return 0
+  # root copies the binary into the temporary directory (root's, the build user cannot write there)
+  # and checks the copy: a symbolic link left by the build is copied as a link and refused.
+  cp -P "$mb_d/src/make" "$mb_d/make" 2>/dev/null && chown root:root "$mb_d/make" &&
+    [ -f "$mb_d/make" ] && [ ! -L "$mb_d/make" ] && [ -x "$mb_d/make" ] && echo "$mb_d/make"
 }
 p_make() {
   while read -r mn mv ms mu; do
     [ -n "$mn" ] || continue
     dir=/usr/local/$mn-$mv
-    ok=1
+    binok=1
+    linkok=1
+    real=
     for l in make gmake; do
       got=$(readlink "$R/usr/local/bin/$l" 2>/dev/null)
       [ "$got" = "$dir/bin/make" ] && continue
       drift "make" "/usr/local/bin/$l is '${got:-missing}', want a link to $dir/bin/make"
-      ok=
+      linkok=
+      if [ -e "$R/usr/local/bin/$l" ] && [ ! -L "$R/usr/local/bin/$l" ]; then real="$real /usr/local/bin/$l"; fi
     done
     v=$(as_user "$R$dir/bin/make" --version 2>/dev/null </dev/null | head -n 1)
     case $v in
-      "GNU Make $mv"*) ;;
+      "GNU Make $mv" | "GNU Make $mv "*) ;;
       *)
         drift "make" "$dir/bin/make says '${v:-missing}', want GNU Make $mv"
-        ok=
+        binok=
         ;;
     esac
-    fixing && [ -z "$ok" ] || continue
+    fixing && { [ -z "$binok" ] || [ -z "$linkok" ]; } || continue
+    if [ -n "$real" ]; then
+      failed "make" "${real# } is a real file; not replaced"
+      continue
+    fi
+    if [ -n "$binok" ]; then
+      if ln -sfn "$dir/bin/make" "$R/usr/local/bin/make" && ln -sfn "$dir/bin/make" "$R/usr/local/bin/gmake"; then
+        changed "make" "linked make and gmake in /usr/local/bin to $dir/bin/make"
+      else
+        failed "make" "link in /usr/local/bin"
+      fi
+      continue
+    fi
     if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-make.XXXXXX); fi || {
       failed "make" "no temporary directory"
       continue
@@ -1500,10 +1522,11 @@ p_make() {
       ln -sfn "$dir/bin/make" "$R/usr/local/bin/make" && ln -sfn "$dir/bin/make" "$R/usr/local/bin/gmake"; then
       v=$(as_user "$R$dir/bin/make" --version 2>/dev/null </dev/null | head -n 1)
       case $v in
-        "GNU Make $mv"*) changed "make" "GNU Make $mv built, linked as make and gmake in /usr/local/bin" ;;
+        "GNU Make $mv" | "GNU Make $mv "*) changed "make" "GNU Make $mv built, linked as make and gmake in /usr/local/bin" ;;
         *) failed "make" "$dir/bin/make says '${v:-missing}' after the install" ;;
       esac
     else
+      rm -f "$R$dir/bin/make.slot-new"
       failed "make" "$dir not written"
     fi
     rm -rf "$td" "$ml"
