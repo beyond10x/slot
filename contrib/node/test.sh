@@ -303,6 +303,16 @@ HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
 grep -qx 'push: copy list: .m2/repository go/bin' "$W/out" && ok "apply prints the copy list" || bad "no list line: $(head -2 "$W/out")"
 grep -q 'rsync' "$W/ssh.log" && ok "the same list: apply copies" || bad "same list, no copy: $(cat "$W/err" | tail -2)"
 
+# 6e. A git or ssh call on the node that asks for a credential prints what to do: fetch on the
+# workstation; `slot --here` only for the one step that reads a credential while it runs, not a
+# whole task; a step that needs docker or a local service goes in `.slot.toml` `local`.
+for b in no-credentials ssh; do
+  msg=$(sh "$R/srv/slot/nodebin/$b" host true 2>&1 >/dev/null)
+  echo "$msg" | grep -q 'only for the step that reads a credential' && ok "$b: --here only for a credential read" || bad "$b: $msg"
+  echo "$msg" | grep -q '\.slot\.toml' && ok "$b: names .slot.toml local" || bad "$b: no .slot.toml in: $msg"
+  echo "$msg" | grep -q 'or run this step with slot --here' && bad "$b: still offers --here for any step" || ok "$b: no --here for any step"
+done
+
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
 leaks=$(grep -nE '/home/[a-z]|\b(i|vol|subnet|sg|vpc|ami)-0?[0-9a-f]{8,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \

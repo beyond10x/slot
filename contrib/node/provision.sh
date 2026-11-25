@@ -449,7 +449,7 @@ gen_sccache_config() {
 gen_no_credentials() {
   cat <<EOF
 #!/bin/sh
-echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job, or run this step with slot --here (stays in the workstation pool)." >&2
+echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs docker or a local service goes in .slot.toml local = [...] of its repository." >&2
 exit 255
 EOF
 }
@@ -473,7 +473,7 @@ for a in "\$@"; do
     *) break ;;
   esac
 done
-echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job, or run this step with slot --here (stays in the workstation pool)." >&2
+echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs docker or a local service goes in .slot.toml local = [...] of its repository." >&2
 exit 255
 EOF
 }
