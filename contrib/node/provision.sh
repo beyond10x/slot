@@ -86,8 +86,9 @@ RUST_TRIPLE=x86_64-unknown-linux-gnu
 # Tools built on the node from a git revision, as the build user, into the store's cargo bin. One
 # line each: name, version, repository URL, revision (the pin: a git object id; the release tag
 # peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
-# starts with `<binary> <version>`). aep: the release binary needs glibc 2.39 and a node has 2.34,
-# so the tag of the release the workstation runs is built here.
+# starts with `<binary> <version>`). aep: the source build serves PATH (`aep` for a job); the
+# release binary, which wants glibc 2.39 and only warns on a node's 2.34, is installed separately
+# for runbook's driver cache path (HOME_PINS), where the driver demands the pin's digest.
 MAKE_PIN='make 4.4.1 dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3 https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz'
 SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5edee0da723bb72d9acb4 aep-cli 1.99.1 aep'
 # Trees in the build user's home that a job reads by path: the ess releases a repository pins by

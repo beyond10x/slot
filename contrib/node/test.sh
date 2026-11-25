@@ -443,7 +443,7 @@ for rv in 1254:158.0.8127.18 1234:151.0.7922.34; do
   [ "$("$rd/chrome-headless-shell-linux64/chrome-headless-shell" --version)" = "Google Chrome for Testing ${rv#*:}" ] && [ -e "$rd/INSTALLATION_COMPLETE" ] && [ -e "$rd/DEPENDENCIES_VALIDATED" ] && ok "Playwright chromium_headless_shell-${rv%%:*} is ${rv#*:} with its two markers" || bad "browser ${rv%%:*}: $(ls -a "$rd" 2>&1)"
 done
 AEPF=$R5/var/lib/builder/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep
-[ -x "$AEPF" ] && [ "$("$AEPF" --version)" = "aep 0.80.0" ] && ok "the pinned aep is at ~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep, where runbook's driver looks" || bad "sdc aep: $(ls -l "$AEPF" 2>&1)"
+[ -x "$AEPF" ] && [ "$("$AEPF" --version)" = "aep 0.80.0" ] && ok "the pinned aep (stub download) is at ~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep, where runbook's driver looks; the 0-drift check after apply below covers it too" || bad "sdc aep: $(ls -l "$AEPF" 2>&1)"
 rm -rf "$HP/ess-versions/0.99.1"
 printf '#!/bin/sh\necho "ess 0.1.0"\n' >"$HP/ess-versions/0.98.0/ess"
 rm -f "$HP/ess-node/node_modules/undici-types/package.json"

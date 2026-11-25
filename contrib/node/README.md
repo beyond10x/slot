@@ -169,7 +169,8 @@ writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin 
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
 `aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
 
-`aep` 0.80.0 is built on the node: its release binary needs glibc 2.39 and the node has 2.34. A
+`aep` 0.80.0 on the PATH of a job is built on the node (the release binary is installed too, for
+runbook's driver cache path only, see below: it wants glibc 2.39 and the node has 2.34). A
 source pin (`SOURCE_PINS` in `provision.sh`) names the repository, the git revision of the release
 tag (the pin: there is no archive to hash) and the rust toolchain; apply runs `cargo +1.99.1
 install --locked --git <url> --rev <rev> aep-cli --root <store>/cargo` as the build user after
