@@ -28,12 +28,17 @@
 //! `/abs/path`, which denies a `git+file` source under that prefix, and
 //! `origin:<pattern>`, a shell pattern (`case` semantics, without regard to
 //! case) matched against the URL cargo fetches in every form the check
-//! knows: as written, normalised (`normalise`), as git rewrites it
+//! knows: as written, normalised (`normalise`), bare (`bare`: host and
+//! path, without user, port, trailing `/` or `.git`), as git rewrites it
 //! (`url.<base>.insteadOf`) and with an ssh host alias resolved. A line of
-//! another kind, a list or lock file that cannot be read, or a source the
-//! check cannot take apart keeps every job here while a list names
-//! anything. The copy checks the sources it copies again.
+//! another kind, a list or lock file that cannot be read, a source the
+//! check cannot take apart, a git or ssh lookup that fails or runs over
+//! its bound, no absolute cargo home, or a cargo configuration that
+//! replaces a git source keeps every job with a lock file here while a
+//! list names anything. The copy checks the sources again before each
+//! entry.
 
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::os::unix::fs::FileExt as _;
@@ -219,6 +224,14 @@ pub struct Locks {
     /// A lock file that could not be read or parsed, or a git source that
     /// could not be taken apart, with why.
     pub problems: Vec<String>,
+    /// The directory of every lock file read, with git sources or without.
+    pub dirs: Vec<PathBuf>,
+    /// The cargo configuration files cargo reads for those lock files:
+    /// `.cargo/config.toml` and `.cargo/config` in each lock file's
+    /// directory and every directory above it, and in any directory of the
+    /// checkout the sync sends (`config_files`). `$CARGO_HOME`'s are added
+    /// by the check.
+    pub configs: Vec<PathBuf>,
 }
 
 /// Reads the lock files `files`.
@@ -233,16 +246,121 @@ pub fn locked(files: &[PathBuf]) -> Locks {
                 continue;
             }
         };
+        let dir = f.parent().map(Path::to_path_buf).unwrap_or_default();
+        l.dirs.push(dir.clone());
         match parse_lock(&text) {
             Ok(sources) if sources.is_empty() => {}
-            Ok(sources) => {
-                let dir = f.parent().map(Path::to_path_buf).unwrap_or_default();
-                l.found.push((dir, sources));
-            }
+            Ok(sources) => l.found.push((dir, sources)),
             Err(e) => l.problems.push(format!("lock file {}: {e}", f.display())),
         }
     }
     l
+}
+
+/// The lock files of the checkout at `top` (`lock_files`), read, with the
+/// cargo configuration files that apply to them (`config_files`).
+pub fn checkout(top: &Path, cwd: &Path) -> Locks {
+    let mut l = locked(&lock_files(top, cwd));
+    l.configs = config_files(top, &l.dirs);
+    l
+}
+
+/// The cargo configuration files that exist for lock files in `dirs` of the
+/// checkout at `top`: `.cargo/config.toml` and `.cargo/config` in each of
+/// `dirs` and every directory above it, and those the sync sends from any
+/// directory of the checkout (cargo reads them from where it runs, which a
+/// wrapper may choose).
+pub fn config_files(top: &Path, dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = dirs
+        .iter()
+        .flat_map(|d| d.ancestors())
+        .flat_map(|a| [a.join(".cargo/config.toml"), a.join(".cargo/config")])
+        .filter(|p| p.is_file())
+        .collect();
+    let listed = Command::new("git")
+        .env("LC_ALL", "C")
+        .arg("-C")
+        .arg(top)
+        .args([
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            ".cargo/config.toml",
+            ".cargo/config",
+            "**/.cargo/config.toml",
+            "**/.cargo/config",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success());
+    if let Some(o) = listed {
+        out.extend(
+            o.stdout
+                .split(|b| *b == 0)
+                .filter(|p| !p.is_empty())
+                .map(|p| top.join(String::from_utf8_lossy(p).as_ref()))
+                .filter(|p| p.is_file()),
+        );
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Why the cargo configuration files `files` keep a job here: one of them
+/// does not parse, or a `[source.<name>]` table replaces a git source or
+/// names a git source as the replacement (`replace-with`, the tables merged
+/// over every file). With a git source replaced, `cargo metadata` names the
+/// replacement's checkout for the source the lock file names, so the entry
+/// copied would be another repository's.
+pub fn git_source_replaced(files: &[PathBuf]) -> Option<String> {
+    // Each source name: whether a file gives it a `git` key, and every
+    // `replace-with` a file gives it.
+    let mut sources: std::collections::BTreeMap<String, (bool, Vec<String>)> =
+        std::collections::BTreeMap::new();
+    for f in files {
+        let text = match std::fs::read_to_string(f) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Some(format!("cargo config {} unreadable ({e})", f.display())),
+        };
+        let Ok(table) = toml::from_str::<toml::Table>(&text) else {
+            return Some(format!("cargo config {} does not parse", f.display()));
+        };
+        let Some(source) = table.get("source") else {
+            continue;
+        };
+        let Some(source) = source.as_table() else {
+            return Some(format!(
+                "cargo config {}: `source` is no table",
+                f.display()
+            ));
+        };
+        for (name, v) in source {
+            let e = sources.entry(name.clone()).or_default();
+            let Some(t) = v.as_table() else {
+                continue;
+            };
+            e.0 |= t.contains_key("git");
+            e.1.extend(
+                t.get("replace-with")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+    }
+    sources.iter().find_map(|(name, (git, with))| {
+        with.iter().find_map(|w| {
+            let target_git = sources.get(w).is_some_and(|(g, _)| *g);
+            (*git || target_git)
+                .then(|| format!("cargo config replaces source `{name}` with `{w}`, a git source"))
+        })
+    })
 }
 
 /// The URL cargo fetches for a source: without `git+`, its `?query` and
@@ -580,60 +698,141 @@ impl DenyLists {
 }
 
 /// The forms of `url` the deny check compares: as written, normalised,
-/// and each of `more` (the URL git rewrites it to, an ssh alias resolved)
-/// with its normalisation. `None` when `url` or one of `more` cannot be
-/// normalised.
+/// its bare forms (`bare`), and the same for each of `more` (the URL git
+/// rewrites it to, an ssh alias resolved). `None` when `url` or one of
+/// `more` cannot be normalised.
 pub fn forms(url: &str, more: &[String]) -> Option<Vec<String>> {
     let mut out = Vec::new();
     for u in std::iter::once(url).chain(more.iter().map(String::as_str)) {
         out.push(u.to_string());
-        out.push(normalise(u)?);
+        let n = normalise(u)?;
+        out.extend(bare(&n));
+        out.push(n);
     }
     out.sort();
     out.dedup();
     Some(out)
 }
 
+/// The bare forms of the normalised URL `n`: without user and port, the
+/// path without trailing `/` and `.git`, as `scheme://host/path` and as
+/// `host/path`; each also with `.git`, `/` and `.git/` after it, so a
+/// pattern written with or without them matches.
+fn bare(n: &str) -> Vec<String> {
+    let Some((scheme, rest)) = n.split_once("://") else {
+        return Vec::new();
+    };
+    let (host, path) = if scheme == "file" {
+        ("", rest)
+    } else {
+        let (authority, path) = rest.find('/').map_or((rest, ""), |i| rest.split_at(i));
+        let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+        let host = if hostport.starts_with('[') {
+            hostport.find(']').map_or(hostport, |i| &hostport[..=i])
+        } else {
+            hostport.split_once(':').map_or(hostport, |(h, _)| h)
+        };
+        (host, path)
+    };
+    let p = path.trim_end_matches('/');
+    let p = p.strip_suffix(".git").unwrap_or(p).trim_end_matches('/');
+    let mut out = Vec::with_capacity(8);
+    for base in [format!("{scheme}://{host}{p}"), format!("{host}{p}")] {
+        for end in ["", ".git", "/", ".git/"] {
+            out.push(format!("{base}{end}"));
+        }
+    }
+    out
+}
+
+/// The programs and bounds the deny check runs, and the cargo home it
+/// reads.
+#[derive(Debug, Clone)]
+pub struct Lookup {
+    /// git and the options before its subcommand.
+    pub git: Vec<OsString>,
+    /// ssh and the options before `-G`.
+    pub ssh: Vec<OsString>,
+    /// Longest one lookup may take.
+    pub limit: Duration,
+    /// This machine's cargo home (`cargo_home`), or why it has none.
+    pub cargo_home: Result<PathBuf, String>,
+}
+
+impl Lookup {
+    /// `git` and `ssh` from `PATH`, [`LOOKUP`], and [`cargo_home`].
+    pub fn here() -> Self {
+        Self {
+            git: vec!["git".into()],
+            ssh: vec!["ssh".into()],
+            limit: LOOKUP,
+            cargo_home: cargo_home(),
+        }
+    }
+}
+
+fn program(argv: &[OsString]) -> Command {
+    let (prog, pre) = argv
+        .split_first()
+        .map_or((OsStr::new("false"), &[][..]), |(p, a)| (p.as_os_str(), a));
+    let mut c = Command::new(prog);
+    c.args(pre);
+    c
+}
+
 /// The URL git fetches for `url` after its `url.<base>.insteadOf` rules,
-/// asked in `dir` (`git ls-remote --get-url`, which talks to no remote);
-/// `None` when git rewrites nothing or cannot say.
-pub fn git_rewrite(url: &str, dir: &Path) -> Option<String> {
-    let mut c = Command::new("git");
-    c.args(["ls-remote", "--get-url", url])
+/// asked in `dir` (`git ls-remote --get-url`, which talks to no remote):
+/// `Ok(None)` when git rewrites nothing, an error when git fails, runs
+/// over `lk.limit` or prints nothing.
+pub fn git_rewrite(url: &str, dir: &Path, lk: &Lookup) -> Result<Option<String>, String> {
+    let mut c = program(&lk.git);
+    // `--`: a URL that starts with `-` is no option.
+    c.args(["ls-remote", "--get-url", "--", url])
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0");
-    let (ok, out, _) = run_bounded(&mut c, Instant::now() + LOOKUP).ok()?;
+    let (ok, out, tail) = run_bounded(&mut c, Instant::now() + lk.limit)
+        .map_err(|e| format!("git ls-remote --get-url {url}: {e}"))?;
     let got = out.trim();
-    (ok && !got.is_empty() && got != url).then(|| got.to_string())
+    if !ok || got.is_empty() {
+        return Err(format!("git ls-remote --get-url {url} failed: {tail}"));
+    }
+    Ok((got != url).then(|| got.to_string()))
 }
 
-/// The host ssh connects to for `host` (`ssh -G`, which connects nowhere);
-/// `None` when it is `host` itself or ssh cannot say.
-pub fn ssh_hostname(host: &str, config: Option<&Path>) -> Option<String> {
+/// The host ssh connects to for `host` (`ssh -G`, which connects nowhere):
+/// `Ok(None)` when it is `host` itself, an error when ssh fails, runs over
+/// `lk.limit` or names no host, or `host` is empty or starts with `-`.
+pub fn ssh_hostname(host: &str, lk: &Lookup) -> Result<Option<String>, String> {
     if host.is_empty() || host.starts_with('-') {
-        return None;
+        return Err(format!("ssh host `{host}` is not looked up"));
     }
-    let mut c = Command::new("ssh");
-    if let Some(f) = config {
-        c.arg("-F").arg(f);
-    }
+    let mut c = program(&lk.ssh);
     c.arg("-G").arg(host);
-    let (ok, out, _) = run_bounded(&mut c, Instant::now() + LOOKUP).ok()?;
+    let (ok, out, tail) = run_bounded(&mut c, Instant::now() + lk.limit)
+        .map_err(|e| format!("ssh -G {host}: {e}"))?;
+    if !ok {
+        return Err(format!("ssh -G {host} failed: {tail}"));
+    }
     let name = out
         .lines()
-        .find_map(|l| l.strip_prefix("hostname "))?
-        .trim()
-        .to_ascii_lowercase();
-    (ok && !name.is_empty() && name != host.to_ascii_lowercase()).then_some(name)
+        .find_map(|l| l.strip_prefix("hostname "))
+        .map(|n| n.trim().to_ascii_lowercase())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| format!("ssh -G {host} names no host"))?;
+    Ok((name != host.to_ascii_lowercase()).then_some(name))
 }
 
-/// `url` with its ssh host alias resolved, when it is an ssh URL whose
-/// host ssh knows by another name.
-fn ssh_resolved(url: &str) -> Option<String> {
-    let n = normalise(url)?;
-    let (scheme, rest) = n.split_once("://")?;
+/// `url` with its ssh host alias resolved: `Ok(None)` when it is no ssh
+/// URL or ssh knows its host by no other name.
+fn ssh_resolved(url: &str, lk: &Lookup) -> Result<Option<String>, String> {
+    let Some(n) = normalise(url) else {
+        return Ok(None);
+    };
+    let Some((scheme, rest)) = n.split_once("://") else {
+        return Ok(None);
+    };
     if !matches!(scheme, "ssh" | "git+ssh" | "ssh+git") {
-        return None;
+        return Ok(None);
     }
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let (user, hostport) = match authority.rsplit_once('@') {
@@ -643,27 +842,36 @@ fn ssh_resolved(url: &str) -> Option<String> {
     let (host, port) = hostport
         .split_once(':')
         .map_or((hostport, String::new()), |(h, p)| (h, format!(":{p}")));
-    let real = ssh_hostname(host, None)?;
-    Some(format!("{scheme}://{user}{real}{port}/{path}"))
+    Ok(ssh_hostname(host, lk)?.map(|real| format!("{scheme}://{user}{real}{port}/{path}")))
 }
 
 /// The forms of source `s` of the lock file in `dir`, with git's rewrite
-/// and an ssh alias resolved; `None` when one cannot be taken apart.
-pub fn resolved_forms(s: &Source, dir: &Path) -> Option<Vec<String>> {
+/// and an ssh alias resolved; `None` when one cannot be taken apart, or a
+/// lookup fails or runs over its bound: the origin is then undetermined.
+pub fn resolved_forms(s: &Source, dir: &Path, lk: &Lookup) -> Option<Vec<String>> {
     let url = fetch_url(&s.url);
-    let mut more: Vec<String> = git_rewrite(url, dir).into_iter().collect();
-    let ssh: Vec<String> = std::iter::once(url)
-        .chain(more.iter().map(String::as_str))
-        .filter_map(ssh_resolved)
-        .collect();
+    let mut more: Vec<String> = git_rewrite(url, dir, lk).ok()?.into_iter().collect();
+    let mut ssh = Vec::new();
+    for u in std::iter::once(url).chain(more.iter().map(String::as_str)) {
+        ssh.extend(ssh_resolved(u, lk).ok()?);
+    }
     more.extend(ssh);
     forms(url, &more)
 }
 
-/// Why the sources of `locks` keep a job here under `lists`: a problem of
-/// the lists or the lock files, or the first source one of whose forms
-/// (`resolved_forms`) is denied. `None` when `lists` name nothing.
+/// Why the sources of `locks` keep a job here under `lists`, with the
+/// programs of this machine ([`Lookup::here`]).
 pub fn check(locks: &Locks, lists: &DenyLists) -> Option<String> {
+    check_with(locks, lists, &Lookup::here())
+}
+
+/// Why the sources of `locks` keep a job here under `lists`: a problem of
+/// the lists or the lock files; no cargo home, or a cargo configuration
+/// that replaces a git source (`git_source_replaced`, the checkout's and
+/// the cargo home's); or the first source one of whose forms
+/// (`resolved_forms`) is denied or cannot be determined. `None` when
+/// `lists` name nothing.
+pub fn check_with(locks: &Locks, lists: &DenyLists, lk: &Lookup) -> Option<String> {
     if let Some(p) = lists.problem() {
         return Some(format!("{REASON_PREFIX}{p}"));
     }
@@ -673,9 +881,21 @@ pub fn check(locks: &Locks, lists: &DenyLists) -> Option<String> {
     if let Some(p) = locks.problems.first() {
         return Some(format!("{REASON_PREFIX}{p}"));
     }
+    if locks.dirs.is_empty() && locks.found.is_empty() {
+        return None;
+    }
+    let home = match &lk.cargo_home {
+        Ok(h) => h,
+        Err(e) => return Some(format!("{REASON_PREFIX}{e}")),
+    };
+    let mut configs = locks.configs.clone();
+    configs.extend([home.join("config.toml"), home.join("config")]);
+    if let Some(why) = git_source_replaced(&configs) {
+        return Some(format!("{REASON_PREFIX}{why}"));
+    }
     locks.found.iter().find_map(|(dir, sources)| {
         sources.iter().find_map(|s| {
-            let denied = resolved_forms(s, dir).is_none_or(|f| lists.denies_forms(&f));
+            let denied = resolved_forms(s, dir, lk).is_none_or(|f| lists.denies_forms(&f));
             denied.then(|| format!("{REASON_PREFIX}{}", s.url))
         })
     })
@@ -721,25 +941,34 @@ pub fn of_job(top: Option<&Path>, cwd: &Path) -> Option<String> {
         return None;
     }
     let top = top.unwrap_or(cwd);
-    check(&locked(&lock_files(top, cwd)), &lists)
+    check(&checkout(top, cwd), &lists)
 }
 
-/// This machine's cargo home: `CARGO_HOME`, else `~/.cargo`, made absolute.
-pub fn cargo_home() -> PathBuf {
-    let home = std::env::var_os("CARGO_HOME")
-        .filter(|v| !v.is_empty())
-        .map_or_else(
-            || {
-                std::env::var_os("HOME")
-                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
-                    .join(".cargo")
-            },
-            PathBuf::from,
-        );
-    if home.is_absolute() {
-        home
+/// This machine's cargo home, from `CARGO_HOME` and `HOME`
+/// ([`cargo_home_from`]).
+pub fn cargo_home() -> Result<PathBuf, String> {
+    cargo_home_from(std::env::var_os("CARGO_HOME"), std::env::var_os("HOME"))
+}
+
+/// The cargo home `CARGO_HOME` = `cargo_home` and `HOME` = `home` name:
+/// `CARGO_HOME`, else `$HOME/.cargo`. An error when neither is set or the
+/// result is relative: it would be taken from wherever slot runs.
+pub fn cargo_home_from(
+    cargo_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, String> {
+    let dir = match cargo_home.filter(|v| !v.is_empty()) {
+        Some(c) => PathBuf::from(c),
+        None => PathBuf::from(
+            home.filter(|h| !h.is_empty())
+                .ok_or("neither CARGO_HOME nor HOME is set")?,
+        )
+        .join(".cargo"),
+    };
+    if dir.is_absolute() {
+        Ok(dir)
     } else {
-        std::env::current_dir().unwrap_or_default().join(home)
+        Err(format!("cargo home `{}` is not absolute", dir.display()))
     }
 }
 
@@ -1085,6 +1314,21 @@ fn ask_node(
     missing_of(&out, wanted).map_err(CarryError::Refuse)
 }
 
+/// Copies each of `missing` with `copy`, each after its own `recheck`: a
+/// source denied while the entries are copied stops the copy before the
+/// next entry.
+fn copy_each(
+    missing: &[String],
+    mut recheck: impl FnMut() -> Result<(), CarryError>,
+    mut copy: impl FnMut(&str) -> Result<(), CarryError>,
+) -> Result<(), CarryError> {
+    for entry in missing {
+        recheck()?;
+        copy(entry)?;
+    }
+    Ok(())
+}
+
 /// Brings the git dependencies of the checkout at `top` to the node of
 /// `r`: the line to print when something was copied, `Ok(None)` when
 /// nothing had to be. The sources it copies are checked against `lists`
@@ -1098,8 +1342,9 @@ pub fn carry(
     r: &sync::Remote<'_>,
     b: &sync::Bounds,
 ) -> Result<Option<String>, CarryError> {
-    let locks = locked(&lock_files(top, cwd));
-    if let Some(why) = check(&locks, lists) {
+    let locks = checkout(top, cwd);
+    let lk = Lookup::here();
+    if let Some(why) = check_with(&locks, lists, &lk) {
         return Err(CarryError::Refuse(why));
     }
     if locks.found.is_empty() {
@@ -1107,7 +1352,11 @@ pub fn carry(
     }
     let t0 = Instant::now();
     let deadline = t0 + LIMIT;
-    let db = db_dir(&cargo_home());
+    let db = db_dir(
+        lk.cargo_home
+            .as_ref()
+            .map_err(|e| CarryError::Refuse(format!("{REASON_PREFIX}{e}")))?,
+    );
     // The job's own cargo and `+toolchain` when it is a cargo command; a
     // wrapper's inner cargo is the one on `PATH`.
     let is_cargo = argv
@@ -1130,17 +1379,18 @@ pub fn carry(
     if missing.is_empty() {
         return Ok(None);
     }
-    // The lists are read again as the entries are copied: a source denied
-    // since the check above is not sent.
-    let now = self::lists()
-        .map_err(|e| CarryError::Refuse(format!("{REASON_PREFIX}list unreadable ({e})")))?;
-    if let Some(why) = check(&locks, &now) {
-        return Err(CarryError::Refuse(why));
-    }
-    for entry in &missing {
+    // The lists are read again before each entry is copied: a source
+    // denied since the check above, or since the entry before, is not sent.
+    let recheck = || {
+        let now = self::lists()
+            .map_err(|e| CarryError::Refuse(format!("{REASON_PREFIX}list unreadable ({e})")))?;
+        check_with(&locks, &now, &lk).map_or(Ok(()), |why| Err(CarryError::Refuse(why)))
+    };
+    let copy = |entry: &str| {
         sync::copy_db_entry(&db.join(entry), entry, r, b)
-            .map_err(|e| CarryError::Skip(format!("{entry}: {e:#}")))?;
-    }
+            .map_err(|e| CarryError::Skip(format!("{entry}: {e:#}")))
+    };
+    copy_each(&missing, recheck, copy)?;
     Ok(Some(format!(
         "slot: git dependencies: {} copied to {} in {:.1} s",
         missing.len(),
@@ -1247,16 +1497,424 @@ mod tests {
             "git+ssh://git.example.org:22/team/dep",
             "git+file:///srv/pri%76ate/dep.git",
             "git+file:///srv//private/dep.git",
+            "git+https://git.example.org:8443/team/dep.git",
         ] {
             assert!(lists.denies(&s(u)), "{u}");
         }
         for u in [
-            "git+https://git.example.org:8443/team/dep.git",
             "git+https://git.example.org/teamwork/dep.git",
             "git+file:///srv/privateer/dep.git",
         ] {
             assert!(!lists.denies(&s(u)), "{u}");
         }
+    }
+
+    #[test]
+    fn a_port_userinfo_or_trailing_git_does_not_pass_a_pattern() {
+        let s = |u: &str| Source::parse(&format!("{u}#{REV}")).unwrap();
+        for (pattern, yes, no) in [
+            (
+                "*git.example.org[:/]team/*",
+                &[
+                    "git+ssh://git@git.example.org:2222/team/x",
+                    "git+https://u:p@git.example.org:8443/team/x",
+                ][..],
+                &["git+https://git.example.org/other/x"][..],
+            ),
+            (
+                "https://git.example.org/team/*",
+                &[
+                    "git+https://user@git.example.org/team/x",
+                    "git+https://user@git.example.org:8443/team/x",
+                ],
+                &[
+                    "git+https://git.example.org.evil/team/x",
+                    "git+https://user@git.example.org/teamwork/x",
+                ],
+            ),
+            (
+                "*git.example.org/team/dep.git",
+                &[
+                    "git+https://git.example.org/team/dep",
+                    "git+https://git.example.org/team/dep/",
+                ],
+                &["git+https://git.example.org/team/depot"],
+            ),
+            (
+                "*git.example.org/team/dep",
+                &[
+                    "git+https://git.example.org/team/dep.git",
+                    "git+https://git.example.org/team/dep.git/",
+                    "git+https://git.example.org/team/dep//",
+                ],
+                &["git+https://git.example.org/team/dep.gitx"],
+            ),
+        ] {
+            let lists = DenyLists::parse([format!("origin:{pattern}\n").as_str()]);
+            for u in yes {
+                assert!(lists.denies(&s(u)), "{pattern} lets through {u}");
+            }
+            for u in no {
+                assert!(!lists.denies(&s(u)), "{pattern} denies {u}");
+            }
+        }
+    }
+
+    /// A [`Lookup`] with git and ssh from `PATH` and an empty cargo home
+    /// under `dir`.
+    fn lookup(dir: &Path) -> Lookup {
+        let home = dir.join("cargo-home");
+        std::fs::create_dir_all(&home).unwrap();
+        Lookup {
+            git: vec!["git".into()],
+            ssh: vec!["ssh".into()],
+            limit: LOOKUP,
+            cargo_home: Ok(home),
+        }
+    }
+
+    /// `sh <dir>/<name>.sh` running `body`.
+    fn script(dir: &Path, name: &str, body: &str) -> Vec<OsString> {
+        let path = dir.join(format!("{name}.sh"));
+        std::fs::write(&path, body).unwrap();
+        vec!["sh".into(), path.into()]
+    }
+
+    /// Locks naming `urls` (with [`REV`]) in one lock file in `dir`.
+    fn locks_of(dir: &Path, urls: &[&str]) -> Locks {
+        let sources = urls
+            .iter()
+            .map(|u| Source::parse(&format!("{u}#{REV}")).unwrap())
+            .collect();
+        Locks {
+            found: vec![(dir.to_path_buf(), sources)],
+            dirs: vec![dir.to_path_buf()],
+            ..Locks::default()
+        }
+    }
+
+    #[test]
+    fn a_lookup_that_fails_or_runs_over_its_bound_keeps_the_job_here() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        let lists = DenyLists::parse(["origin:*denied.example.org*\n"]);
+        let echo = script(
+            dir,
+            "echo",
+            "for a; do last=$a; done; printf '%s\\n' \"$last\"\n",
+        );
+        let same = script(dir, "same", "printf 'user x\\nhostname %s\\n' \"$2\"\n");
+        let fail = script(dir, "fail", "exit 1\n");
+        let hang = script(dir, "hang", "exec sleep 5\n");
+        let nameless = script(dir, "nameless", "printf 'user x\\n'\n");
+        let base = Lookup {
+            git: echo.clone(),
+            ssh: same.clone(),
+            limit: Duration::from_millis(300),
+            ..lookup(dir)
+        };
+        let https = locks_of(dir, &["git+https://open.example.org/team/x"]);
+        let ssh = locks_of(dir, &["git+ssh://git@open.example.org/team/x"]);
+        assert_eq!(
+            check_with(&https, &lists, &base),
+            None,
+            "both lookups answer"
+        );
+        assert_eq!(check_with(&ssh, &lists, &base), None, "both lookups answer");
+        for (what, locks, lk) in [
+            (
+                "git fails",
+                &https,
+                Lookup {
+                    git: fail.clone(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "git hangs",
+                &https,
+                Lookup {
+                    git: hang.clone(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "ssh fails",
+                &ssh,
+                Lookup {
+                    ssh: fail.clone(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "ssh hangs",
+                &ssh,
+                Lookup {
+                    ssh: hang.clone(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "ssh names no host",
+                &ssh,
+                Lookup {
+                    ssh: nameless.clone(),
+                    ..base.clone()
+                },
+            ),
+        ] {
+            let t0 = Instant::now();
+            let why = check_with(locks, &lists, &lk);
+            assert!(
+                why.as_deref().is_some_and(|w| w.starts_with(REASON_PREFIX)),
+                "{what}: {why:?}"
+            );
+            assert!(t0.elapsed() < Duration::from_secs(4), "{what}: bounded");
+        }
+    }
+
+    #[test]
+    fn an_ssh_alias_of_a_denied_host_keeps_the_job_here() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        let lk = Lookup {
+            git: script(
+                dir,
+                "echo",
+                "for a; do last=$a; done; printf '%s\\n' \"$last\"\n",
+            ),
+            ssh: script(
+                dir,
+                "alias",
+                "case \"$2\" in forge-alias) h=git.example.org;; *) h=$2;; esac\n\
+                 printf 'hostname %s\\n' \"$h\"\n",
+            ),
+            ..lookup(dir)
+        };
+        let lists = DenyLists::parse(["origin:*git.example.org/team/*\n"]);
+        let alias = locks_of(dir, &["git+ssh://git@forge-alias/team/dep"]);
+        assert!(!lists.denies(&alias.found[0].1[0]), "the alias as written");
+        assert_eq!(
+            check_with(&alias, &lists, &lk),
+            Some(format!("{REASON_PREFIX}git+ssh://git@forge-alias/team/dep"))
+        );
+        let other = locks_of(dir, &["git+ssh://git@other-alias/team/dep"]);
+        assert_eq!(check_with(&other, &lists, &lk), None);
+    }
+
+    #[test]
+    fn a_lock_url_that_starts_with_a_dash_is_no_option_of_git() {
+        let t = tempfile::tempdir().unwrap();
+        let lk = Lookup {
+            git: vec![
+                "git".into(),
+                "-c".into(),
+                "url.https://denied.example.org/.insteadOf=-x://".into(),
+            ],
+            ..lookup(t.path())
+        };
+        assert_eq!(
+            git_rewrite("-x://h/p", t.path(), &lk),
+            Ok(Some("https://denied.example.org/h/p".into()))
+        );
+        let lists = DenyLists::parse(["origin:https://denied.example.org/*\n"]);
+        let locks = locks_of(t.path(), &["git+-x://h/p"]);
+        assert_eq!(
+            check_with(&locks, &lists, &lk),
+            Some(format!("{REASON_PREFIX}git+-x://h/p"))
+        );
+    }
+
+    #[test]
+    fn a_git_source_replaced_in_cargo_config_keeps_the_job_here() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        // `denied` holds crate `dep`; `allowed.git` is a copy of it.
+        let denied = root.join("denied");
+        std::fs::create_dir_all(denied.join("src")).unwrap();
+        std::fs::write(
+            denied.join("Cargo.toml"),
+            "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(denied.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        git(&denied, &["init", "-q"]);
+        git(&denied, &["add", "."]);
+        git(&denied, &["commit", "-qm", "x"]);
+        let rev = git(&denied, &["rev-parse", "HEAD"]);
+        git(&root, &["clone", "-q", "--bare", "denied", "allowed.git"]);
+        let allowed = format!("file://{}/allowed.git", root.display());
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::create_dir_all(app.join(".cargo")).unwrap();
+        std::fs::write(
+            app.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                 [dependencies]\ndep = {{ git = \"{allowed}\" }}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            app.join("Cargo.lock"),
+            format!(
+                "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                 dependencies = [\"dep\"]\n\n[[package]]\nname = \"dep\"\nversion = \"0.1.0\"\n\
+                 source = \"git+{allowed}#{rev}\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            app.join(".cargo/config.toml"),
+            format!(
+                "[source.allowed]\ngit = \"{allowed}\"\nreplace-with = \"den\"\n\
+                 [source.den]\ngit = \"file://{}\"\n",
+                denied.display()
+            ),
+        )
+        .unwrap();
+        let lk = lookup(&root);
+        let home = lk.cargo_home.clone().unwrap();
+        let mut locks = locked(&[app.join("Cargo.lock")]);
+        locks.configs = config_files(&app, &locks.dirs);
+        // The lock file names the allowed URL; cargo maps it to the
+        // checkout of the denied repository.
+        let cargo = [
+            "env".to_string(),
+            format!("CARGO_HOME={}", home.display()),
+            "cargo".to_string(),
+        ];
+        let deadline = Instant::now() + Duration::from_secs(50);
+        let (wanted, notes) = prepare(&locks.found, &db_dir(&home), &cargo, deadline);
+        assert!(
+            wanted.len() == 1 && wanted[0].entry.starts_with("denied-"),
+            "{wanted:?} {notes:?}"
+        );
+        let lists = DenyLists::parse([format!("origin:file://{}\n", denied.display()).as_str()]);
+        assert!(!lists.denies(&locks.found[0].1[0]), "the lock file's URL");
+        let why = check_with(&locks, &lists, &lk);
+        assert!(
+            why.as_deref().is_some_and(|w| w.starts_with(REASON_PREFIX)),
+            "{why:?}"
+        );
+    }
+
+    #[test]
+    fn a_source_replacement_in_any_cargo_config_keeps_the_job_here() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path();
+        let file = |name: &str, text: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        let git_replaced = file(
+            "git-replaced",
+            "[source.dep]\ngit = \"https://h.example.org/g/dep\"\nreplace-with = \"v\"\n\
+             [source.v]\ndirectory = \"vendor\"\n",
+        );
+        let by_git = file(
+            "by-git",
+            "[source.crates-io]\nreplace-with = \"g\"\n[source.g]\ngit = \"https://h.example.org/g/x\"\n",
+        );
+        let half_a = file("half-a", "[source.crates-io]\nreplace-with = \"g\"\n");
+        let half_b = file(
+            "half-b",
+            "[source.g]\ngit = \"https://h.example.org/g/x\"\n",
+        );
+        let vendored = file(
+            "vendored",
+            "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n",
+        );
+        let plain = file("plain", "[build]\njobs = 1\n");
+        let broken = file("broken", "[source.x\n");
+        for (what, files) in [
+            ("a git source replaced", vec![git_replaced.clone()]),
+            ("a registry replaced by a git source", vec![by_git]),
+            ("split over two files", vec![half_a.clone(), half_b]),
+            ("a file that does not parse", vec![plain.clone(), broken]),
+        ] {
+            assert!(git_source_replaced(&files).is_some(), "{what}");
+        }
+        assert_eq!(git_source_replaced(&[vendored, plain, half_a]), None);
+        let lists = DenyLists::parse(["origin:*denied.example.org*\n"]);
+        let lk = Lookup {
+            git: script(
+                dir,
+                "echo",
+                "for a; do last=$a; done; printf '%s\\n' \"$last\"\n",
+            ),
+            ..lookup(dir)
+        };
+        let mut locks = locks_of(dir, &["git+https://open.example.org/g/x"]);
+        assert_eq!(check_with(&locks, &lists, &lk), None);
+        locks.configs = vec![git_replaced.clone()];
+        assert!(check_with(&locks, &lists, &lk).is_some(), "the checkout's");
+        locks.configs.clear();
+        let home = lk.cargo_home.clone().unwrap();
+        std::fs::copy(&git_replaced, home.join("config.toml")).unwrap();
+        assert!(
+            check_with(&locks, &lists, &lk).is_some(),
+            "the cargo home's"
+        );
+        let none = Lookup {
+            cargo_home: Err("no HOME".into()),
+            ..lk
+        };
+        std::fs::remove_file(home.join("config.toml")).unwrap();
+        assert!(check_with(&locks, &lists, &none).is_some(), "no cargo home");
+    }
+
+    #[test]
+    fn a_relative_or_missing_cargo_home_is_refused() {
+        let os = |s: &str| Some(OsString::from(s));
+        assert_eq!(cargo_home_from(os("/c"), None), Ok(PathBuf::from("/c")));
+        assert_eq!(
+            cargo_home_from(os(""), os("/h")),
+            Ok(PathBuf::from("/h/.cargo"))
+        );
+        assert_eq!(
+            cargo_home_from(None, os("/h")),
+            Ok(PathBuf::from("/h/.cargo"))
+        );
+        for (cargo_home, home) in [
+            (os("rel/ch"), os("/h")),
+            (os("."), os("/h")),
+            (None, None),
+            (os(""), None),
+            (None, os("rel")),
+            (None, os("")),
+        ] {
+            assert!(
+                cargo_home_from(cargo_home.clone(), home.clone()).is_err(),
+                "{cargo_home:?} {home:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_denied_during_the_copy_stops_it_before_the_next_entry() {
+        let missing = ["dep-1".to_string(), "dep-2".to_string()];
+        let mut checks = 0;
+        let mut copied = Vec::new();
+        let got = copy_each(
+            &missing,
+            || {
+                checks += 1;
+                if checks > 1 {
+                    Err(CarryError::Refuse("denied since".into()))
+                } else {
+                    Ok(())
+                }
+            },
+            |e| {
+                copied.push(e.to_string());
+                Ok(())
+            },
+        );
+        assert_eq!(got, Err(CarryError::Refuse("denied since".into())));
+        assert_eq!(copied, ["dep-1"]);
     }
 
     #[test]
@@ -1531,12 +2189,19 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let cfg = t.path().join("config");
         std::fs::write(&cfg, "Host forge-alias\n  HostName git.example.org\n").unwrap();
+        let lk = Lookup {
+            ssh: vec!["ssh".into(), "-F".into(), cfg.into()],
+            ..Lookup::here()
+        };
         assert_eq!(
-            ssh_hostname("forge-alias", Some(&cfg)).as_deref(),
-            Some("git.example.org")
+            ssh_hostname("forge-alias", &lk),
+            Ok(Some("git.example.org".into()))
         );
-        assert_eq!(ssh_hostname("git.example.org", Some(&cfg)), None);
-        assert_eq!(ssh_hostname("-oProxyCommand=x", Some(&cfg)), None);
+        assert_eq!(ssh_hostname("git.example.org", &lk), Ok(None));
+        assert!(
+            ssh_hostname("-oProxyCommand=x", &lk).is_err(),
+            "a host that is an option is not looked up, and is undetermined"
+        );
     }
 
     #[test]
