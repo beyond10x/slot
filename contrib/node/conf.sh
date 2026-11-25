@@ -8,7 +8,7 @@
 
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
-NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS HOME_COPIES SKIP_BINS ETC_EXTRA'
+NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -72,9 +72,8 @@ conf_read() {
   NODE_HOST=${CONF_NODE_HOST:-}
   NODE_RUN_DIR=${CONF_NODE_RUN_DIR:-}
   RUST_TOOLCHAINS=${CONF_RUST_TOOLCHAINS:-}
-  HOME_COPIES=${CONF_HOME_COPIES:-}
-  SKIP_BINS=${CONF_SKIP_BINS:-}
-  ETC_EXTRA=${CONF_ETC_EXTRA:-}
+  RUST_COMPONENTS=${CONF_RUST_COMPONENTS-clippy rustfmt}
+  RUST_TARGETS=${CONF_RUST_TARGETS:-}
   conf_check_forms "$cf"
 }
 
@@ -138,6 +137,23 @@ conf_check_forms() {
     return 2
     ;;
   esac
+  for k in RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS EXTRA_PACKAGES; do
+    eval "v=\${$k}"
+    case $k in
+      EXTRA_PACKAGES) case $v in *[!A-Za-z0-9._+\ -]*) v=\* ;; esac ;;
+      *) case $v in *[!A-Za-z0-9._\ -]*) v=\* ;; esac ;;
+    esac
+    case " $v" in
+      *\**)
+        conf_fail "$1: $k must be names of letters, digits, dots, dashes and underscores (EXTRA_PACKAGES also +), separated by spaces"
+        return 2
+        ;;
+      *" -"*)
+        conf_fail "$1: $k must be names that do not begin with a dash"
+        return 2
+        ;;
+    esac
+  done
   for d in $MIRROR_DIRS; do
     case $d in
       /* | *..*)

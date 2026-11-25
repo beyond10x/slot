@@ -41,8 +41,14 @@ installs), not from the workstation's. With the systemd unit, that is the unit's
 
 A cloud machine with NVMe instance storage (Amazon Linux 2023) can be set up by the scripts in
 [`contrib/node/`](https://github.com/beyond10x/slot/tree/main/contrib/node): `provision.sh` on
-the machine and `push.sh` on the workstation, both with a `check` that lists where the machine
-differs. Names, keys and paths come from a config file outside the repository.
+the machine (a bare image becomes a complete node; nothing is copied from the workstation) and
+`push.sh check` on the workstation, which lists where the node's rust, go and node versions
+differ from the workstation's (the node installs go and node at pinned releases). That check is a
+version parity report, not an integrity check: it runs as the build user, and a job that runs as
+that user can alter what the node reports. Every download `provision.sh` makes is checked against
+a pinned SHA-256 before anything is unpacked or run, and `provision.sh check` names a running unit
+whose definition or slot binary is not the one on disk. Names, keys and paths come from a config
+file outside the repository.
 
 ## Use it from the workstation
 

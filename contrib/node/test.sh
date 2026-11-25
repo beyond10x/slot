@@ -28,7 +28,7 @@ SLOT_VERSION=0.36.0
 MIRROR_DIRS=.local/state/worktree .cache work
 GO_PRIVATE=git.example.org
 NODE_NAME=node-1
-ETC_EXTRA=java21-openjdk
+RUST_TOOLCHAINS=1.99.1 stable
 EOF
 }
 run() { NODE_TEST=1 NODE_ROOT=$1 sh "$P" "$2" "$W/node.conf" >"$W/out" 2>"$W/err"; }
@@ -43,6 +43,22 @@ conf
 echo 'BUILD_SHELL=/bin/zsh' >>"$W/node.conf"
 run "$W/r0" check
 if [ $? -eq 2 ] && grep -q 'unknown key BUILD_SHELL' "$W/err"; then ok "unknown key is refused"; else bad "unknown key is refused ($(cat "$W/err"))"; fi
+for gone in HOME_COPIES=.m2 ETC_EXTRA=java21-openjdk SKIP_BINS=ess; do
+  conf
+  echo "$gone" >>"$W/node.conf"
+  run "$W/r0" check
+  if [ $? -eq 2 ] && grep -q "unknown key ${gone%%=*}" "$W/err"; then ok "the copy key ${gone%%=*} is gone from the config"; else bad "the copy key ${gone%%=*} is still accepted ($(cat "$W/err"))"; fi
+done
+conf
+printf 'RUST_COMPONENTS=clippy\nRUST_TARGETS=wasm32-unknown-unknown\n' >>"$W/node.conf"
+run "$W/r0" check
+if grep -q 'unknown key' "$W/err"; then bad "RUST_COMPONENTS and RUST_TARGETS are refused ($(cat "$W/err"))"; else ok "RUST_COMPONENTS and RUST_TARGETS are config keys"; fi
+for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARGETS=$(id)' 'RUST_TOOLCHAINS=1.99.1 -stable' 'EXTRA_PACKAGES=jq;id' 'EXTRA_PACKAGES=git --nogpgcheck' 'EXTRA_PACKAGES=a $(id)' 'EXTRA_PACKAGES=a*'; do
+  conf
+  echo "$bad_rust" >>"$W/node.conf"
+  run "$W/r0" check
+  if [ $? -eq 2 ] && grep -q "${bad_rust%%=*} must be names" "$W/err"; then ok "${bad_rust%%=*} with a shell character is refused"; else bad "${bad_rust%%=*} with a shell character is accepted ($(cat "$W/err"))"; fi
+done
 conf
 sed -i 's/^BUILD_UID=.*/BUILD_UID=10x1/' "$W/node.conf"
 run "$W/r0" check
@@ -57,27 +73,44 @@ run "$R" check
 st=$?
 n=$(grep -c '^drift: ' "$W/out")
 if [ $st -eq 1 ] && [ "$n" -ge 15 ]; then ok "fresh machine: check exits 1 with $n drift lines"; else bad "fresh machine: check exit $st, $n drift lines"; fi
-for item in storage binds packages user unit:slot-node.service unit:slot-storage.service keys sshd sudoers slot:/usr/local/bin/slot; do
+for item in storage binds packages user unit:slot-node.service unit:slot-storage.service keys sshd sudoers slot:/usr/local/bin/slot rustup rust:1.99.1 rust:stable; do
   grep -q "^drift: $item" "$W/out" || bad "fresh machine: no drift line for $item"
 done
+: >"$R/.calls"
 run "$R" apply
+cp "$W/out" "$W/first-apply.out"
 st=$?
 [ $st -eq 0 ] && ok "apply exits 0" || bad "apply exit $st: $(tail -3 "$W/err")"
-grep -q '^pending: unit:slot-node.service' "$W/err" && ok "before the push, slot-node waits for the workstation /usr" || bad "no pending line: $(cat "$W/err")"
-run "$R" check
-grep -q '^drift: unit:slot-node.service: not active' "$W/out" && ok "before the push, check names slot-node" || bad "before the push: $(cat "$W/out")"
-# What push.sh brings from the workstation: its /usr with the compile cache server, and /etc entries.
-mkdir -p "$R/srv/slot/rootfs/usr/bin" && : >"$R/srv/slot/rootfs/usr/bin/sccache"
-for e in fonts ssl ca-certificates ld.so.conf.d java21-openjdk; do mkdir -p "$R/srv/slot/rootfs/etc/$e"; done
-for e in ld.so.cache localtime locale.conf nsswitch.conf ld.so.conf mime.types protocols services os-release; do : >"$R/srv/slot/rootfs/etc/$e"; done
-run "$R" apply
+# A naked node needs nothing copied: one apply starts both services and leaves 0 drift.
+grep -q '^pending: ' "$W/err" && bad "apply on a naked machine leaves a pending step: $(grep '^pending: ' "$W/err")" || ok "apply on a naked machine leaves nothing pending"
+for u in slot-node.service sccache-node.service; do
+  [ -f "$R/.state/active/$u" ] && ok "one apply starts $u" || bad "$u not started by the first apply"
+done
 run "$R" check
 st=$?
-if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "after apply: 0 drift"; else bad "after apply: exit $st, $(cat "$W/out")"; fi
-grep -qx 'BindReadOnlyPaths=/srv/slot/rootfs/etc/java21-openjdk:/etc/java21-openjdk' "$R/etc/systemd/system/slot-node.service" && ok "ETC_EXTRA is bound" || bad "ETC_EXTRA not bound"
+if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "after one apply: 0 drift"; else bad "after one apply: exit $st, $(cat "$W/out")"; fi
+# The units use the node's own /usr and /etc.
+for u in slot-node.service sccache-node.service; do
+  grep -qE 'rootfs|BindReadOnlyPaths|ConditionPathExists|workstation' "$R/etc/systemd/system/$u" && bad "$u still binds or waits for a copy: $(grep -E 'rootfs|BindReadOnlyPaths|ConditionPathExists|workstation' "$R/etc/systemd/system/$u" | head -2)" || ok "$u uses the node's own /usr and /etc"
+done
+for u in slot-node.service sccache-node.service; do
+  grep -q '^Environment=PATH=/srv/slot/nodebin:/var/lib/builder/.cargo/bin:/usr/local/bin:/usr/bin:' "$R/etc/systemd/system/$u" && ok "$u PATH: nodebin, cargo, /usr/local/bin, /usr/bin" || bad "$u PATH: $(grep PATH "$R/etc/systemd/system/$u")"
+  grep -q '/usr/local/go/bin' "$R/etc/systemd/system/$u" && bad "$u PATH still has /usr/local/go/bin" || ok "$u PATH: no /usr/local/go/bin (the go link is in /usr/local/bin)"
+done
+grep -qx 'ExecStart=/var/lib/builder/.cargo/bin/sccache' "$R/etc/systemd/system/sccache-node.service" && ok "sccache-node runs the pinned sccache in the store's cargo bin" || bad "sccache ExecStart: $(grep ExecStart "$R/etc/systemd/system/sccache-node.service")"
+[ -e "$R/srv/slot/rootfs" ] && bad "the rootfs directory is made" || ok "no rootfs directory"
+[ -e "$R/etc/slot-node/copies" ] && bad "the copy list file is written" || ok "no copy list file"
+grep -q 'slot-toolchains.sh "" /srv/slot/rustup ' "$R/etc/systemd/system/slot-toolchains-manifest.service" && ok "the manifest runs with prefix \"\" and the store's rustup home" || bad "manifest unit: $(grep ExecStart "$R/etc/systemd/system/slot-toolchains-manifest.service")"
 # The compile cache refuses every incremental rustc call; node jobs build without it.
 sed -n '/^\[build\]/,/^\[/p' "$R/srv/slot/cargo/config.toml" | grep -qx 'incremental = false' && ok "node cargo config: incremental off" || bad "node cargo config: $(cat "$R/srv/slot/cargo/config.toml")"
-[ -d "$R/etc/java21-openjdk" ] && [ -f "$R/etc/localtime" ] && ok "bind targets have the type of their copy" || bad "bind target types"
+# Rust: rustup at the pinned release for the build user, then each toolchain with the default
+# components. Nothing is downloaded under NODE_TEST=1; the commands are recorded.
+grep -qx 'fetch https://static.rust-lang.org/rustup/archive/1.29.3/x86_64-unknown-linux-gnu/rustup-init' "$R/.calls" && ok "rustup-init 1.29.3 is fetched from the static host" || bad "rustup-init fetch: $(cat "$R/.calls")"
+grep -qx 'rustup-init --no-modify-path --default-toolchain none --profile minimal -y' "$R/.calls" && ok "rustup-init runs without a default toolchain or path edits" || bad "rustup-init call: $(cat "$R/.calls")"
+for t in 1.99.1 stable; do
+  grep -qx "rustup toolchain install $t --profile minimal -c clippy -c rustfmt" "$R/.calls" && ok "toolchain $t is installed with clippy and rustfmt" || bad "toolchain $t call: $(cat "$R/.calls")"
+done
+grep -q '^changed: rustup' "$W/first-apply.out" && grep -q '^changed: rust:1.99.1' "$W/first-apply.out" && ok "apply reports rustup and the toolchains as changed" || bad "rust changed lines: $(grep rust "$W/first-apply.out")"
 run "$R" apply
 grep -q '^changed: ' "$W/out" && bad "a second apply changed: $(grep '^changed: ' "$W/out" | head -3)" || ok "a second apply changes nothing"
 
@@ -167,13 +200,13 @@ run "$R" check
 sh "$P" pins >"$W/pins" 2>"$W/err"
 grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
   ok "pins: wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
-# geckodriver at the release of the forge runner image of the browser test lanes (Firefox itself
-# is the workstation's, copied with /usr).
+# geckodriver at the release of the forge runner image of the browser test lanes.
 grep -qx 'geckodriver 0.37.1' "$W/pins" && ok "pins: geckodriver 0.37.1" || bad "pins: no geckodriver 0.37.1: $(cat "$W/pins")"
+# sccache: the node has no /usr from the workstation, and the distribution has no package of it.
+grep -qx 'sccache 0.18.0' "$W/pins" && ok "pins: sccache 0.18.0" || bad "pins: no sccache 0.18.0: $(cat "$W/pins")"
 # ess is not pinned: it picks the release a repository pins itself (an exact `requires` runs
-# that release from its own digest-checked cache, a line pin runs the base binary), so the node's
-# base ess is the workstation's, copied by push.sh, and both choose the same for every repository.
-grep -q '^ess ' "$W/pins" && bad "ess is pinned on the node: $(grep '^ess ' "$W/pins")" || ok "ess is not pinned: the node's base ess is the workstation's"
+# that release from its own digest-checked cache, a line pin runs the base binary).
+grep -q '^ess ' "$W/pins" && bad "ess is pinned on the node: $(grep '^ess ' "$W/pins")" || ok "ess is not pinned"
 while read -r b v; do
   [ "$("$R/srv/slot/cargo/bin/$b" --version 2>/dev/null)" = "$b $v" ] && ok "pinned tool installed: $b $v" || bad "pinned tool $b: '$("$R/srv/slot/cargo/bin/$b" --version 2>&1)'"
 done <"$W/pins"
@@ -206,6 +239,140 @@ printf '#!/bin/sh\necho "geckodriver 0.36.0 (0123abcdef01 2025-01-01 00:00 +0000
 run "$R" check
 grep -q "^drift: tool:geckodriver: .*'geckodriver 0.36.0', want geckodriver 0.37.1" "$W/out" && ok "check names a geckodriver of another release" || bad "geckodriver 0.36.0: $(grep tool "$W/out")"
 run "$R" apply
+# cargo-nextest and go-task, the tools consumers' CI pins. nextest's archive holds only the binary
+# (its `--version` starts `cargo-nextest 0.9.143`); task's holds more files and its `--version` is the
+# bare `3.54.0`, which check reads as `task 3.54.0`.
+grep -qx 'cargo-nextest 0.9.143' "$W/pins" && ok "pins: cargo-nextest 0.9.143" || bad "pins: no cargo-nextest 0.9.143: $(cat "$W/pins")"
+grep -qx 'task 3.54.0' "$W/pins" && ok "pins: task 3.54.0" || bad "pins: no task 3.54.0: $(cat "$W/pins")"
+rm -f "$R/srv/slot/cargo/bin/cargo-nextest" "$R/srv/slot/cargo/bin/task"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'fetch https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz' "$R/.calls" &&
+  ok "cargo-nextest is fetched from its release tag" || bad "nextest URL: $(grep fetch "$R/.calls")"
+grep -qx 'fetch https://github.com/go-task/task/releases/download/v3.54.0/task_linux_amd64.tar.gz' "$R/.calls" &&
+  ok "task is fetched from its release tag v3.54.0" || bad "task URL: $(grep fetch "$R/.calls")"
+printf '#!/bin/sh\necho 3.54.0\n' >"$R/srv/slot/cargo/bin/task"
+run "$R" check
+grep -q 'tool:task' "$W/out" && bad "a task that prints the bare 3.54.0 is drift: $(grep tool "$W/out")" || ok "check reads a bare version as <binary> <version>"
+printf '#!/bin/sh\necho 3.53.0\n' >"$R/srv/slot/cargo/bin/task"
+run "$R" check
+grep -q "^drift: tool:task: .*'task 3.53.0', want task 3.54.0" "$W/out" && ok "check names a task of another release" || bad "task 3.53.0: $(grep tool "$W/out")"
+run "$R" apply
+
+# 5h. Pinned archives (ARCHIVE_PINS): go and node at the release the workstation runs, in a
+# root-owned /usr/local/<name>-<version>, linked into /usr/local/bin. check reads each link and the
+# version of the first binary of the pin.
+conf
+R5=$W/r5
+mkdir -p "$R5"
+run "$R5" check
+grep -q '^drift: archive:go: ' "$W/out" && grep -q '^drift: archive:node: ' "$W/out" && ok "check names the archive pins of a bare node" || bad "archive drift: $(grep archive "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx 'fetch https://go.dev/dl/go1.27.1.linux-amd64.tar.gz' "$R5/.calls" && ok "go 1.27.1 is fetched from go.dev/dl" || bad "go URL: $(grep fetch "$R5/.calls")"
+grep -qx 'fetch https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz' "$R5/.calls" && ok "node v22.23.3 is fetched from nodejs.org/dist" || bad "node URL: $(grep fetch "$R5/.calls")"
+for l in go:go-1.27.1/bin/go gofmt:go-1.27.1/bin/gofmt node:node-v22.23.3/bin/node npm:node-v22.23.3/bin/npm npx:node-v22.23.3/bin/npx corepack:node-v22.23.3/bin/corepack; do
+  [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
+done
+[ "$("$R5/usr/local/go-1.27.1/bin/go" version)" = "go version go1.27.1 linux/amd64" ] && ok "go is extracted into /usr/local/go-1.27.1" || bad "go extract: $("$R5/usr/local/go-1.27.1/bin/go" version 2>&1)"
+[ -z "$(find "$R5/usr/local/go-1.27.1" "$R5/usr/local/node-v22.23.3" -perm /022 ! -type l)" ] && ok "the extracted trees are not writable by group or others" || bad "writable: $(find "$R5/usr/local/go-1.27.1" "$R5/usr/local/node-v22.23.3" -perm /022 ! -type l | head -3)"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply the archive pins have 0 drift" || bad "archive pins after apply: $(cat "$W/out")"
+rm -f "$R5/usr/local/bin/node"
+printf '#!/bin/sh\necho "go version go1.26.0 linux/amd64"\n' >"$R5/usr/local/go-1.27.1/bin/go"
+run "$R5" check
+grep -q "^drift: archive:node: /usr/local/bin/node is 'missing', want a link to /usr/local/node-v22.23.3/bin/node" "$W/out" && ok "check names a missing link" || bad "missing link: $(grep archive "$W/out")"
+grep -q "^drift: archive:go: /usr/local/go-1.27.1/bin/go says 'go version go1.26.0 linux/amd64', want go1.27.1" "$W/out" && ok "check names a version that differs" || bad "version drift: $(grep archive "$W/out")"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && ok "apply restores the link and the release" || bad "archive restore: $(cat "$W/out" "$W/err")"
+rm -rf "$R5/usr/local/go-1.27.1" "$R5/usr/local/bin/gofmt" "$R5/usr/local/node-v22.23.3"
+: >"$R5/.state-tool-fetch-fails"
+run "$R5" apply
+st=$?
+rm -f "$R5/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -qx 'failed: archive:go: download or checksum of go 1.27.1' "$W/err" && ok "a failed archive download: apply exits 1 and names it" || bad "failed archive download: exit $st $(grep archive "$W/err")"
+grep -q '^changed: archive' "$W/out" && bad "a failed archive install is reported as changed" || ok "a failed archive install is not reported as changed"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && ok "after the download works: archive pins 0 drift" || bad "archive after the download: $(cat "$W/out")"
+
+# 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
+# `failed` line and exit 1, a toolchain that is there is not installed again.
+conf
+R2=$W/r2
+mkdir -p "$R2"
+run "$R2" check
+grep -qx 'drift: rustup: missing' "$W/out" && ok "check names a missing rustup" || bad "rustup drift: $(grep rust "$W/out")"
+grep -qx 'drift: rust:1.99.1: missing' "$W/out" && grep -qx 'drift: rust:stable: missing' "$W/out" && ok "check names each missing toolchain" || bad "toolchain drift: $(grep rust "$W/out")"
+: >"$R2/.state-tool-fetch-fails"
+run "$R2" apply
+st=$?
+rm -f "$R2/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -qx 'failed: rustup: download or checksum of rustup-init 1.29.3' "$W/err" && ok "a failed rustup download: apply exits 1 and names it" || bad "failed rustup download: exit $st $(grep rust "$W/err")"
+grep -q '^changed: rustup' "$W/out" && bad "a failed rustup install is reported as changed" || ok "a failed rustup install is not reported as changed"
+: >"$R2/.calls"
+run "$R2" apply
+run "$R2" check
+[ $? -eq 0 ] && ok "rust: after the download works, 0 drift" || bad "rust after the download: $(cat "$W/out")"
+[ -x "$R2/srv/slot/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc" ] && [ -x "$R2/srv/slot/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" ] && ok "toolchains are in the store's rustup home" || bad "toolchain dirs: $(ls "$R2/srv/slot/rustup/toolchains" 2>&1)"
+rm -rf "$R2/srv/slot/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu"
+: >"$R2/.calls"
+run "$R2" check
+grep -qx 'drift: rust:1.99.1: missing' "$W/out" && ! grep -q 'rust:stable\|rustup' "$W/out" && ok "check names only the toolchain that is gone" || bad "one toolchain gone: $(cat "$W/out")"
+: >"$R2/.state-tool-fetch-fails"
+run "$R2" apply
+st=$?
+rm -f "$R2/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -qx 'failed: rust:1.99.1: rustup toolchain install 1.99.1' "$W/err" && ok "a failed toolchain download: apply exits 1 and names it" || bad "failed toolchain download: exit $st $(grep rust "$W/err")"
+: >"$R2/.calls"
+run "$R2" apply
+[ "$(cat "$R2/.calls" | grep -c '^rustup toolchain install')" = 1 ] && grep -qx 'rustup toolchain install 1.99.1 --profile minimal -c clippy -c rustfmt' "$R2/.calls" && ! grep -q 'rustup-init' "$R2/.calls" && ok "apply installs the missing toolchain only" || bad "reinstall calls: $(cat "$R2/.calls")"
+# Components and targets from the config; no toolchain configured: rust is not touched.
+R3=$W/r3
+mkdir -p "$R3"
+conf
+printf 'RUST_COMPONENTS=clippy\nRUST_TARGETS=wasm32-unknown-unknown x86_64-unknown-linux-musl\n' >>"$W/node.conf"
+run "$R3" apply
+grep -qx 'rustup toolchain install stable --profile minimal -c clippy -t wasm32-unknown-unknown -t x86_64-unknown-linux-musl' "$R3/.calls" && ok "RUST_COMPONENTS and RUST_TARGETS reach rustup" || bad "components and targets: $(grep rustup "$R3/.calls")"
+R4=$W/r4
+mkdir -p "$R4"
+conf
+grep -v '^RUST_TOOLCHAINS=' "$W/node.conf" >"$W/c2" && mv "$W/c2" "$W/node.conf"
+run "$R4" check
+grep -q '^drift: rust' "$W/out" && bad "no RUST_TOOLCHAINS, yet rust drifts: $(grep '^drift: rust' "$W/out")" || ok "without RUST_TOOLCHAINS check says nothing about rust"
+conf
+
+# 5g. toolchains.sh: one line per rust toolchain; go, node and the C tools by the version they
+# print (the machine it runs on), no digest of /usr or /etc.
+TC=$W/tc
+mkdir -p "$TC/usr/bin" "$TC/usr/lib/go/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin" "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu"
+printf '#!/bin/sh\necho "commit-hash: abc123"\n' >"$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc"
+printf '#!/bin/sh\necho "go version go1.24.0 linux/amd64"\n' >"$TC/usr/lib/go/bin/go"
+printf '#!/bin/sh\necho v22.1.0\n' >"$TC/usr/bin/node"
+printf '#!/bin/sh\necho "gcc (stub) 13.2.0"\necho second line\n' >"$TC/usr/bin/gcc"
+chmod 755 "$TC/rh/toolchains/1.99.1-x86_64-unknown-linux-gnu/bin/rustc" "$TC/usr/lib/go/bin/go" "$TC/usr/bin/node" "$TC/usr/bin/gcc"
+sh "$here/toolchains.sh" "$TC" "$TC/rh" >"$W/out" 2>"$W/err"
+grep -q '^rust 1.99.1-x86_64-unknown-linux-gnu abc123 [0-9a-f]\{12\}$' "$W/out" && ok "toolchains.sh: a rust line with name, commit and digest" || bad "rust line: $(cat "$W/out" "$W/err")"
+grep -qx 'go go1.24.0' "$W/out" && ok "toolchains.sh: go prints its bare version" || bad "go line: $(grep '^go' "$W/out")"
+# The workstation's Arch build prints `go1.27.1-X:nodwarf5`; the node's archive build `go1.27.1`.
+# Both give the same line. A node has go and node in /usr/local/bin (the archive pins).
+mkdir -p "$TC/p2/usr/local/bin" "$TC/p2/usr/lib/go/bin" "$TC/p2/usr/bin"
+printf '#!/bin/sh\necho "go version go1.27.1-X:nodwarf5 linux/amd64"\n' >"$TC/p2/usr/lib/go/bin/go"
+printf '#!/bin/sh\necho "go version go1.27.1 linux/amd64"\n' >"$TC/p2/usr/local/bin/go"
+printf '#!/bin/sh\necho v22.23.3\n' >"$TC/p2/usr/local/bin/node"
+printf '#!/bin/sh\necho v18.0.0\n' >"$TC/p2/usr/bin/node"
+chmod 755 "$TC/p2/usr/lib/go/bin/go" "$TC/p2/usr/local/bin/go" "$TC/p2/usr/local/bin/node" "$TC/p2/usr/bin/node"
+sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go \|^node ' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "go go1.27.1,node v22.23.3," ] && ok "toolchains.sh: the archive build's go and node in /usr/local/bin first" || bad "usr/local/bin lines: $(cat "$W/out2")"
+rm -f "$TC/p2/usr/local/bin/go"
+sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go ' >"$W/out2"
+[ "$(cat "$W/out2")" = "go go1.27.1" ] && ok "toolchains.sh: go1.27.1-X:nodwarf5 prints as go1.27.1" || bad "nodwarf5 line: $(cat "$W/out2")"
+grep -qx 'node v22.1.0' "$W/out" && ok "toolchains.sh: node prints its version" || bad "node line: $(grep '^node' "$W/out")"
+grep -qx 'c gcc gcc (stub) 13.2.0' "$W/out" && ok "toolchains.sh: gcc prints the first line of its version" || bad "gcc line: $(grep '^c gcc' "$W/out")"
+grep -qx 'c clang missing' "$W/out" && ok "toolchains.sh: a missing compiler is named" || bad "clang line: $(grep '^c clang' "$W/out")"
+grep -q '^c usr \|^c etc \|^c mingw-sysroot' "$W/out" && bad "toolchains.sh still digests /usr, /etc or the mingw sysroot: $(grep '^c usr\|^c etc\|^c mingw' "$W/out")" || ok "toolchains.sh: no digest of /usr, /etc or the mingw sysroot"
 
 # 5c. Closing the setup login ends the connections still logged in with the setup key; the
 # build key's connections stay. The node's sshd log names each connection's pid and key.
@@ -283,36 +450,32 @@ NODE_TEST=1 NODE_ROOT=$R sh "$W/bundle.sh" >"$W/out" 2>"$W/err"
 st=$?
 if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "bundle check: 0 drift"; else bad "bundle check exit $st: $(cat "$W/out" "$W/err" | tail -5)"; fi
 
-# 6b. push.sh compares file by file: a file a node job added to a copied directory (a cache)
-# is not drift; a file missing or of another size on the node is.
+# 6b. push.sh check compares only what a node cannot get from its packages alone: the rust, go and
+# node lines of toolchains.sh and the release of each pinned tool. The C tools differ between
+# machines and are not compared; nothing else is a file, so there is no file to compare.
 U=$here/push.sh
 # The node reports each pinned tool's release as `pin <name> <version>`; the workstation's lines
 # for them (it may not have them) are not compared.
 pins_ok=$(sh "$P" pins | sed 's/^/pin /')
-printf 'host ws\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\npin geckodriver missing\n' >"$W/here"
-printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 5\ncopy .cache/t/b 7\ncopy .cache/t/job-added 3\n%s\n' "$pins_ok" >"$W/node"
+printf 'host ws\nrust 1.99.1-x86_64-unknown-linux-gnu abc 111\ngo go1.24.0 linux/amd64\nnode v22.1.0\nc gcc gcc 13.2.0\nc clang clang 17\npin geckodriver missing\n' >"$W/here"
+printf 'host node\nrust 1.99.1-x86_64-unknown-linux-gnu abc 111\ngo go1.24.0 linux/amd64\nnode v22.1.0\nc gcc gcc 11.4.0\nc clang missing\n%s\n' "$pins_ok" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>"$W/err"
 st=$?
-[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "a file a job added on the node is not drift" || bad "job-added file: exit $st $(cat "$W/out" "$W/err")"
-printf 'host node\nbin cargo-x 10\ncopy .cache/t/a 6\nbin cargo-y 3\n%s\n' "$pins_ok" >"$W/node"
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "equal rust, go and node lines: 0 drift, C tools not compared" || bad "equal lines: exit $st $(cat "$W/out" "$W/err")"
+printf 'host node\nrust 1.99.1-x86_64-unknown-linux-gnu def 111\ngo go1.25.0 linux/amd64\n%s\n' "$pins_ok" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>"$W/err"
 st=$?
 [ $st -eq 1 ] && ok "compare with differences exits 1" || bad "compare with differences exit $st"
-grep -qx 'drift: push: workstation has: copy .cache/t/a 5' "$W/out" && ok "a file of another size is drift" || bad "size: $(cat "$W/out")"
-grep -qx 'drift: push: workstation has: copy .cache/t/b 7' "$W/out" && ok "a file missing on the node is drift" || bad "missing: $(cat "$W/out")"
-grep -qx 'drift: push: only on the node: bin cargo-y 3' "$W/out" && ok "a cargo tool only on the node is drift" || bad "bin: $(cat "$W/out")"
-grep -q '^3 drift$' "$W/out" && ok "three differences: 3 drift" || bad "count: $(cat "$W/out")"
-printf 'host ws\nbin ess 10\nsum ess aaaa\n' >"$W/here"
-printf 'host node\nbin ess 10\nsum ess bbbb\n' >"$W/node"
-sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
-st=$?
-[ $st -eq 1 ] && grep -qx 'drift: push: workstation has: sum ess aaaa' "$W/out" && ok "a node ess of the same size and another digest is drift" || bad "ess digest: exit $st $(cat "$W/out")"
-printf 'host ws\nbin cargo-x 10\n' >"$W/here"
-printf 'host node\nbin cargo-x 10\n%s\n' "$(echo "$pins_ok" | sed 's/^pin geckodriver .*/pin geckodriver 0.36.0/')" >"$W/node"
+grep -qx 'drift: push: workstation has: rust 1.99.1-x86_64-unknown-linux-gnu abc 111' "$W/out" && grep -qx 'drift: push: only on the node: rust 1.99.1-x86_64-unknown-linux-gnu def 111' "$W/out" && ok "a rust toolchain of another commit is drift" || bad "rust: $(cat "$W/out")"
+grep -qx 'drift: push: workstation has: go go1.24.0 linux/amd64' "$W/out" && grep -qx 'drift: push: only on the node: go go1.25.0 linux/amd64' "$W/out" && ok "another go version is drift" || bad "go: $(cat "$W/out")"
+grep -qx 'drift: push: workstation has: node v22.1.0' "$W/out" && ok "a node missing on the node is drift" || bad "node: $(cat "$W/out")"
+grep -q '^5 drift$' "$W/out" && ok "five differences: 5 drift" || bad "count: $(cat "$W/out")"
+printf 'host ws\nrust a b c\n' >"$W/here"
+printf 'host node\nrust a b c\n%s\n' "$(echo "$pins_ok" | sed 's/^pin geckodriver .*/pin geckodriver 0.36.0/')" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
 st=$?
 [ $st -eq 1 ] && grep -qx "drift: push: pin geckodriver: node has 'geckodriver 0.36.0', want geckodriver 0.37.1" "$W/out" && ok "push.sh check names a pinned tool of another release on the node" || bad "pin drift: exit $st $(cat "$W/out")"
-printf 'host node\nbin cargo-x 10\n%s\n' "$(echo "$pins_ok" | grep -v '^pin geckodriver ')" >"$W/node"
+printf 'host node\nrust a b c\n%s\n' "$(echo "$pins_ok" | grep -v '^pin geckodriver ')" >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
 st=$?
 [ $st -eq 1 ] && grep -qx "drift: push: pin geckodriver: node has 'missing', want geckodriver 0.37.1" "$W/out" && ok "push.sh check names a pinned tool missing on the node" || bad "pin missing: exit $st $(cat "$W/out")"
@@ -320,52 +483,26 @@ printf 'host ws\n' >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "a result from the workstation itself is refused" || bad "same host not refused"
 
-# 6c. push.sh apply keeps the setup login's ssh connection to itself and ends it on exit: a
-# shared control connection outlives the key's removal from authorized_keys.
-printf '#!/bin/sh\necho "$*" >>"%s"\nexit 1\n' "$W/ssh.log" >"$W/fake-ssh"
-chmod 755 "$W/fake-ssh"
-: >"$W/ssh.log"
+# 6c. push.sh copies nothing: apply and bins are gone, check says so. The check job is `slot` run
+# in the node's checkout; a stand-in slot runs the digest here and reports another host name.
+mkdir -p "$W/home/.cargo/bin" "$W/bin"
+# task prints the bare version (`3.54.0`), the other pinned tools `<name> <version>`.
+sh "$P" pins | while read -r b v; do if [ "$b" = task ]; then printf '#!/bin/sh\necho "%s"\n' "$v"; else printf '#!/bin/sh\necho "%s %s"\n' "$b" "$v"; fi >"$W/home/.cargo/bin/$b"; chmod 755 "$W/home/.cargo/bin/$b"; done
+printf '#!/bin/sh\n"$@" | sed "s/^host .*/host stand-in-node/"\n' >"$W/bin/slot"
+chmod 755 "$W/bin/slot"
 conf
-printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
-mkdir -p "$W/home"
-HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
-n=$(grep -c . "$W/ssh.log")
-[ "$n" -gt 0 ] && ok "apply used the configured ssh ($n calls)" || bad "apply made no ssh call: $(tail -3 "$W/err")"
-grep -v -- '-o ControlPath=' "$W/ssh.log" | grep -q . && bad "an ssh call without a private control path: $(grep -v -- '-o ControlPath=' "$W/ssh.log" | head -1)" || ok "every ssh call names a private control path"
-tail -1 "$W/ssh.log" | grep -q -- '-O exit node-setup' && ok "apply ends the control connection" || bad "last ssh call: $(tail -1 "$W/ssh.log")"
-
-# 6d. push.sh apply copies only under the copy list the last root apply wrote on the node
-# (/etc/slot-node/copies), and prints the list first.
-grep -qx '.m2/repository go/bin' "$R/etc/slot-node/copies" 2>/dev/null && bad "copies written before the key exists" || :
-conf
-printf 'HOME_COPIES=.m2/repository go/bin\n' >>"$W/node.conf"
-# A bundle runs provision.sh under umask 077 (its unpacked config stays private); the directory
-# that holds the copy list must still be readable, or push.sh reads no list on the node.
-rm -rf "$R/etc/slot-node"
-(umask 077 && run "$R" apply)
-[ "$(cat "$R/etc/slot-node/copies" 2>/dev/null)" = ".m2/repository go/bin" ] && ok "apply writes the approved copy list" || bad "copies: $(cat "$R/etc/slot-node/copies" 2>&1)"
-[ "$(stat -c %a "$R/etc/slot-node/copies" 2>/dev/null)" = 644 ] && ok "the copy list is readable by the build user" || bad "copies mode $(stat -c %a "$R/etc/slot-node/copies" 2>&1)"
-[ "$(stat -c %a "$R/etc/slot-node" 2>/dev/null)" = 755 ] && ok "under umask 077 apply makes /etc/slot-node 755" || bad "/etc/slot-node mode $(stat -c %a "$R/etc/slot-node" 2>&1) under umask 077"
-[ "$(stat -c %a "$R/etc/slot-node/node.conf" 2>/dev/null)" = 600 ] && ok "node.conf stays 600" || bad "node.conf mode $(stat -c %a "$R/etc/slot-node/node.conf" 2>&1)"
-# A node that ran an older apply has the directory at 700: check reports it, apply opens it.
-chmod 700 "$R/etc/slot-node"
-run "$R" check
-grep -q 'drift: libexec: /etc/slot-node is mode 700' "$W/out" && ok "check reports /etc/slot-node at 700" || bad "check missed the directory mode: $(grep slot-node "$W/out" | head -2)"
-run "$R" apply
-[ "$(stat -c %a "$R/etc/slot-node" 2>/dev/null)" = 755 ] && ok "apply sets an existing /etc/slot-node to 755" || bad "/etc/slot-node mode $(stat -c %a "$R/etc/slot-node" 2>&1) after apply"
-printf '#!/bin/sh\necho "$*" >>"%s"\ncase "$*" in *"cat /etc/slot-node/copies"*) cat "%s"; exit 0 ;; esac\nexit 1\n' "$W/ssh.log" "$W/node-copies" >"$W/fake-ssh"
-printf 'NODE_SSH=%s\nPUSH_HOST=node-setup\nRUST_TOOLCHAINS=none\n' "$W/fake-ssh" >>"$W/node.conf"
-echo '.m2/repository go/bin .cache/other' >"$W/node-copies"
-: >"$W/ssh.log"
-HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+sed -i "s|^BUILD_HOME=.*|BUILD_HOME=$W/home|" "$W/node.conf"
+printf 'NODE_SSH=false\nNODE_HOST=node-1\nNODE_RUN_DIR=%s\n' "$W/home" >>"$W/node.conf"
+for m in apply bins; do
+  HOME=$W/home sh "$U" $m "$W/node.conf" >"$W/out" 2>"$W/err"
+  st=$?
+  [ $st -eq 2 ] && grep -qi "usage\|push.sh" "$W/err" && ok "push.sh $m is gone" || bad "push.sh $m still runs: exit $st $(cat "$W/out" "$W/err" | head -3)"
+done
+HOME=$W/home PATH=$W/bin:$PATH sh "$U" check "$W/node.conf" >"$W/out" 2>"$W/err"
 st=$?
-[ $st -eq 2 ] && grep -q 'approved copy list' "$W/err" && ok "another approved list: apply refuses" || bad "other list: exit $st $(cat "$W/err" | tail -2)"
-grep -q 'rsync' "$W/ssh.log" && bad "copied under another list" || ok "nothing copied under another list"
-echo '.m2/repository go/bin' >"$W/node-copies"
-: >"$W/ssh.log"
-HOME=$W/home sh "$U" apply "$W/node.conf" >"$W/out" 2>"$W/err"
-grep -qx 'push: copy list: .m2/repository go/bin' "$W/out" && ok "apply prints the copy list" || bad "no list line: $(head -2 "$W/out")"
-grep -q 'rsync' "$W/ssh.log" && ok "the same list: apply copies" || bad "same list, no copy: $(cat "$W/err" | tail -2)"
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "push.sh check: equal machines print 0 drift" || bad "push check: exit $st $(cat "$W/out" "$W/err" | tail -4)"
+grep -qx 'push: nothing is copied to the node; it installs everything itself (provision.sh apply)' "$W/out" && ok "push.sh check says that nothing is copied" || bad "no 'nothing is copied' line: $(cat "$W/out")"
+grep -rq 'rsync' "$U" && bad "push.sh still mentions rsync" || ok "push.sh has no copy function"
 
 # 6e. A git or ssh call on the node that asks for a credential prints what to do: fetch on the
 # workstation; `slot --here` only for the one step that reads a credential while it runs, not a
@@ -377,17 +514,8 @@ for b in no-credentials ssh; do
   echo "$msg" | grep -q 'or run this step with slot --here' && bad "$b: still offers --here for any step" || ok "$b: no --here for any step"
 done
 
-# 6f. push.sh copies the workstation's cargo tools but the pinned ones and SKIP_BINS.
-mkdir -p "$W/home/.cargo/bin"
-for b in cargo-x ess wasm-bindgen wasm-bindgen-test-runner wasm2es6js cargo-skipped; do : >"$W/home/.cargo/bin/$b"; done
-conf
-printf 'SKIP_BINS=cargo-skipped\n' >>"$W/node.conf"
-HOME=$W/home sh "$U" bins "$W/node.conf" >"$W/out" 2>"$W/err"
-st=$?
-[ $st -eq 0 ] && [ "$(cat "$W/out" | tr '\n' ' ')" = "cargo-x ess " ] && ok "push copies cargo-x and ess and leaves the pinned tools and SKIP_BINS" || bad "push bins: exit $st: $(cat "$W/out" "$W/err")"
-
-# 6g. One base ess makes one choice per repository, on the workstation and on a node that has
-# its copy: an exact pin runs that release from ess's own cache (here a stand-in for 0.99.1);
+# 6g. One base ess makes one choice per repository, wherever it is installed: an exact pin runs
+# that release from ess's own cache (here a stand-in for 0.99.1);
 # a line pin the base cannot serve fails with ess's own line, and runs no other release. Needs
 # an ess on PATH (the workstation has one; a CI runner without it skips).
 if command -v ess >/dev/null 2>&1 && base=$(ess --version 2>/dev/null | sed -n 's/^ess //p') && [ -n "$base" ]; then
@@ -410,6 +538,184 @@ if command -v ess >/dev/null 2>&1 && base=$(ess --version 2>/dev/null | sed -n '
 else
   echo "ok - skipped: no ess on PATH"
 fi
+
+# 6i. The real download paths (slot, pinned tools, rustup-init, archives) refuse a file whose
+# SHA-256 is not the expected one: nothing is unpacked and nothing downloaded runs.
+# NODE_TEST_REAL_FETCH=1 makes the four fetch functions take their real branch while every other
+# system query and action stays a stub; `curl` and `tar` on PATH are stand-ins that serve a file
+# that is not what the pin says and record their calls.
+conf
+mkdir -p "$W/stubbin"
+cat >"$W/stubbin/curl" <<EOF
+#!/bin/sh
+echo "\$*" >>"$W/curl.log"
+out=
+url=
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -fsSLo) out=\$2; shift ;;
+    -*) ;;
+    *) url=\$1 ;;
+  esac
+  shift
+done
+[ -n "\$out" ] || out=\${url##*/}
+case \$out in
+  SHA256SUMS) printf '%s  slot-0.36.0-x86_64-unknown-linux-gnu.tar.gz\n' "\$(cat "$W/slot-sum")" >"\$out" ;;
+  *) printf '#!/bin/sh\ntouch "$W/ran"\n' >"\$out" ;;
+esac
+EOF
+printf '#!/bin/sh\necho "$*" >>"%s/tar.log"\nexit 1\n' "$W" >"$W/stubbin/tar"
+chmod 755 "$W/stubbin/curl" "$W/stubbin/tar"
+realrun() { NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_ROOT=$1 PATH=$W/stubbin:$PATH sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"; }
+RF=$W/r6
+mkdir -p "$RF"
+printf '%064d\n' 0 >"$W/slot-sum"
+: >"$W/curl.log"
+: >"$W/tar.log"
+rm -f "$W/ran"
+realrun "$RF"
+st=$?
+[ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task rustup archive:go archive:node; do
+  grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
+done
+[ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"
+[ ! -e "$W/ran" ] && ok "wrong SHA-256: no downloaded file runs" || bad "a downloaded file ran"
+[ "$(grep -c 'rustup-init\|go1.27.1\|node-v22\|task_linux\|nextest\|geckodriver\|wasm-bindgen\|sccache\|slot-0.36' "$W/curl.log")" -ge 9 ] && ok "wrong SHA-256: every download was attempted" || bad "curl calls: $(cat "$W/curl.log")"
+# Control: with the SHA256SUMS line that matches the served file, tar is reached (so the stand-in
+# tar would record a call if the check had failed open above), with no owner taken from the archive.
+RG=$W/r6b
+mkdir -p "$RG"
+printf '#!/bin/sh\ntouch "%s/ran"\n' "$W" | sha256sum | cut -d' ' -f1 >"$W/slot-sum"
+: >"$W/tar.log"
+realrun "$RG"
+grep -q 'xzf slot-0.36.0-x86_64-unknown-linux-gnu.tar.gz' "$W/tar.log" && ok "control: a matching SHA-256 reaches tar" || bad "control: tar not reached: $(cat "$W/tar.log")"
+grep -q -- '--no-same-owner' "$W/tar.log" && ok "slot's tar takes no owner from the archive" || bad "slot's tar has no --no-same-owner: $(cat "$W/tar.log")"
+[ "$(grep -c 'no-same-owner' "$here/provision.sh")" -ge 3 ] && ok "every tar of provision.sh that runs as root has --no-same-owner" || bad "--no-same-owner count: $(grep -c 'no-same-owner' "$here/provision.sh")"
+[ "$(grep -c 'u-s,g-s' "$here/provision.sh")" -ge 3 ] && ok "unpacked trees lose setuid and setgid (static check)" || bad "u-s,g-s count: $(grep -c 'u-s,g-s' "$here/provision.sh")"
+
+# 6j. After apply changed a unit file or replaced the slot binary, each running unit it affects
+# restarts: sccache-node always, slot-node when no job runs (else a pending line). check reports a
+# running unit whose loaded definition, process environment or slot binary is not what its file
+# and the config say.
+conf
+R7=$W/r7
+mkdir -p "$R7"
+run "$R7" apply
+run "$R7" check
+[ $? -eq 0 ] && ok "units started by apply match their files: 0 drift" || bad "after the first apply: $(cat "$W/out")"
+echo 'Environment=EXTRA=1' >>"$R7/etc/systemd/system/sccache-node.service"
+sed -i 's/^GO_PRIVATE=.*/GO_PRIVATE=git.other.org/' "$W/node.conf"
+echo 1 >"$R7/.state/jobs"
+: >"$R7/.calls"
+run "$R7" apply
+grep -qx 'systemctl restart sccache-node.service' "$R7/.calls" && ok "a changed unit file: sccache-node restarts" || bad "no sccache-node restart: $(cat "$R7/.calls")"
+grep -qx 'systemctl restart slot-node.service' "$R7/.calls" && bad "slot-node restarted with a job running" || ok "a changed unit file: slot-node waits while a job runs"
+grep -q '^pending: running: slot-node' "$W/err" && ok "slot-node's restart is a pending line" || bad "no pending line: $(cat "$W/err")"
+run "$R7" check
+st=$?
+[ $st -eq 1 ] && grep -q '^drift: running: slot-node.service: ' "$W/out" && ok "check names slot-node running an older definition" || bad "stale slot-node not named: exit $st $(cat "$W/out")"
+echo 0 >"$R7/.state/jobs"
+: >"$R7/.calls"
+run "$R7" apply
+grep -qx 'systemctl restart slot-node.service' "$R7/.calls" && ok "with no job running slot-node restarts" || bad "no slot-node restart: $(cat "$R7/.calls")"
+run "$R7" check
+[ $? -eq 0 ] && ok "after the restarts: 0 drift" || bad "after the restarts: $(cat "$W/out")"
+echo 'Environment=OLD=1' >"$R7/.state/loaded/sccache-node.service"
+run "$R7" check
+grep -q '^drift: running: sccache-node.service: .*loaded' "$W/out" && ok "check names a loaded definition that is not the unit file" || bad "loaded definition: $(cat "$W/out")"
+: >"$R7/.calls"
+run "$R7" apply
+grep -qx 'systemctl restart sccache-node.service' "$R7/.calls" && ok "apply restarts the unit whose loaded definition differs" || bad "no restart: $(cat "$R7/.calls")"
+echo 'slot 0.35.0' >"$R7/.state/running-version/slot-node.service"
+run "$R7" check
+grep -q "^drift: running: slot-node.service: .*slot 0.35.0.*slot 0.36.0" "$W/out" && ok "check names a running slot of another version" || bad "running slot version: $(cat "$W/out")"
+run "$R7" apply
+run "$R7" check
+[ $? -eq 0 ] && ok "after the slot restart: 0 drift" || bad "after the slot restart: $(cat "$W/out")"
+printf '#!/bin/sh\necho slot 0.35.0\n' >"$R7/srv/slot/bin/slot"
+: >"$R7/.calls"
+run "$R7" apply
+grep -qx 'changed: slot: slot 0.36.0 installed at /srv/slot/bin/slot' "$W/out" && grep -qx 'systemctl restart slot-node.service' "$R7/.calls" && ok "a replaced slot binary restarts slot-node" || bad "replaced binary: $(cat "$W/out" "$R7/.calls")"
+
+# 6k. The user's commands run with a clean environment: nothing of the provisioning run's own
+# variables reaches them, and PATH is the units' PATH.
+conf
+R8=$W/r8
+mkdir -p "$R8"
+run "$R8" apply
+printf '#!/bin/sh\nenv >"%s/env.log"\necho "geckodriver 0.37.1"\n' "$W" >"$R8/srv/slot/cargo/bin/geckodriver"
+chmod 755 "$R8/srv/slot/cargo/bin/geckodriver"
+rm -f "$W/env.log"
+NODE_TEST=1 NODE_ROOT=$R8 SLOT_LEAK=leaked sh "$P" check "$W/node.conf" >"$W/out" 2>"$W/err"
+[ -f "$W/env.log" ] && ok "a user command ran under check" || bad "no user command ran: $(cat "$W/err")"
+grep -q '^SLOT_LEAK=\|^NODE_ROOT=\|^NODE_TEST=' "$W/env.log" && bad "provisioning variables reach a user command: $(grep '^SLOT_LEAK=\|^NODE_ROOT=\|^NODE_TEST=' "$W/env.log")" || ok "variables of the provisioning run are not visible to a user command"
+grep -qx 'HOME=/var/lib/builder' "$W/env.log" && grep -q '^PATH=/srv/slot/nodebin:/var/lib/builder/.cargo/bin:/usr/local/bin:/usr/bin:' "$W/env.log" && ok "a user command gets HOME and the units' PATH" || bad "user environment: $(cat "$W/env.log")"
+
+# 6l. The metadata service is closed before the build key goes in and before anything runs as the
+# build user; a start that does not close it is a `failed:` line, exit 1, and no key.
+conf
+R9=$W/r9
+mkdir -p "$R9"
+: >"$R9/.state-imds-stays-open"
+run "$R9" apply
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: imds: ' "$W/err" && ok "an imds start that does not close it: failed line, exit 1" || bad "imds still open: exit $st $(cat "$W/err" | tail -3)"
+[ -e "$R9/var/lib/builder/.ssh/authorized_keys" ] && bad "the build key was installed with the metadata service open" || ok "no key while the metadata service is open"
+grep -q 'rustup-init\|fetch https://github.com/wasm-bindgen' "$R9/.calls" && bad "a download ran as the build user's installer with the metadata service open" || ok "no rustup or pinned tool install while the metadata service is open"
+rm -f "$R9/.state-imds-stays-open"
+run "$R9" apply
+run "$R9" check
+[ $? -eq 0 ] && [ -e "$R9/var/lib/builder/.ssh/authorized_keys" ] && ok "once it closes, apply finishes: key in, 0 drift" || bad "after imds closes: $(cat "$W/out" "$W/err" | tail -4)"
+
+# 6m. Components and targets are made good on a toolchain that is already there: check names a
+# missing one, apply adds only that one.
+conf
+printf 'RUST_COMPONENTS=clippy rustfmt\nRUST_TARGETS=wasm32-unknown-unknown\n' >>"$W/node.conf"
+RA=$W/r10
+mkdir -p "$RA"
+run "$RA" apply
+run "$RA" check
+[ $? -eq 0 ] && ok "components and targets installed with the toolchain: 0 drift" || bad "components after install: $(cat "$W/out")"
+td=$RA/srv/slot/rustup/toolchains/1.99.1-x86_64-unknown-linux-gnu
+printf 'clippy-x86_64-unknown-linux-gnu\nrust-std-x86_64-unknown-linux-gnu\n' >"$td/.components"
+: >"$td/.targets"
+run "$RA" check
+grep -qx 'drift: rust:1.99.1: component rustfmt missing' "$W/out" && grep -qx 'drift: rust:1.99.1: target wasm32-unknown-unknown missing' "$W/out" && ok "check names a missing component and a missing target" || bad "component drift: $(grep rust "$W/out")"
+grep -q 'rust:stable\|component clippy' "$W/out" && bad "check names what is there: $(grep 'rust:stable\|clippy' "$W/out")" || ok "check names only what is missing"
+: >"$RA/.calls"
+run "$RA" apply
+grep -qx 'rustup component add --toolchain 1.99.1 rustfmt' "$RA/.calls" && grep -qx 'rustup target add --toolchain 1.99.1 wasm32-unknown-unknown' "$RA/.calls" && ok "apply adds the missing component and target" || bad "add calls: $(cat "$RA/.calls")"
+grep -q 'toolchain install\|add --toolchain stable\|add --toolchain 1.99.1 clippy' "$RA/.calls" && bad "apply did more than add the missing ones: $(cat "$RA/.calls")" || ok "apply adds only the missing ones"
+run "$RA" check
+[ $? -eq 0 ] && ok "after the adds: 0 drift" || bad "after the adds: $(cat "$W/out")"
+
+# 6n. EXTRA_PACKAGES and the RUST_* names are refused when they could carry an option or a shell
+# word (cases in section 1); push.sh prints nothing a node could use to move a terminal.
+printf 'host ws\nrust a b c\n' >"$W/here"
+printf 'host node\nrust a b c\ngo go1.0\033[31mred\033]0;title\007\nnode v1\n%s\n' "$(sh "$P" pins | sed 's/^/pin /')" >"$W/node"
+sh "$here/push.sh" compare "$W/here" "$W/node" >"$W/out" 2>&1
+tr -d '\000-\010\013-\037\177' <"$W/out" | cmp -s - "$W/out" && ok "push.sh prints no control character from the node's output" || bad "control characters in the push.sh output"
+grep -q 'only on the node: go go1.0.*red' "$W/out" && ok "the printable part of the node's line is still shown" || bad "drift line lost: $(cat "$W/out" | head -3)"
+grep -q 'version parity report, not an integrity check' "$here/README.md" && ok "README says push.sh check is not an integrity check" || bad "README lacks the parity-report line"
+
+# 6h. The example config carries what consumers build with: the rust toolchains and the wasm
+# target, the dnf packages that exist on the node's repositories. Go and node come from the
+# archive pins, so neither a golang nor a nodejs package is listed.
+ex=$here/node.conf.example
+sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "$RUST_TOOLCHAINS|$RUST_TARGETS|$EXTRA_PACKAGES"' sh "$here" >"$W/out" 2>"$W/err"
+IFS='|' read -r ex_tc ex_tg ex_pk <"$W/out"
+[ "$ex_tc" = "1.85.0 1.91.0 1.91.1 1.97 1.98.0 1.98.1 1.99.0 1.99.1 1.100.0 stable" ] && ok "example: the consumers' rust toolchains" || bad "example toolchains: '$ex_tc' $(cat "$W/err")"
+[ "$ex_tg" = "wasm32-unknown-unknown" ] && ok "example: the wasm target" || bad "example targets: '$ex_tg'"
+for p in jq sqlite bzip2 unzip binutils rsync git gcc gcc-c++ make cmake clang clang-devel llvm20 llvm-devel alsa-lib-devel postgresql17 postgresql17-server java-21-amazon-corretto-devel java-17-amazon-corretto-devel java-11-amazon-corretto-devel java-1.8.0-amazon-corretto-devel maven xorg-x11-server-Xvfb gtk3 libnotify libXScrnSaver libXtst at-spi2-atk atk mesa-libgbm libxkbcommon nss; do
+  case " $ex_pk " in *" $p "*) ;; *) bad "example EXTRA_PACKAGES lacks $p" ;; esac
+done
+for p in golang nodejs nodejs-npm nodejs22 mingw64-gcc musl-gcc dash mawk erlang elixir odin gh; do
+  case " $ex_pk " in *" $p "*) bad "example EXTRA_PACKAGES lists $p" ;; esac
+done
+ok "example: package list checked"
+grep -q 'not installed; a job that needs one is held by name' "$here/README.md" && ok "README names the packages that are not installed" || bad "README has no 'not installed; a job that needs one is held by name'"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

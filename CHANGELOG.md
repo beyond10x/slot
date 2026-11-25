@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- Node provisioning, from a review: tests run the real download paths (slot, pinned tools,
+  rustup-init, go and node) against a file with the wrong SHA-256 and see nothing unpacked or run;
+  `apply` restarts `sccache-node` when its unit changed and `slot-node` when its unit, its
+  arguments or the slot binary changed and no job runs (else `pending: running: ...`), and `check`
+  names a running unit whose loaded definition (`systemctl show`), process environment or slot
+  version is not what its file and the config say; each rust toolchain that is there gets the
+  `RUST_COMPONENTS` and `RUST_TARGETS` it lacks (`rustup component add`, `rustup target add`);
+  `tar` as root takes no owner from an archive and unpacked trees lose setuid and setgid; commands
+  of the build user run with a clean environment (`env -i`, the units' `PATH`) and their own
+  session (`setpriv --setsid`); the metadata service is closed and read back before the key,
+  rustup or a pinned tool goes in (`failed: imds:` otherwise); the units' `PATH` puts the store's
+  `nodebin`, the user's `~/.cargo/bin` and `/usr/local/bin` ahead of `/usr/bin` and drops
+  `/usr/local/go/bin`; `push.sh` drops control characters from the node's output and is documented
+  as a version parity report, not an integrity check; `EXTRA_PACKAGES` is validated like the
+  `RUST_*` keys (letters, digits, `.`, `_`, `+`, `-`, no leading dash).
+
+- A build node starts bare and `provision.sh apply` makes it complete; nothing is copied from the
+  workstation to a node any more. `slot-node` and `sccache-node` use the node's own `/usr` and
+  `/etc` (no `rootfs` binds, no wait for a copy) and start on the first `apply`. New `p_rust`
+  installs rustup 1.29.3 (checked against its SHA-256) for the build user into the store, then
+  each toolchain of `RUST_TOOLCHAINS` with `RUST_COMPONENTS` (default `clippy rustfmt`) and
+  `RUST_TARGETS`; `check` names `rustup` and `rust:<name>` when missing. `sccache` joins the
+  pinned tools and `sccache-node.service` runs it from the store's cargo bin. Everything else
+  comes from `EXTRA_PACKAGES`. `toolchains.sh` prints go, node and the C tools by version and
+  drops the digests of `/usr`, `/etc` and the mingw sysroot. `push.sh` keeps only `check`
+  (the rust, go and node lines and the pinned tools' releases) and `compare`; `apply` and `bins`
+  are gone, and so are the config keys `HOME_COPIES`, `ETC_EXTRA` and `SKIP_BINS` (a config file
+  that sets one is refused) and `/etc/slot-node/copies`.
+- The node carries the workstation's go and node releases: `ARCHIVE_PINS` in `provision.sh` (go
+  1.27.1 from go.dev/dl, node v22.23.3 from nodejs.org/dist) are checked with `sha256sum -c
+  --strict`, unpacked as root into `/usr/local/<name>-<version>` and linked into `/usr/local/bin`;
+  `check` names a missing link or another version. `cargo-nextest` 0.9.143 and `task` 3.54.0 join
+  the pinned tools (`task --version` prints the bare version, read as `task <version>`).
+  `toolchains.sh` prints the go line as the bare version (`go go1.27.1`, cut at the first `-`) and
+  looks in `/usr/local/bin` first. `node.conf.example` lists the consumers' rust toolchains, the
+  `wasm32-unknown-unknown` target and the dnf packages; a job that needs a package Amazon Linux
+  2023 lacks (mingw, `musl-gcc`, `dash`, `mawk`, `erlang`, `elixir`, `odin`, `gh`) is held by name.
 - The git dependencies of a remote job reach the node with it. Before the job is placed (remote
   mode, and a job the daemon hands to a node), the client reads every `Cargo.lock` the sync
   sends, takes the `git+` sources and their locked revisions, maps each to its cargo git
