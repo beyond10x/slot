@@ -3,7 +3,8 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
-#   tool <tsc|prettier|esbuild> <version>: no line when the machine has none
+#   tool <tsc|prettier|esbuild> <version>: no line when the machine has none, `missing` as the
+#        version when the file is there and prints none
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
 # push.sh check compares the rust, go, node and tool lines; the C tools are for reading.
@@ -38,7 +39,8 @@ done
 for n in tsc prettier esbuild; do
   for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
-    echo "tool $n $("$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')"
+    tv=$("$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
+    echo "tool $n ${tv:-missing}"
     break
   done
 done

@@ -1275,6 +1275,9 @@ archive_fetch() {
   if fake_fetch; then
     [ -e "$R/.state-tool-fetch-fails" ] && return 0
     for b in "$@"; do
+      fm=755
+      # A word with a link name stands for a script that a tarball ships without the execute bit.
+      case $b in *:*) fm=644 ;; esac
       b=$(archive_src "$b")
       mkdir -p "$fd/tree/$(dirname "$b")" || return 0
       if [ "$fn" = go ]; then
@@ -1282,7 +1285,7 @@ archive_fetch() {
       else
         printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
       fi
-      chmod 755 "$fd/tree/$b"
+      chmod "$fm" "$fd/tree/$b"
     done
     calls "fetch $fu"
   else
@@ -1292,7 +1295,11 @@ archive_fetch() {
   chmod -R go-w,u-s,g-s "$fd/tree"
   chmod -R a+rX "$fd/tree"
   # A script of an npm tarball that is not marked executable there (prettier's bin/prettier.cjs).
-  for b in "$@"; do chmod a+x "$fd/tree/$(archive_src "$b")"; done
+  # A symbolic link is left alone: chmod would follow it out of the tree.
+  for xb in "$@"; do
+    xp=$fd/tree/$(archive_src "$xb")
+    [ -L "$xp" ] || chmod a+x "$xp"
+  done
   echo "$fd/tree"
 }
 # The first line of the version of binary $2 of archive $1, run as the build user.

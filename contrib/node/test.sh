@@ -9,6 +9,10 @@ P=$here/provision.sh
 base=${TMPDIR:-/tmp}
 W=$(mktemp -d "$base/slot-node-test.XXXXXX")
 trap 'rm -rf "$W"' EXIT
+# The tests read no file of the user that runs them: toolchains.sh looks in $HOME/.local/bin.
+HOME=$W/home
+export HOME
+mkdir -p "$HOME"
 fails=0
 ok() { echo "ok - $1"; }
 bad() {
@@ -320,6 +324,7 @@ for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver pre
   [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
 done
 [ "$("$R5/usr/local/bin/prettier" --version)" = "3.8.1" ] && [ "$("$R5/usr/local/bin/esbuild" --version)" = "0.28.2" ] && ok "prettier and esbuild answer their release through the links" || bad "tool versions: $("$R5/usr/local/bin/prettier" --version 2>&1) $("$R5/usr/local/bin/esbuild" --version 2>&1)"
+[ -x "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" ] && [ ! -L "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" ] && ok "a linked script the tarball ships without the execute bit is executable after apply" || bad "prettier.cjs mode: $(ls -l "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" 2>&1)"
 rm -f "$R5/usr/local/bin/prettier"
 rm -rf "$R5/usr/local/esbuild-0.28.2"
 run "$R5" check
@@ -449,6 +454,9 @@ printf '#!/bin/sh\necho 0.28.2\n' >"$TC/home/.local/bin/esbuild"
 chmod 755 "$TC/home/.local/bin/esbuild"
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool esbuild 0.28.2" ] && ok "toolchains.sh: esbuild from the user's ~/.local/bin" || bad "esbuild line: $(cat "$W/out2")"
+printf '#!/bin/sh\nexit 1\n' >"$TC/home/.local/bin/esbuild"
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool esbuild missing" ] && ok "toolchains.sh: a tool that is there and prints no version is 'missing', not a line with a trailing space" || bad "broken tool line: '$(cat "$W/out2")'"
 
 # 5c. Closing the setup login ends the connections still logged in with the setup key; the
 # build key's connections stay. The node's sshd log names each connection's pid and key.
