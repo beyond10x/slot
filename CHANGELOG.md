@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The node installs `geckodriver` 0.37.1 (`TOOL_PINS`), the release on the forge runner image of
+  browser test lanes that run `wasm-bindgen-test-runner` in headless Firefox; Firefox is the
+  workstation's, copied with `/usr`. A pin's download directory may name the version with `%s`
+  (`…/download/v%s`), its archive may hold the binary at its top, and `check` reads the first
+  line of `--version`. `push.sh check` prints `pin <name> <version>` for each pinned tool on the
+  node and reports another release or a missing one as drift.
 - The node's `ess` is the workstation's again: `ess` leaves `TOOL_PINS`, `push.sh` copies it, and
   `push.sh check` compares its SHA-256 (`sum ess …`). ess chooses the release per repository
   itself (an exact `requires` runs that release from its own cache, a line pin the base), so one

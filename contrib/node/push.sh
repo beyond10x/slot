@@ -19,7 +19,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 # Compares the digest lines of the workstation (file $1) with the node's (file $2). Every line
 # counts both ways, except a `copy <dir>/<file> <size>` line only on the node: a job there may
-# add files to a copied directory such as a cache, and push copies without deleting.
+# add files to a copied directory such as a cache, and push copies without deleting. A
+# `pin <name> <version>` line is the release of a tool provision.sh installs (`provision.sh pins`):
+# the node's must be that release, and the workstation's is not compared.
 compare() {
   nh=$(sed -n 's/^host //p' "$2")
   hh=$(sed -n 's/^host //p' "$1")
@@ -27,15 +29,21 @@ compare() {
     echo "push: the digest job did not run on the node (host '${nh:-none}')" >&2
     return 2
   fi
-  grep -v '^host ' "$1" | LC_ALL=C sort >"$1.s"
-  grep -v '^host ' "$2" | LC_ALL=C sort >"$2.s"
-  LC_ALL=C comm -3 "$1.s" "$2.s" | while IFS= read -r l; do
-    case $l in
-      "	copy "*) ;;
-      "	"*) echo "drift: push: only on the node: ${l#	}" ;;
-      *) echo "drift: push: workstation has: $l" ;;
-    esac
-  done >"$2.d"
+  grep -v '^host \|^pin ' "$1" | LC_ALL=C sort >"$1.s"
+  grep -v '^host \|^pin ' "$2" | LC_ALL=C sort >"$2.s"
+  {
+    sh "$here/provision.sh" pins | while read -r pb pv; do
+      got=$(sed -n "s/^pin $pb //p" "$2" | head -n 1)
+      [ "$got" = "$pv" ] || echo "drift: push: pin $pb: node has '$([ -n "$got" ] && echo "$pb $got" || echo missing)', want $pb $pv"
+    done
+    LC_ALL=C comm -3 "$1.s" "$2.s" | while IFS= read -r l; do
+      case $l in
+        "	copy "*) ;;
+        "	"*) echo "drift: push: only on the node: ${l#	}" ;;
+        *) echo "drift: push: workstation has: $l" ;;
+      esac
+    done
+  } >"$2.d"
   rm -f "$1.s" "$2.s"
   cat "$2.d"
   n=$(grep -c . "$2.d")
@@ -167,6 +175,10 @@ done
 # ess chooses the release for every repository from its base binary: the node's must be the
 # workstation's byte for byte, not only of the same size.
 [ -f ess ] && echo "sum ess \$(sha256sum ess | cut -d' ' -f1)"
+for b in $(sh "$here/provision.sh" pins | cut -d' ' -f1 | tr '\n' ' '); do
+  v=\$("./\$b" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f2)
+  echo "pin \$b \${v:-missing}"
+done
 for p in $HOME_COPIES; do
   [ -d "\$HOME/\$p" ] || { echo "copy \$p missing"; continue; }
   (cd "\$HOME/\$p" && find . -type f -printf "copy \$p/%P %s\n")

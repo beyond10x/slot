@@ -43,11 +43,16 @@ usage() {
 
 # Cargo tools the node installs at the release its consumers' CI installs, instead of copying the
 # workstation's: a node job then runs the release its CI runs, and push.sh leaves these binaries
-# out. One line each: name, version, SHA-256 of the release archive, download directory, archive
-# name (%s is the version), the binaries in it. Each binary answers `<binary> <version>`.
+# out. One line each: name, version, SHA-256 of the release archive (.tar.gz), download directory
+# (the version's directory under it, or with %s the version's directory itself), archive name (%s
+# is the version), the binaries in it. The first line of each binary's `--version` starts with
+# `<binary> <version>`.
 # Not ess: it runs the release a repository pins exactly from its own digest-checked cache, so the
 # node's base ess is the workstation's (push.sh) and both choose the same for every repository.
-TOOL_PINS='wasm-bindgen 0.2.130 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f https://github.com/wasm-bindgen/wasm-bindgen/releases/download wasm-bindgen-%s-x86_64-unknown-linux-musl wasm-bindgen wasm-bindgen-test-runner wasm2es6js'
+# geckodriver: the release on the forge runner image of the browser test lanes; Firefox itself is
+# the workstation's, copied with /usr.
+TOOL_PINS='wasm-bindgen 0.2.130 9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f https://github.com/wasm-bindgen/wasm-bindgen/releases/download wasm-bindgen-%s-x86_64-unknown-linux-musl wasm-bindgen wasm-bindgen-test-runner wasm2es6js
+geckodriver 0.37.1 e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e https://github.com/mozilla/geckodriver/releases/download/v%s geckodriver-v%s-linux64 geckodriver'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
 }
@@ -937,17 +942,26 @@ tool_fetch() {
   fd=$1 fv=$2 fs=$3 fu=$4
   fa=$(printf "$5" "$fv")
   shift 5
+  case $fu in
+    *%s*) fl=$(printf "$fu" "$fv")/$fa.tar.gz ;;
+    *) fl=$fu/$fv/$fa.tar.gz ;;
+  esac
   if [ -n "$T" ]; then
     [ -e "$R/.state-tool-fetch-fails" ] && return 0
     mkdir -p "$fd/$fa" || return 0
     for b in "$@"; do printf '#!/bin/sh\necho %s %s\n' "$b" "$fv" >"$fd/$fa/$b" && chmod 755 "$fd/$fa/$b"; done
-    calls "fetch $fa"
+    calls "fetch $fl"
   else
-    (cd "$fd" && curl -fsSLO "$fu/$fv/$fa.tar.gz" &&
+    (cd "$fd" && curl -fsSLO "$fl" &&
       echo "$fs  $fa.tar.gz" | sha256sum -c --strict - >/dev/null && tar -xzf "$fa.tar.gz") || return 0
   fi
   chmod -R go+rX "$fd"
-  echo "$fd/$fa"
+  # An archive that holds its binaries at its top has no directory of its own name.
+  if [ -d "$fd/$fa" ]; then echo "$fd/$fa"; else echo "$fd"; fi
+}
+# The first two words of the first line of a binary's `--version`, run as the build user.
+tool_version() {
+  as_user "$1" --version 2>/dev/null </dev/null | head -n 1 | cut -d' ' -f1,2
 }
 # The pinned tools (TOOL_PINS) in the store's cargo bin, the build user's ~/.cargo/bin: each
 # binary answers `<binary> <version>`; apply installs the ones that do not and reads them back.
@@ -957,7 +971,7 @@ p_tools() {
     todo=
     for b in $tb; do
       p=$STORE/cargo/bin/$b
-      v=$(as_user "$R$p" --version 2>/dev/null </dev/null)
+      v=$(tool_version "$R$p")
       [ "$v" = "$b $tv" ] && continue
       drift "tool:$tn" "$p is '${v:-missing}', want $b $tv"
       todo="$todo $b"
@@ -982,7 +996,7 @@ p_tools() {
         continue
       fi
       as_user sh -c 'mkdir -p "$(dirname "$2")" && install -m 0755 "$1" "$2.slot-new" && mv "$2.slot-new" "$2"' sh "$src/$b" "$R$p" </dev/null
-      v=$(as_user "$R$p" --version 2>/dev/null </dev/null)
+      v=$(tool_version "$R$p")
       if [ "$v" != "$b $tv" ]; then
         failed "tool:$tn" "$p is '${v:-missing}' after the install"
         done_ok=
