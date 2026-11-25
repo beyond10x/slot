@@ -206,6 +206,13 @@ writes the archive's SHA-256 to `.slot-sha256` in the tree. Check runs `ess --ve
 `package.json`, and reports drift when `.slot-sha256` is not the pin's SHA-256. These steps are
 skipped while the metadata service is open, like the other downloads that run as the build user.
 
+The same list holds the aep release binary of runbook's driver pin
+(`~/.cache/sdc/aep/<version>/x86_64-unknown-linux-gnu/aep`; the driver compares its SHA-256 with
+`driver/aep-pin.json`, so the aep built from source on the node's PATH cannot stand in for it). The
+release binary asks for glibc 2.39 through two weak symbols; on the node's 2.34 the loader prints
+one warning and `aep --version` still answers. `toolchains.sh` prints
+`tool sdc-aep-<version> <16 hex digits of the SHA-256>` for it.
+
 The same list holds the Playwright browsers a repository's tests use: the Chrome for Testing
 headless shell of revision 1254 (Playwright 1.65.0) and 1234 (1.62.1) in
 `~/.cache/ms-playwright/chromium_headless_shell-<revision>`. Their lines have the strip field `zip`:

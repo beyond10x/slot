@@ -5,6 +5,7 @@
 #   go <version> / node <version>
 #   tool <tsc|prettier|esbuild|ess|aep|yq|cargo-about|make> <version>: no line when the machine has none,
 #        `missing` as the version when the file is there and prints none
+#   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
 # push.sh check compares the rust, go, node and tool lines; the C tools are for reading.
@@ -48,6 +49,15 @@ for n in tsc prettier esbuild ess aep yq cargo-about make; do
     echo "tool $n ${tv:-missing}"
     break
   done
+done
+# The aep binary of runbook's driver pin, one file per version in the user's cache
+# (~/.cache/sdc/aep/<version>/x86_64-unknown-linux-gnu/aep): `tool sdc-aep-<version> <the first 16
+# hex digits of the file's SHA-256>`. The driver compares the whole digest with its pin, so the
+# digest, not the version the file prints, is what must agree. The file is not run: the release
+# binary asks for a newer glibc than a node has and prints a loader warning.
+for f in "$HOME"/.cache/sdc/aep/*/x86_64-unknown-linux-gnu/aep; do
+  [ -f "$f" ] || continue
+  echo "tool sdc-aep-$(basename "$(dirname "$(dirname "$f")")") $(sha256sum "$f" | cut -c1-16)"
 done
 # C side: the compilers and cross compilers a job resolves through /usr/bin, and the compile cache
 # (a node has it in the build user's cargo bin) with the server that runs it (the process

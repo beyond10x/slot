@@ -442,6 +442,8 @@ for rv in 1254:158.0.8127.18 1234:151.0.7922.34; do
   rd=$R5/var/lib/builder/.cache/ms-playwright/chromium_headless_shell-${rv%%:*}
   [ "$("$rd/chrome-headless-shell-linux64/chrome-headless-shell" --version)" = "Google Chrome for Testing ${rv#*:}" ] && [ -e "$rd/INSTALLATION_COMPLETE" ] && [ -e "$rd/DEPENDENCIES_VALIDATED" ] && ok "Playwright chromium_headless_shell-${rv%%:*} is ${rv#*:} with its two markers" || bad "browser ${rv%%:*}: $(ls -a "$rd" 2>&1)"
 done
+AEPF=$R5/var/lib/builder/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep
+[ -x "$AEPF" ] && [ "$("$AEPF" --version)" = "aep 0.80.0" ] && ok "the pinned aep is at ~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep, where runbook's driver looks" || bad "sdc aep: $(ls -l "$AEPF" 2>&1)"
 rm -rf "$HP/ess-versions/0.99.1"
 printf '#!/bin/sh\necho "ess 0.1.0"\n' >"$HP/ess-versions/0.98.0/ess"
 rm -f "$HP/ess-node/node_modules/undici-types/package.json"
@@ -624,6 +626,15 @@ HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^to
 printf '#!/bin/sh\nexit 1\n' >"$TC/home/.local/bin/esbuild"
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool esbuild missing" ] && ok "toolchains.sh: a tool that is there and prints no version is 'missing', not a line with a trailing space" || bad "broken tool line: '$(cat "$W/out2")'"
+# The aep of runbook's driver pin: a line with the version of the directory and the first 16 hex
+# digits of the file's SHA-256; the file is not run.
+mkdir -p "$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu" "$TC/home/.cache/sdc/aep/0.79.0/aarch64-apple-darwin"
+printf 'not run\n' >"$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep"
+printf 'other target\n' >"$TC/home/.cache/sdc/aep/0.79.0/aarch64-apple-darwin/aep"
+SD=$(sha256sum "$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep" | cut -c1-16)
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool sdc-aep' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool sdc-aep-0.80.0 $SD" ] && ok "toolchains.sh: the pinned aep of the driver's cache is a tool line with its digest, other targets are left out" || bad "sdc-aep line: '$(cat "$W/out2")'"
+rm -rf "$TC/home/.cache"
 # ess, aep, yq and cargo-about: the user's cargo bin and ~/go/bin are searched too. The command runs
 # in / and without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires (an
 # ess-inputs.yaml in the working directory, ESS_TOOLCHAIN in the environment), not its own.
@@ -861,7 +872,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"

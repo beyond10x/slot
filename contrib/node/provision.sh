@@ -101,7 +101,13 @@ SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5ede
 # browsers.json of playwright-core 1.65.0 says 1254 is 158.0.8127.18, 1.62.1 says 1234 is
 # 151.0.7922.34): unzipped without stripping, with the INSTALLATION_COMPLETE and
 # DEPENDENCIES_VALIDATED markers, checked by the version `--version` prints. The libraries the
-# binary needs come from EXTRA_PACKAGES, and `unzip` too.
+# binary needs come from EXTRA_PACKAGES, and `unzip` too. The aep line is the release binary that
+# runbook's driver (`driver/aep-pin.json`) looks for at ~/.cache/sdc/aep/<version>/<target>/aep: its
+# archive SHA-256 is the pin's `archive_sha256`, and the unpacked binary has the pin's
+# `binary_sha256` (17cf105e...), which the driver compares. The release binary asks for
+# GLIBC_2.39 (two weak symbols, pidfd_spawnp and pidfd_getpid); on a node with glibc 2.34 the loader
+# prints one warning on stderr and `--version` still answers `aep 0.80.0`, which is all the driver
+# reads.
 HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
 ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
 ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
@@ -109,7 +115,8 @@ ess 0.99.4 3902d0f8a6dffe5255bd0a9c8f56608fabf52faf14b97d90b6e7f7ed3da7032d http
 @types/node 26.3.0 69b0a537007774b0d5a3bea12736d3506b6ef451241fbca46213fd9e474b0a17 https://registry.npmjs.org/@types/node/-/node-26.3.0.tgz 1 .local/share/ess-node/node_modules/@types/node package.json
 undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json
 chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb53b0fde4bdfc4bd075d6 https://cdn.playwright.dev/builds/cft/158.0.8127.18/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1254 chrome-headless-shell-linux64/chrome-headless-shell
-chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell'
+chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell
+aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
