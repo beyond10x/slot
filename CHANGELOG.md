@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Breaking: a remote job that cannot start (ssh refused or timed out, a failed sync or fetch)
+  no longer runs on this machine's daemon. `slot` prints `slot: remote build on <host> did not
+  start (…); the job did not run (set SLOT_REMOTE_FALLBACK=local …)` and exits with 3. The
+  fallback documented since 0.8.0 runs only with `SLOT_REMOTE_FALLBACK=local`. Why: a build sent
+  to a server ran on the workstation when the server could not be reached, without anyone asking.
 - The node's `ess` is the workstation's again: `ess` leaves `TOOL_PINS`, `push.sh` copies it, and
   `push.sh check` compares its SHA-256 (`sum ess …`). ess chooses the release per repository
   itself (an exact `requires` runs that release from its own cache, a line pin the base), so one
