@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.38.0 — 2026-11-25
+
 - `slot serve --min-free-disk-light <GB>` is a second disk floor for a job whose last 5 runs of
   the same command in the same repository used no compile server (`compile_server_cpu_s` 0) and
   built into no target directory. Such a job waits only below this floor; every other job, a
