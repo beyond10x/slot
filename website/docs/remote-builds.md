@@ -165,6 +165,33 @@ The check is in the `slot` binary, so it holds however the binary is called: wit
 already set, through a wrapper or without one. A list file that cannot be read, or a host
 configuration that does not parse, keeps every job on this machine.
 
+The same lists hold for the [git dependencies](#git-dependencies-come-from-this-machine) the
+checkout's lock files name, together with a second file,
+`$XDG_CONFIG_HOME/slot/remote-deny-origins`. Either file may hold either kind of line:
+
+```text
+/srv/work/customer-a
+origin:*git.example.org[:/]team/*
+```
+
+- `/abs/path`: a path prefix, as above. A `git+file` source whose path lies under it is denied.
+- `origin:<pattern>`: a shell pattern, matched as a shell's `case` matches it (`*` any run of
+  characters, `/` included; `?` one character; `[...]` and `[!...]` classes), against the whole
+  URL cargo fetches: the source without `git+`, its `?query` and its `#revision`
+  (`git+https://git.example.org/team/dep.git?branch=main#…` is
+  `https://git.example.org/team/dep.git`). The pattern above denies that URL and
+  `ssh://git@git.example.org/team/dep`, not `https://git.example.org/teamwork/dep.git`.
+
+Other lines are skipped; the tree check above ignores `origin:` lines. A job stays on this machine
+when a `git+` source of one of its checkout's `Cargo.lock` files is denied, with the reason
+`git dependency denied: <source>`:
+
+```text
+slot: git dependency denied: git+https://git.example.org/team/dep.git?branch=main: the tree is not synced to buildbox; running on this machine
+```
+
+With both files naming nothing no lock file is read.
+
 ## ssh options
 
 By default `slot` calls ssh with a shared control connection, so the sync and the run reuse one
@@ -316,6 +343,35 @@ need the network themselves (`cargo update`, `add`, `install`, `fetch`) run onli
 
 The digests live in `<ws-root>/.cargo-fetch/` on the server and go with their mirror when it is
 evicted. Both features need this release of slot on the server and on the workstation.
+
+## Git dependencies come from this machine
+
+A `git+` source in a `Cargo.lock` may be reachable only from your machine: a private forge the
+server holds no credential for, or no network to. The fetch above runs on the server, and only for
+a cargo command slot sends itself; a wrapper's inner cargo call (`task check`, `make`) fetches on
+the server too.
+
+So before every remote job the client reads each `Cargo.lock` of the checkout that the sync sends,
+and takes the `git+` sources and their locked revisions. A revision missing from this machine's
+cargo git database (`$CARGO_HOME/git/db`) gets `cargo fetch --locked` in that lock file's
+directory here, with your credentials and outside the pool. The client then asks the server which
+of those database entries (`<name>-<hash>`) lack the revision, and copies only those into the
+server's `$CARGO_HOME/git/db` (`~/.cargo/git/db` when it sets none) over the same ssh and rsync:
+
+```text
+slot: git dependencies: 1 copied to buildbox in 0.4 s
+```
+
+cargo on the server then finds the locked revision in its database and does not fetch it. A job
+whose entries are all on the server copies nothing and prints nothing. Only git objects cross:
+no credential, no `FETCH_HEAD`. A source on a deny list keeps the job here
+([above](#trees-that-never-leave-this-machine)).
+
+A step that fails does not stop the job: `slot: git dependency not here: …` names a revision this
+machine could not fetch, and `slot: git dependencies not copied to <host>: …` a probe or copy that
+failed (a server with an older slot answers no probe); the job then runs on the server as before.
+The server needs this release of slot for `slot shell` to admit the probe (`slot __cargo-git`)
+and the copy.
 
 ## Fetch build output back
 
@@ -490,7 +546,9 @@ ssh then runs `slot shell` for every connection with that key, and it runs only 
 remote mode: the sync (`rsync --server` into the workspace root), a fetch (`rsync --server
 --sender` of one or more paths, each in the workspace root or the cache root's `target/`),
 `slot proxy`, `slot cancel <id>`, the sibling step (`slot __siblings` on the server's own
-workspace root) and the read-only `state` step (`slot state`: the server daemon's own row of
+workspace root), the read-only git dependency probe (`slot __cargo-git <entry>:<rev>…`) and the
+copy of one [git dependency](#git-dependencies-come-from-this-machine) (`rsync --server` into
+one entry directly under `$CARGO_HOME/git/db`, never read back) and the read-only `state` step (`slot state`: the server daemon's own row of
 `/api/nodes` and its jobs, read from `--http`, for the
 [node poll](#show-the-server-in-the-web-view)) and the read-only `output` step (`slot output <id>
 [<from>]`: the kept output of one job from its chunk `<from>` on, read from `--http`). Anything else

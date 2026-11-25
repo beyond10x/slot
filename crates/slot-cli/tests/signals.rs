@@ -23,8 +23,14 @@ impl Daemon {
 
     /// A daemon with `args` added to `slot serve`.
     fn start_with(args: &[&std::ffi::OsStr]) -> Self {
+        Self::start_env(args, &[])
+    }
+
+    /// [`Daemon::start_with`] with `env` added to the daemon's environment.
+    fn start_env(args: &[&std::ffi::OsStr], env: &[(&str, &std::ffi::OsStr)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let child = Command::new(SLOT)
+            .envs(env.iter().copied())
             .env("SLOT_CLUSTER_FILE", "off")
             .args([
                 "serve",

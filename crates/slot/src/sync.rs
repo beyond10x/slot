@@ -469,6 +469,23 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
     run_watched(&mut rsync, b, deadline).map(drop)
 }
 
+/// Copies the directory `src` to `dest`, an absolute path on the server,
+/// within `b`: a git database of a job's git dependency (`git_deps.rs`).
+/// Adds to what `dest` holds (no `--delete`); `FETCH_HEAD` and git's lock
+/// files stay here.
+pub fn copy_dir(src: &Path, dest: &str, r: &Remote<'_>, b: &Bounds) -> Result<()> {
+    let deadline = Instant::now() + b.limit;
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-a", "--mkpath"])
+        .args(["--exclude=/FETCH_HEAD", "--exclude=*.lock"])
+        .arg("-e")
+        .arg(r.ssh.join(" "))
+        .arg(format!("{}/", src.display()))
+        .arg(format!("{}:{dest}/", r.host));
+    run_watched(&mut rsync, b, deadline).map(drop)
+}
+
 /// The fields of one line of `rsync --list-only`: the type letter of its
 /// mode (`d`, `-`, `l`, …) and what follows the time: the path relative to
 /// the listed directory, and for a link ` -> ` and its target.

@@ -614,6 +614,24 @@ package-cache lock while it resolves, but only for the moment it reads the cache
 crate that cargo's cache cleaner removed after the digest was recorded fails the offline build;
 editing `Cargo.lock` (or a sync of a new one) fetches again.
 
+Git dependencies come from the workstation (`git_deps.rs`). The fetch above runs on the node,
+which may hold no credential for a private forge, and only for a cargo command the client sends;
+a wrapper's inner cargo fetches on the node. So before every remote job, the spilled ones
+included (their process is this client), the client reads each `Cargo.lock` the sync sends,
+runs `cargo fetch --locked` on the workstation for a lock file whose locked revision is not in
+the workstation's cargo git database (outside the pool, `SLOT_SHIM_OFF=1`), asks the node with
+`slot __cargo-git <entry>:<rev>…` which entries lack their revision, and rsyncs only those into
+the node's `$CARGO_HOME/git/db/<entry>/`; `slot shell` admits exactly that path depth. cargo
+skips the fetch of a locked revision its database holds. `remote-deny` and `remote-deny-origins`
+may each hold `/abs/path` lines and `origin:<pattern>` lines.
+A `git+file` source under a path line, or a source whose fetch URL (without `git+`,
+`?query` and `#rev`) matches an `origin:` pattern as a shell `case` does (`*` crosses `/`, `?`,
+`[...]`, `[!...]`; e.g. `origin:*git.example.org[:/]team/*`), keeps the job on the workstation
+with `git dependency denied: <source>`, set as `local_reason` before submission, so the daemon
+never spills it. The matcher is `git_deps::glob_match`; no crate in the lock file does `case`
+matching. Not covered: a git dependency's submodules (cargo keeps them as entries of their own
+names) are not copied.
+
 ## 6. Jobs that stay local
 
 | class | why | how slot knows |

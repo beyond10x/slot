@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- The git dependencies of a remote job reach the node with it. Before the job is placed (remote
+  mode, and a job the daemon hands to a node), the client reads every `Cargo.lock` the sync
+  sends, takes the `git+` sources and their locked revisions, runs `cargo fetch --locked` here
+  for a lock file whose revision is not in this machine's cargo git database, asks the node
+  which database entries lack their revision (`slot __cargo-git`), and copies only those into
+  the node's `$CARGO_HOME/git/db`: `slot: git dependencies: N copied to <host> in S s`. A
+  wrapper's inner cargo call on a node without a way to a private forge now finds its revision
+  there. `slot shell` admits the probe and a copy into one database entry. A node's copy list
+  needs no cargo git entries.
+- A `git+` source on a remote deny list keeps the job on this machine with the reason
+  `git dependency denied: <source>`. `remote-deny` and `$XDG_CONFIG_HOME/slot/remote-deny-origins`
+  may each hold `/abs/path` lines (a `git+file` source under the prefix) and `origin:<pattern>`
+  lines, a shell pattern (`*`, `?`, `[...]`, as `case` matches) against the URL cargo fetches
+  (without `git+`, query and revision), e.g. `origin:*git.example.org[:/]team/*`. The tree check
+  of `remote-deny` skips `origin:` lines without a warning. With both files naming nothing no lock
+  file is read.
+
 ## 0.37.0 — 2026-11-25
 
 - `slot cache refused [--since 24h] [--by repo|project] [--json]` lists, per repository, the

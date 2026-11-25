@@ -85,6 +85,11 @@ impl List {
         let mut prefixes = Vec::new();
         let mut skipped = Vec::new();
         for (i, line) in text.lines().enumerate() {
+            // An `origin:` line is a rule for remote URLs (`git_deps.rs`),
+            // not a tree.
+            if line.trim_start().starts_with("origin:") {
+                continue;
+            }
             let line = line.split_once('#').map_or(line, |(l, _)| l).trim();
             if line.is_empty() {
                 continue;
@@ -338,7 +343,7 @@ mod tests {
     #[test]
     fn the_file_takes_absolute_prefixes_and_comments() {
         let (list, skipped) = List::parse(
-            "# trees with customer data\n/srv/a/\n\n  /srv/b # second\nrelative/c\n/srv/d//\n",
+            "# trees with customer data\n/srv/a/\n\n  /srv/b # second\nrelative/c\n/srv/d//\norigin:*git.example.org[:/]team/*\n",
         );
         assert_eq!(skipped, ["line 5: not an absolute path"]);
         let written: Vec<&str> = list.prefixes.iter().map(|p| p.written.as_str()).collect();

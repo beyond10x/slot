@@ -20,7 +20,12 @@
 //!   for the endpoint's page;
 //! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
 //!   <key> [<tree>]`, run by this binary whatever path the client named; the
-//!   workspace root must be this server's.
+//!   workspace root must be this server's;
+//! - `slot __cargo-git <entry>:<rev>…`, read-only: which entries of this
+//!   account's cargo git database lack the revision; and the copy of one
+//!   such entry, `rsync --server … . <cargo-home>/git/db/<entry>/`, the git
+//!   dependencies of a job (`git_deps.rs`). The cargo home is `CARGO_HOME`,
+//!   else `~/.cargo`.
 //!
 //! With `--same-path-root DIR`, a sync, a fetch and the sibling step may
 //! also name an absolute path below DIR: a tree mirrored at the client's own
@@ -72,6 +77,9 @@ pub enum Plan {
         /// The tree of a same-path mirror: `<ws-root>/<id>` links to it.
         path: Option<PathBuf>,
     },
+    /// Print the cargo git database and the wanted entries that lack their
+    /// revision (`git_deps::node_answer`).
+    CargoGit(Vec<crate::git_deps::Wanted>),
 }
 
 /// The directories a client's paths may name.
@@ -83,6 +91,9 @@ pub struct Roots<'a> {
     pub cache: &'a Path,
     /// `--same-path-root`: where a tree may be mirrored at its own path.
     pub same_path: &'a [PathBuf],
+    /// The account's cargo git database: a sync may write one entry
+    /// directly below it.
+    pub cargo_git_db: &'a Path,
 }
 
 /// rsync long options a sync or fetch may carry.
@@ -234,6 +245,11 @@ pub fn plan(line: &str, home: &Path, roots: &Roots<'_>) -> Result<Plan, String> 
                     path,
                 })
             }
+            [c, words @ ..] if c == "__cargo-git" && !words.is_empty() => {
+                crate::git_deps::parse_words(words)
+                    .map(Plan::CargoGit)
+                    .ok_or_else(|| "`slot __cargo-git` takes `<entry>:<rev>` words".into())
+            }
             _ => Err(format!("`slot {}` is not a remote step", args.join(" "))),
         },
         _ => Err(format!("`{prog}` is not a remote step")),
@@ -338,11 +354,18 @@ fn rsync(args: &[String], home: &Path, roots: &Roots<'_>) -> Result<Vec<String>,
         return Err("rsync must name one path".into());
     }
     let target = absolute(home, &cache_root.join("target").to_string_lossy())?;
+    let git_db = absolute(home, &roots.cargo_git_db.to_string_lossy())?;
     for path in paths {
         let p = absolute(home, path)?;
         let under = |root: &Path| p.starts_with(root) && p != root;
         let same = Path::new(path).is_absolute() && under_any(&p, home, roots.same_path)?;
-        if !(under(&ws) || same || (sender && under(&target))) {
+        // One entry of the cargo git database, written, never read back.
+        let db_entry = !sender
+            && p.parent() == Some(git_db.as_path())
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(crate::git_deps::valid_entry);
+        if !(under(&ws) || same || (sender && under(&target)) || db_entry) {
             return Err(format!(
                 "rsync path `{path}` is outside {}{}",
                 ws.display(),
@@ -392,8 +415,44 @@ mod tests {
                 ws: Path::new("/srv/u/.local/state/slot/ws"),
                 cache: Path::new("/srv/u/.local/state/slot/cache"),
                 same_path,
+                cargo_git_db: Path::new("/srv/u/.cargo/git/db"),
             },
         )
+    }
+
+    #[test]
+    fn a_git_dependency_is_asked_for_and_copied_into_the_cargo_git_database_only() {
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(
+            p(&format!("slot __cargo-git dep-00ff00ff00ff00ff:{rev}")),
+            Ok(Plan::CargoGit(vec![crate::git_deps::Wanted {
+                entry: "dep-00ff00ff00ff00ff".into(),
+                rev: rev.into(),
+            }]))
+        );
+        for bad in [
+            "slot __cargo-git".to_string(),
+            format!("slot __cargo-git ../x-1:{rev}"),
+            "slot __cargo-git dep-1:HEAD".to_string(),
+        ] {
+            assert!(p(&bad).is_err(), "accepted: {bad}");
+        }
+        for ok in [
+            "rsync --server -logDtpre.iLsfxCIvu --mkpath . /srv/u/.cargo/git/db/dep-00ff00ff00ff00ff/",
+            "rsync --server -logDtpre.iLsfxCIvu --mkpath . .cargo/git/db/dep-00ff00ff00ff00ff",
+        ] {
+            assert!(matches!(p(ok), Ok(Plan::Rsync(_))), "{ok}: {:?}", p(ok));
+        }
+        for bad in [
+            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/",
+            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/dep-1/objects",
+            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/.hidden-1",
+            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/../../.ssh",
+            "rsync --server -logDtpre.iLsfxCIvu . /srv/u/.cargo/credentials-1",
+            "rsync --server --sender -logDtpre.iLsfxCIvu . /srv/u/.cargo/git/db/dep-1",
+        ] {
+            assert!(p(bad).is_err(), "accepted: {bad}");
+        }
     }
 
     #[test]

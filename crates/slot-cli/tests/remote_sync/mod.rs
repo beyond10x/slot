@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use super::{Daemon, SLOT};
 
 mod fresh;
+mod git_deps;
 mod node_view;
 mod phases;
 mod safety;

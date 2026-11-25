@@ -17,6 +17,7 @@ pub mod client;
 pub mod cpu_limit;
 pub mod evict;
 pub mod gate;
+pub mod git_deps;
 pub mod hook;
 pub mod hostconfig;
 pub mod job_parallel;
