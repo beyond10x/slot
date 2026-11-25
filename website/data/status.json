@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.36.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.37.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -317,6 +317,13 @@
       "status": "shipped",
       "detail": "The sync leaves the node its own file times and a seeded target never makes a changed source look built (0.36.0).",
       "href": "/docs/remote-builds#target-directories-on-the-server"
+    },
+    {
+      "area": "Observation",
+      "label": "Calls the compile cache refused",
+      "status": "shipped",
+      "detail": "slot cache refused lists, per repository, the compiler calls sccache refused to cache by reason, each with its remedy (0.37.0).",
+      "href": "/docs/how-it-works#sccache-watchdog"
     }
   ]
 }

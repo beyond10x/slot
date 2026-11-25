@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.37.0 — 2026-11-25
+
 - `slot cache refused [--since 24h] [--by repo|project] [--json]` lists, per repository, the
   compiler calls the sccache servers refused to cache by reason, with hits and misses, from
   `cache.jsonl` and `jobs.jsonl` in the state directory. A minute's calls go to the jobs that ran
