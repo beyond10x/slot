@@ -9,6 +9,8 @@
 #                        slot job on NODE_HOST run in the checkout NODE_RUN_DIR; print one
 #                        `drift: push: ...` line per difference and `<n> drift`; exit 0 or 1
 #   push.sh compare HERE NODE   the comparison of check, over two digest files
+#   push.sh bins CONF    list the cargo tools apply copies: ~/.cargo/bin but SKIP_BINS and the
+#                        tools provision.sh installs at a pinned release (`provision.sh pins`)
 #
 # CONF is the node config file of provision.sh (node.conf.example).
 set -u
@@ -47,6 +49,7 @@ cf=${2:-}
 case $mode in
   apply) conf_read "$cf" BUILD_USER BUILD_HOME SLOT_VERSION NODE_SSH PUSH_HOST BUILD_UID BUILD_KEY || exit 2 ;;
   check) conf_read "$cf" BUILD_USER BUILD_HOME SLOT_VERSION NODE_SSH NODE_HOST NODE_RUN_DIR BUILD_UID BUILD_KEY || exit 2 ;;
+  bins) conf_read "$cf" BUILD_USER BUILD_HOME SLOT_VERSION BUILD_UID BUILD_KEY || exit 2 ;;
   compare)
     compare "$2" "$3"
     exit
@@ -65,10 +68,19 @@ toolchains() {
     for d in "$HOME"/.rustup/toolchains/*; do [ -x "$d/bin/rustc" ] && basename "$d"; done
   fi
 }
+# The node installs the pinned tools itself; a copy from here would replace them.
+SKIP_BINS="$SKIP_BINS $(sh "$here/provision.sh" pins | cut -d' ' -f1 | tr '\n' ' ')"
 skip() {
   for s in $SKIP_BINS; do [ "$s" = "$1" ] && return 0; done
   return 1
 }
+bins() {
+  (cd "$HOME/.cargo/bin" && for b in *; do [ -f "$b" ] && ! skip "$b" && echo "$b"; done)
+}
+if [ "$mode" = bins ]; then
+  bins
+  exit 0
+fi
 
 # rsync from the default PATH (a wrapper earlier on PATH may drop times); exit 23 and 24: some
 # files could not be read (root-only files under /usr) or vanished;
@@ -129,7 +141,7 @@ if [ "$mode" = apply ]; then
   printf 'version = "12"\ndefault_toolchain = %s\nprofile = "default"\n\n[overrides]\n' "${def:-\"stable\"}" |
     $NODE_SSH "$PUSH_HOST" "cat > $STORE/rustup/settings.toml" || fails=$((fails + 1))
   list=$(mktemp)
-  (cd "$HOME/.cargo/bin" && for b in *; do [ -f "$b" ] && ! skip "$b" && echo "$b"; done) >"$list"
+  bins >"$list"
   rs -aL --files-from="$list" -e "$NODE_SSH" "$HOME/.cargo/bin/" "$dst/cargo/bin/" || fails=$((fails + 1))
   rm -f "$list"
   for p in $HOME_COPIES; do

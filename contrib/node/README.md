@@ -114,7 +114,13 @@ that holds a filesystem, and as root it neither writes nor mounts through a symb
 the build user's directories. Files it replaces keep their old version beside them as
 `<name>.slot-prev`.
 
-`push.sh check` compares the toolchain digest of `/usr` and `/etc`, the size of each cargo tool,
+A few cargo tools are not copied from the workstation: the node installs them at the release its
+consumers' CI installs (`TOOL_PINS` in `provision.sh`, listed by `provision.sh pins`), from the
+release archive checked against its SHA-256. `check` reads each one's `--version`. A consumer
+that moves its CI to a new release needs a new pin, and a bundle with it.
+
+`push.sh check` compares the toolchain digest of `/usr` and `/etc`, the size of each cargo tool
+but the pinned ones and `SKIP_BINS` (`push.sh bins` lists the rest),
 and each file under the `HOME_COPIES` directories by name and size. A file only on the node under
 one of those directories is not drift: `push.sh apply` copies without deleting, and a node job
 may add files to a copied cache.

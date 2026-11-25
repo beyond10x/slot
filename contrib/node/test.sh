@@ -162,6 +162,29 @@ run "$R" apply
 run "$R" check
 [ $? -eq 0 ] && ok "after the download works: 0 drift" || bad "after the download: $(cat "$W/out")"
 
+# 5e. Cargo tools pinned in provision.sh (the release a consumer's CI installs) are installed at
+# that release in the store's cargo bin and read back; check names one of another release.
+sh "$P" pins >"$W/pins" 2>"$W/err"
+grep -qx 'ess 0.99.0' "$W/pins" && grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
+  ok "pins: ess 0.99.0, wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
+while read -r b v; do
+  [ "$("$R/srv/slot/cargo/bin/$b" --version 2>/dev/null)" = "$b $v" ] && ok "pinned tool installed: $b $v" || bad "pinned tool $b: '$("$R/srv/slot/cargo/bin/$b" --version 2>&1)'"
+done <"$W/pins"
+printf '#!/bin/sh\necho ess 0.98.0\n' >"$R/srv/slot/cargo/bin/ess"
+run "$R" check
+grep -q "^drift: tool:ess: .*'ess 0.98.0', want ess 0.99.0" "$W/out" && ok "check names an ess of another release" || bad "ess 0.98.0 not named: $(grep tool "$W/out")"
+grep -q '^drift: tool:wasm-bindgen' "$W/out" && bad "check names a tool at its pinned release" || ok "a tool at its pinned release is no drift"
+: >"$R/.state-tool-fetch-fails"
+run "$R" apply
+st=$?
+rm -f "$R/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -q '^failed: tool:ess: download or checksum of ess 0.99.0' "$W/err" && ok "a failed tool download: apply exits 1 and names it" || bad "failed tool download: exit $st $(cat "$W/err")"
+grep -q '^changed: tool:ess' "$W/out" && bad "a failed tool install is reported as changed" || ok "a failed tool install is not reported as changed"
+run "$R" apply
+grep -q '^changed: tool:ess: ess 0.99.0 installed: ess$' "$W/out" && ok "apply installs the pinned ess" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
+run "$R" check
+[ $? -eq 0 ] && ok "after the tool install: 0 drift" || bad "after the tool install: $(cat "$W/out")"
+
 # 5c. Closing the setup login ends the connections still logged in with the setup key; the
 # build key's connections stay. The node's sshd log names each connection's pid and key.
 ssh-keygen -q -t ed25519 -N '' -C setup -f "$W/setupkey" </dev/null
@@ -314,6 +337,15 @@ for b in no-credentials ssh; do
   echo "$msg" | grep -q '\.slot\.toml' && ok "$b: names .slot.toml local" || bad "$b: no .slot.toml in: $msg"
   echo "$msg" | grep -q 'or run this step with slot --here' && bad "$b: still offers --here for any step" || ok "$b: no --here for any step"
 done
+
+# 6f. push.sh copies the workstation's cargo tools but the pinned ones and SKIP_BINS.
+mkdir -p "$W/home/.cargo/bin"
+for b in cargo-x ess wasm-bindgen wasm-bindgen-test-runner wasm2es6js cargo-skipped; do : >"$W/home/.cargo/bin/$b"; done
+conf
+printf 'SKIP_BINS=cargo-skipped\n' >>"$W/node.conf"
+HOME=$W/home sh "$U" bins "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$W/out")" = cargo-x ] && ok "push copies cargo-x and leaves the pinned tools and SKIP_BINS" || bad "push bins: exit $st: $(cat "$W/out" "$W/err")"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
