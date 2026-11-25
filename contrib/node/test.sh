@@ -75,6 +75,8 @@ run "$R" check
 st=$?
 if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "after apply: 0 drift"; else bad "after apply: exit $st, $(cat "$W/out")"; fi
 grep -qx 'BindReadOnlyPaths=/srv/slot/rootfs/etc/java21-openjdk:/etc/java21-openjdk' "$R/etc/systemd/system/slot-node.service" && ok "ETC_EXTRA is bound" || bad "ETC_EXTRA not bound"
+# The compile cache refuses every incremental rustc call; node jobs build without it.
+sed -n '/^\[build\]/,/^\[/p' "$R/srv/slot/cargo/config.toml" | grep -qx 'incremental = false' && ok "node cargo config: incremental off" || bad "node cargo config: $(cat "$R/srv/slot/cargo/config.toml")"
 [ -d "$R/etc/java21-openjdk" ] && [ -f "$R/etc/localtime" ] && ok "bind targets have the type of their copy" || bad "bind target types"
 run "$R" apply
 grep -q '^changed: ' "$W/out" && bad "a second apply changed: $(grep '^changed: ' "$W/out" | head -3)" || ok "a second apply changes nothing"
