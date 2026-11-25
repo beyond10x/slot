@@ -29,6 +29,7 @@ pub mod policy;
 pub mod procstat;
 pub mod project;
 pub mod proto;
+pub mod refused;
 pub mod repo_config;
 pub mod rewrite;
 pub mod run_limit;

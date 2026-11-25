@@ -88,6 +88,7 @@ fn main() -> ExitCode {
             Ok(0)
         }
         Cmd::Usage(args) => usage(&args),
+        Cmd::Cache(slot::cli::CacheCmd::Refused(args)) => cache_refused(&args),
         Cmd::Hook(slot::cli::HookCmd::ClaudePreToolUse) => return slot::hook::run(),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
@@ -328,6 +329,26 @@ fn usage(args: &slot::cli::UsageArgs) -> Result<i32> {
         println!("{}", slot::usage::json(&u));
     } else {
         print!("{}", slot::usage::render(&u, args.top));
+    }
+    Ok(0)
+}
+
+fn cache_refused(args: &slot::cli::CacheRefusedArgs) -> Result<i32> {
+    let since = slot::usage::parse_since(&args.since).map_err(anyhow::Error::msg)?;
+    let by: slot::usage::By = args.by.parse().map_err(anyhow::Error::msg)?;
+    if by == slot::usage::By::Session {
+        anyhow::bail!("--by {}: repo or project", args.by);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let from = now - since;
+    let (records, jobs) = slot::refused::read(&args.state_dir, from, now);
+    let r = slot::refused::attribute(&records, &jobs, from, now, by);
+    if args.json {
+        println!("{}", slot::refused::json(&r));
+    } else {
+        print!("{}", slot::refused::render(&r));
     }
     Ok(0)
 }

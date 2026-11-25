@@ -344,6 +344,21 @@ request restarts its idle timeout (`SCCACHE_IDLE_TIMEOUT`); a reading each minut
 running for good. A server that does not answer within 5 seconds is skipped and named once in
 the journal. The file is not rotated; a line is about 300 bytes.
 
+`slot cache refused` reads that file and the job log and lists, per repository (`--by project`
+per project), the calls the servers refused to cache by reason, with hits and misses, over a
+window (`--since 24h`, `--json` for the whole answer). The counters belong to a server, not to a
+job, so each minute's calls go to the jobs that ran in it and whose compile server worked for them
+(`compile_server_cpu_s`). When all of them are of one repository, the minute counts for it in the
+`exact` column; otherwise the minute is split across the repositories by each job's
+compile-server CPU per second of its run times its seconds in the minute, in the `shared` column.
+A `no job` line counts the minutes with calls and no such job. Under the table each reason has
+one line with what a repository can do about it: for `incremental`, `CARGO_INCREMENTAL=0` in jobs
+that do not edit and rebuild, as a CI runner does; `crate-type` (bin, proc-macro, dylib and
+cdylib crates) has no remedy in the repository; `multiple input files` and `missing input` say
+what sccache saw (more than one input file in one call; an input file that is not where sccache
+looks, as with generated sources); any other reason is named as sccache prints it, with no remedy
+known.
+
 `slot serve --sccache-watch false` turns the watchdog and the counter log off.
 
 ## Waiting for disk and memory
