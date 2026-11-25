@@ -165,23 +165,27 @@ run "$R" check
 # 5e. Cargo tools pinned in provision.sh (the release a consumer's CI installs) are installed at
 # that release in the store's cargo bin and read back; check names one of another release.
 sh "$P" pins >"$W/pins" 2>"$W/err"
-grep -qx 'ess 0.99.1' "$W/pins" && grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
-  ok "pins: ess 0.99.1, wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
+grep -qx 'wasm-bindgen 0.2.130' "$W/pins" && grep -qx 'wasm-bindgen-test-runner 0.2.130' "$W/pins" &&
+  ok "pins: wasm-bindgen 0.2.130" || bad "pins: $(cat "$W/pins" "$W/err")"
+# ess is not pinned: it picks the release a repository pins itself (an exact `requires` runs
+# that release from its own digest-checked cache, a line pin runs the base binary), so the node's
+# base ess is the workstation's, copied by push.sh, and both choose the same for every repository.
+grep -q '^ess ' "$W/pins" && bad "ess is pinned on the node: $(grep '^ess ' "$W/pins")" || ok "ess is not pinned: the node's base ess is the workstation's"
 while read -r b v; do
   [ "$("$R/srv/slot/cargo/bin/$b" --version 2>/dev/null)" = "$b $v" ] && ok "pinned tool installed: $b $v" || bad "pinned tool $b: '$("$R/srv/slot/cargo/bin/$b" --version 2>&1)'"
 done <"$W/pins"
-printf '#!/bin/sh\necho ess 0.98.0\n' >"$R/srv/slot/cargo/bin/ess"
+printf '#!/bin/sh\necho wasm-bindgen 0.2.129\n' >"$R/srv/slot/cargo/bin/wasm-bindgen"
 run "$R" check
-grep -q "^drift: tool:ess: .*'ess 0.98.0', want ess 0.99.1" "$W/out" && ok "check names an ess of another release" || bad "ess 0.98.0 not named: $(grep tool "$W/out")"
-grep -q '^drift: tool:wasm-bindgen' "$W/out" && bad "check names a tool at its pinned release" || ok "a tool at its pinned release is no drift"
+grep -q "^drift: tool:wasm-bindgen: .*'wasm-bindgen 0.2.129', want wasm-bindgen 0.2.130" "$W/out" && ok "check names a wasm-bindgen of another release" || bad "wasm-bindgen 0.2.129 not named: $(grep tool "$W/out")"
+grep -q '^drift: tool:ess' "$W/out" && bad "check names ess" || ok "check leaves ess to push.sh"
 : >"$R/.state-tool-fetch-fails"
 run "$R" apply
 st=$?
 rm -f "$R/.state-tool-fetch-fails"
-[ $st -eq 1 ] && grep -q '^failed: tool:ess: download or checksum of ess 0.99.1' "$W/err" && ok "a failed tool download: apply exits 1 and names it" || bad "failed tool download: exit $st $(cat "$W/err")"
-grep -q '^changed: tool:ess' "$W/out" && bad "a failed tool install is reported as changed" || ok "a failed tool install is not reported as changed"
+[ $st -eq 1 ] && grep -q '^failed: tool:wasm-bindgen: download or checksum of wasm-bindgen 0.2.130' "$W/err" && ok "a failed tool download: apply exits 1 and names it" || bad "failed tool download: exit $st $(cat "$W/err")"
+grep -q '^changed: tool:wasm-bindgen' "$W/out" && bad "a failed tool install is reported as changed" || ok "a failed tool install is not reported as changed"
 run "$R" apply
-grep -q '^changed: tool:ess: ess 0.99.1 installed: ess$' "$W/out" && ok "apply installs the pinned ess" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
+grep -q '^changed: tool:wasm-bindgen: wasm-bindgen 0.2.130 installed: wasm-bindgen$' "$W/out" && ok "apply installs the pinned wasm-bindgen" || bad "apply: $(cat "$W/out" "$W/err" | grep tool)"
 run "$R" check
 [ $? -eq 0 ] && ok "after the tool install: 0 drift" || bad "after the tool install: $(cat "$W/out")"
 
@@ -277,6 +281,11 @@ grep -qx 'drift: push: workstation has: copy .cache/t/a 5' "$W/out" && ok "a fil
 grep -qx 'drift: push: workstation has: copy .cache/t/b 7' "$W/out" && ok "a file missing on the node is drift" || bad "missing: $(cat "$W/out")"
 grep -qx 'drift: push: only on the node: bin cargo-y 3' "$W/out" && ok "a cargo tool only on the node is drift" || bad "bin: $(cat "$W/out")"
 grep -q '^3 drift$' "$W/out" && ok "three differences: 3 drift" || bad "count: $(cat "$W/out")"
+printf 'host ws\nbin ess 10\nsum ess aaaa\n' >"$W/here"
+printf 'host node\nbin ess 10\nsum ess bbbb\n' >"$W/node"
+sh "$U" compare "$W/here" "$W/node" >"$W/out" 2>&1
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: push: workstation has: sum ess aaaa' "$W/out" && ok "a node ess of the same size and another digest is drift" || bad "ess digest: exit $st $(cat "$W/out")"
 printf 'host ws\n' >"$W/node"
 sh "$U" compare "$W/here" "$W/node" >/dev/null 2>&1
 [ $? -eq 2 ] && ok "a result from the workstation itself is refused" || bad "same host not refused"
@@ -345,7 +354,32 @@ conf
 printf 'SKIP_BINS=cargo-skipped\n' >>"$W/node.conf"
 HOME=$W/home sh "$U" bins "$W/node.conf" >"$W/out" 2>"$W/err"
 st=$?
-[ $st -eq 0 ] && [ "$(cat "$W/out")" = cargo-x ] && ok "push copies cargo-x and leaves the pinned tools and SKIP_BINS" || bad "push bins: exit $st: $(cat "$W/out" "$W/err")"
+[ $st -eq 0 ] && [ "$(cat "$W/out" | tr '\n' ' ')" = "cargo-x ess " ] && ok "push copies cargo-x and ess and leaves the pinned tools and SKIP_BINS" || bad "push bins: exit $st: $(cat "$W/out" "$W/err")"
+
+# 6g. One base ess makes one choice per repository, on the workstation and on a node that has
+# its copy: an exact pin runs that release from ess's own cache (here a stand-in for 0.99.1);
+# a line pin the base cannot serve fails with ess's own line, and runs no other release. Needs
+# an ess on PATH (the workstation has one; a CI runner without it skips).
+if command -v ess >/dev/null 2>&1 && base=$(ess --version 2>/dev/null | sed -n 's/^ess //p') && [ -n "$base" ]; then
+  E=$W/ess
+  mkdir -p "$E/tc/0.99.1" "$E/exact" "$E/line" "$E/same"
+  printf '#!/bin/sh\ncase "$1" in --version) echo "ess 0.99.1" ;; *) echo "ran 0.99.1" ;; esac\n' >"$E/tc/0.99.1/ess"
+  chmod 755 "$E/tc/0.99.1/ess"
+  for d in exact:0.99.1 line:9.9 same:${base%.*}; do
+    printf 'format: ess-inputs/2\nrequires: ess %s\nspecification:\n  - system.yaml\nscenarios: []\n' "${d#*:}" >"$E/${d%%:*}/ess-inputs.yaml"
+    : >"$E/${d%%:*}/system.yaml"
+  done
+  (cd "$E/exact" && ESS_TOOLCHAIN_DIR=$E/tc ESS_TOOLCHAIN_QUIET=1 ess specify validate) >"$W/out" 2>&1
+  grep -qx 'ran 0.99.1' "$W/out" && ok "base ess $base with an exact pin 0.99.1 runs 0.99.1" || bad "exact pin: $(head -3 "$W/out")"
+  (cd "$E/line" && ESS_TOOLCHAIN_DIR=$E/tc ess specify validate) >"$W/out" 2>&1
+  st=$?
+  [ $st -ne 0 ] && grep -q "requires ess 9.9 and this is ess $base" "$W/out" && ! grep -q 'ran 0.99.1' "$W/out" &&
+    ok "a line pin base ess $base cannot serve fails with ess's own line" || bad "line pin: exit $st $(head -3 "$W/out")"
+  (cd "$E/same" && ESS_TOOLCHAIN_DIR=$E/tc ess toolchain which) >"$W/out" 2>&1
+  head -1 "$W/out" | grep -qx "ess $base" && ok "the line pin ${base%.*} runs the base ess $base" || bad "same line: $(head -3 "$W/out")"
+else
+  echo "ok - skipped: no ess on PATH"
+fi
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

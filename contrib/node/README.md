@@ -122,6 +122,13 @@ consumers' CI installs (`TOOL_PINS` in `provision.sh`, listed by `provision.sh p
 release archive checked against its SHA-256. `check` reads each one's `--version`. A consumer
 that moves its CI to a new release needs a new pin, and a bundle with it.
 
+`ess` is never pinned: it chooses the release for each repository itself. An exact `requires: ess
+X.Y.Z` in the repository's `ess-inputs.yaml` runs that release from ess's own cache (downloaded
+from the ess release and checked against its `SHA256SUMS`); a line pin (`0.98`) or none runs the
+base binary. The node's base `ess` is the workstation's, copied by `push.sh`, and `push.sh check`
+compares its SHA-256, so both machines choose the same release for every repository. A repository
+that needs another release than the base pins it exactly.
+
 `push.sh check` compares the toolchain digest of `/usr` and `/etc`, the size of each cargo tool
 but the pinned ones and `SKIP_BINS` (`push.sh bins` lists the rest),
 and each file under the `HOME_COPIES` directories by name and size. A file only on the node under
