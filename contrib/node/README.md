@@ -175,7 +175,7 @@ install --locked --git <url> --rev <rev> aep-cli --root <store>/cargo` as the bu
 the rust part, and check reads `aep --version`. The build needs `github.com` over https (aep and
 its `entity-runtime` dependency are read without credentials). `push.sh check` exits 1 whenever the
 workstation has a tool whose release the node's pin does not match, `aep` included. Packages
-`glibc-static` (a consumer's `cc -static` tests), `bubblewrap`, `socat` and `libubsan` (the
+`glibc-static` (a consumer's `cc -static` tests), `bubblewrap`, `socat`, `unzip` and `libubsan` (the
 undefined-behaviour sanitizer runtime of a consumer's sanitizer build) are base packages, and
 `/usr/sbin` is in the job PATH of `slot-node.service` (`ip`). The workstation's `cargo` and `go`
 shims send the real binary by absolute path and the node runs that argv as sent, so `/usr/bin/cargo`,
@@ -204,6 +204,16 @@ tree into place through a `.slot-new` directory, with group and other write and 
 writes the archive's SHA-256 to `.slot-sha256` in the tree. Check runs `ess --version` or reads
 `package.json`, and reports drift when `.slot-sha256` is not the pin's SHA-256. These steps are
 skipped while the metadata service is open, like the other downloads that run as the build user.
+
+The same list holds the Playwright browsers a repository's tests use: the Chrome for Testing
+headless shell of revision 1254 (Playwright 1.65.0) and 1234 (1.62.1) in
+`~/.cache/ms-playwright/chromium_headless_shell-<revision>`. Their lines have the strip field `zip`:
+the archive is unzipped without stripping, the files `INSTALLATION_COMPLETE` and
+`DEPENDENCIES_VALIDATED` are written, and the check is the version `--version` prints. `playwright
+install` does not know Amazon Linux, so the browser is not installed that way. The libraries it
+loads (`nss`, `atk`, `at-spi2-atk`, `mesa-libgbm`, `libxkbcommon`, `gtk3`) come from
+`EXTRA_PACKAGES`; `unzip` is a base package. A new Playwright version is a new line: the revision
+is in the `browsers.json` of `playwright-core`, the version in its `browserVersion`.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

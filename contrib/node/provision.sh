@@ -94,13 +94,20 @@ SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5ede
 # SHA-256 of the archive, URL, leading path components to strip, directory under BUILD_HOME, the
 # check (a binary of that directory that prints `<binary> <version>`, or `package.json`, whose
 # `version` is read). The ess checksums are those of the release's SHA256SUMS; the npm ones were
-# compared with the sha512 integrity of the workstation's package-lock.json.
+# compared with the sha512 integrity of the workstation's package-lock.json. A line whose strip
+# field is `zip` is a Playwright browser (the Chrome for Testing headless shell of a revision; the
+# browsers.json of playwright-core 1.65.0 says 1254 is 158.0.8127.18, 1.62.1 says 1234 is
+# 151.0.7922.34): unzipped without stripping, with the INSTALLATION_COMPLETE and
+# DEPENDENCIES_VALIDATED markers, checked by the version `--version` prints. The libraries the
+# binary needs come from EXTRA_PACKAGES, and `unzip` too.
 HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
 ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
 ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
 ess 0.99.4 3902d0f8a6dffe5255bd0a9c8f56608fabf52faf14b97d90b6e7f7ed3da7032d https://github.com/beyond10x/ess/releases/download/0.99.4/ess-0.99.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.4 ess
 @types/node 26.3.0 69b0a537007774b0d5a3bea12736d3506b6ef451241fbca46213fd9e474b0a17 https://registry.npmjs.org/@types/node/-/node-26.3.0.tgz 1 .local/share/ess-node/node_modules/@types/node package.json
-undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json'
+undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json
+chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb53b0fde4bdfc4bd075d6 https://cdn.playwright.dev/builds/cft/158.0.8127.18/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1254 chrome-headless-shell-linux64/chrome-headless-shell
+chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -111,7 +118,7 @@ if [ "$mode" = pins ]; then
 fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
-BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan'
+BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan unzip'
 SSHD_LINES='MaxSessions 200
 MaxStartups 100:30:200
 ClientAliveInterval 15
@@ -1590,21 +1597,29 @@ home_fetch() {
     mkdir -p "$hd/tree" || return 0
     case $hc in
       package.json) printf '{\n  "name": "stub",\n  "version": "%s"\n}\n' "$hv" >"$hd/tree/package.json" ;;
+      *chrome-headless-shell) mkdir -p "$hd/tree/${hc%/*}" && printf '#!/bin/sh\necho "Google Chrome for Testing %s"\n' "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
       *) printf '#!/bin/sh\necho "%s %s"\n' "$hc" "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
     esac
     calls "fetch $hu"
+  elif [ "$hk" = zip ]; then
+    (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir tree && unzip -q archive -d tree) || return 0
   else
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xzf archive -C tree --strip-components="$hk" --no-same-owner) || return 0
   fi
+  # A zip is a Playwright browser: its directory needs the two marker files Playwright looks for.
+  if [ "$hk" = zip ]; then : >"$hd/tree/INSTALLATION_COMPLETE" && : >"$hd/tree/DEPENDENCIES_VALIDATED" || return 0; fi
   chmod -R u+rwX,go+rX,go-w,u-s,g-s "$hd/tree"
   echo "$hd/tree"
 }
 # What the check of a HOME_PINS line reads in directory $1: `<binary> <version>` for a binary, the
-# `version` of package.json for package.json.
+# `version` of package.json for package.json, the last word of the first line of `--version` for a
+# chrome-headless-shell.
 home_got() {
   case $2 in
     package.json) sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$R$1/package.json" 2>/dev/null | head -n 1 ;;
+    *chrome-headless-shell) (cd / && as_user "$R$1/$2" --version 2>/dev/null </dev/null | head -n 1 | awk '{print $NF}') ;;
     *) tool_version "$R$1/$2" ;;
   esac
 }
@@ -1612,7 +1627,7 @@ p_home_pins() {
   while read -r hn hv hs hu hk hd hc; do
     [ -n "$hn" ] || continue
     p=$H/$hd
-    case $hc in package.json) want=$hv ;; *) want="$hc $hv" ;; esac
+    case $hc in package.json | *chrome-headless-shell) want=$hv ;; *) want="$hc $hv" ;; esac
     got=$(home_got "$p" "$hc")
     mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
     [ "$got" = "$want" ] && [ "$mark" = "$hs" ] && continue

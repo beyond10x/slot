@@ -6,7 +6,11 @@
   `~/.local/share/ess-versions/<version>/ess` and `@types/node` 26.3.0 with `undici-types` 8.3.0 in
   `~/.local/share/ess-node/node_modules` (`HOME_PINS`, SHA-256 pinned). A repository that calls an
   ess release by that path, and the TypeScript cases of ess that read `ESS_TYPES_NODE`, found
-  nothing on the node.
+  nothing on the node. The Playwright browsers are in the same list: the Chrome for Testing
+  headless shell of revision 1254 (Playwright 1.65.0, 158.0.8127.18) and 1234 (1.62.1,
+  151.0.7922.34) in `~/.cache/ms-playwright/chromium_headless_shell-<revision>`, from the pinned
+  zip with the two marker files Playwright looks for. Playwright's own `install` does not know
+  Amazon Linux. `unzip` is a base package.
 
 - Node rust default and `libubsan`: `provision.sh` runs `rustup default stable` when
   `RUST_TOOLCHAINS` has `stable` (rustup had made 1.85.0, the first toolchain installed, the

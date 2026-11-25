@@ -438,6 +438,10 @@ for v in 0.97.4 0.98.0 0.99.1 0.99.4; do
   [ "$("$HP/ess-versions/$v/ess" --version)" = "ess $v" ] && ok "ess $v is in ~/.local/share/ess-versions/$v/ess" || bad "ess $v: $("$HP/ess-versions/$v/ess" --version 2>&1)"
 done
 grep -q '"version": "26.3.0"' "$HP/ess-node/node_modules/@types/node/package.json" && grep -q '"version": "8.3.0"' "$HP/ess-node/node_modules/undici-types/package.json" && ok "@types/node 26.3.0 and undici-types 8.3.0 are in ess-node/node_modules" || bad "ess-node: $(ls -R "$HP/ess-node" 2>&1 | head -5)"
+for rv in 1254:158.0.8127.18 1234:151.0.7922.34; do
+  rd=$R5/var/lib/builder/.cache/ms-playwright/chromium_headless_shell-${rv%%:*}
+  [ "$("$rd/chrome-headless-shell-linux64/chrome-headless-shell" --version)" = "Google Chrome for Testing ${rv#*:}" ] && [ -e "$rd/INSTALLATION_COMPLETE" ] && [ -e "$rd/DEPENDENCIES_VALIDATED" ] && ok "Playwright chromium_headless_shell-${rv%%:*} is ${rv#*:} with its two markers" || bad "browser ${rv%%:*}: $(ls -a "$rd" 2>&1)"
+done
 rm -rf "$HP/ess-versions/0.99.1"
 printf '#!/bin/sh\necho "ess 0.1.0"\n' >"$HP/ess-versions/0.98.0/ess"
 rm -f "$HP/ess-node/node_modules/undici-types/package.json"
@@ -458,6 +462,13 @@ rm -f "$R5/.state-tool-fetch-fails"
 [ $st -eq 1 ] && grep -qx 'failed: home:ess@0.99.4: download or checksum of ess 0.99.4' "$W/err" && ok "a failed ess download: apply exits 1 and names it" || bad "failed home download: exit $st $(grep home "$W/err")"
 [ ! -e "$HP/ess-versions/0.99.4" ] && ok "a failed download leaves no tree" || bad "a tree of a failed download: $(ls "$HP/ess-versions/0.99.4")"
 run "$R5" apply
+rm -rf "$R5/var/lib/builder/.cache/ms-playwright/chromium_headless_shell-1234"
+printf '#!/bin/sh\necho "Google Chrome for Testing 1.0.0.0"\n' >"$R5/var/lib/builder/.cache/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-linux64/chrome-headless-shell"
+run "$R5" check
+grep -q "^drift: home:chrome-headless-shell@151.0.7922.34: .*chromium_headless_shell-1234 is 'missing', want 151.0.7922.34" "$W/out" && grep -q "^drift: home:chrome-headless-shell@158.0.8127.18: .*chromium_headless_shell-1254 is '1.0.0.0', want 158.0.8127.18" "$W/out" && ok "check names a missing browser and a browser of another version" || bad "browser drift: $(grep home "$W/out")"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && ok "the browsers have 0 drift after apply" || bad "browsers after apply: $(cat "$W/out")"
 
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
@@ -913,6 +924,46 @@ homerun check
 grep -q 'archive' "$W/out" && ok "home pin: a marker of another archive is drift" || bad "home marker drift: $(cat "$W/out")"
 homerun apply
 [ "$(cat "$HT/.slot-sha256" 2>/dev/null)" = "$HSHA" ] && [ ! -e "$HT.slot-new" ] && [ ! -e "$HT.slot-old" ] && ok "home pin: apply replaces a tree of another archive, no .slot-new or .slot-old left" || bad "home repair: $(ls -a "$RH/var/lib/builder/.local/share/ess-versions")"
+
+# A zip pin (Playwright browser) through the real branch: unzipped without stripping, both markers,
+# the version read from `--version`. Needs zip and unzip.
+if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  mkdir -p "$W/zsrc/chrome-headless-shell-linux64"
+  printf '#!/bin/sh\necho "Google Chrome for Testing 7.7.7.7"\n' >"$W/zsrc/chrome-headless-shell-linux64/chrome-headless-shell"
+  chmod 4777 "$W/zsrc/chrome-headless-shell-linux64/chrome-headless-shell"
+  (cd "$W/zsrc" && zip -qr "$W/home.zip" chrome-headless-shell-linux64)
+  ZSHA=$(sha256sum "$W/home.zip" | cut -d' ' -f1)
+  cat >"$W/stubbin2/curl" <<EOF
+#!/bin/sh
+out=
+url=
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -fsSLo) out=\$2; shift ;;
+    -*) ;;
+    *) url=\$1 ;;
+  esac
+  shift
+done
+case \$url in
+  https://home.test/shell.zip) cp "$W/home.zip" "\$out" ;;
+  *) printf 'junk\n' >"\$out" ;;
+esac
+EOF
+  HLINE="chrome-headless-shell 7.7.7.7 $ZSHA https://home.test/shell.zip zip .cache/ms-playwright/chromium_headless_shell-9999 chrome-headless-shell-linux64/chrome-headless-shell"
+  RZ=$W/rz
+  mkdir -p "$RZ"
+  homerun() { NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_TEST_HOME_PINS="$HLINE" NODE_ROOT=$RZ PATH=$W/stubbin2:$PATH sh "$P" "$1" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+  homerun apply
+  ZT=$RZ/var/lib/builder/.cache/ms-playwright/chromium_headless_shell-9999
+  grep -q 'changed: home:chrome-headless-shell@7.7.7.7' "$W/out" && ok "zip pin, real branch: apply installs the browser" || bad "zip real branch: $(cat "$W/out" "$W/err")"
+  [ -e "$ZT/INSTALLATION_COMPLETE" ] && [ -e "$ZT/DEPENDENCIES_VALIDATED" ] && ok "zip pin: both Playwright markers exist" || bad "zip markers: $(ls -a "$ZT")"
+  [ "$(stat -c %a "$ZT/chrome-headless-shell-linux64/chrome-headless-shell" 2>/dev/null)" = 755 ] && ok "zip pin: the binary is mode 755" || bad "zip binary mode: $(stat -c %a "$ZT/chrome-headless-shell-linux64/chrome-headless-shell" 2>&1)"
+  homerun check
+  grep -q 'home:chrome' "$W/out" && bad "zip pin: drift after a matching install: $(cat "$W/out")" || ok "zip pin: check reports no drift after the install"
+else
+  ok "zip pin: skipped, zip or unzip missing on this host"
+fi
 
 # 6j. After apply changed a unit file or replaced the slot binary, each running unit it affects
 # restarts: sccache-node always, slot-node when no job runs (else a pending line). check reports a
