@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { formatValue, toneOf } from '../../lib/spec-format.ts';
+import { formatValue, themeValue } from '../../lib/spec-format.ts';
 import type { Column, FieldGroup, Row } from '../../lib/spec.ts';
 import SectionHead from '../SectionHead.vue';
 import SpecHost from './SpecHost.vue';
@@ -26,23 +26,25 @@ const present = (cols: Column[]): Column[] =>
     <SectionHead v-if="title" :text="title" />
     <p v-if="!row" class="muted">{{ status === 'loading' ? 'loading…' : status === 'failed' ? 'could not read this from the daemon' : 'the daemon holds no such record' }}</p>
     <template v-else>
-      <dl>
+      <dl class="uxui-dense">
         <template v-for="c in present(fields)" :key="c.field">
-          <dt>{{ c.label }}</dt>
-          <dd :class="'as-' + (c.as ?? 'text')">
+          <dt :class="['uxui-field-' + c.field, 'uxui-as-' + (c.as ?? 'text')]">{{ c.label }}</dt>
+          <dd :class="['uxui-field-' + c.field, 'uxui-as-' + (c.as ?? 'text')]" :data-uxui-value="themeValue(row[c.field])">
             <SpecHost v-if="c.host" :name="c.host" :row="row" :params="{}" />
-            <span v-else :class="c.tones ? 'tone-' + toneOf(row[c.field], c) : undefined">{{ formatValue(row[c.field], c) }}</span>
+            <span v-else-if="c.as === 'badge'" class="uxui-badge">{{ formatValue(row[c.field], c) }}</span>
+            <template v-else>{{ formatValue(row[c.field], c) }}</template>
           </dd>
         </template>
       </dl>
       <details v-for="g in groups" :key="g.name" :open="!g.collapsed">
         <summary>{{ g.label }}</summary>
-        <dl>
+        <dl class="uxui-dense">
           <template v-for="c in present(g.fields)" :key="c.field">
-            <dt>{{ c.label }}</dt>
-            <dd :class="'as-' + (c.as ?? 'text')">
+            <dt :class="['uxui-field-' + c.field, 'uxui-as-' + (c.as ?? 'text')]">{{ c.label }}</dt>
+            <dd :class="['uxui-field-' + c.field, 'uxui-as-' + (c.as ?? 'text')]" :data-uxui-value="themeValue(row[c.field])">
               <SpecHost v-if="c.host" :name="c.host" :row="row" :params="{}" />
-              <span v-else :class="c.tones ? 'tone-' + toneOf(row[c.field], c) : undefined">{{ formatValue(row[c.field], c) }}</span>
+              <span v-else-if="c.as === 'badge'" class="uxui-badge">{{ formatValue(row[c.field], c) }}</span>
+              <template v-else>{{ formatValue(row[c.field], c) }}</template>
             </dd>
           </template>
         </dl>
@@ -53,14 +55,5 @@ const present = (cols: Column[]): Column[] =>
 
 <style scoped>
 section { padding: 2px 14px 6px; min-width: 0; }
-dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 1px 14px; margin: 4px 0 8px; font-size: 13px; line-height: 20px;
-  font-variant-numeric: tabular-nums; }
-dt { color: var(--mute); }
-dd { margin: 0; overflow-wrap: anywhere; }
-dd.as-list, dd.as-map { font-family: var(--mono); white-space: pre-wrap; }
 summary { cursor: pointer; font-size: 13px; font-weight: 700; line-height: 22px; }
-.tone-danger { color: var(--bad); font-weight: 600; }
-.tone-warning { color: var(--warn); }
-.tone-success { color: #1e7a3a; }
-.tone-info { color: var(--accent); }
 </style>

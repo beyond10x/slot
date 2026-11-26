@@ -1041,7 +1041,11 @@ fn page_component(
             "const badge = computed(() => {{\n  const v = rows_{read}.value[0]?.[{}];\n  return v === undefined || v === null ? '' : String(v);\n}});",
             js(field)
         );
-        header_attrs.push_str(" :badge=\"badge\"");
+        let _ = write!(
+            header_attrs,
+            " :badge=\"badge\" badge-field=\"{}\"",
+            attr(field)
+        );
     }
     let links = header
         .map(|h| h.actions.as_slice())

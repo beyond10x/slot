@@ -77,10 +77,11 @@ tasks:
 
   ui-spec-check:
     desc: Validate the ESS spec and its HTTP binding, and check the UI spec (spec/ui/slot.ui.yaml) against both and against the host components it declares.
+    dir: spec
     cmds:
-      - ess specify validate --path spec
-      - ess specify http validate --path spec --binding spec/http.yaml
-      - ess ui check --path spec/ui/slot.ui.yaml --model spec --hosts spec/ui/slot.hosts
+      - ess specify validate --path .
+      - ess specify http validate --path . --binding http.yaml
+      - ess ui check --path ui/slot.ui.yaml --model . --hosts ui/slot.hosts
 
   install:
     desc: Build the UI and install slot into ~/.local/bin.

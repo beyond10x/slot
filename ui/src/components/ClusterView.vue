@@ -446,7 +446,6 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
       </dl>
       <nav class="right" aria-label="views">
         <a class="btn" href="#jobs" title="job tables, charts, headroom, pool share and every job's output">Jobs and charts</a>
-        <a class="btn" href="#/jobs" title="every job with a search and a state filter, and each job's detail">Job list</a>
         <button class="btn" type="button" :aria-pressed="theme === 'light'" @click="emit('theme', dark ? 'light' : 'dark')">{{ dark ? 'Light theme' : 'Dark theme' }}</button>
       </nav>
     </header>
@@ -495,6 +494,7 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
         <div class="jhead">
           <h2><span class="name">{{ filter ? `Jobs on ${nameOf(filter)}` : 'Jobs' }}</span> newest first</h2>
           <span class="sum"><b>{{ jobSum.run }}</b> running · <b>{{ jobSum.fin }}</b> finished in 5 min, <b class="bad">{{ jobSum.failed }}</b> failed</span>
+          <a class="btn" href="#/jobs" title="every job with a search and a state filter, and each job's detail">Job list</a>
           <span v-if="filter" class="fchip">node <b>{{ nameOf(filter) }}</b><kbd>Esc</kbd>
             <button type="button" aria-label="Clear the node filter" @click="clearFilter">✕</button></span>
           <span class="legend" aria-hidden="true"><span v-for="t in toolNames" :key="t" :style="{ '--c': tcColor(t) }">{{ t }}</span></span>

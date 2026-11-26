@@ -62,7 +62,7 @@ pages:
           filter: row.state == running and row.state contains state.state and row.argv contains state.search
         columns:
           - {field: id, label: job}
-          - {field: toolchain, label: tool, host: RunningTool, stands_in_for: text, reason: "draws the toolchain's colour dot, the colour every chart of the web view gives it"}
+          - {field: toolchain, label: tool}
           - {field: repo, label: repo, host: RunningRepo, stands_in_for: text, reason: "names the repository and, in the quiet colour, the worktree from the job's checkout"}
           - &session {field: session}
           - &command {field: argv, label: command, as: list}
@@ -83,7 +83,7 @@ pages:
           filter: row.state == queued and row.state contains state.state and row.argv contains state.search
         columns:
           - {field: id, label: job}
-          - {field: toolchain, label: tool, host: QueuedTool, stands_in_for: text, reason: "draws the toolchain's colour dot, the colour every chart of the web view gives it"}
+          - {field: toolchain, label: tool}
           - {field: repo, label: repo, host: QueuedRepo, stands_in_for: text, reason: "names the repository and, in the quiet colour, the worktree from the job's checkout"}
           - *session
           - *command
@@ -103,7 +103,7 @@ pages:
           filter: row.state in [ok, failed, cancelled] and row.state contains state.state and row.argv contains state.search
         columns:
           - {field: id, label: job}
-          - {field: toolchain, label: tool, host: DoneTool, stands_in_for: text, reason: "draws the toolchain's colour dot, the colour every chart of the web view gives it"}
+          - {field: toolchain, label: tool}
           - {field: repo, label: repo, host: DoneRepo, stands_in_for: text, reason: "names the repository and, in the quiet colour, the worktree from the job's checkout"}
           - *session
           - *command

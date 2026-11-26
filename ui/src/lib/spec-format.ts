@@ -45,6 +45,12 @@ export function toneOf(value: unknown, col: Pick<Column, 'tones'>): string {
   return col.tones?.[String(value)] ?? 'neutral';
 }
 
+/** A value as the theme's `data-uxui-value`: a scalar as text; nothing for a list, a map or no value. */
+export function themeValue(value: unknown): string | undefined {
+  if (value === '' || value === null || value === undefined) return undefined;
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? String(value) : undefined;
+}
+
 /** Fields drawn right-aligned. */
 export const isNumeric = (col: Column): boolean =>
   col.as === 'number' || col.as === 'bytes' || col.as === 'duration';

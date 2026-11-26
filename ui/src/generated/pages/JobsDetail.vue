@@ -64,7 +64,7 @@ const links = [{ label: "all jobs", href: href("jobs.list", {}) }];
 </script>
 
 <template>
-  <SpecPage path="pages/jobs.detail" :title="title" :badge="badge" :links="links" :columns="['narrow', 'wide']">
+  <SpecPage path="pages/jobs.detail" :title="title" :badge="badge" badge-field="state" :links="links" :columns="['narrow', 'wide']">
     <template #col0>
       <SpecRecord path="pages/jobs.detail/sections/summary" :row="rows_summary[0]" :status="read_summary.status" :fields="fields_summary" :groups="groups_summary" />
     </template>

@@ -15,7 +15,7 @@ const read_running = useView("slot.pool.Jobs", () => ({}), 2000);
 const rows_running = computed(() => read_running.rows.filter((row) => eq(row["state"], "running") && contains(row["state"], state["state"]) && contains(row["argv"], state["search"])));
 const columns_running: Column[] = [
   { field: "id", label: "job" },
-  { field: "toolchain", label: "tool", host: "RunningTool" },
+  { field: "toolchain", label: "tool" },
   { field: "repo", label: "repo", host: "RunningRepo" },
   { field: "session", label: "session" },
   { field: "argv", label: "command", as: "list" },
@@ -31,7 +31,7 @@ const read_queued = useView("slot.pool.Jobs", () => ({}), 2000);
 const rows_queued = computed(() => read_queued.rows.filter((row) => eq(row["state"], "queued") && contains(row["state"], state["state"]) && contains(row["argv"], state["search"])));
 const columns_queued: Column[] = [
   { field: "id", label: "job" },
-  { field: "toolchain", label: "tool", host: "QueuedTool" },
+  { field: "toolchain", label: "tool" },
   { field: "repo", label: "repo", host: "QueuedRepo" },
   { field: "session", label: "session" },
   { field: "argv", label: "command", as: "list" },
@@ -47,7 +47,7 @@ const read_done = useView("slot.pool.Jobs", () => ({}), 2000);
 const rows_done = computed(() => read_done.rows.filter((row) => among(row["state"], ["ok", "failed", "cancelled"]) && contains(row["state"], state["state"]) && contains(row["argv"], state["search"])));
 const columns_done: Column[] = [
   { field: "id", label: "job" },
-  { field: "toolchain", label: "tool", host: "DoneTool" },
+  { field: "toolchain", label: "tool" },
   { field: "repo", label: "repo", host: "DoneRepo" },
   { field: "session", label: "session" },
   { field: "argv", label: "command", as: "list" },

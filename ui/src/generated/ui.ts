@@ -29,4 +29,4 @@ export const toneMaps: Record<string, Readonly<Record<string, string>>> = {
 };
 
 /** Every host slot of the document: `ui/src/hosts.ts` registers one component for each. */
-export type HostName = "DoneRepo" | "DoneRunTime" | "DoneTool" | "DoneWait" | "JobOutput" | "QueuedRepo" | "QueuedTool" | "QueuedWait" | "RunningRepo" | "RunningRunTime" | "RunningTool" | "RunningWait";
+export type HostName = "DoneRepo" | "DoneRunTime" | "DoneWait" | "JobOutput" | "QueuedRepo" | "QueuedWait" | "RunningRepo" | "RunningRunTime" | "RunningWait";

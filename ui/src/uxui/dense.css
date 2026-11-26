@@ -1,0 +1,81 @@
+/* From themes/dense.css of beyond10x/uxui at commit 478644f7c4e13fab2d5d279ce63e8c013c6df0b9. Copied, not edited: change it there. */
+/* uxui theme "dense": a dense table and a dense record for any generator that writes the uxui class
+   hooks (themes/README.md, "Class hooks"). No ess-ui/1 key is needed: the hooks carry the field name,
+   its `as` and its value, all of which the document already has.
+   - table.uxui-dense: fixed column widths, one line per cell cut with an ellipsis, sticky headings;
+     an app theme gives each column its width with `table.uxui-dense .uxui-field-<field> { width: … }`.
+   - dl.uxui-dense: the label beside its value, two columns.
+   - [data-uxui-value]: a colour per value. An app theme sets, per field and value, --uxui-value-color
+     (the colour mark), --uxui-value-fill (a badge's fill) and --uxui-mark: "" (draw the mark before the
+     value), and colour and weight of the value's text directly; a badge inside inherits them.
+   Two modes: light and dark, chosen like every uxui theme (themes/theme-toggle.js, data-uxui-mode). */
+
+:root {
+  color-scheme: light;
+  --uxui-dense-bg: #ffffff;
+  --uxui-dense-text: #1a1a1a;
+  --uxui-dense-muted: #5c5c5c;
+  --uxui-dense-line: #d4d4d4;
+  --uxui-dense-rule: #e9e9e9;
+  --uxui-dense-hover: #f2f4f7;
+  --uxui-dense-badge: #ececec;
+}
+
+/* Dark: the system asks for it and nobody picked light, or somebody picked dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-uxui-mode="light"]) {
+    color-scheme: dark;
+    --uxui-dense-bg: #14161f;
+    --uxui-dense-text: #e6e8ef;
+    --uxui-dense-muted: #a2a7b8;
+    --uxui-dense-line: #3a3e4e;
+    --uxui-dense-rule: #2a2d3a;
+    --uxui-dense-hover: #1e2130;
+    --uxui-dense-badge: #2a2d3a;
+  }
+}
+:root[data-uxui-mode="dark"] {
+  color-scheme: dark;
+  --uxui-dense-bg: #14161f;
+  --uxui-dense-text: #e6e8ef;
+  --uxui-dense-muted: #a2a7b8;
+  --uxui-dense-line: #3a3e4e;
+  --uxui-dense-rule: #2a2d3a;
+  --uxui-dense-hover: #1e2130;
+  --uxui-dense-badge: #2a2d3a;
+}
+
+/* Values both modes share. --uxui-dense-reach: how far a table's rows reach into the page margin on
+   each side, so that the text of its first and last cells stands in line with the page. */
+:root {
+  --uxui-dense-row: 31px;
+  --uxui-dense-head: 26px;
+  --uxui-dense-reach: 0px;
+  --uxui-dense-sticky-top: 0px;
+  --uxui-dense-mono: ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+}
+
+/* The element around a dense table: the container its column queries measure. */
+.uxui-dense-frame { container-type: inline-size; }
+
+/* The table: column widths hold, every cell is one line. */
+table.uxui-dense { table-layout: fixed; margin: 0 calc(-1 * var(--uxui-dense-reach)); width: calc(100% + 2 * var(--uxui-dense-reach)); border-collapse: collapse; color: var(--uxui-dense-text); background: var(--uxui-dense-bg); font-variant-numeric: tabular-nums; }
+table.uxui-dense th, table.uxui-dense td { text-align: left; padding: 3px 6px; height: var(--uxui-dense-row); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--uxui-dense-rule); }
+table.uxui-dense th { height: var(--uxui-dense-head); vertical-align: bottom; font-size: 12px; font-weight: 400; color: var(--uxui-dense-muted); border-bottom: 0; box-shadow: inset 0 -1px 0 var(--uxui-dense-line); position: sticky; top: var(--uxui-dense-sticky-top); z-index: 1; background: var(--uxui-dense-bg); }
+/* The row of an empty table (class uxui-empty) is no row to point at. */
+table.uxui-dense tbody tr:not(.uxui-empty):hover td { background: var(--uxui-dense-hover); }
+table.uxui-dense tr.uxui-empty td { color: var(--uxui-dense-muted); }
+table.uxui-dense .uxui-as-number, table.uxui-dense .uxui-as-bytes, table.uxui-dense .uxui-as-duration { text-align: right; }
+table.uxui-dense td.uxui-as-list { font-family: var(--uxui-dense-mono); font-size: 13px; }
+
+/* The record: each label beside its value. A generator that wraps each pair in a <div> (the stock one)
+   gets the same grid. */
+dl.uxui-dense { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 1px 14px; margin: 4px 0 8px; font-size: 13px; line-height: 20px; color: var(--uxui-dense-text); font-variant-numeric: tabular-nums; }
+dl.uxui-dense > div { display: contents; }
+dl.uxui-dense dt { color: var(--uxui-dense-muted); white-space: nowrap; }
+dl.uxui-dense dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+dl.uxui-dense dd.uxui-as-list, dl.uxui-dense dd.uxui-as-map { font-family: var(--uxui-dense-mono); white-space: pre-wrap; }
+
+/* A colour per value: the mark before the value, and a badge's fill. */
+[data-uxui-value]::before { content: var(--uxui-mark, none); display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 2px; background: var(--uxui-value-color, var(--uxui-dense-muted)); vertical-align: 0; }
+.uxui-badge { display: inline-block; padding: 0 7px; border-radius: 10px; font-size: 13px; line-height: 20px; background: var(--uxui-value-fill, var(--uxui-dense-badge)); }

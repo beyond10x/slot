@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { formatValue, isNumeric, toneOf } from '../../lib/spec-format.ts';
+import { formatValue, isNumeric, themeValue } from '../../lib/spec-format.ts';
 import type { Column, Row } from '../../lib/spec.ts';
 import SectionHead from '../SectionHead.vue';
 import SpecHost from './SpecHost.vue';
@@ -41,27 +41,26 @@ const emptyText = computed(() =>
 </script>
 
 <template>
-  <section class="spec-table" :data-ui-path="path">
+  <section class="spec-table uxui-dense-frame" :data-ui-path="path">
     <SectionHead v-if="heading" :text="heading" />
-    <table class="jobs spec">
+    <table class="jobs spec uxui-dense">
       <thead>
         <tr>
-          <th v-for="c in columns" :key="c.field + c.label" :class="['f-' + c.field, { num: isNumeric(c) }]">{{ c.label }}</th>
+          <th v-for="c in columns" :key="c.field + c.label" :class="['uxui-field-' + c.field, 'uxui-as-' + (c.as ?? 'text'), { num: isNumeric(c) }]">{{ c.label }}</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in shown" :key="String(row[rowKey])" @click="emit('open', row)">
-          <td v-for="c in columns" :key="c.field + c.label" :class="['f-' + c.field, 'as-' + (c.as ?? 'text'), { num: isNumeric(c) }]"
-            :title="c.as === 'list' ? formatValue(row[c.field], c) : undefined">
+          <td v-for="c in columns" :key="c.field + c.label" :class="['uxui-field-' + c.field, 'uxui-as-' + (c.as ?? 'text'), { num: isNumeric(c) }]"
+            :data-uxui-value="themeValue(row[c.field])" :title="c.as === 'list' ? formatValue(row[c.field], c) : undefined">
             <SpecHost v-if="c.host" :name="c.host" :row="row" :params="{}" />
             <button v-else-if="c.field === rowKey && openLabel" type="button" class="jobid" :aria-label="`${openLabel} ${String(row[rowKey])}`"
               @click.stop="emit('open', row)">{{ formatValue(row[c.field], c) }}</button>
-            <span v-else-if="c.as === 'badge'" class="badge" :class="'tone-' + toneOf(row[c.field], c)">{{ formatValue(row[c.field], c) }}</span>
-            <span v-else-if="c.tones" :class="'tone-' + toneOf(row[c.field], c)">{{ formatValue(row[c.field], c) }}</span>
+            <span v-else-if="c.as === 'badge'" class="uxui-badge">{{ formatValue(row[c.field], c) }}</span>
             <template v-else>{{ formatValue(row[c.field], c) }}</template>
           </td>
         </tr>
-        <tr v-if="!shown.length" class="empty"><td :colspan="columns.length">{{ emptyText }}</td></tr>
+        <tr v-if="!shown.length" class="empty uxui-empty"><td :colspan="columns.length">{{ emptyText }}</td></tr>
       </tbody>
     </table>
     <p v-if="sizes && rows.length > (sizes[0] ?? 0)" class="pager">
@@ -74,32 +73,8 @@ const emptyText = computed(() =>
 </template>
 
 <style scoped>
-section { padding: 2px 14px 6px; container-type: inline-size; }
-/* One width per field, as the job tables give them; the command takes what is left. */
-.spec .f-id { width: 64px; }
-.spec .f-toolchain { width: var(--c-tool); overflow: hidden; }
-.spec .f-repo { width: var(--c-repo); overflow: hidden; text-overflow: ellipsis; }
-.spec .f-session { width: var(--c-session); overflow: hidden; text-overflow: ellipsis; color: var(--mute); }
-.spec .f-priority { width: 64px; }
-.spec .f-tokens { width: 46px; }
-.spec .f-enqueued_ms { width: 56px; }
-.spec .f-started_ms { width: 70px; }
-.spec .f-ended_ms { width: 76px; color: var(--mute); }
-.spec .f-state { width: var(--c-state); }
-.spec .f-cpu_s { width: 64px; }
-.spec .f-peak_rss { width: 76px; }
-.spec .f-wait_reason { width: 30%; overflow: hidden; text-overflow: ellipsis; color: var(--mute); }
-.spec td.as-list { overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 13px; }
-.badge { display: inline-block; padding: 0 7px; border-radius: 10px; background: #ececec; font-size: 13px; line-height: 20px; }
-.badge.tone-success { background: #d6efe6; }
-.badge.tone-info { background: #dbeaf5; }
-.badge.tone-danger { background: #f6dcdc; color: var(--bad); font-weight: 600; }
-.badge.tone-warning { background: #f7e7cf; }
-.tone-danger { color: var(--bad); font-weight: 600; }
-.tone-warning { color: var(--warn); }
+/* Column widths, one-line cells and the colour per value come from the uxui themes (src/uxui/). */
+section { padding: 2px 14px 6px; }
 .pager { display: flex; align-items: center; gap: 10px; margin: 6px 0 0; font-size: 13px; color: var(--mute); font-variant-numeric: tabular-nums; }
 .pager label { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; }
-@container (max-width: 1109px) {
-  .spec .f-session { display: none; }
-}
 </style>

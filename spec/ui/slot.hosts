@@ -1,13 +1,10 @@
 # Host components ui/src/hosts.ts registers, one per host slot of slot.ui.yaml.
 DoneRepo
 DoneRunTime
-DoneTool
 DoneWait
 JobOutput
 QueuedRepo
-QueuedTool
 QueuedWait
 RunningRepo
 RunningRunTime
-RunningTool
 RunningWait

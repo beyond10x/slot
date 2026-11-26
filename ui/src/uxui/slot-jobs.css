@@ -1,0 +1,107 @@
+/* From themes/slot-jobs.css of beyond10x/uxui at commit 478644f7c4e13fab2d5d279ce63e8c013c6df0b9. Copied, not edited: change it there. */
+/* uxui theme "slot-jobs": slot's job list (jobs.list) and job detail (jobs.detail) of its ess-ui/1
+   document, over themes/dense.css. Load it after dense.css. It keys only on field names and values the
+   document already has: no ess-ui/1 key is added.
+   - a width per column of the job list; the command (argv) takes what is left;
+   - from a narrow table on, the tool is its colour mark and the session goes;
+   - a colour per value: the toolchain's mark, the job state's badge, the priority's text.
+   Two modes: light and dark, chosen like every uxui theme (themes/theme-toggle.js, data-uxui-mode). */
+
+:root {
+  color-scheme: light;
+  --uxui-slot-tool-rust: #d55e00;
+  --uxui-slot-tool-go: #0072b2;
+  --uxui-slot-tool-other: #8c8c8c;
+  --uxui-slot-neutral-fill: #ececec;
+  --uxui-slot-info-fill: #dbeaf5;
+  --uxui-slot-success-fill: #d6efe6;
+  --uxui-slot-warning-fill: #f7e7cf;
+  --uxui-slot-warning-text: #a94300;
+  --uxui-slot-danger-fill: #f6dcdc;
+  --uxui-slot-danger-text: #b00000;
+}
+
+/* Dark: the system asks for it and nobody picked light, or somebody picked dark. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-uxui-mode="light"]) {
+    color-scheme: dark;
+    --uxui-slot-tool-rust: #e8772e;
+    --uxui-slot-tool-go: #56b4e9;
+    --uxui-slot-tool-other: #9a9a9a;
+    --uxui-slot-neutral-fill: #2a2d3a;
+    --uxui-slot-info-fill: #1d2a4d;
+    --uxui-slot-success-fill: #15362a;
+    --uxui-slot-warning-fill: #3a2c12;
+    --uxui-slot-warning-text: #f0b55a;
+    --uxui-slot-danger-fill: #43202a;
+    --uxui-slot-danger-text: #ff8a93;
+  }
+}
+:root[data-uxui-mode="dark"] {
+  color-scheme: dark;
+  --uxui-slot-tool-rust: #e8772e;
+  --uxui-slot-tool-go: #56b4e9;
+  --uxui-slot-tool-other: #9a9a9a;
+  --uxui-slot-neutral-fill: #2a2d3a;
+  --uxui-slot-info-fill: #1d2a4d;
+  --uxui-slot-success-fill: #15362a;
+  --uxui-slot-warning-fill: #3a2c12;
+  --uxui-slot-warning-text: #f0b55a;
+  --uxui-slot-danger-fill: #43202a;
+  --uxui-slot-danger-text: #ff8a93;
+}
+
+/* Column widths of the job list. The headings stick below slot's header (its --hdr); the rows reach 6 px
+   into the page margin on each side, as slot's other tables do. */
+table.uxui-dense { --uxui-slot-w-tool: 94px; --uxui-slot-w-repo: 160px; --uxui-slot-w-session: 112px; --uxui-slot-w-state: 106px; --uxui-dense-sticky-top: var(--hdr, 0px); --uxui-dense-reach: 6px; }
+table.uxui-dense .uxui-field-id { width: 64px; }
+table.uxui-dense .uxui-field-toolchain { width: var(--uxui-slot-w-tool); }
+table.uxui-dense .uxui-field-repo { width: var(--uxui-slot-w-repo); }
+table.uxui-dense .uxui-field-session { width: var(--uxui-slot-w-session); }
+table.uxui-dense .uxui-field-argv { width: auto; }
+table.uxui-dense .uxui-field-priority { width: 64px; }
+table.uxui-dense .uxui-field-tokens { width: 46px; }
+table.uxui-dense .uxui-field-enqueued_ms { width: 56px; }
+table.uxui-dense .uxui-field-started_ms { width: 70px; }
+table.uxui-dense .uxui-field-ended_ms { width: 76px; }
+table.uxui-dense .uxui-field-state { width: var(--uxui-slot-w-state); }
+table.uxui-dense .uxui-field-wait_reason { width: 30%; }
+table.uxui-dense .uxui-field-cpu_s { width: 64px; }
+table.uxui-dense .uxui-field-peak_rss { width: 76px; }
+table.uxui-dense td.uxui-field-session, table.uxui-dense td.uxui-field-ended_ms, table.uxui-dense td.uxui-field-wait_reason { color: var(--uxui-dense-muted); }
+
+/* From 1500 px, and again from 1800 px, the repository and the session get more room; below 1320 px the
+   tool is its colour mark (the command names it); below 1110 px the session goes. */
+@container (min-width: 1500px) {
+  table.uxui-dense { --uxui-slot-w-repo: 250px; --uxui-slot-w-session: 230px; }
+}
+@container (min-width: 1800px) {
+  table.uxui-dense { --uxui-slot-w-repo: 320px; --uxui-slot-w-session: 290px; }
+}
+@container (max-width: 1319px) {
+  table.uxui-dense { --uxui-slot-w-tool: 28px; }
+  table.uxui-dense .uxui-field-toolchain { font-size: 0; }
+  table.uxui-dense .uxui-field-toolchain::before { margin-right: 0; }
+}
+@container (max-width: 1109px) {
+  table.uxui-dense { --uxui-slot-w-repo: 140px; --uxui-slot-w-state: 104px; }
+  table.uxui-dense .uxui-field-session { display: none; }
+}
+
+/* A colour per value: the toolchain's mark, the colour every chart of slot's web view gives it. A
+   toolchain without a colour of its own takes the one of `other`. */
+.uxui-field-toolchain[data-uxui-value] { --uxui-mark: ""; --uxui-value-color: var(--uxui-slot-tool-other); }
+.uxui-field-toolchain[data-uxui-value="rust"] { --uxui-value-color: var(--uxui-slot-tool-rust); }
+.uxui-field-toolchain[data-uxui-value="go"] { --uxui-value-color: var(--uxui-slot-tool-go); }
+
+/* The job state's badge: in the result column, in the record and in the page header alike. */
+.uxui-field-state[data-uxui-value="queued"] { --uxui-value-fill: var(--uxui-slot-neutral-fill); }
+.uxui-field-state[data-uxui-value="running"] { --uxui-value-fill: var(--uxui-slot-info-fill); }
+.uxui-field-state[data-uxui-value="ok"] { --uxui-value-fill: var(--uxui-slot-success-fill); }
+.uxui-field-state[data-uxui-value="failed"] { --uxui-value-fill: var(--uxui-slot-danger-fill); color: var(--uxui-slot-danger-text); font-weight: 600; }
+.uxui-field-state[data-uxui-value="cancelled"] { --uxui-value-fill: var(--uxui-slot-warning-fill); }
+
+/* The priority's text. */
+.uxui-field-priority[data-uxui-value="urgent"] { color: var(--uxui-slot-danger-text); font-weight: 600; }
+.uxui-field-priority[data-uxui-value="high"] { color: var(--uxui-slot-warning-text); }
+.uxui-field-priority[data-uxui-value="normal"], .uxui-field-priority[data-uxui-value="low"] { color: var(--uxui-dense-text); }

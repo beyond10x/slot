@@ -9,6 +9,7 @@ const props = defineProps<{
   path: string;
   title: string;
   badge?: string;
+  badgeField?: string;
   links?: Array<{ label: string; href: string }>;
   columns?: Array<'narrow' | 'wide'>;
 }>();
@@ -22,7 +23,7 @@ const grid = computed(() =>
   <div class="spec-page" :data-ui-path="path">
     <div class="head">
       <h1>{{ title }}</h1>
-      <span v-if="badge" class="state">{{ badge }}</span>
+      <span v-if="badge" class="uxui-badge" :class="badgeField ? 'uxui-field-' + badgeField : undefined" :data-uxui-value="badge">{{ badge }}</span>
       <slot name="filters" />
       <nav v-if="links?.length" class="links">
         <a v-for="l in links" :key="l.href" :href="l.href">{{ l.label }}</a>
@@ -38,7 +39,6 @@ const grid = computed(() =>
 <style scoped>
 .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 14px 4px; }
 h1 { margin: 0; font-size: 16px; line-height: 24px; font-variant-numeric: tabular-nums; }
-.state { padding: 0 7px; border-radius: 10px; background: #ececec; font-size: 13px; line-height: 20px; }
 .links { margin-left: auto; font-size: 13px; }
 .links a { color: var(--accent); }
 .cols { display: grid; align-items: start; }

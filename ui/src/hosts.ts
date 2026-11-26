@@ -9,16 +9,12 @@ import type { HostName } from './generated/ui.ts';
 import JobOutput from './components/hosts/JobOutput.vue';
 import JobRepo from './components/hosts/JobRepo.vue';
 import JobRunTime from './components/hosts/JobRunTime.vue';
-import JobTool from './components/hosts/JobTool.vue';
 import JobWait from './components/hosts/JobWait.vue';
 
 // `ess-ui/1` takes each host name once in a document, so one component stands under one name per
 // table it draws in.
 export const hosts: Record<HostName, Component> = {
   JobOutput,
-  RunningTool: JobTool,
-  QueuedTool: JobTool,
-  DoneTool: JobTool,
   RunningRepo: JobRepo,
   QueuedRepo: JobRepo,
   DoneRepo: JobRepo,

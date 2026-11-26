@@ -25,7 +25,9 @@ const setTheme = (t: 'dark' | 'light'): void => {
   localStorage.setItem('slot-theme', t);
 };
 watchEffect(() => {
-  document.documentElement.dataset.theme = view.value === 'cluster' && !specRoute.value ? theme.value : 'light';
+  const mode = view.value === 'cluster' && !specRoute.value ? theme.value : 'light';
+  document.documentElement.dataset.theme = mode;
+  document.documentElement.dataset.uxuiMode = mode;
 });
 </script>
 
