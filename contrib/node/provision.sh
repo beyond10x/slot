@@ -5,18 +5,27 @@
 #   provision.sh check CONF [--canary]
 #                                     print one `drift: <part>: <what>` line per difference,
 #                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise.
-#                                     --canary also tries the node: one container against its
-#                                     role (role-canary.sh), an aborted process, the load
-#   provision.sh apply CONF [--open]  change every part that drifts, print `changed: ...` per
-#                                     change; --open also lets SETUP_KEY in (a setup login)
+#                                     --canary also tries the node: a container against its
+#                                     role, an aborted process, the load, a musl-gcc compile
+#   provision.sh apply CONF [--open] [--drain]
+#                                     change every part that drifts, print `changed: ...` per
+#                                     change; --open also lets SETUP_KEY in (a setup login);
+#                                     --drain starts a restart of slot-node that waits for its
+#                                     jobs: the daemon takes no new job, ends when its jobs have
+#                                     ended and starts again, DRAIN_MAX at most; no job is
+#                                     signalled before that bound
 #   provision.sh storage CONF         the boot step of slot-storage.service: instance store
 #                                     array, its mount, the job tmp filesystem and the binds
-#   provision.sh bundle CONF MODE [--open | --canary]
+#   provision.sh bundle CONF MODE [--open] [--drain] [--canary]
 #                                     print one self-contained script (this script, conf.sh,
-#                                     toolchains.sh and CONF) that runs MODE, for a root channel
-#                                     that takes one script, such as SSM Run Command
+#                                     toolchains.sh and CONF) that runs MODE with the options
+#                                     MODE takes, for a root channel that takes one script,
+#                                     such as SSM Run Command
 #   provision.sh pins                 print the cargo tools the node installs at a pinned
 #                                     release, one `<binary> <version>` line each
+#   provision.sh start-pre CONF       what systemd runs on the node before each start of
+#                                     slot-node.service: the end of a drain
+#   provision.sh drain-bound CONF     what the timer of a drain runs after DRAIN_MAX
 #
 # CONF is a node config file (KEY=value, see node.conf.example and README.md). A node starts as a
 # bare Amazon Linux 2023 image and `apply` makes it complete: packages, rustup and the rust
@@ -40,17 +49,25 @@ mode=${1:-}
 cf=${2:-}
 open=
 canary=
+drain=
 usage() {
-  sed -n '2,20p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,28p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 # An option a mode does not know is refused: a misspelled --canary would be a check without it.
-case $mode:${3:-} in
-  apply:--open) open=1 ;;
-  check:--canary) canary=1 ;;
-  bundle:* | *:) ;;
-  *) usage ;;
-esac
+# apply takes its two options in either order.
+if [ "$mode" != bundle ]; then
+  [ $# -le 4 ] || usage
+  for opt in "${3:-}" "${4:-}"; do
+    case $mode:$opt in
+      *:) ;;
+      apply:--open) open=1 ;;
+      apply:--drain) drain=1 ;;
+      check:--canary) canary=1 ;;
+      *) usage ;;
+    esac
+  done
+fi
 
 # Tools the node installs at a pinned release into the store's cargo bin, the release its
 # consumers' CI installs: a node job then runs the release its CI runs. One line each: name,
@@ -99,6 +116,11 @@ RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
 RUST_TRIPLE=x86_64-unknown-linux-gnu
+# musl, built on the node from its source tarball (p_musl): name, version, SHA-256, URL. The
+# SHA-256 is the one of the tarball as downloaded from musl.libc.org on 2026-11-26, and the one
+# that Arch Linux's package build file of musl 1.2.6-2 carries for the same tarball (`sha256sums`
+# of its PKGBUILD, whose build checks the upstream signature): the two agree.
+MUSL_PIN='musl 1.2.6 d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a https://musl.libc.org/releases/musl-1.2.6.tar.gz'
 # Tools built on the node from a git revision, as the build user, into the store's cargo bin. One
 # line each: name, version, repository URL, revision (the pin: a git object id; the release tag
 # peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
@@ -163,12 +185,44 @@ LIBEXEC=/usr/local/libexec
 NO_CREDENTIAL_TOOLS='glab gh'
 # The node's kernel.core_pattern, in a file that sorts after systemd's 50-coredump.conf.
 CORE_SYSCTL=/etc/sysctl.d/60-slot-core.conf
+# Where the daemon of the pool answers which CPU limit it holds: the loopback address of `slot
+# serve` when the unit names no --http.
+CPU_LIMIT_URL=http://127.0.0.1:7411/api/cpu-limit
+# The same daemon's answers about its run-time limit and about its jobs (the metrics also while
+# it drains, when its socket is gone).
+RUN_LIMIT_URL=http://127.0.0.1:7411/api/run-limit
+METRICS_URL=http://127.0.0.1:7411/metrics
+# A drain of slot-node.service (apply --drain): its marks, in a directory of root that is empty
+# after a boot, and the name of the transient timer that is its bound.
+DRAIN_DIR=/run/slot-node
+DRAIN_UNIT=slot-node-drain
+# GO_ROOT may not be the directory of a pinned archive or of the make this script builds, nor lie
+# in one: each of those is replaced whole at a release change. conf.sh, which does not know the
+# pins, refuses the other directories of the provisioning.
+go_root_pins() {
+  [ -n "$GO_ROOT" ] || return 0
+  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)"; do
+    case $GO_ROOT/ in
+      "$gp_d"/*)
+        conf_fail "$cf: GO_ROOT '$GO_ROOT' is the directory of a pinned archive, or lies in one ($gp_d)"
+        return 2
+        ;;
+    esac
+  done
+  return 0
+}
 
 if [ "$mode" = bundle ]; then
   conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
+  go_root_pins || exit 2
   m=${3:-}
   o=${4:-}
-  case $m:$o in check: | apply: | apply:--open | check:--canary) ;; *) usage ;; esac
+  [ $# -le 5 ] || usage
+  case $m:$o:${5:-} in
+    check:: | check:--canary: | apply:: | apply:--open: | apply:--drain: | apply:--open:--drain | apply:--drain:--open) ;;
+    *) usage ;;
+  esac
+  o=$o${5:+ $5}
   b=$(mktemp -d "${TMPDIR:-/tmp}/slot-node-bundle.XXXXXX") || exit 1
   cp "$here/provision.sh" "$here/conf.sh" "$here/toolchains.sh" "$b/" && cp "$cf" "$b/node.conf" || exit 1
   blob=$(cd "$b" && tar -czf - provision.sh conf.sh toolchains.sh node.conf | base64 -w0)
@@ -184,6 +238,7 @@ if [ "$mode" = bundle ]; then
 fi
 
 conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
+go_root_pins || exit 2
 H=$BUILD_HOME
 U=$BUILD_USER
 # The instance profile of this node: INSTANCE_PROFILE, else the one role.sh makes for NODE_NAME.
@@ -414,15 +469,29 @@ q_core_pattern() {
     cat /proc/sys/kernel/core_pattern 2>/dev/null
   fi
 }
-# The time until an aborted process is reaped, under core limit 0: the quickest of 5 runs, in
-# whole milliseconds. The shell's own line about the abort goes nowhere. NODE_TEST=1: the file
+# The soft core limit of the running main process of unit $1, as /proc has it (`0`, `unlimited`
+# or a number of bytes): what a job of slot-node inherits. Nothing printed: no such process, or
+# its limits cannot be read. NODE_TEST=1: the file core-limit/<unit>, which a_start writes, and
+# without it 0.
+q_core_limit() {
+  if [ -n "$T" ]; then
+    cat "$S/core-limit/$1" 2>/dev/null || echo 0
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    case $qm in '' | 0 | *[!0-9]*) return 0 ;; esac
+    awk '/^Max core file size/ { print $5 }' "/proc/$qm/limits" 2>/dev/null
+  fi
+}
+# The time until an aborted process is reaped, under the soft core limit 0 (what a job of
+# slot-node runs with), whatever limit this run has: the quickest of 5 runs, in whole
+# milliseconds. The shell's own line about the abort goes nowhere. NODE_TEST=1: the file
 # abort-ms, and without it 2.
 q_abort_ms() {
   if [ -n "$T" ]; then
     cat "$S/abort-ms" 2>/dev/null || echo 2
   else
     (
-      ulimit -c 0
+      ulimit -S -c 0
       qa_m=
       for qa_i in 1 2 3 4 5; do
         qa_0=$(date +%s%N)
@@ -435,25 +504,101 @@ q_abort_ms() {
     ) 2>/dev/null
   fi
 }
-# The marks of the pool's CPU limit as the daemon keeps them in limits.json of its state
-# directory (one JSON object; a mark that is off has no key): busy CPUs, and percent of CPU
-# pressure. Nothing printed: that mark is off. NODE_TEST=1: the files cpu-limit and cpu-pressure.
-limits_key() {
-  sed -n "s/.*\"$1\" *: *\([0-9.eE+-]*\).*/\1/p" "$H/.local/state/slot/limits.json" 2>/dev/null | head -n 1
+# $1 is a plain decimal number: digits, at most one point, a digit on both sides of it.
+is_decimal() {
+  case $1 in '' | *[!0-9.]* | .* | *. | *.*.*) return 1 ;; esac
+  return 0
 }
-q_cpu_limit() {
-  if [ -n "$T" ]; then cat "$S/cpu-limit" 2>/dev/null; else limits_key cpu_busy_max; fi
-}
-q_cpu_pressure() {
-  if [ -n "$T" ]; then cat "$S/cpu-pressure" 2>/dev/null; else limits_key cpu_pressure_max; fi
-}
-# The 5-minute load average. NODE_TEST=1: the file load5, and without it 1.00.
-q_load5() {
+# What the daemon of the pool says about its CPU limit: the JSON object of GET /api/cpu-limit on
+# its loopback address (slot serve without --http), asked as the build user, 5 s and 64 KiB at
+# most. The marks are the daemon's own, in a state directory the build user owns: root asks the
+# daemon and opens no file there (a FIFO or a link in that place would hold or feed root).
+# Nothing printed: no daemon answered. NODE_TEST=1: an answer made from the files cpu-limit and
+# cpu-pressure (a_cpu_limit writes them), and none while slot-node.service is not active.
+q_cpu_limit_answer() {
   if [ -n "$T" ]; then
-    cat "$S/load5" 2>/dev/null || echo 1.00
+    q_active slot-node.service || return 0
+    qc_m=$(cat "$S/cpu-limit" 2>/dev/null)
+    qc_p=$(cat "$S/cpu-pressure" 2>/dev/null)
+    printf '{"cpu_busy_max":%s,"cpu_busy_floor":4,"cpus":%s,"busy":0.5,"held":0,"pool":0.2,"compile_cache":0.1,"outside":0.2,"cpu_pressure_max":%s,"pressure":0.7}\n' "${qc_m:-null}" "$(q_nproc)" "${qc_p:-null}"
   else
-    cut -d' ' -f2 /proc/loadavg 2>/dev/null
+    as_user curl -s -m 5 --max-filesize 65536 "$CPU_LIMIT_URL" 2>/dev/null </dev/null | head -c 65536
   fi
+}
+# The same for the run-time limit: the JSON object of GET /api/run-limit, with `run_limit_s`
+# (seconds, or null for no limit) and `run_limit_max_s` (the most a job names, seconds).
+# NODE_TEST=1: an answer made from the files run-limit and run-limit-max (a_run_limit writes
+# them; without them no limit and 3600, a daemon nobody set), and none while slot-node.service is
+# not active.
+q_run_limit_answer() {
+  if [ -n "$T" ]; then
+    q_active slot-node.service || return 0
+    qr_l=$(cat "$S/run-limit" 2>/dev/null)
+    qr_m=$(cat "$S/run-limit-max" 2>/dev/null)
+    printf '{"run_limit_s":%s,"run_limit_max_s":%s}\n' "${qr_l:-null}" "${qr_m:-3600}"
+  else
+    as_user curl -s -m 5 --max-filesize 65536 "$RUN_LIMIT_URL" 2>/dev/null </dev/null | head -c 65536
+  fi
+}
+# The main process of unit $1 as `<pid>@<start>`, the start in microseconds of the monotonic
+# clock: a later process with the same PID has another name. Nothing printed: no main process.
+# NODE_TEST=1: the file mainpid/<unit>, which a_start writes, while the unit is active.
+q_main_id() {
+  if [ -n "$T" ]; then
+    q_active "$1" || return 0
+    cat "$S/mainpid/$1" 2>/dev/null || echo 4000@0
+  else
+    systemctl show -p MainPID -p ExecMainStartTimestampMonotonic "$1" 2>/dev/null | awk -F= '
+      $1 == "MainPID" { p = $2 }
+      $1 == "ExecMainStartTimestampMonotonic" { s = $2 }
+      END { if (p ~ /^[0-9]+$/ && p != 0) print p "@" s }'
+  fi
+}
+# The time in seconds since the epoch (NODE_TEST=1: the file now, when there is one), and such a
+# time as text in UTC.
+q_now() {
+  if [ -n "$T" ] && [ -e "$S/now" ]; then cat "$S/now"; else date +%s; fi
+}
+utc_of() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+# The jobs of the pool that run or wait, from the daemon's /metrics, asked as the build user, 5 s
+# at most: a daemon that drains has no socket for `slot status` (q_jobs) and still answers there.
+# Nothing printed: no daemon answered with its metrics. NODE_TEST=1: the file jobs, and nothing
+# when $R/.state-no-metrics exists.
+q_jobs_left() {
+  if [ -n "$T" ]; then
+    [ -e "$R/.state-no-metrics" ] && return 0
+    cat "$S/jobs" 2>/dev/null || echo 0
+  else
+    as_user curl -s -m 5 --max-filesize 1048576 "$METRICS_URL" 2>/dev/null </dev/null | awk '
+      /^# TYPE slot_jobs_running gauge/ { ok = 1 }
+      /^slot_jobs_(queued|running)\{/ { n += $NF }
+      END { if (ok) print n + 0 }'
+  fi
+}
+# The value of key $1 in the answer $2: `off` for null, the number as the daemon wrote it, `?`
+# for anything else (a string, a negative number, a cut-off object). Nothing printed: no such key.
+# Reads the answers about the CPU limit and about the run-time limit.
+cpu_mark() {
+  cm_v=$(printf '%s\n' "$2" | tr -d '\n' |
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" | sed 's/[[:space:]]*$//')
+  case $cm_v in
+    '') ;;
+    null) echo off ;;
+    *) if is_decimal "$cm_v"; then echo "$cm_v"; else echo '?'; fi ;;
+  esac
+}
+# The 5-minute load average: the second number of /proc/loadavg. NODE_TEST=1: the file loadavg in
+# that format, and without it 1.00.
+q_load5() {
+  ql_f=/proc/loadavg
+  if [ -n "$T" ]; then
+    ql_f=$S/loadavg
+    [ -e "$ql_f" ] || {
+      echo 1.00
+      return 0
+    }
+  fi
+  cut -d' ' -f2 "$ql_f" 2>/dev/null
 }
 
 # ---- system actions ----
@@ -478,12 +623,24 @@ a_start() {
   if [ -n "$T" ]; then
     # $R/.state-start-fails-<unit>: that unit does not start.
     [ -e "$R/.state-start-fails-$1" ] && return 1
+    # Like systemd, which runs the unit file's ExecStartPre: the step before a start of
+    # slot-node.service. What it prints goes to the file journal, except in the mode start-pre.
+    if [ "$1" = slot-node.service ] && grep -q '^ExecStartPre=.* start-pre ' "$R/etc/systemd/system/$1" 2>/dev/null; then
+      if [ "$mode" = start-pre ]; then gap_step; else gap_step >>"$S/journal"; fi
+    fi
     st_touch active "$1"
     [ "$1" = slot-imds-containers.service ] && : >"$S/imds-containers"
     # A unit of a package (docker.service) has no file under /etc/systemd/system.
     [ -f "$R/etc/systemd/system/$1" ] || return 0
-    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version" "$S/procgroups"
+    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version" "$S/procgroups" "$S/core-limit" "$S/mainpid"
     q_groups "$U" >"$S/procgroups/$1"
+    # A new main process: the next number, as PID and as start time.
+    as_n=$(($(cat "$S/mainpid-n" 2>/dev/null || echo 4000) + 1))
+    echo "$as_n" >"$S/mainpid-n"
+    echo "$as_n@$as_n" >"$S/mainpid/$1"
+    # The process gets the soft core limit of its unit file; without one, systemd's default.
+    as_l=$(sed -n 's/^LimitCORE=\([^:]*\).*/\1/p' "$R/etc/systemd/system/$1" | head -n 1)
+    echo "${as_l:-unlimited}" >"$S/core-limit/$1"
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" >"$S/running/$1"
     unit_defs "$1" >"$S/loaded/$1"
     unit_defs "$1" | grep '^Environment=' >"$S/procenv/$1"
@@ -528,7 +685,7 @@ a_sysctl_load() {
 # Sets the pool's CPU limit: `slot cpu-limit $1 --pressure $2`, or `slot cpu-limit off` (which
 # takes the pressure mark away too), run as the build user against the running daemon. A daemon
 # that started a moment ago may not answer yet: 5 tries, 1 s apart. NODE_TEST=1: the marks go to
-# the files q_cpu_limit and q_cpu_pressure read, unless $R/.state-cpu-limit-stays exists.
+# the files q_cpu_limit_answer reads, unless $R/.state-cpu-limit-stays exists.
 a_cpu_limit() {
   if [ "$1" = off ]; then set -- off; else set -- "$1" --pressure "$2"; fi
   if [ -n "$T" ]; then
@@ -544,6 +701,63 @@ a_cpu_limit() {
     [ "$ac_i" = 5 ] || sleep 1
   done
   return 1
+}
+# Sets the pool's run-time limit: `slot run-limit $1 --max $2` ($1 a duration or off, $2 the most
+# a job names), as the build user against the running daemon, with the tries of a_cpu_limit. The
+# daemon fixes the limit into a job when the job starts: the call ends no job that runs.
+# NODE_TEST=1: the seconds go to the files q_run_limit_answer reads, unless
+# $R/.state-run-limit-stays exists.
+a_run_limit() {
+  if [ -n "$T" ]; then
+    calls "slot run-limit $1 --max $2"
+    [ -e "$R/.state-run-limit-stays" ] && return 0
+    mkdir -p "$S" && rm -f "$S/run-limit"
+    [ "$1" = off ] || conf_seconds "$1" >"$S/run-limit"
+    conf_seconds "$2" >"$S/run-limit-max"
+    return 0
+  fi
+  for ar_i in 1 2 3 4 5; do
+    as_user "$STORE/bin/slot" run-limit "$1" --max "$2" </dev/null && return 0
+    [ "$ar_i" = 5 ] || sleep 1
+  done
+  return 1
+}
+# SIGTERM to the main process of unit $1 and to no other process of the unit: the daemon of the
+# pool then drains (no new job, the jobs it has end, it exits). `systemctl stop` and `restart`
+# signal every process of the unit (KillMode=control-group), the jobs too. NODE_TEST=1: the call
+# is recorded, and fails when $R/.state-kill-fails exists.
+a_signal_main() {
+  if [ -n "$T" ]; then
+    calls "systemctl kill --kill-whom=main --signal=TERM $1"
+    [ ! -e "$R/.state-kill-fails" ]
+  else
+    systemctl kill --kill-whom=main --signal=TERM "$1"
+  fi
+}
+# The bound of a drain: a transient timer that runs the mode drain-bound once, $1 seconds from
+# now, with a clean environment. It belongs to the manager, so it outlives this run; its name is
+# fixed, so there is one. A timer that an earlier drain left is stopped first. NODE_TEST=1: the
+# file drain-timer stands for the timer; arming fails when $R/.state-drain-arm-fails exists.
+a_drain_arm() {
+  if [ -n "$T" ]; then
+    calls "systemd-run --unit=$DRAIN_UNIT --on-active=$1 provision.sh drain-bound"
+    [ -e "$R/.state-drain-arm-fails" ] && return 1
+    mkdir -p "$S" && : >"$S/drain-timer"
+  else
+    systemctl stop "$DRAIN_UNIT.timer" 2>/dev/null
+    systemd-run --quiet --collect --unit="$DRAIN_UNIT" --on-active="$1" --timer-property=AccuracySec=1s /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh "$LIBEXEC/slot-node/provision.sh" drain-bound /etc/slot-node/node.conf
+  fi
+}
+# Takes the bound away. A timer that already ran is gone, which is no error.
+a_drain_disarm() {
+  if [ -n "$T" ]; then
+    [ -e "$S/drain-timer" ] || return 0
+    calls "systemctl stop $DRAIN_UNIT.timer"
+    rm -f "$S/drain-timer"
+  else
+    systemctl stop "$DRAIN_UNIT.timer" 2>/dev/null
+    return 0
+  fi
 }
 # The ssh logins of this boot with the key of fingerprint $1 that still run, one line each:
 # `session <id> <leader pid>` or, without a logind session, `pid <pid>`.
@@ -656,6 +870,9 @@ go_env() {
   [ -n "$GO_PRIVATE" ] && printf ' GOPRIVATE=%s GONOSUMDB=%s' "$GO_PRIVATE" "$GO_PRIVATE"
   return 0
 }
+# slot-node.service runs one step as root before each start (ExecStartPre with `+`; `-`: a step
+# that fails does not keep the pool down): the mode start-pre, which ends a drain (gap_step). Its
+# environment is emptied first: the unit's PATH begins with a directory of the build user.
 gen_unit() {
   case $1 in
     slot-storage.service)
@@ -684,11 +901,12 @@ User=$U
 Group=$U
 Environment=HOME=$H XDG_RUNTIME_DIR=/run/user/$BUILD_UID
 Environment=PATH=$STORE/nodebin:$H/.cargo/bin:/usr/local/bin:/usr/bin:/usr/sbin:$H/.bun/bin:$H/go/bin:$H/.local/bin:/bin GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=$STORE/nodebin/no-credentials SSH_ASKPASS=$STORE/nodebin/no-credentials TMPDIR=$STORE/tmp$(go_env)
+ExecStartPre=-+/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh $LIBEXEC/slot-node/provision.sh start-pre /etc/slot-node/node.conf
 ExecStart=$(serve_args)
 ExecReload=/bin/kill -HUP \$MAINPID
 KillMode=control-group
 LimitNOFILE=65536
-LimitCORE=0
+LimitCORE=0:infinity
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -708,7 +926,7 @@ Environment=HOME=$H XDG_RUNTIME_DIR=/run/user/$BUILD_UID SCCACHE_NO_DAEMON=1 SCC
 Environment=PATH=$STORE/nodebin:$H/.cargo/bin:/usr/local/bin:/usr/bin:/bin TMPDIR=$STORE/tmp
 ExecStart=$H/.cargo/bin/sccache
 LimitNOFILE=65536
-LimitCORE=0
+LimitCORE=0:infinity
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -1398,6 +1616,7 @@ p_files() {
 
 units_changed=
 slot_replaced=
+draining=
 p_units() {
   for u in $UNITS; do
     if ! want_file "unit:$u" "/etc/systemd/system/$u" 644 root:root gen_unit "$u"; then
@@ -1882,10 +2101,15 @@ archive_fetch() {
       b=$(archive_src "$b")
       mkdir -p "$fd/tree/$(dirname "$b")" || return 0
       if [ "$fn" = go ]; then
-        printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
+        # Like go: `env GOROOT` answers the directory the binary stands in.
+        printf '#!/bin/sh\n[ "$*" != "env GOROOT" ] || { dirname "$(dirname "$0")"; exit 0; }\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
       elif [ "$fn" = helm ]; then
         # Like helm: no `--version`, the version without a newline for `version --template`.
         printf '#!/bin/sh\n[ "$*" = "version --template {{.Version}}" ] || exit 1\nprintf %%s "%s"\n' "$fv" >"$fd/tree/$b"
+      elif [ "$fn" = yarn ]; then
+        # Like yarn 1 under a `yarn-path` of a .yarnrc: its own release only with
+        # YARN_IGNORE_PATH=1, else what that path prints.
+        printf '#!/bin/sh\n[ "${YARN_IGNORE_PATH:-}" = 1 ] || { echo 9.9.9-from-yarn-path; exit 0; }\necho %s\n' "$fv" >"$fd/tree/$b"
       else
         printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
       fi
@@ -1906,18 +2130,105 @@ archive_fetch() {
   done
   echo "$fd/tree"
 }
-# The first line of the version of binary $2 of archive $1, run as the build user.
+# The first line of the version of binary $2 of archive $1, run as the build user. yarn 1 runs
+# the script a `yarn-path` of the build user's .yarnrc names and prints that one's version:
+# YARN_IGNORE_PATH=1 makes it answer for itself.
 archive_version() {
   case $1 in
     go) as_user "$2" version ;;
     helm) as_user "$2" version --template '{{.Version}}' ;;
+    yarn) as_user env YARN_IGNORE_PATH=1 "$2" --version ;;
     *) as_user "$2" --version ;;
   esac 2>/dev/null </dev/null | head -n 1
+}
+# GO_ROOT: the directory of the go archive in place of /usr/local/go-<version>, for a node whose
+# `go env GOROOT` must answer the path another machine's go answers. go takes its GOROOT from the
+# real path of its binary, so a link at that path to the versioned directory would still answer
+# the versioned one: the archive is unpacked there as a real directory. The path is one that
+# others may own (a distribution's go lives in /usr/lib/go), so the directory carries a mark,
+# the file .slot-archive with `go <version> <sha256 of the archive>`, and a path that exists
+# without it, that is a symbolic link or that a package owns is not written to.
+#
+# What `go env GOROOT` of the go at $1 answers to the build user. NODE_TEST=1: the file goroot
+# when there is one, else the stand-in's answer without the test root.
+q_goroot() {
+  if [ -n "$T" ]; then
+    if [ -e "$S/goroot" ]; then
+      cat "$S/goroot"
+      return 0
+    fi
+    qg_v=$(as_user "$R$1" env GOROOT 2>/dev/null </dev/null | head -n 1)
+    echo "${qg_v#"$R"}"
+  else
+    as_user "$1" env GOROOT 2>/dev/null </dev/null | head -n 1
+  fi
+}
+# The package that owns path $1; nothing printed when none does. NODE_TEST=1: the file
+# pkg-owner/<path with _ for />.
+q_pkg_owner() {
+  if [ -n "$T" ]; then
+    cat "$S/pkg-owner/$(key "$1")" 2>/dev/null
+  else
+    qo_v=$(rpm -qf "$1" 2>/dev/null) && echo "$qo_v" | head -n 1
+  fi
+}
+# Why GO_ROOT ($1) is not this script's to write; nothing printed when it is, or is not there.
+go_root_foreign() {
+  [ -e "$R$1" ] || [ -L "$R$1" ] || return 0
+  if [ -L "$R$1" ]; then
+    echo "is a symbolic link, owner $(q_owner "$1")"
+    return 0
+  fi
+  gf_p=$(q_pkg_owner "$1")
+  if [ -n "$gf_p" ]; then
+    echo "belongs to the package $gf_p"
+    return 0
+  fi
+  if [ -f "$R$1/.slot-archive" ] && [ ! -L "$R$1/.slot-archive" ]; then
+    case $(head -n 1 "$R$1/.slot-archive") in "go "*) return 0 ;; esac
+  fi
+  echo "exists without the mark of provision.sh ($1/.slot-archive), owner $(q_owner "$1")"
+}
+# The /usr/local/go-<version> ($1) that go was in before GO_ROOT ($2), once go works from $2:
+# removed when the pool counts no job, since a go build that runs reads its GOROOT. check names
+# it with a pending line, which is no drift. A directory a link of /usr/local/bin still names
+# stays (the link is drift).
+go_old_dir() {
+  [ -d "$R$1" ] && [ ! -L "$R$1" ] || return 0
+  for go_b in go gofmt; do
+    case $(readlink "$R/usr/local/bin/$go_b" 2>/dev/null) in "$1"/*) return 0 ;; esac
+  done
+  if ! fixing; then
+    [ "$mode" != check ] || echo "pending: archive:go: $1 is removed when no job runs"
+    return 0
+  fi
+  go_j=0
+  if q_active slot-node.service; then go_j=$(q_jobs); fi
+  if [ "${go_j:-1}" != 0 ]; then
+    echo "pending: archive:go: $1 is removed when no job runs" >&2
+    return 0
+  fi
+  if rm -rf "$R$1"; then
+    changed archive:go "$1 removed: go is in $2"
+  else
+    failed archive:go "$1 not removed"
+  fi
 }
 p_archives() {
   while read -r an av as au ak ab; do
     [ -n "$an" ] || continue
     dir=/usr/local/$an-$av
+    old=
+    if [ "$an" = go ] && [ -n "$GO_ROOT" ]; then
+      old=$dir
+      dir=$GO_ROOT
+      aw=$(go_root_foreign "$dir")
+      if [ -n "$aw" ]; then
+        drift "archive:$an" "GO_ROOT $dir $aw"
+        if fixing; then failed "archive:$an" "GO_ROOT $dir $aw: nothing was changed"; fi
+        continue
+      fi
+    fi
     first=$(archive_src "${ab%% *}")
     todo=
     for b in $ab; do
@@ -1936,8 +2247,22 @@ p_archives() {
     if [ -z "$vok" ]; then
       drift "archive:$an" "$dir/$first says '${v:-missing}', want $wv"
       todo=1
+    elif [ -n "$old" ]; then
+      gr=$(q_goroot "$dir/$first")
+      if [ "$gr" != "$dir" ]; then
+        drift "archive:$an" "go env GOROOT of $dir/$first answers '${gr:-nothing}', want $dir"
+        todo=1
+      fi
     fi
-    fixing && [ -n "$todo" ] || continue
+    if [ -z "$todo" ]; then
+      [ -z "$old" ] || go_old_dir "$old" "$dir" </dev/null
+      continue
+    fi
+    fixing || continue
+    if [ -n "$old" ] && ! no_link "$dir"; then
+      failed "archive:$an" "GO_ROOT $dir has a symbolic link in its path: not written"
+      continue
+    fi
     if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-archive.XXXXXX); fi || {
       failed "archive:$an" "no temporary directory"
       continue
@@ -1947,6 +2272,11 @@ p_archives() {
       rm -rf "$td"
       failed "archive:$an" "download or checksum of $an $av"
       continue
+    fi
+    # The mark goes into the tree before the tree goes to its place.
+    if [ -n "$old" ]; then
+      mkdir -p "$(dirname "$R$dir")"
+      echo "$an $av $as" >"$src/.slot-archive" && chmod 644 "$src/.slot-archive"
     fi
     mkdir -p "$R/usr/local/bin"
     rm -rf "$R$dir.slot-new"
@@ -1960,16 +2290,34 @@ p_archives() {
     v=$(archive_version "$an" "$R$dir/$first")
     vok=
     for w in $v; do [ "$w" = "$wv" ] && vok=1; done
-    if [ -n "$vok" ]; then
-      changed "archive:$an" "$an $av installed in $dir, linked in /usr/local/bin"
-    else
+    if [ -z "$vok" ]; then
       failed "archive:$an" "$dir/$first says '${v:-missing}' after the install"
+      continue
     fi
+    if [ -n "$old" ]; then
+      gr=$(q_goroot "$dir/$first")
+      if [ "$gr" != "$dir" ]; then
+        failed "archive:$an" "go env GOROOT of $dir/$first answers '${gr:-nothing}' after the install, want $dir"
+        continue
+      fi
+    fi
+    changed "archive:$an" "$an $av installed in $dir, linked in /usr/local/bin"
+    [ -z "$old" ] || go_old_dir "$old" "$dir" </dev/null
   done <<EOF
 $ARCHIVE_PINS
 EOF
 }
 
+# source_unpack DIR SHA256 URL: the source tarball of a pin that is built on the node (make,
+# musl). Downloads it into DIR (root's temporary directory, made readable for the build user),
+# checks its SHA-256 before anything of it is unpacked, and unpacks it as DIR/src, owned by the
+# build user, who builds there. Status 1 when one of the steps failed.
+source_unpack() {
+  chmod 755 "$1"
+  (cd "$1" && curl -fsSLo src.tar.gz "$3" && echo "$2  src.tar.gz" | sha256sum -c --strict - >/dev/null &&
+    mkdir src && tar -xf src.tar.gz -C src --strip-components=1 --no-same-owner &&
+    chown -R "$U:$U" src)
+}
 # GNU make built from its source tarball (MAKE_PIN): the node's make is 4.3, which cannot parse the
 # `--jobserver-auth=fifo:` form of the pool's jobserver (make 4.4 added it), so every cmake or make
 # build of a job failed with "invalid --jobserver-auth string". The tarball is built by the build
@@ -1984,10 +2332,7 @@ make_build() {
     printf '#!/bin/sh\necho "GNU Make %s"\n' "$3" >"$mb_d/make" && chmod 755 "$mb_d/make" && echo "$mb_d/make"
     return 0
   fi
-  chmod 755 "$mb_d"
-  (cd "$mb_d" && curl -fsSLo src.tar.gz "$5" && echo "$4  src.tar.gz" | sha256sum -c --strict - >/dev/null &&
-    mkdir src && tar -xf src.tar.gz -C src --strip-components=1 --no-same-owner &&
-    chown -R "$U:$U" src) || return 0
+  source_unpack "$mb_d" "$4" "$5" || return 0
   [ -x /usr/bin/make ] || {
     echo "error: /usr/bin/make (the package's make, which builds this one) is missing" >&2
     return 0
@@ -2055,6 +2400,172 @@ p_make() {
     rm -rf "$td" "$ml"
   done <<EOF
 $MAKE_PIN
+EOF
+}
+
+# musl built from its source tarball (MUSL_PIN): Amazon Linux 2023 packages no musl-gcc, and a
+# build that names it as the C compiler of the musl target (CC_x86_64_unknown_linux_musl=musl-gcc)
+# stopped with `failed to find tool "musl-gcc"`. The build user configures the source for the
+# prefix /usr/local/musl-<version>, with the loader's link in the prefix too (--syslibdir: the
+# default is /lib, outside it), builds it with 4 make jobs and installs it into a directory of
+# its own source tree (DESTDIR). Root copies that tree, so nothing of the build runs as root and
+# no installed file is the build user's. bin/musl-gcc is the wrapper (--enable-wrapper=gcc) that
+# runs the node's gcc with lib/musl-gcc.specs; it is linked as /usr/local/bin/musl-gcc.
+# Measured on a node of 32 CPUs at a load of 58 to 68: configure 1 s, make 104 s with one job and
+# 31 s with 4, make install 3 to 8 s.
+# Prints the path of the tree to install; nothing when the download, the checksum or the build
+# failed. Arguments: dir name version sha256 url prefix. NODE_TEST=1: a tree of stand-ins, or
+# nothing when $R/.state-tool-fetch-fails exists.
+musl_build() {
+  ub_d=$1
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    calls "fetch $5"
+    mkdir -p "$ub_d/tree/bin" "$ub_d/tree/lib" "$ub_d/tree/include" || return 0
+    # Like the wrapper, `--version` answers as a compiler does. In place of a compile it writes,
+    # as the file that -o names, a script that prints what the puts line of the source prints.
+    # Like the loader, libc.so prints its release on standard error and exits 1.
+    cat >"$ub_d/tree/bin/musl-gcc" <<'EOF'
+#!/bin/sh
+[ "$1" != --version ] || { echo "gcc (stand-in of provision.sh under NODE_TEST=1)"; exit 0; }
+o=
+s=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) o=$2; shift ;;
+    *.c) s=$1 ;;
+  esac
+  shift
+done
+[ -n "$o" ] && [ -f "$s" ] || exit 1
+printf '#!/bin/sh\necho "%s"\n' "$(sed -n 's/.*puts("\(.*\)").*/\1/p' "$s")" >"$o" && chmod 755 "$o"
+EOF
+    printf '#!/bin/sh\necho "musl libc (x86_64)" >&2\necho "Version %s" >&2\nexit 1\n' "$3" >"$ub_d/tree/lib/libc.so"
+    : >"$ub_d/tree/lib/musl-gcc.specs"
+    : >"$ub_d/tree/lib/libc.a"
+    : >"$ub_d/tree/include/stdio.h"
+    chmod -R go-w "$ub_d/tree" && chmod -R a+rX "$ub_d/tree" && chmod 755 "$ub_d/tree/bin/musl-gcc" "$ub_d/tree/lib/libc.so" && echo "$ub_d/tree"
+    return 0
+  fi
+  source_unpack "$ub_d" "$4" "$5" || return 0
+  [ -x /usr/bin/make ] || {
+    echo "error: /usr/bin/make (the package's make, which builds musl) is missing" >&2
+    return 0
+  }
+  as_user timeout 600 sh -c 'cd "$1" && ./configure --prefix="$2" --syslibdir="$2/lib" --enable-wrapper=gcc && /usr/bin/make -j4 && /usr/bin/make install DESTDIR="$1/.slot-stage"' sh "$ub_d/src" "$6" </dev/null >&2 || return 0
+  # The copy is root's: made without the owner or the set-id bits of the build's files, a link
+  # copied as a link. A link in the path of the installed tree, or in place of one of the files a
+  # compile needs, refuses the whole tree.
+  ub_s=$ub_d/src/.slot-stage$6
+  if ! no_link "$ub_s" || [ ! -d "$ub_s" ]; then
+    echo "error: the build of musl left no directory $6 under its DESTDIR" >&2
+    return 0
+  fi
+  cp -RP "$ub_s" "$ub_d/tree" || return 0
+  chmod -R go-w,u-s,g-s "$ub_d/tree" && chmod -R a+rX "$ub_d/tree" || return 0
+  for ub_f in bin/musl-gcc lib/musl-gcc.specs lib/libc.a lib/libc.so include/stdio.h; do
+    if [ ! -f "$ub_d/tree/$ub_f" ] || [ -L "$ub_d/tree/$ub_f" ]; then
+      echo "error: the build of musl left no file $ub_f" >&2
+      return 0
+    fi
+  done
+  echo "$ub_d/tree"
+}
+# What the loader $1 names as its release, run as the build user: the line `Version <release>`
+# among the lines it prints on standard error (it exits 1). Nothing for a file that prints none.
+musl_says() {
+  as_user "$1" </dev/null 2>&1 | sed -n '/^Version /p' | head -n 1
+}
+p_musl() {
+  while read -r un uv us uu; do
+    [ -n "$un" ] || continue
+    dir=/usr/local/$un-$uv
+    ul=/usr/local/bin/musl-gcc
+    binok=1
+    linkok=1
+    got=$(readlink "$R$ul" 2>/dev/null)
+    if [ "$got" != "$dir/bin/musl-gcc" ]; then
+      drift "musl" "$ul is '${got:-missing}', want a link to $dir/bin/musl-gcc"
+      linkok=
+    fi
+    v=$(musl_says "$R$dir/lib/libc.so")
+    if [ "$v" != "Version $uv" ]; then
+      drift "musl" "$dir/lib/libc.so says '${v:-missing}', want Version $uv"
+      binok=
+    elif [ -z "$(as_user "$R$dir/bin/musl-gcc" --version 2>/dev/null </dev/null | head -n 1)" ]; then
+      drift "musl" "$dir/bin/musl-gcc --version answers nothing"
+      binok=
+    fi
+    fixing && { [ -z "$binok" ] || [ -z "$linkok" ]; } || continue
+    if [ -e "$R$ul" ] && [ ! -L "$R$ul" ]; then
+      failed "musl" "$ul is a real file; not replaced"
+      continue
+    fi
+    if [ -n "$binok" ]; then
+      if ln -sfn "$dir/bin/musl-gcc" "$R$ul"; then
+        changed "musl" "linked musl-gcc in /usr/local/bin to $dir/bin/musl-gcc"
+      else
+        failed "musl" "link in /usr/local/bin"
+      fi
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-musl.XXXXXX); fi || {
+      failed "musl" "no temporary directory"
+      continue
+    }
+    ml=$(mktemp)
+    src=$(musl_build "$td" "$un" "$uv" "$us" "$uu" "$dir" 2>"$ml" </dev/null)
+    if [ -z "$src" ]; then
+      failed "musl" "download, checksum or build of musl $uv: $({ grep -m 3 -i 'error' "$ml"; tail -n 2 "$ml"; } | tr '\n' ' ')"
+    elif mkdir -p "$R/usr/local/bin" && rm -rf "$R$dir.slot-new" && mv "$src" "$R$dir.slot-new" && rm -rf "$R$dir" && mv "$R$dir.slot-new" "$R$dir" &&
+      ln -sfn "$dir/bin/musl-gcc" "$R$ul"; then
+      v=$(musl_says "$R$dir/lib/libc.so")
+      if [ "$v" = "Version $uv" ]; then
+        changed "musl" "musl $uv built in $dir, linked as musl-gcc in /usr/local/bin"
+      else
+        failed "musl" "$dir/lib/libc.so says '${v:-missing}' after the install"
+      fi
+    else
+      rm -rf "$R$dir.slot-new"
+      failed "musl" "$dir not written"
+    fi
+    rm -rf "$td" "$ml"
+  done <<EOF
+$MUSL_PIN
+EOF
+}
+# check --canary: what a job does with musl-gcc. The build user writes one C file that includes
+# stdio.h into a new directory of the store's tmp (the TMPDIR of a job), compiles it with
+# `musl-gcc -static`, runs the result and removes the directory. The script answers one line:
+# `out <what the program printed>`, `cc <the compiler's first line with "error", else its first
+# line>`, or `tmp` without a directory.
+p_musl_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  while read -r un uv us uu; do
+    [ -n "$un" ] || continue
+    mc_w='slot musl canary'
+    mc_o=$(as_user timeout 60 sh -c 'd=$(mktemp -d "$2/slot-musl-canary.XXXXXX" 2>/dev/null) || { echo tmp; exit 0; }
+if cd "$d"; then
+  printf "#include <stdio.h>\nint main(void) { puts(\"%s\"); return 0; }\n" "$3" >canary.c
+  if "$1" -static -o canary canary.c >log 2>&1; then
+    echo "out $(./canary 2>&1 | head -n 1)"
+  else
+    e=$(grep -m 1 "error" log)
+    [ -n "$e" ] || e=$(head -n 1 log)
+    echo "cc ${e:-no line from the compiler}"
+  fi
+fi
+cd /
+rm -rf "$d"' sh "$R/usr/local/$un-$uv/bin/musl-gcc" "$R$STORE/tmp" "$mc_w" </dev/null 2>&1)
+    case $mc_o in
+      "out $mc_w") echo "canary: ok: musl: a C file that includes stdio.h, compiled with musl-gcc -static (musl $uv), runs and prints its line" ;;
+      "out "*) drift "musl" "canary: the program that musl-gcc -static made prints '${mc_o#out }', want '$mc_w'" ;;
+      "cc "*) drift "musl" "canary: musl-gcc -static canary.c failed: ${mc_o#cc }" ;;
+      tmp*) drift "musl" "canary: the build user got no directory in $STORE/tmp: nothing was compiled" ;;
+      *) drift "musl" "canary: no answer from the compile within 60 s: nothing was tested" ;;
+    esac
+  done <<EOF
+$MUSL_PIN
 EOF
 }
 
@@ -2209,11 +2720,33 @@ p_imds() {
 # runs a pipe handler whatever the core limit of the process is: a process killed by SIGABRT was
 # reaped only after the handler, 142 to 256 ms later on an idle node and up to 3.5 s with 24 at
 # once, and a consumer's tests that wait a few seconds for an aborted child timed out. The node's
-# pattern is the file name `core`: no handler runs, and under core limit 0 (LimitCORE=0 of
-# slot-node.service) nothing is written. A pattern that is neither a pipe nor `core` is the
-# owner's choice and stays.
+# pattern is the file name `core`: no handler runs, and under the soft core limit 0
+# (LimitCORE=0:infinity of slot-node.service and sccache-node.service; a job that wants a core
+# file raises its own limit) nothing is written.
+#
+# p_core: the sysctl file, which sets the pattern at every boot. A pattern that is neither a pipe
+# nor `core` is the owner's choice and stays: with no file there none is written, and one line
+# says so. A file that is already there stays as it is and makes the pattern `core` at the next
+# boot.
 p_core() {
+  co_v=$(q_core_pattern)
+  case $co_v in
+    "|"* | core) ;;
+    *)
+      if [ ! -e "$R$CORE_SYSCTL" ] && [ ! -L "$R$CORE_SYSCTL" ]; then
+        echo "kept: core: kernel.core_pattern is '$co_v', neither a pipe nor core: it stays, and $CORE_SYSCTL is not written"
+        return 0
+      fi
+      ;;
+  esac
   want_file core "$CORE_SYSCTL" 644 root:root gen_core_sysctl
+}
+
+# p_core_load, after p_services: the pattern of the running kernel. Under the pattern `core` a
+# process whose core limit is not 0 writes a core file into its working directory, so the file is
+# loaded only when sccache-node and slot-node run with the soft limit 0: p_services restarts a
+# unit with another limit when no job runs, and until then the pipe stays.
+p_core_load() {
   co_v=$(q_core_pattern)
   case $co_v in
     "|"*) ;;
@@ -2221,6 +2754,14 @@ p_core() {
   esac
   drift core "kernel.core_pattern is '$co_v', a pipe: an aborted process waits for the handler"
   fixing || return 0
+  [ -e "$R$CORE_SYSCTL" ] || return 0
+  for co_u in sccache-node.service slot-node.service; do
+    q_active "$co_u" || continue
+    co_l=$(q_core_limit "$co_u")
+    [ "$co_l" = 0 ] && continue
+    echo "pending: core: kernel.core_pattern stays '$co_v' while $co_u runs with the core limit ${co_l:-unknown} (under the pattern core its processes write core files): the apply that restarts it loads $CORE_SYSCTL" >&2
+    return 0
+  done
   a_sysctl_load "$CORE_SYSCTL"
   co_v=$(q_core_pattern)
   case $co_v in
@@ -2229,20 +2770,36 @@ p_core() {
   esac
 }
 
-# check --canary: an aborted process under core limit 0 is reaped within 50 ms (q_abort_ms).
+# check --canary: an aborted process under the soft core limit 0 is reaped within 50 ms
+# (q_abort_ms), and slot-node.service, whose limit its jobs inherit, runs with that limit. The
+# time is compared as a number only when it has at most 6 digits: a longer one is over the bound
+# and outside what the shell compares.
 p_core_canary() {
   [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  [ -z "${draining:-}" ] || return 0
   co_ms=$(q_abort_ms)
   case $co_ms in
-    '' | *[!0-9]*) drift core "canary: no time was measured for an aborted process: nothing was tested" ;;
-    *)
-      if [ "$co_ms" -gt 50 ]; then
-        drift core "canary: an aborted process is reaped after $co_ms ms (the quickest of 5), over 50"
-      else
-        echo "canary: ok: core: an aborted process is reaped in $co_ms ms (the quickest of 5)"
-      fi
+    '' | *[!0-9]*)
+      drift core "canary: no time was measured for an aborted process: nothing was tested"
+      return 0
       ;;
+    ???????*) co_over=1 ;;
+    *) if [ "$co_ms" -gt 50 ]; then co_over=1; else co_over=; fi ;;
   esac
+  if [ -n "$co_over" ]; then
+    drift core "canary: an aborted process is reaped after $co_ms ms (the quickest of 5), over 50"
+    return 0
+  fi
+  if ! q_active slot-node.service; then
+    drift core "canary: slot-node.service is not active: the core limit of its jobs was not read"
+    return 0
+  fi
+  co_l=$(q_core_limit slot-node.service)
+  if [ "$co_l" != 0 ]; then
+    drift core "canary: slot-node.service runs with the core limit '${co_l:-unknown}', not 0: an aborted process of a job writes a core file"
+    return 0
+  fi
+  echo "canary: ok: core: an aborted process is reaped in $co_ms ms (the quickest of 5), and slot-node.service runs with the core limit 0"
 }
 
 # docker for the jobs that start containers (a consumer's OCI lane). The package is one of
@@ -2301,19 +2858,29 @@ p_role() {
 }
 
 # check --canary: one container tries the role (role-canary.sh). An answer other than a refusal
-# is drift.
+# is drift. NODE_TEST=1 changes nothing on the host, so there the canary runs only with the
+# stand-in for docker that the test names: NODE_TEST_DOCKER, the directory that holds it. Without
+# one nothing is started, whatever `docker` PATH has.
 p_canary() {
   [ -n "$canary" ] && [ "$mode" = check ] || return 0
   if ! q_active docker.service; then
     drift role "canary: docker.service is not active: nothing was tested"
     return 0
   fi
+  pc_path=$PATH
+  if [ -n "$T" ]; then
+    if [ -z "${NODE_TEST_DOCKER:-}" ] || [ ! -x "$NODE_TEST_DOCKER/docker" ]; then
+      drift role "canary: NODE_TEST=1 names no stand-in for docker (NODE_TEST_DOCKER): nothing was started"
+      return 0
+    fi
+    pc_path=$NODE_TEST_DOCKER:$PATH
+  fi
   pc_f=$(mktemp) || {
     drift role "canary: no temporary file: nothing was tested"
     return 0
   }
   gen_role_canary >"$pc_f"
-  if pc_o=$(sh "$pc_f" 2>&1); then
+  if pc_o=$(PATH=$pc_path sh "$pc_f" 2>&1); then
     echo "canary: $pc_o"
   else
     drift role "canary: ${pc_o#role canary: }"
@@ -2382,6 +2949,12 @@ stale_reason() {
       return 0
     fi
   fi
+  # A process that started before its unit had LimitCORE (p_core_load says why the limit counts).
+  sr_l=$(q_core_limit "$1")
+  if [ -n "$sr_l" ] && [ "$sr_l" != 0 ]; then
+    echo "the process has the core limit $sr_l, not 0"
+    return 0
+  fi
   if [ "$1" = slot-node.service ]; then
     sr_v=$(q_running_version "$1")
     if [ -n "$sr_v" ] && [ "$sr_v" != "slot $SLOT_VERSION" ]; then
@@ -2407,6 +2980,124 @@ stale_reason() {
   return 0
 }
 
+# Why the running unit $1 must restart: stale_reason, a unit file this run changed, the slot
+# binary this run replaced, or other arguments than the config's. Nothing printed: no reason.
+unit_why() {
+  uw=$(stale_reason "$1")
+  if [ -z "$uw" ]; then
+    case " $units_changed " in *" $1 "*) fixing && uw="its unit file changed" ;; esac
+    [ "$1" = slot-node.service ] && [ -n "$slot_replaced" ] && uw="the slot binary was replaced"
+  fi
+  if [ -z "$uw" ] && [ "$1" = slot-node.service ]; then
+    uw_want=$(serve_args)
+    uw_got=$(q_running_args "$1")
+    [ "$uw_got" = "$uw_want" ] || uw="it runs '$uw_got', its unit says '$uw_want'"
+  fi
+  [ -z "$uw" ] || echo "$uw"
+}
+
+# A drain of slot-node.service, for a node that never has 0 jobs (apply --drain). The daemon
+# alone gets SIGTERM (a_signal_main): it removes its socket, so it takes no new job, waits until
+# the jobs it has have ended, and exits. systemd then starts the unit again (Restart=always
+# covers an exit with status 0), with the unit file as the manager has it loaded and the groups
+# the build user has at that moment; drain_start reloads the manager first. While it drains the
+# node takes no job: a `slot` call there waits for the socket.
+#
+# The marks, files of root in DRAIN_DIR: `drain`, with the main process that got the signal
+# (q_main_id), the time of the bound in seconds since the epoch, and on its second line the
+# reason; `sccache-restart`, with the reason of a restart of sccache-node.service that waits.
+# The drain runs while the main process of slot-node.service is the one of the mark.
+#
+# drain_read: dr_id, dr_until and dr_why from the mark, and draining=1 while the drain runs.
+drain_read() {
+  dr_id=
+  dr_until=
+  dr_why=
+  draining=
+  [ -f "$R$DRAIN_DIR/drain" ] || return 0
+  {
+    read -r dr_id dr_until
+    read -r dr_why
+  } <"$R$DRAIN_DIR/drain"
+  case $dr_until in '' | *[!0-9]* | ????????????*) dr_until=0 ;; esac
+  [ -n "$dr_id" ] && [ "$dr_id" = "$(q_main_id slot-node.service)" ] && draining=1
+  return 0
+}
+# Starts a drain: the mark, the bound, then the signal. Without the bound nothing is signalled,
+# and a signal that fails leaves neither mark nor bound. why_sn and why_sc are the reasons of the
+# two units, j the jobs counted.
+drain_start() {
+  ds_id=$(q_main_id slot-node.service)
+  if [ -z "$ds_id" ]; then
+    failed drain "slot-node.service has no main process: nothing was signalled"
+    return 0
+  fi
+  ds_why=${why_sn:-sccache-node.service restarts: $why_sc}
+  ds_s=$(conf_seconds "$DRAIN_MAX")
+  ds_until=$(($(q_now) + ds_s))
+  a_daemon_reload
+  rm -f "$R$DRAIN_DIR/sccache-restart"
+  if ! { mkdir -p "$R$DRAIN_DIR" && printf '%s %s\n%s\n' "$ds_id" "$ds_until" "$ds_why" >"$R$DRAIN_DIR/drain.new" &&
+    mv "$R$DRAIN_DIR/drain.new" "$R$DRAIN_DIR/drain"; }; then
+    failed drain "$DRAIN_DIR/drain could not be written: slot-node.service was not signalled"
+    return 0
+  fi
+  if ! a_drain_arm "$ds_s"; then
+    rm -f "$R$DRAIN_DIR/drain"
+    failed drain "the bound could not be armed (systemd-run --unit=$DRAIN_UNIT): slot-node.service was not signalled"
+    return 0
+  fi
+  [ -z "$why_sc" ] || echo "$why_sc" >"$R$DRAIN_DIR/sccache-restart"
+  if ! a_signal_main slot-node.service; then
+    a_drain_disarm
+    rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart"
+    failed drain "systemctl kill --kill-whom=main --signal=TERM slot-node.service failed: nothing drains"
+    return 0
+  fi
+  [ -z "$why_sc" ] || echo "pending: running: sccache-node restarts when slot-node does, at the end of its drain: $why_sc" >&2
+  echo "draining: slot-node: ${j:-?} job(s), restart by $(utc_of "$ds_until")"
+}
+# The step before each start of slot-node.service (mode start-pre, the unit's ExecStartPre): no
+# daemon of the pool runs now, whoever started the unit. A restart of sccache-node.service that
+# waited happens here, and the drain is over: its mark and its bound go. The lines go to the
+# journal of the unit.
+gap_step() {
+  if [ -f "$R$DRAIN_DIR/sccache-restart" ]; then
+    gs_why=$(head -n 1 "$R$DRAIN_DIR/sccache-restart")
+    rm -f "$R$DRAIN_DIR/sccache-restart"
+    if a_restart sccache-node.service; then
+      echo "slot-node: sccache-node.service restarted before slot-node.service starts: $gs_why"
+    else
+      echo "slot-node: systemctl restart sccache-node.service failed before the start of slot-node.service: the next apply restarts it ($gs_why)"
+    fi
+  fi
+  if [ -f "$R$DRAIN_DIR/drain" ]; then
+    rm -f "$R$DRAIN_DIR/drain"
+    a_drain_disarm
+    echo "slot-node: the drain is over: slot-node.service starts"
+  fi
+  return 0
+}
+# The bound of a drain (mode drain-bound, run by the timer of a_drain_arm). The daemon process of
+# the mark still runs: the unit restarts the hard way, which ends the jobs that still run. Another
+# process runs: the drain is over, and that daemon is left alone. None runs: the unit is started,
+# so a daemon that drained and exited does not stay down. The lines go to the journal.
+drain_bound() {
+  [ -z "$T" ] || rm -f "$S/drain-timer"
+  [ -f "$R$DRAIN_DIR/drain" ] || return 0
+  drain_read
+  if [ -n "$draining" ]; then
+    db_n=$(q_jobs_left)
+    echo "slot-node: the drain reached its bound (DRAIN_MAX=$DRAIN_MAX) with ${db_n:-?} job(s) left: slot-node.service restarts now, and the jobs that still run end"
+    a_restart slot-node.service || echo "slot-node: systemctl restart slot-node.service failed"
+  elif ! q_active slot-node.service; then
+    echo "slot-node: slot-node.service is not active after its drain: starting it"
+    a_start slot-node.service || echo "slot-node: systemctl start slot-node.service failed"
+  fi
+  rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart"
+  return 0
+}
+
 p_services() {
   started=
   for u in slot-storage.service slot-imds-root-only.service slot-imds-containers.service docker.service slot-docker-prune.timer slot-toolchains-manifest.timer sccache-node.service slot-node.service; do
@@ -2420,33 +3111,79 @@ p_services() {
       failed "unit:$u" "systemctl start $u"
     fi
   done
-  # A running unit that is not what its file and the config say restarts: sccache-node at once,
-  # slot-node when no job runs (it holds the build user's jobs).
+  # While slot-node.service drains nothing is signalled and nothing restarts: one line says how
+  # far the drain is. A restart of sccache-node that became due meanwhile gets its mark.
+  drain_read
+  if [ -n "$draining" ]; then
+    dr_n=$(q_jobs_left)
+    dr_t=$(utc_of "$dr_until")
+    drift drain "slot-node.service drains for its restart ($dr_why): ${dr_n:-?} job(s) left, restart by $dr_t"
+    fixing || return 0
+    if q_active sccache-node.service; then
+      why_sc=$(unit_why sccache-node.service)
+      if [ -n "$why_sc" ]; then
+        echo "$why_sc" >"$R$DRAIN_DIR/sccache-restart"
+        echo "pending: running: sccache-node restarts when slot-node does, at the end of its drain: $why_sc" >&2
+      fi
+    fi
+    echo "draining: slot-node: ${dr_n:-?} job(s), restart by $dr_t"
+    return 0
+  fi
+  if [ -e "$R$DRAIN_DIR/drain" ] || [ -e "$R$DRAIN_DIR/sccache-restart" ]; then
+    drift drain "the mark of a drain that is over is still in $DRAIN_DIR (apply removes it)"
+    if fixing; then
+      rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart"
+      a_drain_disarm
+      changed drain "the mark of a drain that is over removed"
+    fi
+  fi
+  # A running unit that is not what its file and the config say restarts when no job runs:
+  # slot-node holds the build user's jobs, and a restart of sccache-node ends the compilers the
+  # cache server runs for them. With slot-node not active, or started in this run, no job runs;
+  # a daemon that does not say how many run counts as one that has jobs. With jobs, the restart
+  # waits for a later apply, or with --drain for the end of a drain that starts now.
+  why_sc=
+  why_sn=
   for u in sccache-node.service slot-node.service; do
     q_active "$u" || continue
     case " $started " in *" $u "*) continue ;; esac
-    why=$(stale_reason "$u")
-    if [ -z "$why" ]; then
-      case " $units_changed " in *" $u "*) fixing && why="its unit file changed" ;; esac
-      [ "$u" = slot-node.service ] && [ -n "$slot_replaced" ] && why="the slot binary was replaced"
-    fi
-    if [ -z "$why" ] && [ "$u" = slot-node.service ]; then
-      want=$(serve_args)
-      got=$(q_running_args "$u")
-      [ "$got" = "$want" ] || why="it runs '$got', its unit says '$want'"
-    fi
+    why=$(unit_why "$u")
     [ -n "$why" ] || continue
     drift running "$u: $why"
-    fixing || continue
-    if [ "$u" = slot-node.service ]; then
-      j=$(q_jobs)
-      if [ "${j:-1}" != 0 ]; then
-        echo "pending: running: slot-node restarts when no job runs ($j now): $why" >&2
-        continue
-      fi
-    fi
-    a_restart "$u" && changed running "$u restarted: $why"
+    case $u in
+      sccache-node.service) why_sc=$why ;;
+      *) why_sn=$why ;;
+    esac
   done
+  fixing || return 0
+  [ -n "$why_sc$why_sn" ] || return 0
+  j=0
+  if q_active slot-node.service; then
+    case " $started " in
+      *" slot-node.service "*) ;;
+      *) j=$(q_jobs) ;;
+    esac
+  fi
+  if [ "${j:-1}" = 0 ]; then
+    for u in sccache-node.service slot-node.service; do
+      case $u in
+        sccache-node.service) why=$why_sc ;;
+        *) why=$why_sn ;;
+      esac
+      [ -n "$why" ] || continue
+      # systemctl restart starts what the manager has loaded.
+      case $why in "the loaded definition"*) a_daemon_reload ;; esac
+      a_restart "$u" && changed running "$u restarted: $why"
+    done
+    return 0
+  fi
+  if [ -n "$drain" ]; then
+    drain_start
+    return 0
+  fi
+  [ -z "$why_sc" ] || echo "pending: running: sccache-node restarts when no job runs ($j now): $why_sc" >&2
+  [ -z "$why_sn" ] || echo "pending: running: slot-node restarts when no job runs ($j now): $why_sn" >&2
+  return 0
 }
 
 # The CPU limit of the node's pool. Slots bound how many jobs run, not what they use: on a node
@@ -2454,8 +3191,9 @@ p_services() {
 # cpu-limit` said `no CPU limit`. With a limit the daemon holds a queued job while the pool's
 # jobs and the compile cache use more CPUs than the mark, or while the host's CPU pressure
 # (`some avg10`) is at the pressure mark or over it. The marks: CPU_LIMIT, or 80 % of the CPUs
-# found with one decimal (32 CPUs: 25.6, never under 1); CPU_PRESSURE, or 40. CPU_LIMIT=off is no
-# limit, and then no pressure mark either: the daemon keeps one only beside a CPU mark.
+# found with one decimal (32 CPUs: 25.6, never under 1); CPU_PRESSURE, or 20: on a node of 32
+# CPUs without a limit every CPU was busy at the lowest pressure seen, 21.8 %. CPU_LIMIT=off is
+# no limit, and then no pressure mark either: the daemon keeps one only beside a CPU mark.
 cpu_limit_want() {
   case $CPU_LIMIT in
     '') q_nproc | awk '{ v = $1 * 0.8; if (v < 1) v = 1; printf "%.1f\n", v }' ;;
@@ -2463,7 +3201,7 @@ cpu_limit_want() {
   esac
 }
 cpu_pressure_want() {
-  if [ "$CPU_LIMIT" = off ]; then echo off; else echo "${CPU_PRESSURE:-40}"; fi
+  if [ "$CPU_LIMIT" = off ]; then echo off; else echo "${CPU_PRESSURE:-20}"; fi
 }
 # $1 and $2 are the same mark: both off, or the same number (25.6 and 25.60, 40 and 40.0).
 same_mark() {
@@ -2473,15 +3211,40 @@ same_mark() {
     awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 == b + 0) }'
   fi
 }
-# The daemon must run: this part comes after p_services. The marks are in limits.json on the
-# instance store, so a node that was stopped and started gets them again here.
+# The marks the daemon holds, from its answer (q_cpu_limit_answer): cl_g the CPU mark and cl_gp
+# the pressure mark, each a number or `off`. A daemon from before the pressure mark answers
+# without that key: the mark is off. cl_g empty: no answer, or one that is not the whole object
+# with a CPU mark that is a number or null.
+cpu_limit_read() {
+  cl_g=
+  cl_gp=
+  cl_ans=$(q_cpu_limit_answer | tr -d '\n\r')
+  case $cl_ans in
+    "{"*"}") ;;
+    *) return 0 ;;
+  esac
+  cl_g=$(cpu_mark cpu_busy_max "$cl_ans")
+  cl_gp=$(cpu_mark cpu_pressure_max "$cl_ans")
+  cl_gp=${cl_gp:-off}
+  case "$cl_g$cl_gp" in *"?"*) cl_g= ;; esac
+  return 0
+}
+# The daemon answered, and holds both marks that are wanted (cl_w, cl_wp).
+cpu_limit_holds() {
+  [ -n "$cl_g" ] && same_mark "$cl_g" "$cl_w" && same_mark "$cl_gp" "$cl_wp"
+}
+# The daemon must run: this part comes after p_services. It keeps the marks in its state
+# directory on the instance store, so a node that was stopped and started gets them again here.
 p_cpu_limit() {
   cl_w=$(cpu_limit_want)
   cl_wp=$(cpu_pressure_want)
-  cl_g=$(q_cpu_limit)
-  cl_gp=$(q_cpu_pressure)
-  same_mark "${cl_g:-off}" "$cl_w" && same_mark "${cl_gp:-off}" "$cl_wp" && return 0
-  drift cpu-limit "the pool holds a queued job from '${cl_g:-off}' busy CPUs and '${cl_gp:-off}' % CPU pressure, want '$cl_w' and '$cl_wp'"
+  cpu_limit_read
+  cpu_limit_holds && return 0
+  if [ -n "$cl_g" ]; then
+    drift cpu-limit "the pool holds a queued job from '$cl_g' busy CPUs and '$cl_gp' % CPU pressure, want '$cl_w' and '$cl_wp'"
+  else
+    drift cpu-limit "the daemon of the pool gives no answer about its CPU limit (GET $CPU_LIMIT_URL as $U, 5 s at most), want '$cl_w' and '$cl_wp'"
+  fi
   fixing || return 0
   if ! q_active slot-node.service; then
     failed cpu-limit "slot-node.service is not active: the limit was not set"
@@ -2489,11 +3252,18 @@ p_cpu_limit() {
   fi
   if [ "$cl_w" = off ]; then cl_a=off; else cl_a="$cl_w --pressure $cl_wp"; fi
   cl_o=$(a_cpu_limit "$cl_w" "$cl_wp" 2>&1)
-  cl_g=$(q_cpu_limit)
-  cl_gp=$(q_cpu_pressure)
-  if ! { same_mark "${cl_g:-off}" "$cl_w" && same_mark "${cl_gp:-off}" "$cl_wp"; }; then
-    cl_o=$(echo "$cl_o" | tail -n 1)
-    failed cpu-limit "after slot cpu-limit $cl_a the pool holds a queued job from '${cl_g:-off}' busy CPUs and '${cl_gp:-off}' % CPU pressure${cl_o:+: $cl_o}"
+  cl_o=$(echo "$cl_o" | tail -n 1)
+  # A daemon that started a moment ago takes the call on its socket before it answers the
+  # request: 5 tries, 1 s apart.
+  for cl_i in 1 2 3 4 5; do
+    cpu_limit_read
+    [ -z "$cl_g" ] || break
+    [ -n "$T" ] || [ "$cl_i" = 5 ] || sleep 1
+  done
+  if [ -z "$cl_g" ]; then
+    failed cpu-limit "after slot cpu-limit $cl_a the daemon of the pool gives no answer about its CPU limit${cl_o:+: $cl_o}"
+  elif ! cpu_limit_holds; then
+    failed cpu-limit "after slot cpu-limit $cl_a the pool holds a queued job from '$cl_g' busy CPUs and '$cl_gp' % CPU pressure${cl_o:+: $cl_o}"
   elif [ "$cl_w" = off ]; then
     changed cpu-limit "no CPU limit (slot cpu-limit off)"
   else
@@ -2508,19 +3278,111 @@ p_cpu_limit() {
 p_cpu_limit_canary() {
   [ -n "$canary" ] && [ "$mode" = check ] || return 0
   [ "$(cpu_limit_want)" != off ] || return 0
+  [ -z "${draining:-}" ] || return 0
   cl_l=$(q_load5)
-  case $cl_l in
-    '' | *[!0-9.]* | *.*.*)
-      drift cpu-limit "canary: the 5-minute load average could not be read: nothing was tested"
-      return 0
-      ;;
-  esac
+  if ! is_decimal "$cl_l"; then
+    drift cpu-limit "canary: the 5-minute load average could not be read: nothing was tested"
+    return 0
+  fi
   cl_n=$(q_nproc)
   cl_b=$(awk -v n="$cl_n" 'BEGIN { printf "%g\n", n * 2.5 }')
   if awk -v l="$cl_l" -v b="$cl_b" 'BEGIN { exit !(l + 0 > b + 0) }'; then
     drift cpu-limit "canary: the 5-minute load average is $cl_l on $cl_n CPUs, over $cl_b (2.5 per CPU): the limit does not hold the node"
   else
     echo "canary: ok: cpu-limit: the 5-minute load average is $cl_l on $cl_n CPUs (bound $cl_b)"
+  fi
+}
+# check --canary while slot-node.service drains: the daemon whose jobs the two canaries above
+# speak for takes no job and is about to be replaced, so neither says ok; one line names them.
+p_drain_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] && [ -n "$draining" ] || return 0
+  dc_l=core
+  [ "$(cpu_limit_want)" = off ] || dc_l="$dc_l, cpu-limit"
+  echo "canary: not tested while slot-node.service drains: $dc_l"
+}
+
+# The run-time limit of the node's pool: RUN_LIMIT, after which the daemon ends a job (exit 124),
+# or off, and RUN_LIMIT_MAX, the most a job names with `slot --timeout`. A daemon nobody set has
+# no limit and lets a job name 1 h. Both are compared in seconds, the form of the daemon's
+# answer: 10m, 600s and 600 are one limit. The daemon fixes the limit into a job when the job
+# starts, so setting it ends no job that runs.
+#
+# run_limit_read: rl_g the limit (seconds or `off`) and rl_gm the most a job names (seconds), from
+# the daemon's answer (q_run_limit_answer). rl_g empty: no answer, or one that is not the whole
+# object with a limit of whole seconds or null and a maximum of whole seconds.
+run_limit_read() {
+  rl_g=
+  rl_gm=
+  rl_ans=$(q_run_limit_answer | tr -d '\n\r')
+  case $rl_ans in
+    "{"*"}") ;;
+    *) return 0 ;;
+  esac
+  rl_g=$(cpu_mark run_limit_s "$rl_ans")
+  rl_gm=$(cpu_mark run_limit_max_s "$rl_ans")
+  case $rl_gm in '' | *[!0-9]* | ????????????????*) rl_g= ;; esac
+  case $rl_g in
+    off) ;;
+    *[!0-9]* | ????????????????*) rl_g= ;;
+  esac
+  return 0
+}
+# The daemon answered, and has the limit and the maximum that are wanted (rl_w, rl_wm).
+run_limit_holds() {
+  [ -n "$rl_g" ] || return 1
+  if [ "$rl_g" = off ] || [ "$rl_w" = off ]; then
+    [ "$rl_g" = "$rl_w" ] || return 1
+  else
+    [ "$rl_g" -eq "$rl_w" ] || return 1
+  fi
+  [ "$rl_gm" -eq "$rl_wm" ]
+}
+# What the pool does, in the words of the lines below: the limit $1 and the maximum $2.
+run_limit_text() {
+  if [ "$1" = off ]; then
+    echo "the pool has no run-time limit, and a job names up to '$2' s"
+  else
+    echo "the pool ends a job that runs longer than '$1' s, and a job names up to '$2' s"
+  fi
+}
+# After p_services, like the CPU limit: the daemon must run.
+p_run_limit() {
+  rl_wm=$(conf_seconds "$RUN_LIMIT_MAX")
+  if [ "$RUN_LIMIT" = off ]; then
+    rl_w=off
+    rl_wt="'off' and '$rl_wm' s ($RUN_LIMIT_MAX)"
+  else
+    rl_w=$(conf_seconds "$RUN_LIMIT")
+    rl_wt="'$rl_w' s ($RUN_LIMIT) and '$rl_wm' s ($RUN_LIMIT_MAX)"
+  fi
+  run_limit_read
+  run_limit_holds && return 0
+  if [ -n "$rl_g" ]; then
+    drift run-limit "$(run_limit_text "$rl_g" "$rl_gm"), want $rl_wt"
+  else
+    drift run-limit "the daemon of the pool gives no answer about its run-time limit (GET $RUN_LIMIT_URL as $U, 5 s at most), want $rl_wt"
+  fi
+  fixing || return 0
+  if ! q_active slot-node.service; then
+    failed run-limit "slot-node.service is not active: the limit was not set"
+    return 0
+  fi
+  rl_a="$RUN_LIMIT --max $RUN_LIMIT_MAX"
+  rl_o=$(a_run_limit "$RUN_LIMIT" "$RUN_LIMIT_MAX" 2>&1)
+  rl_o=$(echo "$rl_o" | tail -n 1)
+  for rl_i in 1 2 3 4 5; do
+    run_limit_read
+    [ -z "$rl_g" ] || break
+    [ -n "$T" ] || [ "$rl_i" = 5 ] || sleep 1
+  done
+  if [ -z "$rl_g" ]; then
+    failed run-limit "after slot run-limit $rl_a the daemon of the pool gives no answer about its run-time limit${rl_o:+: $rl_o}"
+  elif ! run_limit_holds; then
+    failed run-limit "after slot run-limit $rl_a $(run_limit_text "$rl_g" "$rl_gm")${rl_o:+: $rl_o}"
+  elif [ "$rl_w" = off ]; then
+    changed run-limit "no run-time limit, and a job names up to $RUN_LIMIT_MAX (slot run-limit $rl_a)"
+  else
+    changed run-limit "a job that runs longer than $RUN_LIMIT is ended (exit 124), and a job names up to $RUN_LIMIT_MAX (slot run-limit $rl_a)"
   fi
 }
 
@@ -2545,15 +3407,21 @@ case $mode in
     [ -n "$imds_open" ] || p_tools
     p_archives
     p_make
+    [ -z "$T" ] || [ -z "${NODE_TEST_MUSL_PIN:-}" ] || MUSL_PIN=$NODE_TEST_MUSL_PIN
+    p_musl
     [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
     p_services
+    p_core_load
     p_cpu_limit
+    p_run_limit
     p_docker_rule
     p_canary
     p_core_canary
     p_cpu_limit_canary
+    p_musl_canary
+    p_drain_canary
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"
@@ -2568,6 +3436,15 @@ case $mode in
     p_dirs
     p_binds
     [ "$nfailed" -eq 0 ] || exit 1
+    ;;
+  start-pre)
+    # NODE_TEST=1: the whole start of the unit, as systemd does it (a_start runs the step).
+    if [ -n "$T" ]; then a_start slot-node.service; else gap_step; fi
+    exit 0
+    ;;
+  drain-bound)
+    drain_bound
+    exit 0
     ;;
   *) usage ;;
 esac

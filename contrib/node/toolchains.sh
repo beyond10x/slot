@@ -3,8 +3,9 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
-#   tool <tsc|prettier|esbuild|pnpm|yarn|ess|aep|yq|cargo-about|make|helm> <version>: no line when
-#        the machine has none, `missing` as the version when the file is there and prints none
+#   goroot <what `go env GOROOT` of that go answers>: no line without go
+#   tool <tsc|prettier|esbuild|pnpm|yarn|ess|aep|yq|cargo-about|make|musl|helm> <version>: no line
+#        when the machine has none, `missing` as the version when the file is there and prints none
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   tool groovy-all-<version> <16 hex digits of the SHA-256 of
 #        ~/.sdkman/candidates/groovy/<version>/embeddable/groovy-all-<version>.jar>
@@ -29,6 +30,11 @@ done
 for b in "$P/usr/local/bin/go" "$P/usr/local/go/bin/go" "$P/usr/lib/go/bin/go" "$P/usr/bin/go"; do
   [ -x "$b" ] || continue
   echo "go $("$b" version 2>/dev/null </dev/null | head -n 1 | awk '{ print $3 }' | cut -d- -f1)"
+  # goroot: the directory that go takes its standard library from, which a build can carry in
+  # its output. A word of its own, so that a reader of the lines that begin with `go ` and a
+  # space sees the one line as before. No line for an answer that is no absolute path.
+  gr=$("$b" env GOROOT 2>/dev/null </dev/null | head -n 1)
+  case $gr in /*) echo "goroot $gr" ;; esac
   break
 done
 for b in "$P/usr/local/bin/node" "$P/usr/bin/node"; do
@@ -44,13 +50,28 @@ done
 # the workstation.
 # The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
 # runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
+# And with YARN_IGNORE_PATH=1: yarn 1 prints the release a `yarn-path` of ~/.yarnrc names, not
+# its own.
 for n in tsc prettier esbuild pnpm yarn ess aep yq cargo-about make; do
   for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.cargo/bin/$n" "$HOME/go/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
-    tv=$(cd / && env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
+    tv=$(cd / && env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED YARN_IGNORE_PATH=1 "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
     echo "tool $n ${tv:-missing}"
     break
   done
+done
+# musl: `musl-gcc --version` is the version of gcc, so the release is read from musl's loader,
+# libc.so in the directory of the specs file that the wrapper names (`-specs "<dir>/musl-gcc.specs"`
+# in its text): run without arguments it prints `Version <release>` on standard error. A node has
+# the wrapper in /usr/local/bin (the musl pin of provision.sh, <dir> /usr/local/musl-<release>/lib),
+# the workstation in /usr/bin (<dir> /usr/lib/musl/lib).
+for b in "$P/usr/local/bin/musl-gcc" "$P/usr/bin/musl-gcc"; do
+  [ -x "$b" ] || continue
+  ml=$(sed -n 's/.* -specs "\(\/[^"]*\)\/musl-gcc\.specs".*/\1/p' "$b" 2>/dev/null | head -n 1)
+  mv=
+  if [ -n "$ml" ] && [ -x "$P$ml/libc.so" ]; then mv=$(cd / && "$P$ml/libc.so" 2>&1 </dev/null | sed -n 's/^Version //p' | head -n 1); fi
+  echo "tool musl ${mv:-missing}"
+  break
 done
 # helm has no `--version`: `helm version --template {{.Version}}` prints `v3.8.1`. A node has it in
 # /usr/local/bin (an archive pin). A workstation may have more than one (a package in /usr/bin and
@@ -88,10 +109,11 @@ for d in "$HOME"/.sdkman/candidates/groovy/*; do
 done
 # C side: the compilers and cross compilers a job resolves through /usr/bin, and the compile cache
 # (a node has it in the build user's cargo bin) with the server that runs it (the process
-# listening on 4226).
+# listening on 4226). musl-gcc: a node has it in /usr/local/bin (the musl pin).
 for n in cc gcc clang sccache x86_64-w64-mingw32-gcc musl-gcc; do
   b=$P/usr/bin/$n
   if [ ! -x "$b" ] && [ "$n" = sccache ] && [ -x "$HOME/.cargo/bin/sccache" ]; then b=$HOME/.cargo/bin/sccache; fi
+  if [ ! -x "$b" ] && [ "$n" = musl-gcc ] && [ -x "$P/usr/local/bin/musl-gcc" ]; then b=$P/usr/local/bin/musl-gcc; fi
   if [ -x "$b" ]; then
     echo "c $n $("$b" --version 2>/dev/null </dev/null | head -n 1)"
   else

@@ -3620,6 +3620,243 @@ fn eviction_starts_at_the_disk_holds_mark_and_the_held_job_starts() {
     assert_eq!(e.last[0].action, "deleted", "{e:?}");
 }
 
+/// A daemon with a disk hold's mark that knows no target directory looks
+/// and measures nothing: its report says so and `slot status` names no free
+/// space, where it read `0.0 GB free, under 50.0 GB`. Once a known target
+/// directory exists, the next look measures its filesystem.
+#[test]
+fn a_look_without_a_known_target_directory_claims_no_free_space() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(300 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 50 * GB;
+        c.evict = crate::evict::Settings {
+            floor: 40 * GB,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+    });
+    wait_for_jobs(&f, "the watch's first look", || {
+        f.server.state().evict.checked_ms > 0
+    });
+    let st = f.server.state();
+    let text = crate::status::render(&st);
+    assert!(!text.contains("0.0 GB free"), "{text}");
+    assert!(
+        text.contains(
+            "disk: no target dir known, nothing measured (eviction below 50.0 GB, raised \
+             from 40.0 GB to the disk hold's mark)\n"
+        ),
+        "{text}"
+    );
+    let e = &st.evict;
+    assert_eq!((e.unmeasured, e.free, e.known), (true, 0, 0), "{e:?}");
+
+    old_target(&f, "old");
+    evict_view(put_evict_below(&f, r#"{"evict_below_gb":40}"#));
+    wait_for_jobs(&f, "the look at the known target directory", || {
+        f.server.state().evict.known == 1
+    });
+    let st = f.server.state();
+    let e = &st.evict;
+    assert_eq!((e.unmeasured, e.free), (false, 300 * GB), "{e:?}");
+    let text = crate::status::render(&st);
+    assert!(
+        text.contains(
+            "disk: 300.0 GB free, eviction below 50.0 GB, raised from 40.0 GB to the disk \
+             hold's mark (1 target dir(s) known)\n"
+        ),
+        "{text}"
+    );
+}
+
+/// A cargo job that arrived with a same-path workspace of id `ws`, mirrored
+/// at `tree`: it runs `script` there. `target` names its target directory
+/// when that is not `target` in the tree.
+fn node_build(f: &Fixture, ws: &str, tree: &Path, target: Option<&Path>, script: &str) -> Request {
+    std::fs::create_dir_all(tree).unwrap();
+    Request {
+        cwd: String::new(),
+        repo: "r".into(),
+        workspace: Some(Workspace {
+            id: ws.into(),
+            rel_cwd: ".".into(),
+            client_root: tree.to_string_lossy().into_owned(),
+            same_path: true,
+            target_dir: target.map_or_else(String::new, |t| t.to_string_lossy().into_owned()),
+        }),
+        ..fake_build(&f.root, &f.root.join("unused"), script)
+    }
+}
+
+/// On a build node every job arrives with a workspace and builds into the
+/// target directory its record names (`node_target_dir`). That directory is
+/// known to eviction like a local job's: idle, it is deleted when free
+/// space is under the mark; one a running job builds into is kept, also
+/// when it lies outside that job's tree.
+#[test]
+fn a_node_evicts_the_idle_target_directory_of_a_job_it_ran_and_keeps_one_in_use() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const GB: u64 = crate::admission::GB;
+    static FREE: AtomicU64 = AtomicU64::new(60 * GB);
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(FREE.load(SeqCst))
+    }
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+        c.disk_free = Some(free);
+        c.evict = crate::evict::Settings {
+            floor: 40 * GB,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+    });
+    let home = f.root.join("home");
+    let idle_tree = home.join("trees/idle");
+    let idle = idle_tree.join("target");
+    let used_tree = home.join("trees/used");
+    let used = home.join("targets/used");
+    // What cargo leaves in a target directory it made.
+    let build = format!(
+        "t=${{CARGO_TARGET_DIR:-target}}; mkdir -p \"$t/debug\"; \
+         echo '{}' > \"$t/CACHEDIR.TAG\"; echo built > \"$t/debug/blob\"",
+        crate::evict::CACHEDIR_SIGNATURE
+    );
+    let r = run(&f, node_build(&f, "a1", &idle_tree, None, &build));
+    assert_eq!(r.code, 0, "{r:?}");
+    let r = run(&f, node_build(&f, "b1", &used_tree, Some(&used), &build));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(crate::evict::is_target_dir(&idle) && crate::evict::is_target_dir(&used));
+    let known = || -> Vec<PathBuf> {
+        let g = f.server.inner.lock().unwrap();
+        let mut v: Vec<PathBuf> = g.targets.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    assert_eq!(known(), [used.clone(), idle.clone()], "both are known");
+
+    // Both jobs ended long ago.
+    {
+        let mut g = f.server.inner.lock().unwrap();
+        g.targets.values_mut().for_each(|t| t.1 = 1);
+        g.ran_in.values_mut().for_each(|at| *at = 1);
+    }
+    // A job of the second tree runs: it builds into `used`.
+    let go = f.root.join("go-used");
+    let wait = format!("while [ ! -e {} ]; do sleep 0.02; done", go.display());
+    let (c, id) = submit(&f, node_build(&f, "b1", &used_tree, Some(&used), &wait));
+    wait_for_jobs(&f, "the job to run", || {
+        state_of(&f, id) == JobState::Running
+    });
+
+    FREE.store(30 * GB, SeqCst);
+    evict_view(put_evict_below(&f, r#"{"evict_below_gb":40}"#));
+    wait_for_jobs(&f, "the look under the mark", || {
+        !f.server.state().evict.last.is_empty()
+    });
+    let e = f.server.state().evict;
+    assert!(!idle.exists(), "idle and under the mark: {e:?}");
+    assert!(used.exists(), "a running job builds into it: {e:?}");
+    assert_eq!((e.known, e.free), (2, 30 * GB), "{e:?}");
+    assert_eq!(e.last.len(), 1, "{e:?}");
+    assert_eq!(
+        (e.last[0].path.as_str(), e.last[0].action.as_str()),
+        (idle.to_str().unwrap(), "deleted"),
+        "{e:?}"
+    );
+    std::fs::write(&go, "").unwrap();
+    assert_eq!(collect(c).code, 0);
+}
+
+/// The record of a job this daemon handed to a node names the directory it
+/// built into on that node: no directory of this machine, so eviction here
+/// does not learn it. The record of a job that arrived with a workspace
+/// names one of this machine.
+#[test]
+fn a_job_handed_to_a_node_names_no_target_directory_of_this_machine() {
+    let job = |remote: bool, node: &str| -> Job {
+        serde_json::from_value(serde_json::json!({
+            "id": 1, "argv": ["cargo", "build"], "cwd": "/w/r", "repo": "r",
+            "toolchain": "rust", "remote": remote, "tokens": 1, "state": "ok",
+            "enqueued_ms": 1, "started_ms": 2, "ended_ms": 3, "exit": 0, "cpu_s": 0.0,
+            "compile_server_cpu_s": 0.0, "peak_rss": 0, "node": node,
+            "node_target_dir": "/w/r/target",
+        }))
+        .unwrap()
+    };
+    let noted = |j: &Job| {
+        let mut targets = HashMap::new();
+        record_target(&mut targets, j, Path::new("/srv/cache"));
+        targets.into_keys().collect::<Vec<PathBuf>>()
+    };
+    let here = [PathBuf::from("/w/r/target")];
+    let none: [PathBuf; 0] = [];
+    assert_eq!(noted(&job(true, LOCAL_NODE)), here);
+    assert_eq!(noted(&job(true, "")), here, "a line older than nodes");
+    assert_eq!(noted(&job(false, "build-1")), none);
+    assert_eq!(noted(&job(true, "build-1")), none);
+    let mut local = job(false, "build-1");
+    local.target_dir = "/w/r/own".into();
+    assert_eq!(noted(&local), [PathBuf::from("/w/r/own")], "as before");
+}
+
+/// A job whose workspace is mirrored under the workspace root builds into
+/// `<cache-root>/target/<id>`. That directory is the cache LRU's alone,
+/// which keeps its size in a record: eviction does not learn it, so the
+/// record cannot go stale. A same-path job's directory, which the LRU never
+/// deletes, is known.
+#[test]
+fn a_target_directory_under_the_cache_root_is_not_known_to_eviction() {
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+    });
+    let build = format!(
+        "t=${{CARGO_TARGET_DIR:-target}}; mkdir -p \"$t/debug\"; \
+         echo '{}' > \"$t/CACHEDIR.TAG\"; echo built > \"$t/debug/blob\"",
+        crate::evict::CACHEDIR_SIGNATURE
+    );
+    let tree = f.root.join("home/trees/own");
+    let r = run(&f, node_build(&f, "a1", &tree, None, &build));
+    assert_eq!(r.code, 0, "{r:?}");
+    std::fs::create_dir_all(f.root.join("ws/c1")).unwrap();
+    let mut mirrored = node_build(&f, "c1", &f.root.join("client"), None, &build);
+    if let Some(ws) = &mut mirrored.workspace {
+        ws.same_path = false;
+    }
+    let r = run(&f, mirrored);
+    assert_eq!(r.code, 0, "{r:?}");
+    let cached = f.root.join("cache/target/c1");
+    assert!(crate::evict::is_target_dir(&cached), "the job built there");
+    let done = f.server.state().done;
+    let ran: Vec<Option<String>> = done.iter().map(|j| j.node_target_dir.clone()).collect();
+    assert!(
+        ran.contains(&Some(cached.to_string_lossy().into_owned())),
+        "its record names the directory: {ran:?}"
+    );
+    let known: Vec<PathBuf> = {
+        let g = f.server.inner.lock().unwrap();
+        g.targets.keys().cloned().collect()
+    };
+    assert_eq!(known, [tree.join("target")], "only the same-path one");
+
+    // The same at a start: the job log names both directories.
+    let mut targets = HashMap::new();
+    for j in &done {
+        record_target(&mut targets, j, &f.root.join("cache"));
+    }
+    assert_eq!(
+        targets.into_keys().collect::<Vec<PathBuf>>(),
+        [tree.join("target")]
+    );
+}
+
 /// `--evict-below 0` keeps eviction off, whatever `--min-free-disk` is: a
 /// job held for disk deletes nothing.
 #[test]

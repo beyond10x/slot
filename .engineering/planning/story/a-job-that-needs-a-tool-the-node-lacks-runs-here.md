@@ -8,7 +8,7 @@ summary: A repository lists the tools its jobs need in .slot/needs; the client c
 relations:
 - serves: vision:O6
 - decomposes: epic:compute-cluster
-revision: 1
+revision: 2
 ---
 ## Outcome
 
@@ -54,7 +54,7 @@ failing on the node.
 
 - A repository whose `.slot/needs` names `x86_64-w64-mingw32-gcc`, with a node manifest whose `c`
   line for it is `missing`: the job runs in the host pool, and its record has `local_reason`
-  `needs x86_64-w64-mingw32-gcc, missing on build-1d`.
+  `needs x86_64-w64-mingw32-gcc, missing on <node>`.
 - The same repository after the node gets the tool (the `c` line is not `missing`): the job runs on
   the node.
 - A `.slot/needs` line with a version that differs from the node's `tool` line: host pool, reason

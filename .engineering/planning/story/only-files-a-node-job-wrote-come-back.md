@@ -8,7 +8,7 @@ relations:
 - decomposes: epic:compute-cluster
 - serves: vision:O2
 - depends_on: story:results-come-back-from-a-node
-revision: 1
+revision: 2
 ---
 ## Outcome
 
@@ -36,6 +36,13 @@ still holds.
   (modification time, size, path) and copies only what is new or changed. Its limits: a file
   written with an old time and the same size does not come back, a name with a newline is not
   handled, and each job pays two listings.
+- A second change of the wrapper the same day: the two listings keep directories, so an empty
+  directory the job made comes back. Before it a job that made a detached git checkout inside
+  the tree lost that checkout's empty `refs/heads` and `refs/tags` on the session's side, and
+  the next forward sync with `--delete` removed them on the node too.
+- The wrapper's two rules, to keep when the step moves into the client: (1) only what is new
+  on the node, or changed there in modification time or size while the job ran, comes back;
+  (2) directories count like files, the empty ones included.
 
 ## Recommendation
 
@@ -60,7 +67,9 @@ still holds.
 4. A job that fails (exit code not 0) brings its written files back as a successful one does.
 5. A written file under `.git`, the target directory or `node_modules` does not come back.
 6. A listing that fails prints one line naming the node and copies nothing.
-7. Tests use the stand-in node; no network; each under 60 s.
+7. A job makes an empty directory: it is in the session's tree after the job, and a second job
+   in the same tree still finds it on the node.
+8. Tests use the stand-in node; no network; each under 60 s.
 
 ## Scope
 

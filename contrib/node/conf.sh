@@ -9,11 +9,36 @@
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
-INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE'
+INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT'
 
 conf_fail() {
   echo "node config: $*" >&2
   return 2
+}
+
+# The seconds of the duration $1, in the forms the slot command line takes: whole seconds, or a
+# whole number with s, m or h, at least 1 s and at most 9 digits. Nothing printed and status 1:
+# no such duration.
+conf_seconds() {
+  case $1 in
+    *[smh])
+      cs_n=${1%?}
+      cs_u=${1#"$cs_n"}
+      ;;
+    *)
+      cs_n=$1
+      cs_u=s
+      ;;
+  esac
+  case $cs_n in '' | *[!0-9]* | ??????????*) return 1 ;; esac
+  # Without leading zeros: the shell reads 010 as 8.
+  cs_n=$(echo "$cs_n" | sed 's/^0*//')
+  [ -n "$cs_n" ] || return 1
+  case $cs_u in
+    m) cs_n=$((cs_n * 60)) ;;
+    h) cs_n=$((cs_n * 3600)) ;;
+  esac
+  echo "$cs_n"
 }
 
 conf_read() {
@@ -79,6 +104,10 @@ conf_read() {
   INSTANCE_PROFILE=${CONF_INSTANCE_PROFILE:-}
   CPU_LIMIT=${CONF_CPU_LIMIT:-}
   CPU_PRESSURE=${CONF_CPU_PRESSURE:-}
+  DRAIN_MAX=${CONF_DRAIN_MAX:-30m}
+  RUN_LIMIT=${CONF_RUN_LIMIT:-10m}
+  RUN_LIMIT_MAX=${CONF_RUN_LIMIT_MAX:-30m}
+  GO_ROOT=${CONF_GO_ROOT:-}
   conf_check_forms "$cf"
 }
 
@@ -133,6 +162,29 @@ conf_check_forms() {
       return 2
       ;;
   esac
+  # DRAIN_MAX, the bound of a drain (apply --drain): from 1m, since a shorter one ends the jobs
+  # about as a restart does, to 24h, since the mark of a drain lives until the next boot and a
+  # longer bound is none.
+  cc_s=$(conf_seconds "$DRAIN_MAX") && [ "$cc_s" -ge 60 ] && [ "$cc_s" -le 86400 ] || {
+    conf_fail "$1: DRAIN_MAX must be a duration from 1m to 24h (seconds, or a number with s, m or h), not '$DRAIN_MAX'"
+    return 2
+  }
+  # The run-time limit of the pool as `slot run-limit` takes it: a duration or off, and the most
+  # a job names, which the limit may not exceed (the daemon refuses that).
+  cc_m=$(conf_seconds "$RUN_LIMIT_MAX") || {
+    conf_fail "$1: RUN_LIMIT_MAX must be a duration of at least 1 s (seconds, or a number with s, m or h), not '$RUN_LIMIT_MAX'"
+    return 2
+  }
+  if [ "$RUN_LIMIT" != off ]; then
+    cc_s=$(conf_seconds "$RUN_LIMIT") || {
+      conf_fail "$1: RUN_LIMIT must be a duration of at least 1 s (seconds, or a number with s, m or h), or off, not '$RUN_LIMIT'"
+      return 2
+    }
+    [ "$cc_s" -le "$cc_m" ] || {
+      conf_fail "$1: RUN_LIMIT '$RUN_LIMIT' is longer than RUN_LIMIT_MAX '$RUN_LIMIT_MAX', the most a job may name"
+      return 2
+    }
+  fi
   case $INSTANCE_PROFILE in
     *[!A-Za-z0-9_+=,.@-]*)
       conf_fail "$1: INSTANCE_PROFILE must be the name of an instance profile, or none"
@@ -154,6 +206,24 @@ conf_check_forms() {
         ;;
     esac
   done
+  # GO_ROOT, where the go archive goes in place of /usr/local/go-<version>: the path as `go env
+  # GOROOT` prints it, so in its plain form. provision.sh replaces that directory whole, so it is
+  # none that the provisioning writes elsewhere, none in one, and none that holds one.
+  case $GO_ROOT in
+    '') ;;
+    /*[!A-Za-z0-9._/+-]* | /*//* | */ | /*/./* | /*/. | /*/../* | /*/.. | /./* | /../* | /. | /.. | [!/]*)
+      conf_fail "$1: GO_ROOT must be an absolute path of letters, digits and the signs . _ + -, without a doubled slash, a slash at its end or a . or .. part, not '$GO_ROOT'"
+      return 2
+      ;;
+    *)
+      for v in "$STORE" "$BUILD_HOME" /usr/local/bin /usr/local/libexec /usr/bin /etc /run; do
+        [ -n "$v" ] || continue
+        case $GO_ROOT/ in "$v"/*) ;; *) case $v/ in "$GO_ROOT"/*) ;; *) continue ;; esac ;; esac
+        conf_fail "$1: GO_ROOT '$GO_ROOT' is a directory the provisioning manages, lies in one or holds one ($v)"
+        return 2
+      done
+      ;;
+  esac
   case $SLOT_VERSION in
     '' | [0-9]*.[0-9]*.[0-9]*) ;;
     *)

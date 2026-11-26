@@ -393,6 +393,12 @@ known: number,
  */
 free: number, 
 /**
+ * The last look measured nothing: no known target directory exists,
+ * so no filesystem was asked and `free` is 0. False from a daemon
+ * older than the field, whose `free` of 0 may be this case.
+ */
+unmeasured?: boolean, 
+/**
  * Time of the last look, Unix milliseconds.
  */
 checked_ms: number, 
