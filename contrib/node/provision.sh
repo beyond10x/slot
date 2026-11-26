@@ -2915,6 +2915,37 @@ $HOME_PINS
 EOF
 }
 
+# sdkman's `current` link of groovy: ~/.sdkman/candidates/groovy/current names the version of the
+# first groovy line of HOME_PINS, relative, as sdkman makes it. A job that carries the
+# workstation's GROOVY_HOME (that path, named in SLOT_ENV) finds the tree there. The build user
+# writes the link; a path there that is no symbolic link is left alone.
+p_groovy_current() {
+  gc_l=$(echo "$HOME_PINS" | awk '$1 == "groovy" { print $2 " " $6; exit }')
+  [ -n "$gc_l" ] || return 0
+  gc_v=${gc_l%% *}
+  gc_p=$H/$(dirname "${gc_l#* }")/current
+  gc_g=$(readlink "$R$gc_p" 2>/dev/null)
+  [ -L "$R$gc_p" ] && [ "$gc_g" = "$gc_v" ] && return 0
+  if [ -L "$R$gc_p" ]; then
+    gc_s="'$gc_g'"
+  elif [ -d "$R$gc_p" ]; then
+    gc_s='a directory'
+  elif [ -e "$R$gc_p" ]; then
+    gc_s='a file'
+  else
+    gc_s="'missing'"
+  fi
+  drift home:groovy-current "$gc_p is $gc_s, want a link to $gc_v"
+  fixing || return 0
+  if [ -e "$R$gc_p" ] && [ ! -L "$R$gc_p" ]; then
+    failed home:groovy-current "$gc_p is no symbolic link: not replaced"
+  elif as_user ln -sfn "$gc_v" "$R$gc_p" </dev/null && [ "$(readlink "$R$gc_p")" = "$gc_v" ]; then
+    changed home:groovy-current "$gc_p links to $gc_v"
+  else
+    failed home:groovy-current "$gc_p not written"
+  fi
+}
+
 p_keys() {
   k=$H/.ssh/authorized_keys
   if [ -d "$R$H/.ssh" ] && [ -f "$R$k" ] && gen_keys | cmp -s - "$R$k"; then
@@ -3718,6 +3749,7 @@ case $mode in
     p_dash
     [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
     [ -n "$imds_open" ] || p_home_pins
+    [ -n "$imds_open" ] || p_groovy_current
     [ -n "$imds_open" ] || p_keys
     p_services
     p_core_load

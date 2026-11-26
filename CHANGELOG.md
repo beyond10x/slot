@@ -29,6 +29,11 @@
   `dbus-libs`, and `xz` for the archive). A consumer's browser tests start `firefox` by name and
   failed on a node, which had none. `check --canary` starts it headless as the build user until
   it listens for WebDriver BiDi; `toolchains.sh` prints `tool firefox <release>`.
+- Node: sdkman's `current` link of Groovy. `contrib/node/provision.sh` links
+  `~/.sdkman/candidates/groovy/current` to the version of the groovy line of `HOME_PINS`
+  (`2.4.10`) as the build user, so a job that carries the workstation's
+  `GROOVY_HOME=~/.sdkman/candidates/groovy/current` finds the tree; the path did not exist on a
+  node. A missing link or one to another version is drift; a directory there is left alone.
 
 ## 0.39.1 — 2026-11-26
 

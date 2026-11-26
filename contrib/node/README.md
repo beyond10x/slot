@@ -599,6 +599,14 @@ exists and is no symbolic link. `toolchains.sh` prints
 `tool groovy-all-<version> <16 hex digits of the jar's SHA-256>` for each version directory under
 that path that has the jar, so `push.sh check` reports a workstation without that candidate, or
 with another 2.4 release, as drift. The JDK comes from `EXTRA_PACKAGES`.
+sdkman's `current` link is made too: `~/.sdkman/candidates/groovy/current` names the version of
+the first groovy line (`2.4.10`, relative, as sdkman makes it), so a job that carries the
+workstation's `GROOVY_HOME=~/.sdkman/candidates/groovy/current` (named in `SLOT_ENV`) finds
+the tree. The build user writes it after the trees; a missing link, or one to another version,
+is `drift: home:groovy-current: ...`, and a directory or file at that path is left alone
+(`failed: ... is no symbolic link: not replaced`). `JAVA_HOME` gets no such link: a job that
+carries the workstation's `~/.sdkman/candidates/java/current` should not name it in `SLOT_ENV`;
+a node's `java` is `/usr/bin/java`, and its JDKs are under `/usr/lib/jvm`.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

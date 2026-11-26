@@ -838,6 +838,34 @@ grep -q "^drift: home:groovy@2.4.10: .*groovy/2.4.10 is 'missing', want 2.4.10" 
 run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && [ -f "$GJ" ] && [ ! -L "$GJ" ] && ok "groovy has 0 drift after apply" || bad "groovy after apply: $(cat "$W/out")"
+# sdkman's `current` link: ~/.sdkman/candidates/groovy/current names the version of the groovy line
+# of HOME_PINS, relative, as sdkman makes it. A job that carries GROOVY_HOME of the workstation
+# (that path) finds the tree.
+GC=/var/lib/builder/.sdkman/candidates/groovy/current
+[ "$(readlink "$R5$GC")" = 2.4.10 ] && ok "apply links $GC to 2.4.10" || bad "groovy current after apply: '$(readlink "$R5$GC")'"
+rm -f "$R5$GC"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: home:groovy-current: $GC is 'missing', want a link to 2.4.10" "$W/out" && ok "check names a missing groovy current link" || bad "groovy current missing: exit $st $(grep groovy "$W/out")"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "changed: home:groovy-current: $GC links to 2.4.10" "$W/out" && [ "$(readlink "$R5$GC")" = 2.4.10 ] && ok "apply creates the groovy current link" || bad "groovy current apply: exit $st $(grep groovy "$W/out" "$W/err") '$(readlink "$R5$GC")'"
+ln -sfn 3.0.13 "$R5$GC"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: home:groovy-current: $GC is '3.0.13', want a link to 2.4.10" "$W/out" && ok "a current link to another version is drift" || bad "groovy current other: exit $st $(grep groovy "$W/out")"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ "$(readlink "$R5$GC")" = 2.4.10 ] && ok "apply sets the current link back to 2.4.10" || bad "groovy current back: $(cat "$W/out") '$(readlink "$R5$GC")'"
+rm -f "$R5$GC"
+mkdir "$R5$GC"
+run "$R5" check
+grep -qx "drift: home:groovy-current: $GC is a directory, want a link to 2.4.10" "$W/out" && ok "a directory at the current path is drift" || bad "groovy current directory: $(grep groovy "$W/out")"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: home:groovy-current: $GC is no symbolic link: not replaced" "$W/err" && [ -d "$R5$GC" ] && [ ! -L "$R5$GC" ] && ok "apply leaves a directory at the current path and says so" || bad "groovy current over a directory: exit $st $(grep groovy "$W/out" "$W/err")"
+rmdir "$R5$GC"
+run "$R5" apply
 
 # 5i. GO_ROOT: the directory the go archive goes to, for a node whose `go env GOROOT` must answer
 # the path the workstation's go answers (a consumer's output carries that path). Empty, go stays
