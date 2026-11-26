@@ -148,17 +148,18 @@ every `CARGO_*` variable of the compiler's environment (sccache: all but `CARGO_
 `workspace.target_default`: true when the directory is the one cargo resolves by itself, that
 is `target` in `cargo metadata`'s `workspace_root` with no `CARGO_TARGET_DIR` of the caller
 (`same_path::target_dir`, the one place that decides the directory). The daemon then exports no
-`CARGO_TARGET_DIR` and removes its own; cargo finds the same directory in the tree. Otherwise
-(the caller's variable, a `build.target-dir` of a cargo configuration, `CARGO_BUILD_TARGET_DIR`,
-or a client older than the field) it sets `CARGO_TARGET_DIR` to the directory, as before: a
-configuration in the caller's home does not exist on the server. So a cargo job, cargo inside a
+`CARGO_TARGET_DIR` and removes its own and its `CARGO_BUILD_TARGET_DIR`; cargo finds the same
+directory in the tree. Otherwise (the caller's variable, a `build.target-dir` of a cargo
+configuration, `CARGO_BUILD_TARGET_DIR`, a `cargo metadata` that failed on the client, whose
+`target` beside the lock file is a guess an in-tree configuration may contradict, or a client
+older than the field) it sets `CARGO_TARGET_DIR` to the directory, as before: a configuration
+in the caller's home does not exist on the server. So a cargo job, cargo inside a
 generic job (which never got the variable) and the jobs of a second tree of the repository
 carry the same `CARGO_*` variables. For the same reason a cargo job gets no `CARGO_NET_OFFLINE`
 after its fetch (`cargo_fetch.rs`). Not changed: a mirror below the workspace root gets
 `CARGO_TARGET_DIR=<cache-root>/target/<id>`, one value per tree, and a sandbox with fixed paths
-its own `/work/target`. A server whose own cargo configuration or environment
-(`build.target-dir`, `CARGO_BUILD_TARGET_DIR`) names a target directory would move a default
-build away from the recorded directory.
+its own `/work/target`. A server whose own cargo configuration (`build.target-dir`) names a
+target directory would move a default build away from the recorded directory.
 
 ### 3.3 Transport and access
 

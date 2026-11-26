@@ -530,8 +530,16 @@ written. The listing is an rsync sender without a destination (`rsync -d host:<d
 `slot shell` admits as it admits a fetch, so the host needs no new command. Way (b) above was
 rejected for cargo because cargo names its files; go does not. Both listings come from one
 machine, so no clock is compared across machines. rsync lists times to the second: a file
-written again with the same size in the second of its earlier mtime reads as not written. A
-build without `-o`, and every other go command, makes no listing and no copy.
+written again with the same size in the second of its earlier mtime reads as not written. The
+top of the tree (`-o .`) is listed like any other directory. Only a directory needs the first
+listing: when it fails for a path that is not named as a directory, the path is listed again
+after the job and, when it is no directory, copied as one file. The copy goes into the
+directory of the file (or the directory `-o` names), created and resolved on the client, with
+the file names alone as rsync paths: `--relative` would send the directories on the way, and
+the receiver replaces one that is a symlink on the client with a directory (rsync 3.5 refuses
+to write through it even with `--keep-dirlinks`). A build without
+`-o`, `go test -c` without `-o` (its `<pkg>.test` stays in the working directory on the host)
+and every other go command make no listing and no copy.
 
 ### 5.3 `cargo test`
 

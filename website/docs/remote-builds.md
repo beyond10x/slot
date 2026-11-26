@@ -414,14 +414,21 @@ slot go test -c -o target/tools/pkg.test ./pkg
 - **A directory.** When the path is a directory on the server before the job, or `-o` ends in
   `/`, slot lists it on the server before the job and after it and copies the files the job
   wrote: those that are new, or whose size or modification time changed. Any other file of that
-  directory stays on the server. Both listings are the server's, so no clock of this machine is
-  compared with the server's. The times are compared to the second: a file written again with
-  the same size within the second of its earlier time counts as not written.
+  directory stays on the server. The top of the checkout is such a directory too
+  (`go build -o . ./cmd/...` called there). Both listings are the server's, so no clock of this
+  machine is compared with the server's. The times are compared to the second: a file written
+  again with the same size within the second of its earlier time counts as not written.
+- **Links.** A directory on the path that is a symlink in your checkout (`out -> /data/out`)
+  stays a symlink: the file arrives where it points.
 - **When.** After exit 0 only. The line is the same, for example
   `slot: fetched 1 artifact, 2.1 MB, in 0.2 s`. A listing or a copy that fails prints
-  `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1.
+  `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1. A single file needs no
+  listing before the job: when that listing fails, slot lists the path again after the job and
+  copies the file when it is no directory.
 - **Not touched.** `go run`, `go vet`, `go install`, a `go build` without `-o` and a `go test`
-  without `-c` run as before: no listing, no copy.
+  without `-c` run as before: no listing, no copy. A `go test -c` without `-o` writes
+  `<package>.test` into the working directory on the server, and it stays there: name the file
+  with `-o` to get it back.
 - **Off.** `SLOT_NO_PRODUCTS=1`, as for cargo.
 
 ## Crates are fetched once per Cargo.lock
@@ -560,10 +567,13 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
   cache](reference/environment.md#cargo-variables-and-the-compile-cache)). When you set
   `CARGO_TARGET_DIR`, or `CARGO_BUILD_TARGET_DIR` or a `build.target-dir` of a cargo
   configuration on this machine names another directory, the job gets `CARGO_TARGET_DIR` with
-  that directory's absolute path. The job's record names the directory either way. A server
-  whose own cargo configuration sets `build.target-dir`, or whose daemon runs with
-  `CARGO_BUILD_TARGET_DIR`, would build elsewhere than the record says: keep both off the
-  server.
+  that directory's absolute path. So does a job for which `cargo metadata` fails here: slot
+  then takes `target` beside the nearest `Cargo.lock`, which a cargo configuration might have
+  moved, and names it to cargo rather than leave it to cargo. The job's record names the
+  directory either way. Where the job gets no `CARGO_TARGET_DIR` it gets no
+  `CARGO_BUILD_TARGET_DIR` either, also not one of the server daemon's own environment. A
+  server whose own cargo configuration sets `build.target-dir` would build elsewhere than the
+  record says: keep it off the server.
 - A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
   directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
 - A directory outside any git checkout (a scratch copy) is the tree itself, unless it is the

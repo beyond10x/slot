@@ -2358,13 +2358,14 @@ impl Server {
         // by itself (`target_default`) the job is not told: a compile cache
         // keys every `CARGO_*` variable, and this one differs per tree. The
         // record, eviction and the `start` frame name the directory either
-        // way (`job_target`).
+        // way (`job_target`). Nor does it get `CARGO_BUILD_TARGET_DIR`: the
+        // daemon's own, in a remote job's base, would move the build.
         if let Some(ws) = req.workspace.as_ref().filter(|w| w.same_path) {
             env = match self.same_path_target(ws) {
                 Ok(Some(t)) if !ws.target_default => {
                     toolchain::set(env, "CARGO_TARGET_DIR", &t.to_string_lossy())
                 }
-                _ => toolchain::unset(env, &["CARGO_TARGET_DIR"]),
+                _ => toolchain::unset(env, &["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"]),
             };
         }
         // The bound in force at the start is the job's, like its run-time

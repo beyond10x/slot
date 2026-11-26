@@ -3970,6 +3970,35 @@ fn a_cargo_job_a_generic_job_and_a_second_tree_get_the_same_cargo_variables() {
     }
 }
 
+/// Where cargo resolves the directory by itself, no `CARGO_BUILD_TARGET_DIR`
+/// reaches the job either: the daemon's own environment (the base of a remote
+/// job) would move the build away from the recorded directory. The test puts
+/// it in the request, which the job's environment is built from the same way.
+#[test]
+fn a_default_target_directory_gets_no_cargo_build_target_dir() {
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+    });
+    let cargo = printing_cargo(&f.root);
+    let tree = f.root.join("home/trees/a");
+    let r = run(
+        &f,
+        same_path_job(
+            &tree,
+            "a1",
+            &[&cargo, "build"],
+            Some((&tree.join("target"), true)),
+            &["CARGO_BUILD_TARGET_DIR=/elsewhere"],
+        ),
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(
+        !r.out.contains("CARGO_BUILD_TARGET_DIR="),
+        "cargo resolves the directory by itself: {}",
+        r.out
+    );
+}
+
 /// A tree mirrored below the workspace root: a cargo job and cargo inside a
 /// generic job get the same `CARGO_*` variables too, with the target
 /// directory the daemon gives that workspace in both.

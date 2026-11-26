@@ -224,7 +224,8 @@ fn target_of(json: &[u8]) -> Option<Target> {
 /// cargo finds without being told: not with a variable of the caller, and
 /// not when `CARGO_BUILD_TARGET_DIR` or a `build.target-dir` of a cargo
 /// configuration moved it, since a configuration outside the tree (in the
-/// caller's home) does not exist on the server.
+/// caller's home) does not exist on the server; nor the guess beside the
+/// lock file when `cargo metadata` fails.
 pub fn target_dir(
     argv: &[String],
     cwd: &Path,
@@ -263,6 +264,8 @@ pub fn target_dir(
     {
         return Some(t);
     }
+    // A guess: a cargo configuration, also one in the tree, may name
+    // another directory, so cargo is told this one.
     let from = manifest
         .as_deref()
         .map(|m| cwd.join(m))
@@ -270,7 +273,7 @@ pub fn target_dir(
         .unwrap_or_else(|| cwd.to_path_buf());
     Some(Target {
         dir: crate::artifacts::local_target(&from, top, None),
-        default: true,
+        default: false,
     })
 }
 
@@ -423,7 +426,9 @@ mod tests {
             target_dir(&build, &top, &top, None),
             at(top.join("elsewhere"), false)
         );
-        // Without a cargo that answers, `target` beside the lock file.
+        // Without a cargo that answers, `target` beside the lock file, a
+        // guess: a cargo configuration (here the one in the tree) may name
+        // another directory, so it is exported, not left to cargo.
         std::fs::write(top.join("driver/Cargo.lock"), "").unwrap();
         assert_eq!(
             target_dir(
@@ -432,7 +437,7 @@ mod tests {
                 &top,
                 None
             ),
-            at(top.join("driver/target"), true)
+            at(top.join("driver/target"), false)
         );
         assert_eq!(target_dir(&v(&["sh", "run.sh"]), &top, &top, None), None);
         assert_eq!(

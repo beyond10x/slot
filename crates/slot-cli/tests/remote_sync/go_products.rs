@@ -267,6 +267,132 @@ fn a_directory_brings_back_the_files_the_build_wrote_and_no_other() {
     eprintln!("took {:?}", t0.elapsed());
 }
 
+/// `-o .` at the top of the tree names the tree, a directory like any
+/// other: the files the build wrote there come back, no other.
+#[test]
+fn the_top_of_the_tree_as_the_output_directory_brings_back_what_was_written() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = go_module(t.path());
+    let ssh = forced_ssh(t.path(), &d, "");
+    let go = standin_go(t.path(), 0);
+    let out = remote_job(
+        &d,
+        &ssh,
+        &repo,
+        &[go.to_str().unwrap(), "build", "-o", ".", "./cmd/..."],
+        &[],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(node_mirror(&d).join("a").is_file(), "written on the node");
+    for n in ["a", "b"] {
+        assert_eq!(
+            std::fs::read_to_string(repo.join(n)).unwrap_or_default(),
+            format!("built {n}\n"),
+            "{n} stayed on the node: {err}"
+        );
+    }
+    assert!(
+        err.lines()
+            .any(|l| l.starts_with("slot: fetched 2 artifacts, ")),
+        "{err}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+/// A directory on the `-o` path that is a symlink on the client's side
+/// stays one: the file arrives where the link points.
+#[test]
+fn a_symlinked_directory_on_the_output_path_stays_a_symlink() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = go_module(t.path());
+    // `/out` without the slash: the sync leaves the link out too.
+    std::fs::write(repo.join(".gitignore"), "/target/\n/out\n").unwrap();
+    let elsewhere = t.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.join("out")).unwrap();
+    let ssh = forced_ssh(t.path(), &d, "");
+    let go = standin_go(t.path(), 0);
+    let out = remote_job(
+        &d,
+        &ssh,
+        &repo,
+        &[
+            go.to_str().unwrap(),
+            "build",
+            "-o",
+            "out/x/tool",
+            "./cmd/tool",
+        ],
+        &[],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(
+        !node_mirror(&d).join("out").is_symlink(),
+        "the link was not synced"
+    );
+    assert!(
+        std::fs::symlink_metadata(repo.join("out"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "out was replaced by a directory: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.join("x/tool")).unwrap_or_default(),
+        "built tool\n",
+        "{err}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
+/// A single file needs no listing before the job: when that listing fails
+/// the file still comes back and the job keeps its exit 0.
+#[test]
+fn a_failed_listing_before_the_job_still_brings_a_single_file_back() {
+    let t0 = Instant::now();
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let repo = go_module(t.path());
+    let marker = t.path().join("failed-once");
+    let ssh = forced_ssh(
+        t.path(),
+        &d,
+        &format!(
+            "case \"$*\" in *--sender*) [ -e {m} ] || {{ : > {m}; exit 12; }} ;; esac",
+            m = marker.display()
+        ),
+    );
+    let go = standin_go(t.path(), 0);
+    let out = remote_job(
+        &d,
+        &ssh,
+        &repo,
+        &[
+            go.to_str().unwrap(),
+            "build",
+            "-o",
+            "target/x/tool",
+            "./cmd/tool",
+        ],
+        &[],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(marker.exists(), "the listing before the job failed");
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("target/x/tool")).unwrap_or_default(),
+        "built tool\n",
+        "{err}"
+    );
+    eprintln!("took {:?}", t0.elapsed());
+}
+
 #[test]
 fn an_output_outside_the_tree_or_a_failed_build_brings_nothing_back() {
     let d = Daemon::start();
@@ -383,7 +509,7 @@ fn go_commands_that_name_no_build_output_are_untouched() {
 }
 
 /// Same-path: the tree on the node is the client's own path, and the fetch
-/// names the output below it.
+/// names the output below it, from the output's directory.
 #[test]
 fn a_same_path_go_build_fetches_its_output_from_the_tree() {
     let t = tempfile::tempdir().unwrap();
@@ -409,8 +535,8 @@ fn a_same_path_go_build_fetches_its_output_from_the_tree() {
         );
     }
     let got = senders(&root);
-    for rel in ["target/x/tool", "out/abs"] {
-        let want = format!(" {}/./{rel}", repo.display());
+    for (dir, name) in [("target/x", "tool"), ("out", "abs")] {
+        let want = format!(" {}/{dir}/./{name}", repo.display());
         assert!(
             got.iter().any(|l| l.ends_with(&want)),
             "no fetch of{want}: {got:?}"
