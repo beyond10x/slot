@@ -27,11 +27,12 @@ impl Daemon {
     }
 
     /// [`Daemon::start_with`] with `env` added to the daemon's environment.
+    /// It has no cluster file unless `env` names one.
     fn start_env(args: &[&std::ffi::OsStr], env: &[(&str, &std::ffi::OsStr)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let child = Command::new(SLOT)
-            .envs(env.iter().copied())
             .env("SLOT_CLUSTER_FILE", "off")
+            .envs(env.iter().copied())
             .args([
                 "serve",
                 "--http",

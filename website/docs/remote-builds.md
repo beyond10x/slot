@@ -173,6 +173,15 @@ The check is in the `slot` binary, so it holds however the binary is called: wit
 already set, through a wrapper or without one. A list file that cannot be read, or a host
 configuration that does not parse, keeps every job on this machine.
 
+Nothing failed, so the job runs here without `SLOT_REMOTE_FALLBACK`, and it runs here whatever
+else the caller's environment holds. One call ends with exit 3 instead, and its line has no
+`; running on this machine`: the client that this machine's daemon started itself for a job it
+handed to a node ([Hand queued jobs to a node](#hand-queued-jobs-to-a-node)). The daemon gives
+that client `SLOT_SPILLED` and `SLOT_PHASES_FILE`, and it queues the job here again when the
+client ends that way. `SLOT_SPILLED` alone, set by a wrapper beside `SLOT_HOST`, is no such
+client: up to 0.39.1 its job ended with exit 3 and ran nowhere; now it runs in this machine's
+pool.
+
 The same lists hold for the [git dependencies](#git-dependencies-come-from-this-machine) the
 checkout's lock files name, together with a second file,
 `$XDG_CONFIG_HOME/slot/remote-deny-origins`. Either file may hold either kind of line:
@@ -226,6 +235,11 @@ it names are not read. A job stays on this machine when a `git+` source of one o
 ```text
 slot: git dependency denied: git+https://git.example.org/team/dep.git?branch=main: the tree is not synced to buildbox; running on this machine
 ```
+
+The job then runs in this machine's pool as the job of a listed tree does: neither the tree nor
+the dependency is sent, its exit code is the command's, and its record carries the reason in
+`local_reason`. Exit 3 is kept for the one call named above, the client of a job this machine's
+daemon handed to a node.
 
 With both files naming nothing no lock file is read.
 

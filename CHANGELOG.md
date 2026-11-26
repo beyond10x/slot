@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Remote mode: a job that a deny list keeps on this machine (a tree on the never-sync list, a
+  denied git dependency of a `Cargo.lock`) runs in this machine's pool also when the caller's
+  environment carries `SLOT_SPILLED`. The client read that variable alone as the mark of a job
+  this machine's daemon had handed to a node: it printed `slot: git dependency denied: <source>:
+  the tree is not synced to <host>`, ended with exit 3 and left the job to that daemon to queue
+  again. A wrapper that sets `SLOT_SPILLED` beside `SLOT_HOST`, so that a failed remote start
+  never runs here, has no such daemon, and the job ran nowhere. Now only the client the daemon
+  started itself for a handed job ends that way (it has `SLOT_PHASES_FILE` too); every other
+  call prints the line with `; running on this machine` and runs the job here. Its record names
+  the deny reason in `local_reason`, also on a daemon with a node, where a request with
+  `SLOT_SPILLED` in its environment was labelled `sent back by a node` before any reason the
+  client named. Unchanged: a remote start that failed (ssh, the sync, a node that did not start
+  the job) ends with exit 3, and `slot --here` says nothing about a node.
+
 ## 0.39.1 — 2026-11-26
 
 - The release workflow installs `ess` before it runs `task check`, as the pull-request gate

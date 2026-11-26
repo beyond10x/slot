@@ -303,7 +303,10 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         return crate::gate::submit(&dir, &req);
     }
     if let (Some(reason), Some(host), false) = (&never, &s.host, s.here) {
-        if std::env::var_os(crate::server::spill::SPILLED_ENV).is_some_and(|v| !v.is_empty()) {
+        // Only the daemon that handed the job to the node queues it here
+        // again. With `SPILLED_ENV` from a caller's environment alone, the
+        // exit would be a job that ran nowhere.
+        if crate::server::spill::handed() {
             eprintln!("slot: {reason}: the tree is not synced to {host}");
             return crate::server::spill::INFRA_EXIT;
         }
