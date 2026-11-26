@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Releases carry static binaries: `slot-<version>-x86_64-unknown-linux-musl.tar.gz` and
+  `slot-<version>-aarch64-unknown-linux-musl.tar.gz` beside the two gnu archives, all four in
+  `SHA256SUMS`. A gnu binary names the glibc versions of the image it was built on and stops on
+  a host with an older one (`version 'GLIBC_…' not found`); a musl binary loads no library and
+  runs whatever C library the host has, Alpine included. The release workflow builds each
+  musl target on the runner of its architecture, as it builds the gnu one, proves the binary
+  static (`.github/scripts/static-binary.sh`: no `NEEDED` entry and no program interpreter in
+  its ELF headers) and runs `slot --version` in an Alpine container named by digest; the answer
+  must be the tag. The bundle job fails when one of the four archives is missing. Which archive
+  a host takes is in Getting started (`website/docs/getting-started.md`). Where a gnu binary
+  runs it stays the one to take: with musl's allocator the daemon ended a burst of 400 jobs on
+  16 slots at 75 jobs a second, the gnu build at 86.
+
 ## 0.39.1 — 2026-11-26
 
 - The release workflow installs `ess` before it runs `task check`, as the pull-request gate
