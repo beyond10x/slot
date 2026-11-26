@@ -7,7 +7,7 @@
 #   empty, and a value of the wrong form.
 
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
-GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
+GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS'
 
 conf_fail() {
@@ -64,6 +64,7 @@ conf_read() {
   MIN_FREE_DISK=${CONF_MIN_FREE_DISK:-50}
   SCCACHE_GB=${CONF_SCCACHE_GB:-200}
   TMP_GB=${CONF_TMP_GB:-400}
+  DOCKER_GB=${CONF_DOCKER_GB:-10}
   EXTRA_PACKAGES=${CONF_EXTRA_PACKAGES:-}
   DISK_MODEL=${CONF_DISK_MODEL:-Amazon EC2 NVMe Instance Storage}
   NODE_NAME=${CONF_NODE_NAME:-this node}
@@ -78,7 +79,7 @@ conf_read() {
 }
 
 conf_check_forms() {
-  for k in BUILD_UID TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB; do
+  for k in BUILD_UID TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB; do
     eval "v=\${$k}"
     case $v in
       '') ;;
@@ -88,6 +89,14 @@ conf_check_forms() {
         ;;
     esac
   done
+  # A cap of 0 is over the cap at every check.
+  case $DOCKER_GB in
+    *[1-9]*) ;;
+    *)
+      conf_fail "$1: DOCKER_GB must be at least 1, not '$DOCKER_GB'"
+      return 2
+      ;;
+  esac
   for k in STORE BUILD_HOME; do
     eval "v=\${$k}"
     case $v in

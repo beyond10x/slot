@@ -31,6 +31,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `GO_PRIVATE` | provision | `GOPRIVATE` and `GONOSUMDB` of jobs |
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
 | `MIN_FREE_DISK`, `SCCACHE_GB`, `TMP_GB` | provision | disk floor, compile cache size, job tmp size (GB) |
+| `DOCKER_GB` | provision | what docker may store on the root disk before the prune timer removes what no job uses (GB, default 10, at least 1) |
 | `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
@@ -125,6 +126,39 @@ firewall back before it installs a key, rustup, a pinned tool or anything else t
 runs. A start that does not close it is a `failed: imds:` line, and those parts wait for the next
 `apply`. Commands that run as the build user get a clean environment (`HOME`, the units' `PATH`,
 `LANG`, the rust homes for rustup) and, where `setpriv` can, a session of their own.
+
+docker is there for the jobs that start containers (a consumer's OCI lane): the distribution's
+`docker` package (a base package), `docker.service` enabled and started, and the build user in
+group `docker`. `slot-node.service` gets the group when it starts, so on a node that ran before
+it restarts when no job runs (`pending: running: ... started before <user> was in group docker`
+until then).
+
+A container's packets to the metadata service are forwarded and pass the rule of
+`slot-imds-root-only.service`. `slot-imds-containers.service` rejects them in the `DOCKER-USER`
+chain, a drop-in makes `docker.service` require that unit, and `check` reads the rules back from
+the firewall. What this does not close:
+
+- A member of group `docker` is root on the node: a privileged container, a host-network
+  container, an ipvlan or macvlan network.
+- dockerd fetches as root on the host: `ADD http://169.254.169.254/...` in a Dockerfile and
+  `docker import <url>` pass both rules.
+
+So the instance must require IMDSv2 (`HttpTokens=required`: a plain GET gets no credential), and
+its role carries nothing a job may not use.
+
+docker stores on the root disk (`/var/lib/docker`). `slot-docker-prune.timer` runs
+`docker-prune.sh` every 10 minutes:
+
+- With no job in the pool, running or queued, it removes every container, running ones too: a
+  job that ended left it. Nothing else on the node may keep a container.
+- While docker holds more than `DOCKER_GB`: containers that do not run and were created over an
+  hour ago, and the unused build cache. With no job in the pool also every image and every volume
+  no container uses.
+- While the pool has a job, images and volumes stay, also one a job pulled, built or loaded and
+  has not started yet. docker may then hold more than the cap; the unit fails with one line that
+  says how much. The cap is checked every 10 minutes and is not a quota.
+
+The node holds no registry credential, so a job pulls public images only.
 
 A running unit follows its file. When `apply` rewrites `sccache-node.service` it restarts that
 unit; `slot-node.service` restarts when its file, its `slot serve` arguments or the slot binary

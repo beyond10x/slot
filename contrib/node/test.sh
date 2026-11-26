@@ -846,9 +846,11 @@ grep -rq 'rsync' "$U" && bad "push.sh still mentions rsync" || ok "push.sh has n
 
 # 6e. A git or ssh call on the node that asks for a credential prints what to do: fetch on the
 # workstation; `slot --here` only for the one step that reads a credential while it runs, not a
-# whole task; a step that needs docker or a local service goes in `.slot.toml` `local`.
+# whole task; a step that needs a local service the node does not run goes in `.slot.toml`
+# `local`. docker is not named there: the node runs it (section 6o).
 for b in no-credentials ssh; do
   msg=$(sh "$R/srv/slot/nodebin/$b" host true 2>&1 >/dev/null)
+  echo "$msg" | grep -q 'needs docker' && bad "$b: still sends a docker step to the workstation" || ok "$b: docker is not named as a reason to leave the node"
   echo "$msg" | grep -q 'only for the step that reads a credential' && ok "$b: --here only for a credential read" || bad "$b: $msg"
   echo "$msg" | grep -q '\.slot\.toml' && ok "$b: names .slot.toml local" || bad "$b: no .slot.toml in: $msg"
   echo "$msg" | grep -q 'or run this step with slot --here' && bad "$b: still offers --here for any step" || ok "$b: no --here for any step"
@@ -1184,6 +1186,221 @@ sh "$here/push.sh" compare "$W/here" "$W/node" >"$W/out" 2>&1
 tr -d '\000-\010\013-\037\177' <"$W/out" | cmp -s - "$W/out" && ok "push.sh prints no control character from the node's output" || bad "control characters in the push.sh output"
 grep -q 'only on the node: go go1.0.*red' "$W/out" && ok "the printable part of the node's line is still shown" || bad "drift line lost: $(cat "$W/out" | head -3)"
 grep -q 'version parity report, not an integrity check' "$here/README.md" && ok "README says push.sh check is not an integrity check" || bad "README lacks the parity-report line"
+
+# 6o. docker: the package, docker.service enabled and started behind the rule that keeps a
+# container off the metadata service, the build user in group docker, slot-node restarted when
+# its process started before the group, and a timer that keeps what docker stores within
+# DOCKER_GB.
+conf
+RD=$W/r11
+mkdir -p "$RD"
+run "$RD" check
+grep -q '^drift: packages: .* docker' "$W/out" && grep -qx "drift: docker: $me is not in group docker" "$W/out" && ok "check names the docker package and the missing group on a bare node" || bad "docker drift: $(grep -i docker "$W/out" | cut -c1-300)"
+run "$RD" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "changed: docker: $me added to group docker" "$W/out" && ok "apply adds the build user to group docker" || bad "docker apply: exit $st $(grep -i docker "$W/out" "$W/err" | cut -c1-300)"
+grep -qx docker "$RD/.state/packages" && ok "apply installs the docker package" || bad "docker not in the packages: $(tr '\n' ' ' <"$RD/.state/packages")"
+grep -qx "$me:docker" "$RD/.state/groups" && ok "the group change is recorded" || bad "groups: $(cat "$RD/.state/groups" 2>&1)"
+for u in docker.service slot-imds-containers.service slot-docker-prune.timer; do
+  [ -f "$RD/.state/enabled/$u" ] && [ -f "$RD/.state/active/$u" ] && ok "$u is enabled and started" || bad "$u: enabled $(ls "$RD/.state/enabled" | tr '\n' ' ') active $(ls "$RD/.state/active" | tr '\n' ' ')"
+done
+[ -f "$RD/.state/enabled/slot-docker-prune.service" ] && bad "the prune service is enabled beside its timer" || ok "the prune service runs only from its timer"
+dd=$RD/etc/systemd/system/docker.service.d/slot-imds.conf
+grep -qx 'Requires=slot-imds-containers.service' "$dd" && grep -qx 'After=slot-imds-containers.service' "$dd" && ok "docker.service requires the container rule and starts after it" || bad "docker drop-in: $(cat "$dd" 2>&1)"
+cu=$RD/etc/systemd/system/slot-imds-containers.service
+grep -q '^ExecStart=.*iptables -w -I DOCKER-USER 1 -d 169.254.169.254/32 -j REJECT' "$cu" && grep -q '^ExecStart=.*ip6tables -w -I DOCKER-USER 1 -d fd00:ec2::254/128 -j REJECT' "$cu" && ok "the container rule rejects both metadata addresses in DOCKER-USER" || bad "container rule: $(grep ExecStart "$cu")"
+grep -q '^Before=.*docker.service' "$cu" && ok "the container rule is ordered before docker.service" || bad "container rule order: $(grep Before "$cu")"
+pu_pre=$RD/etc/systemd/system
+grep -q "^ExecStop=" "$cu" && bad "stopping the container rule unit takes the rule away: $(grep ExecStop "$cu")" || ok "the container rule has no ExecStop: a stop leaves the rule in place"
+grep -qx "Nice=19" "$pu_pre/slot-docker-prune.service" && grep -qx "IOSchedulingClass=idle" "$pu_pre/slot-docker-prune.service" && grep -qx "TimeoutStartSec=300" "$pu_pre/slot-docker-prune.service" && ok "the prune unit runs at idle priority with a start timeout" || bad "prune unit priority: $(cat "$pu_pre/slot-docker-prune.service")"
+pu=$RD/etc/systemd/system/slot-docker-prune.service
+grep -qx 'ExecStart=/bin/sh /usr/local/libexec/slot-node/docker-prune.sh 10' "$pu" && ok "the prune unit runs the script with the default cap of 10 GB" || bad "prune unit: $(grep ExecStart "$pu")"
+grep -qx 'OnUnitActiveSec=600' "$RD/etc/systemd/system/slot-docker-prune.timer" && ok "the prune timer runs every 10 min" || bad "prune timer: $(cat "$RD/etc/systemd/system/slot-docker-prune.timer")"
+grep -qw docker "$RD/.state/procgroups/slot-node.service" && ok "slot-node, started after the group change, has group docker" || bad "slot-node groups: $(cat "$RD/.state/procgroups/slot-node.service" 2>&1)"
+run "$RD" check
+st=$?
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "docker: 0 drift after one apply" || bad "docker: exit $st $(cat "$W/out")"
+# The cap is a config key.
+echo 'DOCKER_GB=7' >>"$W/node.conf"
+run "$RD" check
+grep -q '^drift: unit:slot-docker-prune.service' "$W/out" && ok "a changed DOCKER_GB is drift in the prune unit" || bad "DOCKER_GB=7: $(cat "$W/out")"
+run "$RD" apply
+grep -qx 'ExecStart=/bin/sh /usr/local/libexec/slot-node/docker-prune.sh 7' "$pu" && ok "apply writes the new cap into the prune unit" || bad "prune unit after DOCKER_GB=7: $(grep ExecStart "$pu")"
+conf
+echo 'DOCKER_GB=x' >>"$W/node.conf"
+run "$RD" check
+[ $? -eq 2 ] && grep -q 'DOCKER_GB must be a whole number' "$W/err" && ok "a malformed DOCKER_GB is refused" || bad "DOCKER_GB=x: $(cat "$W/err")"
+conf
+echo 'DOCKER_GB=0' >>"$W/node.conf"
+run "$RD" check
+[ $? -eq 2 ] && grep -q "DOCKER_GB must be at least 1" "$W/err" && ok "a DOCKER_GB of 0 is refused" || bad "DOCKER_GB=0: $(cat "$W/err")"
+conf
+run "$RD" apply
+# A slot-node process that started before the group change has no group docker, and neither has
+# a job it starts: it restarts when no job runs.
+echo "wheel adm" >"$RD/.state/procgroups/slot-node.service"
+echo 1 >"$RD/.state/jobs"
+run "$RD" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: running: slot-node.service: the process started before $me was in group docker" "$W/out" && ok "check names a slot-node that started before the group change" || bad "old slot-node: exit $st $(cat "$W/out")"
+: >"$RD/.calls"
+run "$RD" apply
+grep -qx 'systemctl restart slot-node.service' "$RD/.calls" && bad "slot-node restarted for the group with a job running" || ok "the restart for the group waits while a job runs"
+grep -q '^pending: running: slot-node .*group docker' "$W/err" && ok "the restart for the group is a pending line" || bad "no pending line: $(cat "$W/err")"
+echo 0 >"$RD/.state/jobs"
+: >"$RD/.calls"
+run "$RD" apply
+grep -qx 'systemctl restart slot-node.service' "$RD/.calls" && ok "with no job running slot-node restarts and gets the group" || bad "no restart: $(cat "$RD/.calls")"
+run "$RD" check
+[ $? -eq 0 ] && ok "after the restart for the group: 0 drift" || bad "after the group restart: $(cat "$W/out")"
+# A user taken out of the group is put back.
+: >"$RD/.state/groups"
+run "$RD" check
+grep -qx "drift: docker: $me is not in group docker" "$W/out" && ok "check names a build user taken out of group docker" || bad "group removed: $(cat "$W/out")"
+run "$RD" apply
+run "$RD" check
+[ $? -eq 0 ] && ok "apply puts the build user back: 0 drift" || bad "after the group is back: $(cat "$W/out")"
+# The rules are read from the firewall: the unit stays active when its chain was flushed. They
+# are put back without a restart of the unit, which would restart docker and end every container.
+rm -f "$RD/.state/imds-containers"
+run "$RD" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: docker: slot-imds-containers.service is active and its reject rules are not in DOCKER-USER' "$W/out" && ok "check names reject rules that are gone while their unit is active" || bad "flushed rules: exit $st $(cat "$W/out")"
+: >"$RD/.calls"
+run "$RD" apply
+grep -q '^iptables -w -I DOCKER-USER 1 -d 169.254.169.254/32 -j REJECT$' "$RD/.calls" && ok "apply puts the reject rule back" || bad "rule not put back: $(cat "$RD/.calls")"
+grep -q 'restart slot-imds-containers\|restart docker' "$RD/.calls" && bad "putting the rule back restarts docker: $(cat "$RD/.calls")" || ok "putting the rule back restarts neither the unit nor docker"
+run "$RD" check
+[ $? -eq 0 ] && ok "after the rule is back: 0 drift" || bad "after the rule is back: $(cat "$W/out")"
+rm -f "$RD/.state/imds-containers"
+: >"$RD/.state-imds-containers-stay-open"
+run "$RD" apply
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: docker: the reject rules for the metadata service are not in DOCKER-USER' "$W/err" && ok "rules that do not come back: failed line, exit 1" || bad "rules stay gone: exit $st $(tail -3 "$W/err")"
+rm -f "$RD/.state-imds-containers-stay-open"
+run "$RD" apply
+# A drop-in that was edited is drift, rewritten with a daemon-reload.
+echo 'Requires=other.service' >"$dd"
+run "$RD" check
+grep -q '^drift: unit:docker.service.d' "$W/out" && ok "check names a changed docker drop-in" || bad "drop-in drift: $(cat "$W/out")"
+: >"$RD/.calls"
+run "$RD" apply
+grep -qx 'Requires=slot-imds-containers.service' "$dd" && grep -qx 'systemctl daemon-reload' "$RD/.calls" && ok "apply rewrites the drop-in and reloads systemd" || bad "drop-in after apply: $(cat "$dd") calls $(cat "$RD/.calls")"
+# The prune script with its commands replaced. `du` prints the KB in $W/dk/used. `docker` logs its
+# call; `ps -aq` prints $W/dk/containers, `rm` takes its ids out of that file except those in
+# $W/dk/stuck, `builder` and `volume` set used to what after1 and after2 hold, a subcommand
+# named in $W/dk/failon fails, and with $W/dk/down every call fails. `runuser` is the pool's
+# answer: the line in $W/dk/status (none: slot does not answer), replaced by status2 after one call.
+prune=$RD/usr/local/libexec/slot-node/docker-prune.sh
+mkdir -p "$W/dk/bin"
+cat >"$W/dk/bin/du" <<EOF
+#!/bin/sh
+[ "\$1" = -skx ] || exit 1
+printf '%s\t/var/lib/docker\n' "\$(cat "$W/dk/used")"
+EOF
+cat >"$W/dk/bin/docker" <<EOF
+#!/bin/sh
+echo "\$*" >>"$W/dk/calls"
+[ -e "$W/dk/down" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+[ "\$1" = "\$(cat "$W/dk/failon" 2>/dev/null)" ] && exit 1
+case "\$1 \$2" in
+  'ps -aq') cat "$W/dk/containers" 2>/dev/null ;;
+  'rm -fv')
+    shift 2
+    for c in "\$@"; do
+      grep -qx "\$c" "$W/dk/stuck" 2>/dev/null && continue
+      grep -vx "\$c" "$W/dk/containers" >"$W/dk/containers.new"
+      mv "$W/dk/containers.new" "$W/dk/containers"
+    done
+    ;;
+  'builder prune') [ -f "$W/dk/after1" ] && cp "$W/dk/after1" "$W/dk/used" ;;
+  'volume prune') [ -f "$W/dk/after2" ] && cp "$W/dk/after2" "$W/dk/used" ;;
+esac
+exit 0
+EOF
+cat >"$W/dk/bin/runuser" <<EOF
+#!/bin/sh
+echo "\$*" >"$W/dk/runuser.args"
+[ -f "$W/dk/status" ] || exit 1
+cat "$W/dk/status"
+[ -f "$W/dk/status2" ] && mv "$W/dk/status2" "$W/dk/status"
+exit 0
+EOF
+chmod 755 "$W/dk/bin/du" "$W/dk/bin/docker" "$W/dk/bin/runuser"
+# dk <KB used> <jobs in the pool, or none> [<containers>]
+dk() {
+  rm -f "$W/dk/status" "$W/dk/containers"
+  : >"$W/dk/calls"
+  echo "$1" >"$W/dk/used"
+  [ "$2" = none ] || echo "slots 3 of 64 free, $2 running, 0 queued" >"$W/dk/status"
+  [ -z "${3:-}" ] || printf '%s\n' $3 >"$W/dk/containers"
+  PATH=$W/dk/bin:$PATH sh "$prune" 10 >"$W/out" 2>"$W/err"
+}
+dkreset() { rm -f "$W/dk/after1" "$W/dk/after2" "$W/dk/status2" "$W/dk/stuck" "$W/dk/failon" "$W/dk/down"; }
+dkreset
+dk 10485760 0
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$W/dk/calls")" = 'ps -aq' ] && [ ! -s "$W/out" ] && [ ! -s "$W/err" ] && ok "prune at the cap with no container: nothing is removed and nothing printed" || bad "prune at the cap: exit $st calls $(cat "$W/dk/calls") out $(cat "$W/out" "$W/err")"
+grep -qx -- "-u $me -- env XDG_RUNTIME_DIR=/run/user/$uid /srv/slot/bin/slot status" "$W/dk/runuser.args" && ok "prune asks the build user's pool for its jobs" || bad "pool question: $(cat "$W/dk/runuser.args")"
+dk 1024 0 'c1 c2'
+st=$?
+[ $st -eq 0 ] && grep -qx 'rm -fv c1 c2' "$W/dk/calls" && grep -qx 'removed containers left by jobs that ended: 2' "$W/out" && ok "prune with no job in the pool removes every container, also under the cap" || bad "leftover containers: exit $st $(cat "$W/dk/calls" "$W/out" "$W/err")"
+grep -q 'prune' "$W/dk/calls" && bad "prune under the cap removed more than containers: $(cat "$W/dk/calls")" || ok "prune under the cap leaves images, volumes and the build cache"
+dk 1024 2 'c1 c2'
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$W/dk/calls")" = 'ps -aq' ] && ok "prune while the pool has a job removes no container" || bad "containers of a running job: exit $st $(cat "$W/dk/calls")"
+dk 1024 none 'c1'
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$W/dk/calls")" = 'ps -aq' ] && ok "prune when slot does not answer removes no container" || bad "no answer from slot: exit $st $(cat "$W/dk/calls")"
+echo c2 >"$W/dk/stuck"
+dk 1024 0 'c1 c2'
+st=$?
+[ $st -eq 1 ] && grep -qx 'container c2 could not be removed' "$W/err" && grep -qx 'removed containers left by jobs that ended: 1' "$W/out" && ok "a container that stays is named, exit 1" || bad "stuck container: exit $st $(cat "$W/out" "$W/err")"
+dkreset
+echo 5242880 >"$W/dk/after1"
+dk 12582912 1 'c1'
+st=$?
+printf 'ps -aq\ncontainer prune -f --filter until=1h\nbuilder prune -af\n' >"$W/dk/want"
+[ $st -eq 0 ] && cmp -s "$W/dk/want" "$W/dk/calls" && ok "prune over the cap with a job in the pool: old stopped containers and the build cache go, nothing else" || bad "prune with a job: exit $st $(cat "$W/dk/calls")"
+grep -qx 'docker held 12288 MB, cap 10 GB: pruned to 5120 MB' "$W/out" && ok "prune prints what it held and what is left" || bad "prune line: $(cat "$W/out" "$W/err")"
+echo 11534336 >"$W/dk/after1"
+dk 12582912 1
+st=$?
+[ $st -eq 1 ] && cmp -s "$W/dk/want" "$W/dk/calls" && grep -qx 'docker holds 11264 MB, cap 10 GB: images and volumes stay while the pool has jobs (jobs: 1)' "$W/err" && [ "$(wc -l <"$W/err")" -eq 1 ] && ok "prune still over the cap with a job in the pool: images and volumes stay, one line, exit 1" || bad "over the cap with a job: exit $st $(cat "$W/dk/calls" "$W/err")"
+dk 12582912 none
+st=$?
+[ $st -eq 1 ] && cmp -s "$W/dk/want" "$W/dk/calls" && grep -q '(jobs: unknown)$' "$W/err" && ok "prune over the cap when slot does not answer: images and volumes stay" || bad "over the cap, no answer: exit $st $(cat "$W/dk/calls" "$W/err")"
+echo 2097152 >"$W/dk/after2"
+dk 12582912 0
+st=$?
+printf 'image prune -af\nvolume prune -af\n' >>"$W/dk/want"
+[ $st -eq 0 ] && cmp -s "$W/dk/want" "$W/dk/calls" && ok "prune over the cap with no job in the pool: every unused image and volume goes" || bad "prune with no job: exit $st $(cat "$W/dk/calls" "$W/err")"
+# A job that came in while the first calls ran keeps its images.
+dk_late() {
+  echo 'slots 3 of 64 free, 1 running, 0 queued' >"$W/dk/status2"
+  dk 12582912 0
+}
+dk_late
+st=$?
+[ $st -eq 1 ] && ! grep -q '^image prune\|^volume prune' "$W/dk/calls" && grep -q '(jobs: a new one)$' "$W/err" && ok "a job that came in during the prune keeps images and volumes" || bad "late job: exit $st $(cat "$W/dk/calls" "$W/err")"
+dkreset
+echo 11534336 >"$W/dk/after2"
+dk 12582912 0
+st=$?
+[ $st -eq 1 ] && grep -qx 'docker holds 11264 MB with no job in the pool and everything unused removed, cap 10 GB' "$W/err" && ok "prune that cannot reach the cap on an idle node: exit 1 and one line" || bad "over after everything: exit $st $(cat "$W/out" "$W/err")"
+dkreset
+: >"$W/dk/down"
+dk 12582912 0 'c1'
+st=$?
+[ $st -eq 1 ] && [ "$(cat "$W/dk/calls")" = 'ps -aq' ] && grep -qx 'docker does not answer: nothing is pruned' "$W/err" && ok "prune with dockerd down: one call, one line, exit 1" || bad "dockerd down: exit $st $(cat "$W/dk/calls" "$W/err")"
+dkreset
+echo builder >"$W/dk/failon"
+echo 5242880 >"$W/dk/after2"
+dk 12582912 0
+st=$?
+[ $st -eq 1 ] && grep -qx 'docker builder prune -af failed' "$W/err" && ok "a docker call that fails is named, exit 1 also under the cap afterwards" || bad "failed docker call: exit $st $(cat "$W/out" "$W/err")"
+dkreset
+grep -q 'system prune\|docker kill\|docker stop\|rm -rf' "$prune" && bad "the prune script has a removal beside rm of the listed containers and the prunes" || ok "the prune script removes through docker rm of the listed containers and the prunes only"
 
 # 6h. The example config carries what consumers build with: the rust toolchains and the wasm
 # target, the dnf packages that exist on the node's repositories. Go and node come from the

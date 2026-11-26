@@ -138,13 +138,13 @@ if [ "$mode" = pins ]; then
 fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
-BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan unzip'
+BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan unzip docker'
 SSHD_LINES='MaxSessions 200
 MaxStartups 100:30:200
 ClientAliveInterval 15
 ClientAliveCountMax 3'
-UNITS='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-toolchains-manifest.service slot-toolchains-manifest.timer'
-ENABLED='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-toolchains-manifest.timer'
+UNITS='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-imds-containers.service slot-docker-prune.service slot-docker-prune.timer slot-toolchains-manifest.service slot-toolchains-manifest.timer'
+ENABLED='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-imds-containers.service docker.service slot-docker-prune.timer slot-toolchains-manifest.timer'
 LIBEXEC=/usr/local/libexec
 
 if [ "$mode" = bundle ]; then
@@ -209,6 +209,37 @@ q_user() {
     awk -F: -v u="$1" '$1 == u { print $3, $6 }' "$S/passwd" 2>/dev/null
   else
     getent passwd "$1" | awk -F: '{ print $3, $6 }'
+  fi
+}
+# The groups that list user $1 as a member, names on one line: what a process of a service gets
+# beside the group of its unit. The user's own group is not among them.
+q_groups() {
+  if [ -n "$T" ]; then
+    awk -F: -v u="$1" '$1 == u { print $2 }' "$S/groups" 2>/dev/null | tr '\n' ' '
+  else
+    getent group | awk -F: -v u="$1" '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) print $1 }' | tr '\n' ' '
+  fi
+}
+# The rules of slot-imds-containers.service are in the firewall.
+q_imds_containers() {
+  if [ -n "$T" ]; then
+    [ -f "$S/imds-containers" ]
+  else
+    iptables -w -C DOCKER-USER -d 169.254.169.254/32 -j REJECT 2>/dev/null &&
+      ip6tables -w -C DOCKER-USER -d fd00:ec2::254/128 -j REJECT 2>/dev/null
+  fi
+}
+# The groups the main process of unit $1 started with, names on one line; nothing when the unit
+# has no process.
+q_proc_groups() {
+  if [ -n "$T" ]; then
+    cat "$S/procgroups/$1" 2>/dev/null
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    [ -n "$qm" ] && [ "$qm" != 0 ] || return 0
+    for qg in $(sed -n 's/^Groups:[[:space:]]*//p' "/proc/$qm/status" 2>/dev/null); do
+      getent group "$qg" | cut -d: -f1
+    done | tr '\n' ' '
   fi
 }
 q_enabled() {
@@ -308,7 +339,11 @@ a_enable() {
 a_start() {
   if [ -n "$T" ]; then
     st_touch active "$1"
-    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version"
+    [ "$1" = slot-imds-containers.service ] && : >"$S/imds-containers"
+    # A unit of a package (docker.service) has no file under /etc/systemd/system.
+    [ -f "$R/etc/systemd/system/$1" ] || return 0
+    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version" "$S/procgroups"
+    q_groups "$U" >"$S/procgroups/$1"
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" >"$S/running/$1"
     unit_defs "$1" >"$S/loaded/$1"
     unit_defs "$1" | grep '^Environment=' >"$S/procenv/$1"
@@ -539,6 +574,61 @@ ExecStop=-/usr/sbin/ip6tables -w -X SLOT-IMDS
 WantedBy=multi-user.target
 EOF
       ;;
+    slot-imds-containers.service)
+      # A container's packets to the metadata service are forwarded, so the OUTPUT rule of
+      # slot-imds-root-only.service does not see them. docker runs DOCKER-USER before its own
+      # forward rules and keeps what is in it; docker.service requires this unit (the drop-in of
+      # gen_docker_dropin), so no container starts without the rule. There is no ExecStop: a stop
+      # would take the rule away under containers that still run. The IPv6 rule takes effect only
+      # where dockerd manages ip6tables (it jumps to the IPv6 DOCKER-USER only then); without
+      # that, docker gives a container no routed IPv6 either. p_docker_rule reads the rules back.
+      cat <<'EOF'
+[Unit]
+Description=No container reaches the instance metadata service
+DefaultDependencies=no
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/sbin/iptables -w -N DOCKER-USER
+ExecStart=/bin/sh -c '/usr/sbin/iptables -w -C DOCKER-USER -d 169.254.169.254/32 -j REJECT 2>/dev/null || /usr/sbin/iptables -w -I DOCKER-USER 1 -d 169.254.169.254/32 -j REJECT'
+ExecStart=-/usr/sbin/ip6tables -w -N DOCKER-USER
+ExecStart=/bin/sh -c '/usr/sbin/ip6tables -w -C DOCKER-USER -d fd00:ec2::254/128 -j REJECT 2>/dev/null || /usr/sbin/ip6tables -w -I DOCKER-USER 1 -d fd00:ec2::254/128 -j REJECT'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
+    slot-docker-prune.service)
+      cat <<EOF
+[Unit]
+Description=Keep what docker stores within $DOCKER_GB GB
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=300
+ExecStart=/bin/sh $LIBEXEC/slot-node/docker-prune.sh $DOCKER_GB
+EOF
+      ;;
+    slot-docker-prune.timer)
+      cat <<'EOF'
+[Unit]
+Description=Docker prune check every 10 min
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=600
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target
+EOF
+      ;;
     slot-toolchains-manifest.service)
       cat <<EOF
 [Unit]
@@ -588,10 +678,92 @@ EOF
 gen_sccache_config() {
   printf '[cache.disk]\ndir = "%s/sccache"\nsize = %s\n' "$STORE" "$((SCCACHE_GB * 1073741824))"
 }
+gen_docker_dropin() {
+  printf '[Unit]\nRequires=slot-imds-containers.service\nAfter=slot-imds-containers.service\n'
+}
+# docker-prune.sh GB: what the timer slot-docker-prune runs as root.
+gen_docker_prune() {
+  cat <<EOF
+#!/bin/sh
+SLOT_USER=$U
+SLOT_UID=$BUILD_UID
+SLOT_BIN=$STORE/bin/slot
+EOF
+  cat <<'EOF'
+# docker-prune.sh GB: no container outlives the jobs, and what docker stores on the root disk
+# (images, containers, volumes and the build cache, under /var/lib/docker and
+# /var/lib/containerd) stays within GB.
+#
+# With no job in the pool (running or queued) every container is removed, running or not: a job
+# that ended left it, and nothing else on the node starts one.
+# Over the cap, at any time: containers that do not run and were created over an hour ago, and
+# the build cache no build uses.
+# Over the cap with no job in the pool: also every image and every volume no container uses.
+# While the pool has a job its images and volumes stay, also one the job pulled, built or loaded
+# and has not started yet. Then, and when slot does not answer, a line on stderr names what is
+# held and the exit status is 1, as it is when a docker call fails.
+cap=$(($1 * 1048576))
+bad=0
+used() { du -skx /var/lib/docker /var/lib/containerd 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
+# Jobs in the pool, running and queued; nothing when slot does not answer.
+pool() {
+  runuser -u "$SLOT_USER" -- env XDG_RUNTIME_DIR="/run/user/$SLOT_UID" "$SLOT_BIN" status 2>/dev/null |
+    head -1 | sed -n 's/.* \([0-9]*\) running, \([0-9]*\) queued.*/\1 \2/p' | awk '{ print $1 + $2 }'
+}
+dk() {
+  docker "$@" >/dev/null && return 0
+  echo "docker $* failed" >&2
+  bad=1
+}
+# The containers are listed before the pool is asked: when the pool then has no job, none of the
+# listed ones belongs to a job that runs.
+left=$(docker ps -aq) || {
+  echo "docker does not answer: nothing is pruned" >&2
+  exit 1
+}
+j=$(pool)
+if [ "$j" = 0 ] && [ -n "$left" ]; then
+  docker rm -fv $left >/dev/null 2>&1
+  now=" $(docker ps -aq | tr '\n' ' ') "
+  n=0
+  for c in $left; do
+    case $now in
+      *" $c "*)
+        echo "container $c could not be removed" >&2
+        bad=1
+        ;;
+      *) n=$((n + 1)) ;;
+    esac
+  done
+  echo "removed containers left by jobs that ended: $n"
+fi
+u=$(used)
+[ "$u" -le "$cap" ] && exit $bad
+dk container prune -f --filter until=1h
+dk builder prune -af
+# Asked again: the calls above take time, and a job that came in between keeps its images.
+if [ "$j" = 0 ] && [ "$(pool)" = 0 ]; then
+  dk image prune -af
+  dk volume prune -af
+else
+  j=${j:-unknown}
+  [ "$j" = 0 ] && j='a new one'
+fi
+u2=$(used)
+echo "docker held $((u / 1024)) MB, cap $1 GB: pruned to $((u2 / 1024)) MB"
+[ "$u2" -le "$cap" ] && exit $bad
+if [ "$j" = 0 ]; then
+  echo "docker holds $((u2 / 1024)) MB with no job in the pool and everything unused removed, cap $1 GB" >&2
+else
+  echo "docker holds $((u2 / 1024)) MB, cap $1 GB: images and volumes stay while the pool has jobs (jobs: $j)" >&2
+fi
+exit 1
+EOF
+}
 gen_no_credentials() {
   cat <<EOF
 #!/bin/sh
-echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs docker or a local service goes in .slot.toml local = [...] of its repository." >&2
+echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs a local service this node does not run goes in .slot.toml local = [...] of its repository." >&2
 exit 255
 EOF
 }
@@ -615,7 +787,7 @@ for a in "\$@"; do
     *) break ;;
   esac
 done
-echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs docker or a local service goes in .slot.toml local = [...] of its repository." >&2
+echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs a local service this node does not run goes in .slot.toml local = [...] of its repository." >&2
 exit 255
 EOF
 }
@@ -952,6 +1124,7 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-toolchains.sh" 755 root:root cat "$here/toolchains.sh"
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
+  want_file libexec "$LIBEXEC/slot-node/docker-prune.sh" 755 root:root gen_docker_prune
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
 }
 
@@ -963,6 +1136,9 @@ p_units() {
       units_changed="$units_changed $u"
     fi
   done
+  if ! want_file unit:docker.service.d /etc/systemd/system/docker.service.d/slot-imds.conf 644 root:root gen_docker_dropin; then
+    units_changed="$units_changed docker.service.d"
+  fi
   if fixing && [ -n "$units_changed" ]; then a_daemon_reload; fi
   for u in $ENABLED; do
     q_enabled "$u" && continue
@@ -1761,6 +1937,55 @@ p_imds() {
   fi
 }
 
+# docker for the jobs that start containers (a consumer's OCI lane). The package is one of
+# BASE_PACKAGES, docker.service one of ENABLED, and p_services starts it behind
+# slot-imds-containers.service. Here: the build user is in group docker, which is what lets a job
+# reach the daemon's socket. A member of that group is root on the node (a privileged or
+# host-network container), so the rule that only root reaches the metadata service holds against
+# the build user's own processes and against bridge containers, not against a job that starts
+# such a container. slot-node gets the group when it starts: stale_reason names a process that
+# started before.
+p_docker() {
+  case " $(q_groups "$U") " in *" docker "*) return 0 ;; esac
+  drift docker "$U is not in group docker"
+  fixing || return 0
+  if [ -n "$T" ]; then
+    st_add groups "$U:docker"
+  else
+    { getent group docker >/dev/null || groupadd -r docker; } && usermod -aG docker "$U" || {
+      failed docker "usermod -aG docker $U"
+      return 0
+    }
+  fi
+  changed docker "$U added to group docker"
+}
+
+# slot-imds-containers.service stays active after its rules are gone (a flushed chain), so the
+# rules are read from the firewall, like the rule of slot-imds-root-only.service. They are put
+# back here and not by a restart of the unit: docker.service requires it and would restart too,
+# which ends every container.
+p_docker_rule() {
+  q_active slot-imds-containers.service || return 0
+  q_imds_containers && return 0
+  drift docker "slot-imds-containers.service is active and its reject rules are not in DOCKER-USER"
+  fixing || return 0
+  if [ -n "$T" ]; then
+    calls "iptables -w -I DOCKER-USER 1 -d 169.254.169.254/32 -j REJECT"
+    [ -e "$R/.state-imds-containers-stay-open" ] || : >"$S/imds-containers"
+  else
+    for pr in 'iptables 169.254.169.254/32' 'ip6tables fd00:ec2::254/128'; do
+      "${pr% *}" -w -N DOCKER-USER 2>/dev/null
+      "${pr% *}" -w -C DOCKER-USER -d "${pr#* }" -j REJECT 2>/dev/null ||
+        "${pr% *}" -w -I DOCKER-USER 1 -d "${pr#* }" -j REJECT
+    done
+  fi
+  if q_imds_containers; then
+    changed docker "reject rules for the metadata service put back into DOCKER-USER"
+  else
+    failed docker "the reject rules for the metadata service are not in DOCKER-USER"
+  fi
+}
+
 # Why the running process of $1 is not what its unit file and the config say; nothing when it is.
 stale_reason() {
   sr_want=$(unit_defs "$1")
@@ -1786,16 +2011,35 @@ stale_reason() {
       echo "it runs '$sr_v', the config says slot $SLOT_VERSION"
       return 0
     fi
+    # A job is a child of this process and has its groups.
+    sr_g=$(q_proc_groups "$1")
+    case " $(echo $sr_g) " in
+      "  " | *" docker "*) ;;
+      *)
+        case " $(q_groups "$U") " in
+          *" docker "*)
+            echo "the process started before $U was in group docker"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
   fi
   return 0
 }
 
 p_services() {
   started=
-  for u in slot-storage.service slot-imds-root-only.service slot-toolchains-manifest.timer sccache-node.service slot-node.service; do
+  for u in slot-storage.service slot-imds-root-only.service slot-imds-containers.service docker.service slot-docker-prune.timer slot-toolchains-manifest.timer sccache-node.service slot-node.service; do
     q_active "$u" && continue
     drift "unit:$u" "not active"
-    if fixing; then a_start "$u" && changed "unit:$u" "started" && started="$started $u"; fi
+    fixing || continue
+    if a_start "$u"; then
+      changed "unit:$u" "started"
+      started="$started $u"
+    else
+      failed "unit:$u" "systemctl start $u"
+    fi
   done
   # A running unit that is not what its file and the config say restarts: sccache-node at once,
   # slot-node when no job runs (it holds the build user's jobs).
@@ -1839,6 +2083,7 @@ case $mode in
     p_files
     p_units
     p_imds
+    p_docker
     p_slot
     [ -n "$imds_open" ] || p_rust
     [ -n "$imds_open" ] || p_tools
@@ -1848,6 +2093,7 @@ case $mode in
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
     p_services
+    p_docker_rule
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"

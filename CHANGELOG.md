@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Node docker: `provision.sh` installs the distribution's `docker` package, enables and starts
+  `docker.service` and puts the build user in group `docker`, so a job that starts containers (a
+  consumer's OCI lane) runs on the node; `slot-node` restarts when its process started before
+  the group change, at a moment no job runs. `slot-imds-containers.service` puts a reject rule
+  for the instance metadata service into `DOCKER-USER`, a drop-in makes `docker.service` require
+  it, and `check` reads the rule back. `slot-docker-prune.timer` runs every 10 min: with no job
+  in the pool it removes every container (a job that ended left it); while docker stores more
+  than `DOCKER_GB` (new config key, default 10) it removes old stopped containers and the unused
+  build cache, and with no job in the pool every unused image and volume. A member of group
+  `docker` is root on the node, and the instance must require IMDSv2 (README). A unit that does
+  not start is now a `failed: unit:` line.
+
 - Node Groovy: `provision.sh` installs the Groovy 2.4.10 binary distribution (Maven Central,
   SHA-256 pinned) at `~/.sdkman/candidates/groovy/2.4.10` (`HOME_PINS`, new strip kind `zip1`),
   where a consumer's tasks read `embeddable/groovy-all-2.4.10.jar` and `bin/groovyc`; those tasks
