@@ -3128,12 +3128,16 @@ ar=$(
 # rsync is replaced: it copies $W/rf/node-manifest when that file exists and fails otherwise;
 # toolchains.sh is a copy beside the script that prints $W/rf/local-lines; timeout is replaced by
 # one that records its arguments and runs the command.
+# The copy reads where its output goes before it writes the name down: dash redirects in the
+# shell itself while a command with a redirection runs, so `readlink /proc/$$/fd/1 >file` reads
+# the name of that file there.
 RF=$W/rf
 mkdir -p "$RF/bin" "$RF/lib" "$RF/home" "$RF/state/slot"
 cp "$here/toolchains-refresh.sh" "$RF/lib/"
 cat >"$RF/lib/toolchains.sh" <<EOF
 #!/bin/sh
-readlink /proc/\$\$/fd/1 >"$RF/local.dst"
+dst=\$(readlink /proc/\$\$/fd/1)
+printf '%s\n' "\$dst" >"$RF/local.dst"
 [ -f "$RF/local-lines" ] || exit 1
 cat "$RF/local-lines"
 EOF
