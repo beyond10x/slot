@@ -452,6 +452,11 @@ fn bounded(mut rsync: Command, bounds: &crate::sync::Bounds) -> Result<(ExitStat
 }
 
 /// One rsync of `rels` from `src` into `local`; the bytes it received.
+/// `--relative` sends the directories on each path too: one that is a
+/// symlink in `local` is replaced by a directory (rsync 3.5 refuses
+/// to write through it even with `--keep-dirlinks`), so a caller whose
+/// paths may cross one passes `local` resolved and `rels` without
+/// directories ([`GoProduct::split`]).
 fn rsync(
     src: &Source<'_>,
     rels: &[String],
@@ -624,7 +629,7 @@ pub fn go_output(argv: &[String]) -> Option<GoOutput> {
 /// A go job's output in the client's tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoProduct {
-    /// Its path relative to the tree.
+    /// Its path relative to the tree; empty for the tree itself.
     pub rel: String,
     /// `-o` ends in `/`: a directory, which the go command makes.
     pub dir: bool,
@@ -655,10 +660,34 @@ impl GoOutput {
             }
         }
         let rel = plain.strip_prefix(top).ok()?.to_str()?;
-        (!rel.is_empty()).then(|| GoProduct {
+        // The tree itself (`-o .` at its top) is a directory.
+        Some(GoProduct {
             rel: rel.to_string(),
-            dir: self.path.ends_with('/'),
+            dir: rel.is_empty() || self.path.ends_with('/'),
         })
+    }
+}
+
+impl GoProduct {
+    /// The directory the files to copy lie in, relative to the tree (empty:
+    /// the tree), and their names: for the one file (`written` is `None`)
+    /// its parent and its name, for a directory itself and `written`. The
+    /// copy goes into that directory resolved on the client's side, so a
+    /// directory on the path that is a symlink there stays one.
+    pub fn split(&self, written: Option<Vec<String>>) -> (String, Vec<String>) {
+        let rel = self.rel.trim_end_matches('/');
+        match written {
+            Some(names) => (rel.to_string(), names),
+            None => match rel.rsplit_once('/') {
+                Some((dir, name)) => (dir.to_string(), vec![name.to_string()]),
+                None => (String::new(), vec![rel.to_string()]),
+            },
+        }
+    }
+
+    /// Its path for a message: `.` for the tree itself.
+    pub fn shown(&self) -> &str {
+        if self.rel.is_empty() { "." } else { &self.rel }
     }
 }
 
@@ -719,20 +748,21 @@ pub fn entries(out: &str) -> Vec<Entry> {
 /// that is no directory.
 const RSYNC_PARTIAL: i32 = 23;
 
-/// Lists the directory `rel` below `src` on the node, not its
-/// subdirectories: one rsync with no destination, which `slot shell`
-/// admits as a fetch. Bounded like a sync; rsync's own error lines are not
-/// shown.
+/// Lists the directory `rel` below `src` on the node (empty: `src` itself),
+/// not its subdirectories: one rsync with no destination, which `slot
+/// shell` admits as a fetch. Bounded like a sync; rsync's own error lines
+/// are not shown.
 pub fn list(src: &Source<'_>, rel: &str, bounds: &crate::sync::Bounds) -> Listing {
+    let mut dir = format!("{}/", src.target.trim_end_matches('/'));
+    if !rel.is_empty() {
+        dir.push_str(rel.trim_end_matches('/'));
+        dir.push('/');
+    }
     let mut rsync = Command::new("rsync");
     rsync
         .args(["-d", "-e"])
         .arg(src.ssh.join(" "))
-        .arg(format!(
-            "{}:{}/{rel}/",
-            src.host,
-            src.target.trim_end_matches('/')
-        ))
+        .arg(format!("{}:{dir}", src.host))
         .stderr(Stdio::null());
     match bounded(rsync, bounds) {
         Ok((st, out)) if st.success() => Listing::Dir(entries(&out)),
@@ -986,11 +1016,35 @@ mod tests {
             at(None, "bin/", "/h/repo", false),
             Some(("bin".to_string(), true))
         );
-        // Outside the tree, or the tree itself.
+        // The copy goes into the directory of the file, or the directory.
+        let p = |rel: &str, dir: bool| GoProduct {
+            rel: rel.to_string(),
+            dir,
+        };
+        assert_eq!(
+            p("target/x/tool", false).split(None),
+            ("target/x".to_string(), v(&["tool"]))
+        );
+        assert_eq!(p("tool", false).split(None), (String::new(), v(&["tool"])));
+        assert_eq!(
+            p("out/bin", true).split(Some(v(&["a", "b"]))),
+            ("out/bin".to_string(), v(&["a", "b"]))
+        );
+        assert_eq!(
+            p("", true).split(Some(v(&["a"]))),
+            (String::new(), v(&["a"]))
+        );
+        // The tree itself is a directory like any other: `-o .` at the top.
+        let top_dir = Some((String::new(), true));
+        assert_eq!(at(None, ".", "/h/repo", false), top_dir);
+        assert_eq!(at(None, "./", "/h/repo", false), top_dir);
+        assert_eq!(at(None, "..", "/h/repo/cmd", false), top_dir);
+        assert_eq!(at(None, "/h/repo", "/h/repo/cmd", true), top_dir);
+        // Outside the tree.
         for (path, cwd) in [
             ("../tool", "/h/repo"),
             ("../../repo2/tool", "/h/repo/cmd"),
-            (".", "/h/repo"),
+            ("..", "/h/repo"),
             ("/dev/null", "/h/repo"),
             ("/h/repo2/tool", "/h/repo"),
         ] {

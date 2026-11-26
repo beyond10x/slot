@@ -60,18 +60,26 @@
   anything in `.gitignore`), and the job still ended with exit 0. `-o <path>` and `-o=<path>` are
   read against the directory of the call (after `-C`). For a directory, slot lists it on the
   server before the job and after it and copies the files that are new or whose size or
-  modification time changed, and no other file of that directory. A path outside the checkout, a
-  job that did not exit 0, `go run`, `go vet`, a `go build` without `-o` and a `go test` without
-  `-c` copy nothing and print nothing. `SLOT_NO_PRODUCTS=1` turns it off, as for cargo. A listing
-  or a copy that fails prints `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1.
+  modification time changed, and no other file of that directory; the top of the checkout
+  (`-o .`) is such a directory. A directory on the path that is a symlink in the checkout stays
+  a symlink (the copy goes into the directory as this machine resolves it). A path outside the
+  checkout, a job that did not exit 0, `go run`, `go vet`, a `go build` without `-o`, a `go test` without
+  `-c`, and a `go test -c` without `-o` (its `<package>.test` stays in the working directory on
+  the server) copy nothing and print nothing. `SLOT_NO_PRODUCTS=1` turns it off, as for cargo. A
+  listing or a copy that fails prints `slot: artifacts not fetched: <path>: …` and turns exit 0
+  into 1; a single file needs no listing before the job, so a failed one is listed again after
+  it.
 - Remote mode: a cargo job, cargo inside a generic job and the jobs of another tree of the
   repository get the same `CARGO_*` variables, so a compile cache that keys them (sccache keys
   every `CARGO_*` variable of the compiler's environment) can serve a crate one of them built to
   the others. Two changes. For a tree mirrored at the same path, the job gets no
   `CARGO_TARGET_DIR` when it builds into the directory cargo resolves by itself (`target` beside
   the workspace's root manifest); before, it got `CARGO_TARGET_DIR=<tree>/target`, one value per
-  tree. A caller that set `CARGO_TARGET_DIR`, or whose cargo configuration names another
-  directory, still gets the variable with that directory. And a cargo job gets no
+  tree; the server daemon's own `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` are removed
+  from it too. A caller that set `CARGO_TARGET_DIR`, or whose cargo configuration names another
+  directory, still gets the variable with that directory, and so does a job for which
+  `cargo metadata` failed on the caller's machine (`target` beside the nearest `Cargo.lock` is
+  then a guess that a cargo configuration in the tree may contradict). And a cargo job gets no
   `CARGO_NET_OFFLINE=true` after its fetch: cargo inside a generic job never had it. The fetch
   once per `Cargo.lock` stays; its line now ends after the time (`slot: new Cargo.lock on this
   mirror: cargo fetch took 2.1 s`). A job whose crate is missing after the fetch now downloads it

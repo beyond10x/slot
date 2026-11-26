@@ -702,8 +702,11 @@ fn products_back(
 /// of a cargo job's products ([`artifacts::fetch`]), and prints its line.
 /// A path that was a directory `before` the job, or that `-o` names as one,
 /// is listed again and only the files the job wrote come back
-/// ([`artifacts::written`]); any other path is the one file. Returns 0, or
-/// 1 when a listing or the copy failed: the caller would run a stale binary.
+/// ([`artifacts::written`]); any other path is the one file. Only a
+/// directory needs the listing before the job: when it failed for a path
+/// `-o` does not name as one, the path is listed after the job, and copied
+/// as the one file when it is no directory. Returns 0, or 1 when a listing
+/// or the copy failed: the caller would run a stale binary.
 fn go_back(
     src: &artifacts::Source<'_>,
     top: &Path,
@@ -713,29 +716,49 @@ fn go_back(
 ) -> i32 {
     use artifacts::Listing;
     let failed = |why: &str| {
-        eprintln!("slot: artifacts not fetched: {}: {why}", g.rel);
+        eprintln!("slot: artifacts not fetched: {}: {why}", g.shown());
         1
     };
     let had = match before {
-        Listing::Failed(why) => return failed(why),
+        Listing::Failed(why) if g.dir => return failed(why),
+        Listing::Failed(why) => match artifacts::list(src, &g.rel, &s.sync) {
+            Listing::Absent => None,
+            Listing::Dir(_) => return failed(why),
+            Listing::Failed(again) => return failed(&again),
+        },
         Listing::Dir(had) => Some(had.as_slice()),
         Listing::Absent => g.dir.then_some(&[][..]),
     };
-    let rels = match had {
-        None => vec![g.rel.clone()],
+    let written = match had {
+        None => None,
         Some(had) => match artifacts::list(src, &g.rel, &s.sync) {
             Listing::Failed(why) => return failed(&why),
-            Listing::Absent => Vec::new(),
-            Listing::Dir(now) => artifacts::written(had, &now)
-                .iter()
-                .map(|name| format!("{}/{name}", g.rel.trim_end_matches('/')))
-                .collect(),
+            Listing::Absent => Some(Vec::new()),
+            Listing::Dir(now) => Some(artifacts::written(had, &now)),
         },
     };
-    if rels.is_empty() {
+    let (dir, names) = g.split(written);
+    if names.is_empty() {
         return 0;
     }
-    match artifacts::fetch(src, &rels, top, &s.sync) {
+    // Into the directory as this machine resolves it: rsync would replace
+    // a symlink on the way with a directory.
+    let local = top.join(&dir);
+    let local = match std::fs::create_dir_all(&local).and_then(|()| local.canonicalize()) {
+        Ok(l) => l,
+        Err(e) => return failed(&format!("{}: {e}", local.display())),
+    };
+    let base = src.target.trim_end_matches('/');
+    let base = if dir.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}/{dir}")
+    };
+    let src = artifacts::Source {
+        target: &base,
+        ..*src
+    };
+    match artifacts::fetch(&src, &names, &local, &s.sync) {
         Ok(f) => {
             eprintln!("{}", f.line());
             0
