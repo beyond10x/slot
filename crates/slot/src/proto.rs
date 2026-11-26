@@ -258,6 +258,14 @@ pub struct Workspace {
     /// (below a `--same-path-root`); empty keeps cargo's default there.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target_dir: String,
+    /// `target_dir` is the directory cargo resolves by itself in this tree:
+    /// the caller set no `CARGO_TARGET_DIR` and no cargo configuration
+    /// names another. The server then exports no `CARGO_TARGET_DIR`, so
+    /// the jobs of two trees carry the same `CARGO_*` variables, and it
+    /// still records `target_dir`. `false` from a client older than this
+    /// field: the variable is exported, as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub target_default: bool,
 }
 
 /// One server message.
@@ -328,6 +336,24 @@ mod tests {
         };
         let back: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back.tokens, Some(4));
+    }
+
+    /// A client older than `target_default` sends none: the server reads
+    /// `false` and exports the target directory as before. A newer client
+    /// sends the field only when it is true.
+    #[test]
+    fn a_workspace_from_an_older_client_names_no_default_target() {
+        let old = r#"{"id":"a1","rel_cwd":".","client_root":"/w/r","same_path":true,"target_dir":"/w/r/target"}"#;
+        let ws: Workspace = serde_json::from_str(old).unwrap();
+        assert!(!ws.target_default);
+        assert_eq!(serde_json::to_string(&ws).unwrap(), old);
+        let new = Workspace {
+            target_default: true,
+            ..ws
+        };
+        let line = serde_json::to_string(&new).unwrap();
+        assert!(line.ends_with(r#","target_default":true}"#), "{line}");
+        assert_eq!(serde_json::from_str::<Workspace>(&line).unwrap(), new);
     }
 
     #[test]

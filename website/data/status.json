@@ -231,7 +231,7 @@
       "area": "Remote",
       "label": "Fetch once",
       "status": "shipped",
-      "detail": "The node runs cargo fetch once per new Cargo.lock, then every job builds offline (0.34.0).",
+      "detail": "The node runs cargo fetch once per new Cargo.lock, before the job is queued (0.34.0).",
       "href": "/docs/remote-builds"
     },
     {

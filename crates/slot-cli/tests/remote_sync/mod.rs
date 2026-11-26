@@ -591,8 +591,8 @@ fn a_remote_cargo_build_leaves_the_binary_in_the_local_target_dir() {
     let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
     assert!(
         log.lines()
-            .any(|l| l == "true|build --message-format=json-render-diagnostics"),
-        "{log}"
+            .any(|l| l == "|build --message-format=json-render-diagnostics"),
+        "no offline setting of slot's own: {log}"
     );
     eprintln!("took {:?}", t0.elapsed());
 }
@@ -724,8 +724,8 @@ fn slot_no_products_copies_nothing_back() {
     assert!(!err.contains("slot: fetched"), "{err}");
     let log = std::fs::read_to_string(t.path().join("cargo.log")).unwrap();
     assert!(
-        log.lines().any(|l| l == "true|build"),
-        "the caller's command unchanged: {log}"
+        log.lines().any(|l| l == "|build"),
+        "the caller's command and environment unchanged: {log}"
     );
     eprintln!("took {:?}", t0.elapsed());
 }
@@ -784,10 +784,11 @@ fn a_second_job_with_the_same_lock_file_does_not_fetch_again() {
         lines,
         [
             "|fetch",
-            "true|check",
-            "true|build --message-format=json-render-diagnostics"
+            "|check",
+            "|build --message-format=json-render-diagnostics"
         ],
-        "one fetch, then each job offline"
+        "one fetch; a job gets no CARGO_NET_OFFLINE, which would be part of \
+         the compile cache's key for a cargo job and absent in a generic one"
     );
     eprintln!("took {:?}", t0.elapsed());
 }
@@ -908,7 +909,11 @@ fn a_same_path_job_outside_a_checkout_syncs_its_directory() {
 
 /// Same-path: cargo builds into the client's own target directory, also
 /// for a nested workspace named with `--manifest-path`; the node's cache
-/// holds no target directory.
+/// holds no target directory. The job gets no `CARGO_TARGET_DIR` for a
+/// directory cargo resolves by itself, since the variable is part of the
+/// compile cache's key and would differ per tree; a caller that set the
+/// variable builds into that directory with the variable as the caller
+/// set it.
 #[test]
 fn a_same_path_cargo_build_uses_the_clients_target_dir() {
     let t0 = Instant::now();
@@ -941,12 +946,17 @@ fn a_same_path_cargo_build_uses_the_clients_target_dir() {
         ),
     );
     let cargo = cargo.to_str().unwrap();
-    for argv in [
-        vec![cargo, "build"],
-        vec![cargo, "build", "--manifest-path", "driver/Cargo.toml"],
+    let named = repo.join("named");
+    for (argv, target) in [
+        (vec![cargo, "build"], None),
+        (
+            vec![cargo, "build", "--manifest-path", "driver/Cargo.toml"],
+            None,
+        ),
+        (vec![cargo, "build"], Some(&named)),
     ] {
-        let out = Command::new(SLOT)
-            .args(&argv)
+        let mut slot = Command::new(SLOT);
+        slot.args(&argv)
             .current_dir(&repo)
             .env("SLOT_HOST", "node")
             .env("SLOT_SSH", &ssh)
@@ -959,16 +969,20 @@ fn a_same_path_cargo_build_uses_the_clients_target_dir() {
             .env("SLOT_SYNC_LIMIT", "50s")
             .env_remove("SLOT_JOB")
             .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
             .env_remove("CARGO_BUILD_TARGET")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
+            .stdin(Stdio::null());
+        if let Some(t) = target {
+            slot.env("CARGO_TARGET_DIR", t);
+        }
+        let out = slot.output().unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(0), "{argv:?}: {err}");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
     }
     assert!(repo.join("target/debug/tiny").is_file());
     assert!(driver.join("target/debug/driver").is_file());
+    assert!(named.join("debug/tiny").is_file(), "the caller's directory");
     let log = std::fs::read_to_string(root.join("cargo.log")).unwrap();
     let dirs: Vec<&str> = log
         .lines()
@@ -977,11 +991,8 @@ fn a_same_path_cargo_build_uses_the_clients_target_dir() {
         .collect();
     assert_eq!(
         dirs,
-        [
-            repo.join("target").to_str().unwrap(),
-            driver.join("target").to_str().unwrap()
-        ],
-        "{log}"
+        ["", "", named.to_str().unwrap()],
+        "no variable where cargo resolves the directory, the caller's own otherwise: {log}"
     );
     let node = d.dir.path().join("state/cache/target");
     let built: Vec<_> = std::fs::read_dir(&node)

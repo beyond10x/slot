@@ -431,8 +431,19 @@ downloads crates. Before a cargo job that builds (`build`, `check`, `clippy`, `t
 `doc`, `rustc`, `nextest`, `llvm-cov`), the server daemon compares the digest of the mirror's
 `Cargo.lock` with the one it recorded for that mirror. When they differ it runs
 `cargo fetch` once, under a lock per repository, records the digest, and prints
-`slot: new Cargo.lock on this mirror: cargo fetch took 2.1 s; its cargo jobs run
-offline`. Every such job of the mirror then runs with `CARGO_NET_OFFLINE=true`.
+`slot: new Cargo.lock on this mirror: cargo fetch took 2.1 s`. The job then finds every crate in
+the server's cargo home and downloads nothing.
+
+The job's environment is not changed. Releases up to 0.39.1 set `CARGO_NET_OFFLINE=true` for
+such a job. A compile cache keys every `CARGO_*` variable, so a cargo job shared no cache entry
+with cargo inside a generic job (`slot sh -c 'cargo build'`), which gets no fetch and no
+variable ([Cargo variables and the compile
+cache](reference/environment.md#cargo-variables-and-the-compile-cache)). What the variable
+guarded is now different: when a crate is missing after the fetch (the server's cargo home was
+cleaned), the job downloads it and holds the package-cache lock for that long, where it failed
+before; and a job whose `Cargo.lock` is out of date asks the registry's index. Set
+`CARGO_NET_OFFLINE=true` yourself for a job that must not use the network: your value reaches
+the job.
 
 Like cargo on your machine, the fetch updates a `Cargo.lock` that is out of date, for example
 after you add a path dependency. A job that passes `--locked` or `--frozen` itself gets
@@ -442,8 +453,9 @@ A fetch that fails (a `Cargo.toml` cargo cannot resolve, an unreachable registry
 `Cargo.lock` under `--locked`) or takes longer than 5 minutes is a job that did not start:
 `slot: remote build on <host> did not start (cargo fetch failed …)`, exit 3, or this machine's
 daemon with `SLOT_REMOTE_FALLBACK=local` ([When the server is
-unreachable](#when-the-server-is-unreachable)). A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
-need the network themselves (`cargo update`, `add`, `install`, `fetch`) run online.
+unreachable](#when-the-server-is-unreachable)). A mirror without a `Cargo.lock` gets no fetch,
+and neither do commands that need the network themselves (`cargo update`, `add`, `install`,
+`fetch`).
 
 The digests live in `<ws-root>/.cargo-fetch/` on the server and go with their mirror when it is
 evicted. Both features need this release of slot on the server and on the workstation.
@@ -541,7 +553,17 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
   names for the command's manifest (`--manifest-path driver/Cargo.toml` builds into
   `driver/target`). The paths cargo prints, and `CARGO_BIN_EXE_*` in tests, are valid on both
   machines, and a build's products come back to the same paths. It must lie below a
-  `--same-path-root` too.
+  `--same-path-root` too. When it is the directory cargo resolves by itself (`target` beside
+  the workspace's root manifest), the job gets no `CARGO_TARGET_DIR`: the variable is part of a
+  compile cache's key and would differ in every tree, so a crate built in one worktree would be
+  compiled again in the next ([Cargo variables and the compile
+  cache](reference/environment.md#cargo-variables-and-the-compile-cache)). When you set
+  `CARGO_TARGET_DIR`, or `CARGO_BUILD_TARGET_DIR` or a `build.target-dir` of a cargo
+  configuration on this machine names another directory, the job gets `CARGO_TARGET_DIR` with
+  that directory's absolute path. The job's record names the directory either way. A server
+  whose own cargo configuration sets `build.target-dir`, or whose daemon runs with
+  `CARGO_BUILD_TARGET_DIR`, would build elsewhere than the record says: keep both off the
+  server.
 - A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
   directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
 - A directory outside any git checkout (a scratch copy) is the tree itself, unless it is the

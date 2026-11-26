@@ -1643,8 +1643,8 @@ impl Server {
     }
 
     /// Fetch once (`cargo_fetch.rs`) for a cargo job of workspace `id` that
-    /// runs in `cwd`: whether the job runs offline, or why it goes back to
-    /// the client.
+    /// runs in `cwd`; `Err` with why the job goes back to the client. The
+    /// job's environment is not changed.
     async fn fetch_once(
         &self,
         id: &str,
@@ -1653,7 +1653,7 @@ impl Server {
         argv: &[String],
         env: &[String],
         tx: &mpsc::UnboundedSender<Frame>,
-    ) -> Result<bool, String> {
+    ) -> Result<(), String> {
         use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure, label, locked};
         let ws_root = self.cfg.ws_root.clone();
         let root = root.to_path_buf();
@@ -1677,19 +1677,15 @@ impl Server {
         })
         .await
         .map_err(|e| format!("{what} failed: {e}"))??;
-        Ok(match out {
-            Outcome::NoLock => false,
-            Outcome::Current => true,
-            Outcome::Fetched(t) => {
-                let _ = tx.send(Frame::Info {
-                    msg: format!(
-                        "slot: new Cargo.lock on this mirror: {what} took {:.1} s; its cargo jobs run offline",
-                        t.as_secs_f64()
-                    ),
-                });
-                true
-            }
-        })
+        if let Outcome::Fetched(t) = out {
+            let _ = tx.send(Frame::Info {
+                msg: format!(
+                    "slot: new Cargo.lock on this mirror: {what} took {:.1} s",
+                    t.as_secs_f64()
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Sends a client its last frames unless a handover took the table;
@@ -1889,7 +1885,7 @@ impl Server {
     /// job: the client is answered by the next process.
     async fn run_job(
         self: &Arc<Self>,
-        mut req: Request,
+        req: Request,
         tx: mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
         stop: Option<Stop>,
@@ -1905,36 +1901,28 @@ impl Server {
         };
         // A mistyped subcommand (`slot cancle 12`) would otherwise wait in
         // the queue for slots and fail only when it starts.
-        let mut base = Self::base_env(&req);
+        let base = Self::base_env(&req);
         if !req.argv[0].contains('/')
             && let Err(e) = look_path(&req.argv[0], &base)
         {
             return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
         }
+        // The job gets no `CARGO_NET_OFFLINE` after its fetch: a compile
+        // cache keys every `CARGO_*` variable, and cargo inside a generic
+        // job, which gets no fetch, would then share no entry with it.
         if req.fetch_once
             && let Some(ws) = req.workspace.as_ref()
             && crate::cargo_fetch::applies(&req.argv)
-        {
-            let root = PathBuf::from(&from);
-            match self
-                .fetch_once(&ws.id, &root, &cwd, &req.argv, &base, &tx)
+            && let Err(msg) = self
+                .fetch_once(&ws.id, &PathBuf::from(&from), &cwd, &req.argv, &base, &tx)
                 .await
-            {
-                Ok(offline) => {
-                    if offline && !req.env.iter().any(|e| e == crate::cargo_fetch::OFFLINE) {
-                        req.env.push(crate::cargo_fetch::OFFLINE.to_string());
-                        base = Self::base_env(&req);
-                    }
-                }
-                Err(msg) => {
-                    let g = self.inner.lock().expect("server lock");
-                    if g.handing_over {
-                        return None;
-                    }
-                    let _ = tx.send(Frame::Fallback { msg });
-                    return Some(());
-                }
+        {
+            let g = self.inner.lock().expect("server lock");
+            if g.handing_over {
+                return None;
             }
+            let _ = tx.send(Frame::Fallback { msg });
+            return Some(());
         }
         // A gated job is shown, counted and sized by the command its client
         // runs in a sandbox; the daemon starts only `req.argv`, the hold.
@@ -2366,10 +2354,16 @@ impl Server {
         };
         let mut env = tc.env(&ctx, base);
         // A same-path job builds where the client would, so the paths cargo
-        // prints hold on both machines.
+        // prints hold on both machines. Where cargo resolves that directory
+        // by itself (`target_default`) the job is not told: a compile cache
+        // keys every `CARGO_*` variable, and this one differs per tree. The
+        // record, eviction and the `start` frame name the directory either
+        // way (`job_target`).
         if let Some(ws) = req.workspace.as_ref().filter(|w| w.same_path) {
             env = match self.same_path_target(ws) {
-                Ok(Some(t)) => toolchain::set(env, "CARGO_TARGET_DIR", &t.to_string_lossy()),
+                Ok(Some(t)) if !ws.target_default => {
+                    toolchain::set(env, "CARGO_TARGET_DIR", &t.to_string_lossy())
+                }
                 _ => toolchain::unset(env, &["CARGO_TARGET_DIR"]),
             };
         }

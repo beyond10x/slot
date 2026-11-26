@@ -1240,7 +1240,10 @@ fn remote(
     let t0 = Instant::now();
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
-    let target_dir = if same_path {
+    // Where the job builds, for the record, eviction and the products; and
+    // whether cargo finds that directory by itself, so the server need not
+    // export it.
+    let job_target = if same_path {
         same_path_extras(top, cwd, tc.sync_excludes(), &target, s)?;
         same_path::target_dir(
             &req.argv,
@@ -1248,11 +1251,13 @@ fn remote(
             top,
             std::env::var("CARGO_TARGET_DIR").ok().as_deref(),
         )
-        .map(|t| t.to_string_lossy().into_owned())
-        .unwrap_or_default()
     } else {
-        String::new()
+        None
     };
+    let target_default = job_target.as_ref().is_some_and(|t| t.default);
+    let target_dir = job_target
+        .map(|t| t.dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
     req.sync_ms = Some(millis(t0.elapsed()));
     req.sync_bytes = synced.bytes;
     // The git dependencies the lock files name, from this machine's cargo
@@ -1286,6 +1291,7 @@ fn remote(
         client_root: top.to_string_lossy().into_owned(),
         same_path,
         target_dir,
+        target_default,
     });
     Ok(())
 }

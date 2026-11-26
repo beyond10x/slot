@@ -12,6 +12,24 @@
   job that did not exit 0, `go run`, `go vet`, a `go build` without `-o` and a `go test` without
   `-c` copy nothing and print nothing. `SLOT_NO_PRODUCTS=1` turns it off, as for cargo. A listing
   or a copy that fails prints `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1.
+- Remote mode: a cargo job, cargo inside a generic job and the jobs of another tree of the
+  repository get the same `CARGO_*` variables, so a compile cache that keys them (sccache keys
+  every `CARGO_*` variable of the compiler's environment) can serve a crate one of them built to
+  the others. Two changes. For a tree mirrored at the same path, the job gets no
+  `CARGO_TARGET_DIR` when it builds into the directory cargo resolves by itself (`target` beside
+  the workspace's root manifest); before, it got `CARGO_TARGET_DIR=<tree>/target`, one value per
+  tree. A caller that set `CARGO_TARGET_DIR`, or whose cargo configuration names another
+  directory, still gets the variable with that directory. And a cargo job gets no
+  `CARGO_NET_OFFLINE=true` after its fetch: cargo inside a generic job never had it. The fetch
+  once per `Cargo.lock` stays; its line now ends after the time (`slot: new Cargo.lock on this
+  mirror: cargo fetch took 2.1 s`). A job whose crate is missing after the fetch now downloads it
+  where it failed before; a `CARGO_NET_OFFLINE` of the caller's own reaches the job. The job's
+  record, eviction and the products read the target directory as before. Not changed: a tree
+  mirrored below the workspace root gets `CARGO_TARGET_DIR=<cache-root>/target/<id>`, and a
+  sandbox with fixed paths `/work/target`. Needs this release on the server and on the client:
+  the client says whether the directory is cargo's own (`workspace.target_default`), and a server
+  that gets no word exports the variable as before. The environment reference lists what slot
+  sets in a job and what that means for the cache key.
 
 ## 0.39.1 — 2026-11-26
 

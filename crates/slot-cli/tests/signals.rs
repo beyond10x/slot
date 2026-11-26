@@ -30,6 +30,10 @@ impl Daemon {
     fn start_env(args: &[&std::ffi::OsStr], env: &[(&str, &std::ffi::OsStr)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let child = Command::new(SLOT)
+            // A job starts from its daemon's environment. When this test is
+            // itself a job of a daemon that set the variable, the daemon
+            // under test must not pass it on as its own.
+            .env_remove("CARGO_NET_OFFLINE")
             .envs(env.iter().copied())
             .env("SLOT_CLUSTER_FILE", "off")
             .args([
