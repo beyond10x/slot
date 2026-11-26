@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.33.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.38.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -214,6 +214,48 @@
       "href": "/docs/remote-builds#restrict-the-key-to-slot"
     },
     {
+      "area": "Remote",
+      "label": "Build nodes in the web view",
+      "status": "shipped",
+      "detail": "Each remote node of the host configuration shows in the cluster view with its jobs and lease; a node's job keeps the id its node gave it (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Same-path mirrors and products back",
+      "status": "shipped",
+      "detail": "A tree under the home syncs to its own path on the node, like a CI runner's checkout; a remote cargo build brings its products back into the local target directory (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Fetch once",
+      "status": "shipped",
+      "detail": "The node runs cargo fetch once per new Cargo.lock, then every job builds offline (0.34.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Node cards read the node",
+      "status": "shipped",
+      "detail": "A node reports its scheduled poweroff, its boot, the whole machine's CPU and load, and its finished jobs by cause; the card counts the lease to that poweroff and the cost from that boot (0.35.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Output of a node's job",
+      "status": "shipped",
+      "detail": "The web view streams the output of a job that runs on a node, read through the node's restricted ssh command (0.35.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
+      "area": "Remote",
+      "label": "Never-sync list and credential names in the binary",
+      "status": "shipped",
+      "detail": "A tree under a listed prefix never leaves the machine, however slot is called; a variable whose name looks like a credential never crosses; links that leave the tree are sent as links (0.35.0).",
+      "href": "/docs/remote-builds"
+    },
+    {
       "area": "Configuration",
       "label": "Per-repository configuration",
       "status": "shipped",
@@ -233,6 +275,62 @@
       "status": "shipped",
       "detail": "slot gate lets a sandbox with no socket and no network queue its builds in the pool through FIFOs; the build runs in the sandbox (0.18.0).",
       "href": "/docs/agent-integration#builds-in-a-sandbox-the-gate"
+    },
+    {
+      "area": "Agents",
+      "label": "Gates whose steps call slot",
+      "status": "shipped",
+      "detail": "SLOT_ORCHESTRATOR=1 in front of task, make, just or a shell lets the Claude Code hook run the gate outside the pool while each step is its own pool job (0.34.0).",
+      "href": "/docs/claude-code-plugin"
+    },
+    {
+      "area": "Observation",
+      "label": "Where a job's time went",
+      "status": "shipped",
+      "detail": "The job log records sync, copy-back, compile and test time of each job, and the node target directory a remote job used and where it was seeded from (0.36.0).",
+      "href": "/docs/how-it-works#job-log"
+    },
+    {
+      "area": "Remote",
+      "label": "Width on a node",
+      "status": "shipped",
+      "detail": "On a node, test threads and GOMAXPROCS follow the node's free cores; SLOT_WIDTH sets them (0.36.0).",
+      "href": "/docs/toolchains#width-on-a-node"
+    },
+    {
+      "area": "Remote",
+      "label": "Warm the node after a merge",
+      "status": "shipped",
+      "detail": "slot warm in a checkout of main builds the repository on the node at the lowest priority, so the next worktree starts from a warm target (0.36.0).",
+      "href": "/docs/remote-builds#warm-the-node-after-a-merge"
+    },
+    {
+      "area": "Remote",
+      "label": "Copy-back without pile-up",
+      "status": "shipped",
+      "detail": "After a copy-back the client removes older builds of the same targets; SLOT_NO_PRODUCTS=1 turns the copy-back off (0.36.0).",
+      "href": "/docs/remote-builds#binaries-and-test-binaries-come-back"
+    },
+    {
+      "area": "Remote",
+      "label": "Changed sources always rebuild",
+      "status": "shipped",
+      "detail": "The sync leaves the node its own file times and a seeded target never makes a changed source look built (0.36.0).",
+      "href": "/docs/remote-builds#target-directories-on-the-server"
+    },
+    {
+      "area": "Observation",
+      "label": "Calls the compile cache refused",
+      "status": "shipped",
+      "detail": "slot cache refused lists, per repository, the compiler calls sccache refused to cache by reason, each with its remedy (0.37.0).",
+      "href": "/docs/how-it-works#sccache-watchdog"
+    },
+    {
+      "area": "Pool",
+      "label": "A lower disk floor for jobs that compile nothing",
+      "status": "shipped",
+      "detail": "--min-free-disk-light: a job whose last 5 runs used no compile server and no target directory waits only below this floor; every other job waits at --min-free-disk (0.38.0).",
+      "href": "/docs/how-it-works#waiting-for-disk-and-memory"
     }
   ]
 }

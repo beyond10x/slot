@@ -21,11 +21,16 @@ pub struct Context {
     /// Default parallelism of test runners that do not speak the jobserver
     /// protocol (libtest, nextest, Go test binaries); 0 means the free tokens.
     pub test_threads: usize,
+    /// The job's width on a node ([`crate::width`]); `None` for a local
+    /// job, which keeps `test_threads`.
+    pub width: Option<usize>,
 }
 
 impl Context {
     fn test_threads(&self) -> usize {
-        if self.test_threads > 0 {
+        if let Some(w) = self.width {
+            w
+        } else if self.test_threads > 0 {
             self.test_threads
         } else {
             self.free_tokens.max(2)
@@ -38,6 +43,22 @@ fn default_threads(mut env: Vec<String>, keys: &[&str], n: usize) -> Vec<String>
     for k in keys {
         if get(&env, k).is_none() {
             env.push(format!("{k}={n}"));
+        }
+    }
+    env
+}
+
+/// Sets each of `keys` to `n` unless the caller set it; for a job with a
+/// width (on a node) a caller's count below `n` is raised to `n`. A higher
+/// count, or one that is not a number, stays.
+fn threads(c: &Context, env: Vec<String>, keys: &[&str], n: usize) -> Vec<String> {
+    let mut env = default_threads(env, keys, n);
+    if c.width.is_some() {
+        for k in keys {
+            let have = get(&env, k).and_then(|v| v.trim().parse::<usize>().ok());
+            if have.is_some_and(|have| have < n) {
+                env = set(env, k, &n.to_string());
+            }
         }
     }
     env
@@ -156,23 +177,73 @@ pub fn own_jobserver(env: Vec<String>, p: usize) -> Vec<String> {
     env
 }
 
+/// Parts of a name that make it look like a credential, anywhere in it.
+pub const CREDENTIAL_PARTS: &[&str] = &[
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "PASS",
+    "CREDENTIAL",
+    "_KEY",
+    "AUTH",
+    "SSH_",
+    "AWS_SECRET",
+];
+
+/// Words of a name (between `_`) that make it look like a credential:
+/// `NPM_PAT`, `SENTRY_DSN`, `KEY`, not `PKG_CONFIG_PATH`.
+pub const CREDENTIAL_WORDS: &[&str] = &["PAT", "DSN", "KEY"];
+
+/// Words that hold a part of [`CREDENTIAL_PARTS`] and name no credential:
+/// `CARGO_PKG_AUTHORS`, which cargo sets in every build script and test.
+const NOT_CREDENTIAL_WORDS: &[&str] = &["AUTHOR", "AUTHORS"];
+
 /// Whether a variable name looks like a credential (`CARGO_REGISTRY_TOKEN`,
-/// `CARGO_REGISTRIES_X_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_KEY`). Such a
-/// variable never crosses to a remote host through a toolchain's prefix
-/// rule; naming it in `SLOT_ENV` still forwards it.
+/// `*_SECRET`, `DB_PASS`, `*_KEY`, `SSH_AUTH_SOCK`, `NPM_PAT`, `*_DSN`).
+/// Such a variable never crosses to a remote host, through a toolchain's
+/// prefix rule or named in `SLOT_ENV`.
 pub fn credential(name: &str) -> bool {
-    let n = name.to_ascii_uppercase();
-    [
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PASSWD",
-        "CREDENTIAL",
-        "_KEY",
-        "AUTH",
-    ]
-    .iter()
-    .any(|w| n.contains(w))
+    let n = name
+        .to_ascii_uppercase()
+        .split('_')
+        .map(|w| {
+            if NOT_CREDENTIAL_WORDS.contains(&w) {
+                ""
+            } else {
+                w
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_");
+    CREDENTIAL_PARTS.iter().any(|w| n.contains(w))
+        || n.split('_').any(|w| CREDENTIAL_WORDS.contains(&w))
+}
+
+/// What of `vars` a remote job gets: the names `admits` (a toolchain's
+/// `client_env`) and the names in `listed` (`SLOT_ENV`), except those that
+/// look like a credential. The second value: the names held back for that,
+/// sorted, for the caller to name (never their values).
+pub fn remote_env(
+    vars: impl IntoIterator<Item = (String, String)>,
+    admits: impl Fn(&str) -> bool,
+    listed: impl Fn(&str) -> bool,
+) -> (Vec<String>, Vec<String>) {
+    let mut sent = Vec::new();
+    let mut held = Vec::new();
+    for (k, v) in vars {
+        if !(admits(&k) || listed(&k)) {
+            continue;
+        }
+        if credential(&k) {
+            held.push(k);
+        } else {
+            sent.push(format!("{k}={v}"));
+        }
+    }
+    held.sort();
+    held.dedup();
+    (sent, held)
 }
 
 fn common_client_env(name: &str) -> bool {
@@ -206,7 +277,7 @@ impl Toolchain for Cargo {
             let dir = Path::new(&c.cache_dir).join("target").join(&c.workspace_id);
             env = set(env, "CARGO_TARGET_DIR", &dir.to_string_lossy());
         }
-        default_threads(env, RUST_TEST_VARS, c.test_threads())
+        threads(c, env, RUST_TEST_VARS, c.test_threads())
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -225,7 +296,8 @@ impl Toolchain for Cargo {
 }
 
 /// The go command. Not a jobserver client: the server takes `parallel`
-/// tokens up front and caps the go command's package parallelism to match.
+/// tokens up front and caps the go command's package parallelism to match;
+/// on a node `-p` and `GOMAXPROCS` follow the job's width instead.
 pub struct Go {
     /// Tokens a go job holds.
     pub parallel: usize,
@@ -246,7 +318,9 @@ impl Toolchain for Go {
 
     fn env(&self, c: &Context, env: Vec<String>) -> Vec<String> {
         let env = unset(env, STRIPPED);
-        let n = if c.held > 0 { c.held } else { self.tokens() };
+        let held = if c.held > 0 { c.held } else { self.tokens() };
+        // On a node the job's width, if more than the slots it holds.
+        let n = c.width.map_or(held, |w| w.max(held));
         let flags = match get(&env, "GOFLAGS") {
             Some(v) if !v.is_empty() => format!("{v} -p={n}"),
             _ => format!("-p={n}"),
@@ -256,7 +330,7 @@ impl Toolchain for Go {
             let dir = Path::new(&c.cache_dir).join("go-build");
             env = set(env, "GOCACHE", &dir.to_string_lossy());
         }
-        default_threads(env, &["GOMAXPROCS"], n)
+        threads(c, env, &["GOMAXPROCS"], n)
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -491,8 +565,8 @@ impl Toolchain for Generic {
             env = set(env, "GOCACHE", &go.to_string_lossy());
         }
         let n = c.test_threads();
-        let env = default_threads(env, RUST_TEST_VARS, n);
-        default_threads(env, &["GOMAXPROCS"], n)
+        let env = threads(c, env, RUST_TEST_VARS, n);
+        threads(c, env, &["GOMAXPROCS"], n)
     }
 
     fn client_env(&self, name: &str) -> bool {
@@ -630,6 +704,43 @@ mod tests {
         assert!(
             go.contains(&"GOMAXPROCS=2".to_string()) && !go.contains(&"GOMAXPROCS=4".to_string())
         );
+    }
+
+    #[test]
+    fn a_job_on_a_node_gets_its_width_and_a_lower_caller_count_is_raised() {
+        let node = Context {
+            jobserver_auth: "fifo:/p".into(),
+            held: 1,
+            free_tokens: 60,
+            test_threads: 16,
+            width: Some(40),
+            ..Context::default()
+        };
+        let workstation = Context {
+            width: None,
+            ..node.clone()
+        };
+        let caller = v(&["NEXTEST_TEST_THREADS=4", "GOMAXPROCS=64"]);
+        let cargo = Cargo.env(&node, caller.clone());
+        assert_eq!(get(&cargo, "RUST_TEST_THREADS"), Some("40"), "{cargo:?}");
+        assert_eq!(get(&cargo, "NEXTEST_TEST_THREADS"), Some("40"), "raised");
+        let generic = Generic.env(&node, caller.clone());
+        assert_eq!(get(&generic, "NEXTEST_TEST_THREADS"), Some("40"));
+        assert_eq!(
+            get(&generic, "GOMAXPROCS"),
+            Some("64"),
+            "a higher count stays"
+        );
+        let go = Go { parallel: 4 }.env(&node, v(&["GOMAXPROCS=2"]));
+        assert_eq!(get(&go, "GOMAXPROCS"), Some("40"), "{go:?}");
+        assert_eq!(get(&go, "GOFLAGS"), Some("-p=40"), "{go:?}");
+
+        let cargo = Cargo.env(&workstation, caller);
+        assert_eq!(get(&cargo, "RUST_TEST_THREADS"), Some("16"), "{cargo:?}");
+        assert_eq!(get(&cargo, "NEXTEST_TEST_THREADS"), Some("4"), "kept");
+        let go = Go { parallel: 4 }.env(&workstation, v(&["GOMAXPROCS=2"]));
+        assert_eq!(get(&go, "GOMAXPROCS"), Some("2"));
+        assert_eq!(get(&go, "GOFLAGS"), Some("-p=1"), "the slots it holds");
     }
 
     #[test]
@@ -774,5 +885,57 @@ mod tests {
         ] {
             assert!(!credential(name), "{name}");
         }
+    }
+
+    #[test]
+    fn names_that_look_like_a_credential_are_known_by_part_and_by_word() {
+        for name in [
+            "DB_PASS",
+            "PGPASSFILE",
+            "SSH_AUTH_SOCK",
+            "GIT_SSH_COMMAND",
+            "AWS_SECRET_ACCESS_KEY",
+            "NPM_PAT",
+            "GH_PAT_RO",
+            "SENTRY_DSN",
+            "DATABASE_DSN_RO",
+            "KEY",
+            "api_token",
+            "HTTP_AUTHORIZATION",
+            "OAUTH_CLIENT",
+        ] {
+            assert!(credential(name), "{name}");
+        }
+        for name in [
+            "PKG_CONFIG_PATH",
+            "LD_LIBRARY_PATH",
+            "PATTERN",
+            "AWS_PROFILE",
+            "FEATURE_FLAGS",
+            "KEYBOARD_LAYOUT",
+            "CARGO_PKG_AUTHORS",
+        ] {
+            assert!(!credential(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_listed_credential_is_held_back_and_named() {
+        let vars = [
+            ("RUSTFLAGS", "-Dwarnings"),
+            ("CARGO_REGISTRY_TOKEN", "t0"),
+            ("FEATURE_FLAGS", "on"),
+            ("DB_PASS", "p1"),
+            ("NPM_PAT", "p2"),
+            ("UNLISTED", "u"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let listed: std::collections::HashSet<String> = ["FEATURE_FLAGS", "DB_PASS", "NPM_PAT"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let (sent, held) = remote_env(vars, |k| Cargo.client_env(k), |k| listed.contains(k));
+        assert_eq!(sent, ["RUSTFLAGS=-Dwarnings", "FEATURE_FLAGS=on"]);
+        assert_eq!(held, ["CARGO_REGISTRY_TOKEN", "DB_PASS", "NPM_PAT"]);
     }
 }

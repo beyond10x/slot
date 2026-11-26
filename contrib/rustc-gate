@@ -1,0 +1,24 @@
+#!/bin/sh
+# rustc-gate: set as build.rustc-wrapper in ~/.cargo/config.toml. Every rustc call cargo
+# makes passes here. A compile runs through sccache only inside a slot job (SLOT_JOB set), under
+# `slot --local` (SLOT_LOCAL_REASON "local requested"), with
+# SLOT_SHIM_OFF=1 (one command outside the pool), or with SLOT_EDITOR=1 (an editor's
+# rust-analyzer). Queries that compile nothing (-vV, --version, --print) always pass.
+# Anything else is refused with exit 3 and the command that replaces it.
+# Install: rustc-wrapper = "<path>/rustc-gate" in ~/.cargo/config.toml; restore with rustc-wrapper = "sccache".
+if [ -n "${SLOT_JOB:-}" ] || [ "${SLOT_LOCAL_REASON:-}" = "local requested" ] || [ "${SLOT_SHIM_OFF:-}" = 1 ] || [ "${SLOT_EDITOR:-}" = 1 ]; then
+  exec sccache "$@"
+fi
+crate=
+next=
+for a in "$@"; do
+  if [ -n "$next" ]; then crate=$a; next=; continue; fi
+  case $a in
+    -vV | -V | --version | --print | --print=*) exec sccache "$@" ;;
+    --crate-name) next=1 ;;
+  esac
+done
+cmd=$(tr '\0' ' ' < /proc/$PPID/cmdline 2>/dev/null | sed 's/ $//')
+case $cmd in */cargo\ * | cargo\ *) cmd="cargo ${cmd#* }" ;; esac
+echo "slot: refused: compile of ${crate:-a crate} outside a slot job in $PWD. Run it through the pool: slot run -- ${cmd:-cargo …}. One command outside the pool: SLOT_SHIM_OFF=1. An editor's rust-analyzer: set SLOT_EDITOR=1 in its environment." >&2
+exit 3

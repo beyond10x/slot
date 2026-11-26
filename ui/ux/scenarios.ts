@@ -1,5 +1,5 @@
 // Hermetic scenarios for the UX gates: every response and event the page gets, state by state.
-import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, Node, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
+import type { CacheMinute, Chunk, Event, HostCensus, Job, LiveJob, Node, Outcomes, SharesView, State, Usage, UsageRow } from '../src/generated/types.ts';
 import { POOL_BASE } from '../src/lib/headroom.ts';
 import type { RecordedBucket } from '../src/lib/history.ts';
 import type { MachineNumbers } from '../src/lib/headroom.ts';
@@ -36,7 +36,8 @@ export interface Scenario {
   /** Answer of `api/cache-day`; the path answers 404 when absent, as a daemon older than the page does. */
   cacheDay?: CacheMinute;
   steps: Step[];
-  output: Record<number, { chunks: Chunk[]; end: string }>;
+  /** Output by job: its id, or `<node>/<id>` for a node's own job. */
+  output: Record<string, { chunks: Chunk[]; end: string }>;
   task: Task | null;
   /** Answer of `api/nodes`; the path answers 404 when absent, as a daemon older than nodes does. */
   nodes?: Node[];
@@ -44,6 +45,8 @@ export interface Scenario {
   view?: 'cluster' | 'jobs';
   /** Answer of `api/usage`; empty when absent. */
   usage?: Usage;
+  /** Answer of `api/usage` grouped by session; `usage` (or empty) when absent. */
+  usageSessions?: Usage;
 }
 
 export const T0 = Date.UTC(2026, 10, 12, 9, 0, 0);
@@ -74,15 +77,15 @@ function job(id: number, over: Partial<Job> = {}): Job {
   return {
     id, argv, cwd: `/work/${REPOS[id % REPOS.length]}`, repo: REPOS[id % REPOS.length], checkout: { kind: 'repository' }, session,
     client: 'ws:1', toolchain, remote: false, tokens: toolchain === 'rust' ? 4 : 2, state: 'running',
-    enqueued_ms: s(-400 + id), started_ms: s(-380 + id), ended_ms: 0, exit: 0, cpu_s: 0,
-    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
+    enqueued_ms: s(-400 + (id % 1000)), started_ms: s(-380 + (id % 1000)), ended_ms: 0, exit: 0, cpu_s: 0,
+    compile_server_cpu_s: 0, peak_rss: 0, wait_reason: '', local_reason: '', target_dir: '', priority: 'normal', promoted: false, node: 'local', ...over,
   };
 }
 
 function done(id: number, endSec: number, over: Partial<Job> = {}): Job {
   return job(id, {
     state: 'ok', enqueued_ms: s(endSec - 90), started_ms: s(endSec - 80), ended_ms: s(endSec),
-    cpu_s: 300 + id * 7, peak_rss: (400 + id * 13) * 2 ** 20, ...over,
+    cpu_s: 300 + (id % 1000) * 7, peak_rss: (400 + (id % 1000) * 13) * 2 ** 20, ...over,
   });
 }
 
@@ -92,7 +95,7 @@ function queued(id: number, sinceSec: number): Job {
 
 function liveOf(j: Job, k: number): LiveJob {
   return {
-    id: j.id, cores: Math.round((0.7 + 0.5 * (1 + Math.sin(j.id * 1.7 + k / 9))) * 10) / 10, rss: (600 + j.id * 11) * 2 ** 20, procs: 3 + (j.id % 4),
+    id: j.id, cores: Math.round((0.7 + 0.5 * (1 + Math.sin(j.id * 1.7 + k / 9))) * 10) / 10, rss: (600 + (j.id % 1000) * 11) * 2 ** 20, procs: 3 + (j.id % 4),
     units: [
       { kind: 'compile', name: `crate_${j.id}_a`, cores: 1.2, secs: 4 },
       { kind: 'link', name: `bin_${j.id}`, cores: 0.9, secs: 2 },
@@ -504,13 +507,127 @@ function clusterOldDaemon(): Scenario {
     undefined, null, { kind: 'see', expect: 'No remote node' });
 }
 
+/** A build node with a name of 16 characters; its daemon numbers its jobs up to 7 digits. */
+export const NODE16 = 'build-node-eu-1d';
+/** A session whose title only `api/usage` grouped by session knows: no census of this page names it. */
+export const QUIET_SESSION = { id: '5f6e7d8c-9b0a-4c1d-8e2f-3a4b5c6d7e8f', title: 'release train' };
+
+function remoteNode(over: Partial<Node> = {}): Node {
+  return {
+    node_id: NODE16, cluster_id: 'workstation', kind: 'Remote', state: 'Ready', cpus: 64, slots: 51, slots_in_use: 5, memory_gib: 124,
+    disk_gib: 3539, max_worktrees: 8, running_jobs: 4, queued_jobs: 0, slot_version: '0.33.0', cpu_busy_milli: 21_300, memory_used_mib: 11_264,
+    disk_free_gib: 2400, location: 'eu-central', machine_type: 'compute-64', price_per_hour_cents: 373, joined_at: iso(-6_420), deadline: iso(7_985), ...over,
+  };
+}
+
+/** Answer of `api/usage?by=session`: the sessions of the window with the titles the daemon resolved. */
+function sessionUsage(): Usage {
+  const r = (key: string, title: string, slot: number, jobs: number): UsageRow => ({
+    key, title, jobs, unverified_repo_jobs: 0, slot_s: slot, cpu_s: slot / 2, wait_s: 0, wait_p50_s: 0, wait_max_s: 0, slot_share: slot / 9000, cpu_share: slot / 9000,
+  });
+  const rows = [r(QUIET_SESSION.id, QUIET_SESSION.title, 5000, 40), r(SESSIONS[0][0], SESSIONS[0][1], 3000, 20), r(SESSIONS[3][0], '', 1000, 5)];
+  return { ...EMPTY_USAGE, by: 'session', rows, total: { ...EMPTY_USAGE.total, jobs: 65, slot_s: 9000, cpu_s: 4500, slot_share: 1, cpu_share: 1 } };
+}
+
+/**
+ * Most jobs run on a build node: its own jobs (`from_node`, ids of 7 digits), one this daemon handed to it, and a few on this host.
+ * The node's finished jobs are newer than this host's, whose ids are higher. One node job has no session; one session's title is
+ * known only from `api/usage` grouped by session.
+ */
+function nodeJobsOf(queue: boolean): { running: Job[]; waiting: Job[]; finished: Job[] } {
+  const run = (id: number, sec: number, over: Partial<Job> = {}): Job => job(id, { enqueued_ms: s(sec - 2), started_ms: s(sec), ...over });
+  const theirs = (id: number, sec: number, over: Partial<Job> = {}): Job => run(id, sec, { ...onTree(id, NODE16), from_node: true, ...over });
+  const running = [
+    run(1_000_301, -50), run(1_000_302, -40), run(1_000_303, -30, onTree(4, NODE16)),
+    theirs(1_234_567, -90, { session: QUIET_SESSION.id }), theirs(1_234_568, -70, { session: '' }), theirs(1_234_569, -20),
+  ];
+  const waiting = queue ? [queued(1_000_310, -20), { ...queued(1_234_570, -6), node: NODE16, from_node: true }] : [];
+  const finished = [
+    ...Array.from({ length: 62 }, (_, i) => done(2_000_000 + i, -3000 + i * 30)),
+    ...Array.from({ length: 6 }, (_, i) => done(1_234_500 + i, -60 + i * 8, {
+      ...onTree(i, NODE16), from_node: true, ...(i === 2 ? { state: 'failed' as const, exit: 101 } : {}),
+    })),
+  ];
+  return { running, waiting, finished };
+}
+
+function nodesBusy(): Scenario {
+  const { running, waiting, finished } = nodeJobsOf(true);
+  const local = running.filter((j) => j.node === 'local');
+  return {
+    name: 'nodes-busy', anchor: false,
+    card: 'Most jobs run on a build node with a long name and ids of 7 digits. Read which jobs run where, and whose session they are.',
+    state: state([...running, ...waiting], finished, 20, 0), history: history(local, 20, 20, 0, 2), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
+    nodes: [localRow({ slots_in_use: 10, running_jobs: 2, queued_jobs: 1 }), remoteNode()],
+    usageSessions: sessionUsage(),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), local, 20, 20, 0, 2, 1)] }],
+    output: {}, task: null,
+  };
+}
+
+function clusterQueueEmpty(): Scenario {
+  const { running, finished } = nodeJobsOf(false);
+  const local = running.filter((j) => j.node === 'local');
+  return {
+    name: 'cluster-queue-empty', anchor: false, view: 'cluster',
+    card: 'Every job has a slot, most of them on a build node. The start page says where the jobs run and whose they are.',
+    state: state(running, finished, 20, 0), history: history(local, 20, 20, 0, 0), cacheHistory: cacheCalls(), cacheDay: CACHE_DAY,
+    nodes: [localRow({ slots_in_use: 8, running_jobs: 2 }), remoteNode()],
+    usageSessions: sessionUsage(),
+    steps: [{ moment: 'loaded', dt_s: 1, events: [tick(s(1), local, 20, 20, 0, 0, 1)] }],
+    output: {}, task: null,
+  };
+}
+
 export const SCENARIOS: Scenario[] = [
   busyFailed(), videoCall('video-call', false), videoCall('video-call-old-daemon', true), queuePosition(), queueLevels(), crowded(), callMode(), upgradePending(), idle(),
-  machineHeadroom(), poolShare(), fresh(), byShare(), clusterLocal(), clusterRemote(), clusterOldDaemon(),
+  machineHeadroom(), poolShare(), fresh(), byShare(), clusterLocal(), clusterRemote(), clusterOldDaemon(), nodesBusy(), clusterQueueEmpty(),
 ];
 
 /** Scenarios whose output pane is open from the start. */
 export const OPEN_PANE: Record<string, number> = { crowded: 100 };
+
+const outcomes = (o: Partial<Outcomes>): Outcomes => ({ ok: 0, test: 0, timeout: 0, infra: 0, cancelled: 0, ...o });
+const HOUR_S = 3600;
+/** The start of the clock hour `h` hours before T0, ms. */
+const hourAgo = (h: number): number => s(-h * HOUR_S) - (s(-h * HOUR_S) % (HOUR_S * 1000));
+
+/**
+ * A build node that has run for 12 hours past the stale deadline of the cluster file: its machine has a poweroff scheduled in 2 hours,
+ * it counts its own finished jobs, far more than the 30 it lists; the local machine is busy with programs outside the pool.
+ */
+export function clusterNodeFacts(): Scenario {
+  const local = localRow({
+    slots_in_use: 2, running_jobs: 3, queued_jobs: 2, cpu_busy_milli: 0, host_cpu_milli: 4_100, load1: 5.3,
+    ended_hour: outcomes({ ok: 40, test: 3 }), ended_hours: [{ t: hourAgo(1), n: outcomes({ ok: 300, test: 20, cancelled: 4 }) }],
+  });
+  const node: Node = {
+    node_id: 'build-1d', cluster_id: 'workstation', kind: 'Remote', state: 'Ready', cpus: 64, slots: 51, slots_in_use: 8, memory_gib: 124,
+    disk_gib: 1800, running_jobs: 3, queued_jobs: 0, slot_version: '0.33.0', cpu_busy_milli: 27_000, host_cpu_milli: 29_500, load1: 31.2,
+    memory_used_mib: 40_960, disk_free_gib: 1200, price_per_hour_cents: 373,
+    joined_at: iso(-5.5 * HOUR_S), deadline: iso(-4 * HOUR_S), booted_at: iso(-12 * HOUR_S), poweroff_at: iso(2 * HOUR_S),
+    ended_hour: outcomes({ ok: 1_700, test: 110, timeout: 2, infra: 8 }),
+    ended_hours: [
+      { t: hourAgo(24), n: outcomes({ ok: 999 }) },
+      { t: hourAgo(3), n: outcomes({ ok: 5_866, test: 1_243, infra: 15 }) },
+      { t: hourAgo(1), n: outcomes({ ok: 1_700, test: 110, timeout: 2, infra: 8 }) },
+    ],
+  };
+  return cluster('cluster-node-facts', 'A build node outlived the deadline of the cluster file. Read when it really powers off and what it cost.',
+    [local, node], 'build-1d', null);
+}
+
+/** busy-failed with a finished job of node build-1d whose output the node keeps: its output is read from the node. */
+export function nodeJobOutput(): Scenario {
+  const base = busyFailed();
+  const theirs: Job = done(7089, -200, {
+    node: 'build-1d', from_node: true, repo: 'node-repo', cwd: '/trees/node-repo', checkout: { kind: 'repository' }, state: 'failed', exit: 101,
+  });
+  return {
+    ...base, name: 'node-job-output', state: { ...base.state, done: [...base.state.done, theirs] },
+    output: { ...base.output, 'build-1d/7089': { chunks: [{ t: 'err', b: 'test lease::renews ... FAILED on the node\n' }], end: 'exit 101' } },
+  };
+}
 
 /** Freshly opened tab: persisted averages, a gap, recent exact history, and a new live tick. */
 export function recordedCharts(): Scenario {

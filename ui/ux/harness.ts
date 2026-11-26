@@ -33,8 +33,9 @@ function fakeEventSource(outputs: Outputs): void {
       setTimeout(() => {
         this.readyState = 1;
         this.onopen?.(new Event('open'));
-        const m = /jobs\/(\d+)\/output$/.exec(this.url);
-        const out = m ? outputs[m[1]] : undefined;
+        // A node's own job is asked with its node named; its output is kept under `<node>/<id>`.
+        const m = /jobs\/(\d+)\/output(?:\?node=([^&]+))?$/.exec(this.url);
+        const out = m ? outputs[m[2] ? `${decodeURIComponent(m[2])}/${m[1]}` : m[1]] : undefined;
         if (out) {
           for (const c of out.chunks) this.emit('message', JSON.stringify(c));
           if (out.end !== '') this.emit('end', JSON.stringify({ msg: out.end }));
@@ -131,7 +132,9 @@ export async function open(page: Page, base: string, sc: Scenario): Promise<Open
     ? r.fulfill({ json: sc.cacheHistory }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/cache-day', (r) => sc.cacheDay
     ? r.fulfill({ json: sc.cacheDay }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
-  await page.route('**/api/usage**', (r) => r.fulfill({ json: sc.usage ?? EMPTY_USAGE }));
+  await page.route('**/api/usage**', (r) => r.fulfill({
+    json: (new URL(r.request().url()).searchParams.get('by') === 'session' ? sc.usageSessions : undefined) ?? sc.usage ?? EMPTY_USAGE,
+  }));
   await page.route('**/api/nodes', (r) => sc.nodes
     ? r.fulfill({ json: sc.nodes }) : r.fulfill({ status: 404, body: 'slot: no such API path\n' }));
   await page.route('**/api/limits', async (r) => {

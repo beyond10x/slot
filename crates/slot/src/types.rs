@@ -185,11 +185,85 @@ pub struct Job {
     /// without shares.
     #[serde(default, skip_serializing_if = "crate::shares::Mode::is_slots")]
     pub admission: crate::shares::Mode,
+    /// Why the job runs on this machine while a remote node is configured:
+    /// `local requested`, `cache rule`, `sync failed: …`, `nested job`,
+    /// `gated job`, `remote job`, `sent back by a node`, `slots free here
+    /// first` or the text of `SLOT_LOCAL_REASON`. Empty for a job that
+    /// went to a node and without nodes.
+    #[serde(default)]
+    pub local_reason: String,
     /// Id of the node the job runs or ran on ([`Node::node_id`]): `local`
     /// for every job of a daemon without remote nodes. Empty in a job-log
     /// line written before nodes; the API shows such a job as `local`.
     #[serde(default)]
     pub node: String,
+    /// The row came from the daemon of node [`Job::node`]: `id` is the id
+    /// that node gave the job, so a job is named by `node` and `id`
+    /// together. False for this daemon's own jobs, a job it handed to a
+    /// node included.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_node: bool,
+    /// A remote job: milliseconds its client took to send the tree to the
+    /// node, before the job queued there. Absent for a local job and from a
+    /// client or daemon that does not measure it (`crate::phases`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub sync_ms: Option<u64>,
+    /// A remote job: bytes that sync sent, as rsync counted them. Absent
+    /// where `sync_ms` is, and when rsync did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub sync_bytes: Option<u64>,
+    /// A remote job: milliseconds its client took to copy the cargo
+    /// products and the `--fetch` paths back after the job ended. Absent
+    /// when nothing was copied back, and from a client that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub back_ms: Option<u64>,
+    /// A cargo `test`, `nextest` or `bench` job: milliseconds from its
+    /// start to the first test binary it ran, as its output shows it (a
+    /// `Running …` or `Doc-tests …` line of cargo, nextest's `Starting …`
+    /// line or cargo's `build-finished` message); the whole run when no
+    /// test binary ran. Absent for other jobs and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub compile_ms: Option<u64>,
+    /// A cargo `test`, `nextest` or `bench` job: milliseconds from the
+    /// first test binary to its end. Absent when no test binary ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub test_ms: Option<u64>,
+    /// A remote cargo job: the target directory it built into on the node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_target_dir: Option<String>,
+    /// A remote cargo job: what its target directory on the node held when
+    /// the job queued: the workspace id of the sibling it was seeded from,
+    /// `empty` (absent or empty, and not seeded) or `kept` (the directory
+    /// of an earlier job of the same tree).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub seeded_from: Option<String>,
+    /// A remote job: its width, set once when it started (`crate::width`):
+    /// the node's free cores then, split over the jobs that started in the
+    /// last seconds, at least 1 and at most the node's CPUs. The job got it
+    /// as `SLOT_WIDTH`, test threads, `GOMAXPROCS`, go's `-p` and, with
+    /// `slot job-parallel` on, as its bound if that was lower. Absent for a
+    /// local job and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub width: Option<u32>,
+    /// A warm-up job (`slot warm`): started after a merge to `main` to
+    /// build that tree's tests into the target directory new worktrees of
+    /// its repository start from. It is queued at `low`, never promoted,
+    /// and cancelled when a job of a session waits for slots.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warm: bool,
+    /// Why the daemon cancelled the job, such as `preempted by job 12`;
+    /// empty when its client or `slot cancel` ended it, and for a job that
+    /// was not cancelled.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cancel_reason: String,
 }
 
 /// Id of the daemon's own machine as a node.
@@ -314,6 +388,108 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub left_at: Option<String>,
+    /// When the machine booted, RFC 3339, as the node reads it (`btime` of
+    /// `/proc/stat`); absent from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub booted_at: Option<String>,
+    /// The poweroff systemd has scheduled on the machine, RFC 3339, as the
+    /// node reads it (`/run/systemd/shutdown/scheduled`); absent when none
+    /// is scheduled and from a daemon that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub poweroff_at: Option<String>,
+    /// CPUs busy on the whole machine, every program counted, in
+    /// thousandths of a CPU (`/proc/stat`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host_cpu_milli: Option<u32>,
+    /// One-minute load average of the whole machine (`/proc/loadavg`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub load1: Option<f64>,
+    /// Jobs of this node that ended in the last 60 minutes, by result, as
+    /// its own job log has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ended_hour: Option<Outcomes>,
+    /// Jobs of this node that ended, by result, per clock hour (UTC) of the
+    /// last 25 hours, oldest first; hours without a job are left out. A
+    /// reader sums the hours from its own midnight for "today".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ended_hours: Option<Vec<HourOutcomes>>,
+}
+
+/// Finished jobs by result: ok, failed by cause, cancelled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct Outcomes {
+    /// Exited 0.
+    pub ok: u32,
+    /// Failed with any other exit: the command's own failure, a red test.
+    pub test: u32,
+    /// Ended at a run-time limit (exit 124).
+    pub timeout: u32,
+    /// Failed for the infrastructure: the connection to a daemon or a node
+    /// was lost (3), the command could not be run (125) or found (127).
+    pub infra: u32,
+    /// Cancelled.
+    pub cancelled: u32,
+}
+
+/// The result of an ended job, a failure by its cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Exited 0.
+    Ok,
+    /// Failed with an exit of the command itself.
+    Test,
+    /// Ended at a run-time limit.
+    Timeout,
+    /// Failed for the infrastructure.
+    Infra,
+    /// Cancelled.
+    Cancelled,
+}
+
+impl Outcome {
+    /// The result of an ended job; none for one still queued or running.
+    pub fn of(j: &Job) -> Option<Self> {
+        Some(match j.state {
+            JobState::Queued | JobState::Running => return None,
+            JobState::Ok => Self::Ok,
+            JobState::Cancelled => Self::Cancelled,
+            JobState::Failed if j.timed_out || j.exit == 124 => Self::Timeout,
+            JobState::Failed if matches!(j.exit, 3 | 125 | 127) => Self::Infra,
+            JobState::Failed => Self::Test,
+        })
+    }
+}
+
+impl Outcomes {
+    /// Counts one more job of result `o`.
+    pub fn add(&mut self, o: Outcome) {
+        let n = match o {
+            Outcome::Ok => &mut self.ok,
+            Outcome::Test => &mut self.test,
+            Outcome::Timeout => &mut self.timeout,
+            Outcome::Infra => &mut self.infra,
+            Outcome::Cancelled => &mut self.cancelled,
+        };
+        *n = n.saturating_add(1);
+    }
+}
+
+/// Finished jobs of one clock hour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default)]
+pub struct HourOutcomes {
+    /// Start of the hour, Unix milliseconds.
+    #[ts(type = "number")]
+    pub t: i64,
+    /// The jobs that ended in it.
+    pub n: Outcomes,
 }
 
 /// Unix milliseconds as an RFC 3339 time in UTC, as the API's timestamps
@@ -508,6 +684,17 @@ pub struct State {
     /// Machine base: CPUs busy on the host over the last second; 0 otherwise.
     #[serde(default)]
     pub busy_cores: f64,
+    /// CPUs busy on the whole host over the last second, every program
+    /// counted, whatever the headroom base; absent from a daemon that
+    /// predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub host_busy_cores: Option<f64>,
+    /// One-minute load average of the whole host; absent from a daemon that
+    /// predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub load1: Option<f64>,
     /// Machine base: CPUs the host may use with the headroom kept free; 0
     /// when the machine base is not in force (pool base or no headroom).
     #[serde(default)]
@@ -580,6 +767,9 @@ pub struct State {
 /// One message on `GET /api/events`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "lowercase")]
+// An event is built, serialized to its line at once and dropped: no
+// collection holds events, so the size of the larger variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// A job changed state.
     Job {
@@ -746,6 +936,25 @@ pub struct Chunk {
     pub b: String,
 }
 
+/// `GET /api/jobs/{id}/output-tail?from=<n>`: the kept output of a job
+/// from its chunk `n` on, every chunk the job wrote numbered from 0; what
+/// the `output` step of a node prints for the endpoint.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputTail {
+    /// The number of the first chunk of `chunks`: above the asked one when
+    /// older chunks were dropped.
+    pub from: u64,
+    /// The number of the next chunk the job writes.
+    pub next: u64,
+    /// The kept chunks from `from` on.
+    pub chunks: Vec<Chunk>,
+    /// Whether the job has ended: no chunk follows.
+    pub ended: bool,
+    /// Whether the daemon still keeps the job's output.
+    pub kept: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -808,6 +1017,56 @@ mod tests {
             "{line}"
         );
         assert_eq!(serde_json::from_str::<Job>(&line).unwrap(), j);
+    }
+
+    /// A job-log line written before the phase fields reads each of them
+    /// as unknown, never as 0, and a job without them is written without
+    /// them; a line of the new shape reads every one back.
+    #[test]
+    fn a_jobs_record_names_its_sync_phases_and_seed() {
+        let old = r#"{"id":7,"argv":["cargo","test"],"cwd":"/srv/acct/ws/w1","repo":"repo",
+            "session":"","client":"h:1","toolchain":"rust","remote":true,"tokens":1,
+            "state":"ok","enqueued_ms":1,"started_ms":2,"ended_ms":3,"exit":0,"cpu_s":0.0,
+            "compile_server_cpu_s":0.0,"peak_rss":0}"#;
+        let j: Job = serde_json::from_str(old).unwrap();
+        assert_eq!(j.sync_ms, None);
+        assert_eq!(j.back_ms, None);
+        assert_eq!(j.sync_bytes, None);
+        assert_eq!(j.compile_ms, None);
+        assert_eq!(j.test_ms, None);
+        assert_eq!(j.node_target_dir, None);
+        assert_eq!(j.seeded_from, None);
+        let line = serde_json::to_string(&j).unwrap();
+        for k in [
+            "sync_ms",
+            "back_ms",
+            "sync_bytes",
+            "compile_ms",
+            "test_ms",
+            "node_target_dir",
+            "seeded_from",
+        ] {
+            assert!(!line.contains(k), "{k}: {line}");
+        }
+        let new = r#"{"id":8,"argv":["cargo","test"],"cwd":"/srv/acct/ws/w1","repo":"repo",
+            "session":"","client":"h:1","toolchain":"rust","remote":true,"tokens":1,
+            "state":"ok","enqueued_ms":1,"started_ms":2,"ended_ms":3,"exit":0,"cpu_s":0.0,
+            "compile_server_cpu_s":0.0,"peak_rss":0,"sync_ms":1200,"back_ms":300,
+            "sync_bytes":4096,"compile_ms":45000,"test_ms":9000,
+            "node_target_dir":"/srv/acct/cache/target/w1","seeded_from":"w0"}"#;
+        let j: Job = serde_json::from_str(new).unwrap();
+        assert_eq!(j.sync_ms, Some(1200));
+        assert_eq!(j.back_ms, Some(300));
+        assert_eq!(j.sync_bytes, Some(4096));
+        assert_eq!(j.compile_ms, Some(45_000));
+        assert_eq!(j.test_ms, Some(9000));
+        assert_eq!(
+            j.node_target_dir.as_deref(),
+            Some("/srv/acct/cache/target/w1")
+        );
+        assert_eq!(j.seeded_from.as_deref(), Some("w0"));
+        let back: Job = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(back, j);
     }
 
     /// A job-log line written before nodes has no `node` and reads as "";

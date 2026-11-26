@@ -2,6 +2,7 @@ version: '3'
 
 env:
   CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
 
 tasks:
   ui:
@@ -58,6 +59,9 @@ tasks:
     desc: Run the complete offline repository gate.
     cmds:
       - rustc --version
+      - sh contrib/slot-shim.test.sh
+      - sh contrib/rustc-gate.test.sh
+      - sh contrib/node/test.sh
       - task: ui-check
       - task: ui
       - task: ui-ux

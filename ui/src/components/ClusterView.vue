@@ -4,9 +4,10 @@ import type { Job, Node } from '../generated/types.ts';
 import { QUEUE_COLOR, tcColor } from '../lib/colors.ts';
 import { LOCAL, cacheShare, checkoutOf, cloudCost, cpuTotals, jobList, laneColor, nodeJobs, nodeOf } from '../lib/cluster.ts';
 import { fmtDur } from '../lib/format.ts';
-import { cmdText, isActive, jobId, runS, waitS } from '../lib/job.ts';
+import { sessionHover, sessionName } from '../lib/host.ts';
+import { cmdText, idLabel, isActive, jobKey, jobName, runS, waitS } from '../lib/job.ts';
 import { servedQueue, waitReasonText, waitStats } from '../lib/queue.ts';
-import { cacheDay, chartWindow, jobChanges, jobs, live, nodes, select, store } from '../store.ts';
+import { cacheDay, chartWindow, jobChanges, jobs, liveOf, nodes, select, sessionTitles, store } from '../store.ts';
 import NodeCard from './NodeCard.vue';
 
 const props = defineProps<{ theme: 'dark' | 'light' }>();
@@ -116,7 +117,7 @@ const jobSum = computed(() => {
 const cpuCell = (j: Job): string => {
   if (j.state === 'queued') return `×${j.tokens}`;
   if (j.state === 'running') {
-    const l = live.get(jobId(j));
+    const l = liveOf(j);
     return `${(l?.cores ?? 0).toFixed(1)} / ${j.tokens}`;
   }
   const r = runS(j, store.clock);
@@ -126,7 +127,7 @@ const stateWord = (j: Job): string => j.state;
 const toolNames = computed(() => [...new Set(allJobs.value.map((j) => j.toolchain))].slice(0, 5));
 
 function openOutput(j: Job, e: MouseEvent): void {
-  select(jobId(j), e);
+  select(jobKey(j), e);
   location.hash = '#jobs';
 }
 
@@ -136,6 +137,13 @@ const qBox = useTemplateRef<HTMLElement>('qBox');
 const qCap = ref(6);
 const chips = computed(() => queue.value.slice(0, queue.value.length > qCap.value ? Math.max(0, qCap.value - 1) : qCap.value));
 const oldestWait = computed(() => (queue.value.length ? Math.max(...queue.value.map((j) => waitS(j, store.clock))) : 0));
+/** With no job queued the endpoint says where the jobs run: per node its running jobs and busy slots, and the slots free over all. */
+const placed = computed(() => {
+  const rows = shown.value.map((n) => ({ id: n.node_id, name: nameOf(n.node_id), running: n.running_jobs, used: n.slots_in_use, slots: n.slots }));
+  const free = rows.reduce((a, r) => a + Math.max(0, r.slots - r.used), 0);
+  return { rows, free, slots: rows.reduce((a, r) => a + r.slots, 0) };
+});
+const session = (j: Job): string => sessionName(j.session, sessionTitles);
 const queueMeta = (j: Job): string => {
   const reason = j.wait_reason ? waitReasonText(j) : 'waits for a slot';
   return `${j.tokens} ${j.tokens === 1 ? 'slot' : 'slots'} · ${j.priority !== 'normal' ? j.priority + ' · ' : ''}${reason}`;
@@ -238,7 +246,7 @@ function cssVar(name: string): string {
 /** A job that starts leaves its queue chip and moves along its checkout's lane to its node's cells. */
 function onJob(before: Job | undefined, after: Job): void {
   if (reduce.value || !diagram.value) return;
-  const id = jobId(after);
+  const id = jobKey(after);
   if (after.state === 'running' && before?.state !== 'running') {
     const start = rel(diagram.value.querySelector(`[data-chip="${id}"]`)) ?? rel(diagram.value.querySelector('.qlist'));
     if (!start) return;
@@ -272,7 +280,7 @@ function drawFlow(now: number): void {
   g.setTransform(DPR, 0, 0, DPR, 0, 0);
   g.clearRect(0, 0, W, H);
   const cpuBy = new Map<string, number>();
-  for (const j of running.value) cpuBy.set(checkoutOf(j), (cpuBy.get(checkoutOf(j)) ?? 0) + (live.get(jobId(j))?.cores ?? 0));
+  for (const j of running.value) cpuBy.set(checkoutOf(j), (cpuBy.get(checkoutOf(j)) ?? 0) + (liveOf(j)?.cores ?? 0));
   if (!reduce.value) dash += dt;
   for (const L of lanes()) {
     const cpu = cpuBy.get(L.name) ?? 0;
@@ -448,10 +456,10 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
         <div class="endpoint">
           <div class="ehead"><b>Endpoint</b><span>queue · scheduler · job log</span></div>
           <div class="esub">places jobs on <b>{{ shown.length }}</b> {{ shown.length === 1 ? 'node' : 'nodes' }}</div>
-          <div ref="qBox" class="qlist" role="list" aria-label="Queue">
+          <div ref="qBox" class="qlist" :class="{ empty: !queue.length }" :role="queue.length ? 'list' : undefined" :aria-label="queue.length ? 'Queue' : undefined">
             <TransitionGroup name="chip">
-              <div v-for="(j, i) in chips" :key="jobId(j)" class="qchip" role="listitem" :data-chip="jobId(j)" :class="{ dim: filter && nodeOf(j) !== filter }"
-                :style="{ transform: `translateY(${i * QH}px)` }" :title="`#${jobId(j)} ${cmdText(j)} · ${checkoutOf(j)} · ${queueMeta(j)}`">
+              <div v-for="(j, i) in chips" :key="jobKey(j)" class="qchip" role="listitem" :data-chip="jobKey(j)" :class="{ dim: filter && nodeOf(j) !== filter }"
+                :style="{ transform: `translateY(${i * QH}px)` }" :title="`#${jobName(j)} ${cmdText(j)} · ${checkoutOf(j)} · ${queueMeta(j)}`">
                 <span class="wt" :style="{ background: laneColor(checkoutOf(j), dark) }"></span>
                 <span class="td" :style="{ background: tcColor(j.toolchain) }"></span>
                 <span class="name">{{ checkoutOf(j) }}</span><span class="age">{{ fmtDur(waitS(j, store.clock)) }}</span>
@@ -459,11 +467,19 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
               </div>
             </TransitionGroup>
             <div v-if="queue.length > chips.length" class="qmore">+{{ queue.length - chips.length }} more queued</div>
-            <div v-if="!queue.length" class="qempty">Queue empty: every job has a slot.</div>
+            <div v-if="!queue.length" class="qempty">
+              <p>Queue empty: every job has a slot.</p>
+              <ul class="placed" aria-label="Running now, by node">
+                <li v-for="r in placed.rows" :key="r.id" :title="`${r.name}: ${r.running} running, ${r.used} of ${r.slots} slots busy`">
+                  <span class="pn" :title="r.name">{{ r.name }}</span><span class="pv"><b>{{ r.running }}</b> running · {{ r.used }}/{{ r.slots }} slots</span>
+                </li>
+              </ul>
+              <p><b>{{ placed.free }}</b> of {{ placed.slots }} slots free</p>
+            </div>
           </div>
           <div class="efoot"><span>queue, 60 s<br><b>{{ queue.length }}</b> queued · oldest <b>{{ fmtDur(oldestWait) }}</b></span><canvas ref="qspark" aria-hidden="true"></canvas></div>
         </div>
-        <div aria-hidden="true"></div>
+        <div class="gap" aria-hidden="true"></div>
         <div class="nodes">
           <div v-for="n in shown" :key="n.node_id" class="bay">
             <NodeCard :node="n" :name="nodeTitle(n)" :running="runningOn(n.node_id)" :jobs="perNode.get(n.node_id) ?? EMPTY_JOBS" :pressed="filter === n.node_id"
@@ -485,21 +501,22 @@ const nodeTitle = (n: Node): string => nameOf(n.node_id);
         </div>
         <div class="jtable" role="table" aria-label="Jobs, newest first">
           <div class="jcols" role="row">
-            <span role="columnheader">job</span><span role="columnheader">state</span><span role="columnheader">tool</span><span role="columnheader">checkout</span>
-            <span role="columnheader">node</span><span role="columnheader">command</span><span role="columnheader" class="r">wait</span>
+            <span role="columnheader">job</span><span role="columnheader">state</span><span role="columnheader" class="c-tool">tool</span><span role="columnheader">checkout</span>
+            <span role="columnheader">node</span><span role="columnheader" class="c-sess">session</span><span role="columnheader">command</span><span role="columnheader" class="r c-wait">wait</span>
             <span role="columnheader" class="r">run</span><span role="columnheader" class="r">CPU</span>
           </div>
           <div ref="rowsBox" class="jrows" role="rowgroup">
             <TransitionGroup name="row">
-              <div v-for="(j, i) in list" :key="jobId(j)" class="jrow" role="row" :style="{ transform: `translateY(${i * RH}px)` }">
-                <span role="cell" class="id"><button type="button" class="jobid" :aria-label="`output of job ${jobId(j)}`" :title="`open the output of job ${jobId(j)} in the job view`"
-                  @click="openOutput(j, $event)">{{ jobId(j) }}</button></span>
+              <div v-for="(j, i) in list" :key="jobKey(j)" class="jrow" role="row" :style="{ transform: `translateY(${i * RH}px)` }">
+                <span role="cell" class="id"><button type="button" class="jobid" :aria-label="`output of job ${jobName(j)}`" :title="`open the output of job ${jobName(j)} in the job view`"
+                  @click="openOutput(j, $event)">{{ idLabel(j) }}</button></span>
                 <span role="cell"><span class="st" :class="j.state"><i></i>{{ stateWord(j) }}</span></span>
-                <span role="cell" class="tool" :title="j.toolchain"><i :style="{ background: tcColor(j.toolchain) }"></i>{{ j.toolchain }}</span>
+                <span role="cell" class="tool c-tool" :title="j.toolchain"><i :style="{ background: tcColor(j.toolchain) }"></i>{{ j.toolchain }}</span>
                 <span role="cell" class="wt" :title="checkoutOf(j)"><i :style="{ background: laneColor(checkoutOf(j), dark) }"></i>{{ checkoutOf(j) }}</span>
                 <span role="cell" class="nd" :title="nameOf(nodeOf(j))">{{ j.state === 'queued' ? '→ ' : '' }}{{ nameOf(nodeOf(j)) }}</span>
+                <span role="cell" class="ss c-sess" :title="sessionHover(j.session, session(j))">{{ session(j) }}</span>
                 <span role="cell" class="cmd" :title="cmdText(j)">{{ cmdText(j) }}</span>
-                <span role="cell" class="r num">{{ fmtDur(waitS(j, store.clock)) }}</span>
+                <span role="cell" class="r num c-wait">{{ fmtDur(waitS(j, store.clock)) }}</span>
                 <span role="cell" class="r num">{{ runS(j, store.clock) === null ? '' : fmtDur(runS(j, store.clock) ?? 0) }}</span>
                 <span role="cell" class="r num">{{ cpuCell(j) }}</span>
               </div>
@@ -575,7 +592,14 @@ header.top { display: flex; align-items: center; gap: 18px; padding: 0 14px; bor
 .chip-enter-from, .chip-leave-to { opacity: 0; }
 .chip-leave-active { position: absolute; }
 .qmore { position: absolute; left: 0; right: 0; bottom: 0; height: 20px; font-size: 12px; color: var(--mute); text-align: center; background: var(--panel); }
-.qempty { color: var(--mute); font-size: 12px; padding: 4px 0; }
+.qempty { color: var(--mute); font-size: 12px; line-height: 17px; padding: 4px 0; }
+.qempty p { margin: 0 0 8px; }
+.qempty b { color: var(--fg); font-weight: 600; }
+/* With nothing queued the panel says where the jobs run: per node its name, and its numbers below it. */
+.placed { list-style: none; margin: 0 0 8px; padding: 0; }
+.placed li { padding: 4px 7px; margin-bottom: 4px; border-radius: 5px; background: var(--panel2); white-space: nowrap; }
+.placed .pn { display: block; overflow: hidden; text-overflow: ellipsis; color: var(--fg); font-weight: 600; }
+.placed .pv { display: block; font-variant-numeric: tabular-nums; }
 .efoot { display: flex; align-items: flex-end; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--mute); line-height: 15px; white-space: nowrap; }
 .efoot canvas { flex: 1; height: 26px; min-width: 0; }
 .efoot b { color: var(--fg); font-weight: 600; }
@@ -598,7 +622,7 @@ header.top { display: flex; align-items: center; gap: 18px; padding: 0 14px; bor
 .fchip button { border: 0; background: transparent; color: var(--fg); cursor: pointer; min-width: 24px; min-height: 24px; border-radius: 12px; font-size: 13px; padding: 0 6px; }
 .fchip button:hover { background: var(--hover); }
 .fchip kbd { font: 11px var(--mono); color: var(--mute); }
-.jtable { --cols: 62px 104px 70px minmax(150px, 1.15fr) 100px minmax(180px, 2.4fr) 54px 84px 70px; display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.jtable { --cols: 62px 104px 70px minmax(150px, 1.15fr) 100px minmax(96px, .8fr) minmax(180px, 2.4fr) 54px 84px 70px; display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .jcols, .jrow { display: grid; grid-template-columns: var(--cols); column-gap: 10px; align-items: center; padding: 0 8px; }
 .jcols { height: 22px; font-size: 12px; color: var(--mute); border-bottom: 1px solid var(--line); flex: none; }
 .r { text-align: right; }
@@ -628,8 +652,31 @@ header.top { display: flex; align-items: center; gap: 18px; padding: 0 14px; bor
 @media (max-width: 1330px) {
   .diagram { grid-template-columns: 244px 104px minmax(0, 1fr); }
   .kpi { padding: 3px 8px; }
-  .jtable { --cols: 60px 100px 66px minmax(140px, 1.1fr) 96px minmax(160px, 2.4fr) 52px 80px 64px; }
+  .jtable { --cols: 60px 100px 66px minmax(140px, 1.1fr) 96px minmax(90px, .7fr) minmax(160px, 2.4fr) 52px 80px 64px; }
   .legend { display: none; }
+}
+.ss { color: var(--mute); }
+/*
+ * Below 1100 px the page stacks and scrolls down: the header numbers take a row of their own, the endpoint stands above the node
+ * cards (the lanes between them are not drawn), and the job list shows ten rows without tool and wait (the output pane names both).
+ */
+@media (max-width: 1099px) {
+  .cluster { height: auto; min-height: 100vh; grid-template-rows: auto auto; }
+  header.top { flex-wrap: wrap; row-gap: 4px; padding: 6px 14px 8px; }
+  .kpis { order: 3; flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; row-gap: 4px; }
+  .right { margin-left: auto; }
+  main { display: block; }
+  .diagram { grid-template-columns: minmax(0, 1fr); height: auto; row-gap: 8px; }
+  .gap, .flow { display: none; }
+  .qlist { flex: none; height: 148px; }
+  .qlist.empty { height: auto; }
+  .nodes { grid-template-rows: none; }
+  .bay :deep(.node) { position: relative; inset: auto; }
+  .ghost { position: static; min-height: 56px; padding: 8px 12px; }
+  .jobs { padding-top: 6px; }
+  .jrows { flex: none; height: calc(10 * 28px); }
+  .jtable { --cols: 62px 88px minmax(96px, 1fr) 92px minmax(76px, .7fr) minmax(110px, 1.6fr) 54px 70px; }
+  .c-tool, .c-wait { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .cluster *, .cluster *::before, .cluster *::after { animation: none !important; }

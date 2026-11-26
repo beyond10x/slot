@@ -1,5 +1,5 @@
 import type { Job, Priority } from '../generated/types.ts';
-import { isActive, jobId, times } from './job.ts';
+import { isActive, jobId, jobKey, times } from './job.ts';
 
 const RANK: Record<Priority, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
 
@@ -60,8 +60,8 @@ export function waitReasonText(j: Job): string {
 }
 
 /** A queued job's place in the order the pool serves, 1 first, and the queue's length; null when it is not queued. */
-export function queuePlace(queue: readonly Job[], id: number): { pos: number; of: number } | null {
-  const k = queue.findIndex((j) => jobId(j) === id);
+export function queuePlace(queue: readonly Job[], key: string): { pos: number; of: number } | null {
+  const k = queue.findIndex((j) => jobKey(j) === key);
   return k < 0 ? null : { pos: k + 1, of: queue.length };
 }
 

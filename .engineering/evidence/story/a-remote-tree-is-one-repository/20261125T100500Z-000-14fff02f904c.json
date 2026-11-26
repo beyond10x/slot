@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-25T10:05:00Z",
+  "actor": "agent:slot",
+  "artifact": "story:a-remote-tree-is-one-repository",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "remote_sync::safety::a_tree_root_that_is_not_one_repository_is_refused; gate on PR 115",
+    "reference": "https://github.com/beyond10x/slot/pull/115"
+  }
+}

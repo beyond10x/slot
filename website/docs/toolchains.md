@@ -35,6 +35,11 @@ How a tool shares the pool depends on whether it speaks the jobserver protocol:
 - **Crosses to a remote server:** `CARGO_*` except `CARGO_TARGET_DIR`, `CARGO_HOME` and
   `CARGO_BUILD_JOBS`; `RUST*`; `NEXTEST_*`; `INSTA_*`; `SQLX_OFFLINE`.
 - **Not synced:** `/target/`.
+- **Known, not slot's:** `cargo nextest run --stress-count N` (cargo-nextest 0.9.143) exits by
+  its last iteration only: a test that fails in iteration 1 of 3 and passes after gives exit 0;
+  one that fails in iteration 3 of 3 gives exit 100. Read 2026-11-25, the same with and without
+  slot. A gate that runs a stress count reads the `Summary` line (`stress run iterations: N
+  passed, M failed`; red when M > 0) instead of the exit.
 
 ## go
 
@@ -60,7 +65,8 @@ $ slot go env GOFLAGS
 - **Slots:** one per worker: the value of `--workers` or `-j` (playwright), or `--maxWorkers` or
   `--max-workers` (vitest, jest), as a number or a percentage of the cores. Without one of those
   flags, 4. Pass the flag: without it the runner still starts about one worker per core.
-- **Sets:** nothing; the jobserver variables are removed.
+- **Sets:** nothing; the jobserver variables are removed. A remote job gets `SLOT_WIDTH` (see
+  [Width on a node](#width-on-a-node)); a config reads it as its worker count.
 - **Crosses to a remote server:** `CI`, `NODE_ENV`, `NODE_OPTIONS`, `PLAYWRIGHT_*`, `VITEST_*`,
   `JEST_*`.
 - **Not synced:** `/node_modules/`.
@@ -82,6 +88,22 @@ it.
   variables as for `other`.
 - **Crosses to a remote server:** `IGNITE_*` and the rust list.
 - **Not synced:** `/target/`.
+
+## Width on a node
+
+A remote job (synced from another host) runs on the server as on a node of a cluster, and the
+rules above for test threads and `GOMAXPROCS` are those of a workstation: they hold for local
+jobs only. A remote job gets a width once, when it starts: the server's free CPUs at that moment
+divided by the jobs that started in the last 5 s, this one counted, at least 1 and at most the
+server's CPUs. An idle server of 64 CPUs gives one job 64 and two jobs started at once 32 each.
+
+The job gets the width as `SLOT_WIDTH`, as `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and
+`GOMAXPROCS` (a lower count the caller set is raised to it, a higher one kept), and as go's `-p`.
+cargo's compilers draw from the pool's jobserver as before; while
+[`slot job-parallel`](how-it-works.md#build-processes-per-job) is on, a bound lower than the width
+is raised to it (`CARGO_BUILD_JOBS`, `MAKEFLAGS=-j`). A Playwright or Vitest config reads
+`SLOT_WIDTH` for its worker count; a worker flag on the command line is not changed. The job's
+record carries the width as `width`.
 
 ## other
 

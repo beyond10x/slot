@@ -65,6 +65,51 @@ pub struct Request {
     /// build server's limit applies there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nofile: Option<FileLimit>,
+    /// A remote cargo job: before it queues, the daemon fetches the crates
+    /// of the mirror's `Cargo.lock` once and runs it offline
+    /// (`cargo_fetch.rs`); when the fetch fails it answers with a
+    /// [`Frame::Fallback`], which only a client that sets this reads. A
+    /// daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fetch_once: bool,
+    /// Why the client sends the job to this machine's daemon when a remote
+    /// node is configured, such as `sync failed: …` after a remote start
+    /// failed. The daemon shows it as the job's `local_reason` and hands
+    /// such a job to no node. A daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_reason: String,
+    /// A remote request: milliseconds the client took to send the tree to
+    /// this server; the job's record carries it as `sync_ms`. A daemon
+    /// that predates it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_ms: Option<u64>,
+    /// A remote request: bytes that sync sent; the record's `sync_bytes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_bytes: Option<u64>,
+    /// Adds what the client measured after the job ended to the record of
+    /// an ended remote job, in place of running `argv`. A daemon that
+    /// predates it answers "empty command".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amend: Option<Amend>,
+    /// `slot warm`: a warm-up job after a merge to `main`. The daemon
+    /// answers at once and runs it without the client, at `low`, cancelled
+    /// when a job of a session waits for slots; it starts none when the
+    /// repository built on it in no job of the last 24 hours, or when a
+    /// warm-up of the repository is queued or running. A daemon that
+    /// predates it runs `argv` as an ordinary job.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warm: bool,
+}
+
+/// What a client adds to the record of a remote job after it ended
+/// ([`Request::amend`]).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Amend {
+    /// The job's id on the server, from its `start` frame.
+    pub id: i64,
+    /// Milliseconds the products and `--fetch` paths took to come back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_ms: Option<u64>,
 }
 
 impl Request {
@@ -204,6 +249,15 @@ pub struct Workspace {
     pub rel_cwd: String,
     /// Repository root on the client, for path rewriting.
     pub client_root: String,
+    /// Mirrored at `client_root` itself, not under the workspace root
+    /// (`SLOT_REMOTE_SAME_PATH`); the server admits it only under a
+    /// `--same-path-root`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub same_path: bool,
+    /// A same-path job's target directory, the client's own absolute path
+    /// (below a `--same-path-root`); empty keeps cargo's default there.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_dir: String,
 }
 
 /// One server message.
@@ -232,6 +286,11 @@ pub enum Frame {
         /// Empty for local jobs and from daemons older than 0.8.0.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         target_dir: String,
+        /// For a synced cargo job: what its target directory held when it
+        /// queued, the record's `seeded_from`. Absent for other jobs and
+        /// from an older daemon.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seeded_from: Option<String>,
     },
     /// A message from the daemon for the client's stderr.
     Info {
@@ -242,6 +301,13 @@ pub enum Frame {
     Exit {
         /// Exit code; 128 + signal for a signalled process.
         code: i32,
+    },
+    /// The job did not start on this server and goes back to the client,
+    /// which runs it on its own machine's daemon. Sent only to a client
+    /// whose request set `fetch_once`, after its fetch failed.
+    Fallback {
+        /// Why, for the client's stderr.
+        msg: String,
     },
 }
 

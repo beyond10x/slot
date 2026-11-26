@@ -17,11 +17,17 @@ use crate::paths;
 /// GNU-make jobserver, so cargo, rustc and make draw parallelism from the
 /// same pool and the machine is never oversubscribed.
 #[derive(Debug, Parser)]
-#[command(name = "slot", version)]
+#[command(name = "slot", version = env!("SLOT_VERSION"))]
 pub struct Cli {
     /// Run the command here, without the daemon.
     #[arg(long, global = true)]
     pub local: bool,
+
+    /// Keep the job in this host's pool, never on a build node: for a step
+    /// that needs this host's credentials while it runs (a clone, a fetch,
+    /// a push). `slot status` shows `local: here: needs this host` under it.
+    #[arg(long, global = true)]
+    pub here: bool,
 
     /// Slots the job holds, in place of the count slot derives from the
     /// command. For work the daemon cannot see, such as a script that
@@ -91,6 +97,11 @@ pub enum Cmd {
     /// can copy from. Run by remote clients only.
     #[command(name = "__siblings", hide = true)]
     Siblings(SiblingsArgs),
+    /// The step a remote client runs on the build server before a job: the
+    /// server's cargo git database, and which of the named entries lack
+    /// their revision. Run by remote clients only.
+    #[command(name = "__cargo-git", hide = true)]
+    CargoGit(CargoGitArgs),
     /// Run a build command; use this when the command's name is also a slot subcommand.
     Run(RunArgs),
     /// Show the pool and every queued and running job.
@@ -119,11 +130,26 @@ pub enum Cmd {
     /// Cancel a queued or running job you submitted; a running job's
     /// processes get SIGTERM, then SIGKILL after 5 s.
     Cancel(CancelArgs),
+    /// After a merge to `main`: build the tests of a checkout of `main` at
+    /// the lowest level, so the next worktree of the repository starts from
+    /// a built target directory.
+    ///
+    /// Run it in the checkout after it took the merge, for example from its
+    /// `post-merge` hook. It returns at once; the daemon runs `cargo test
+    /// --no-run`, or the `warm` command of the checkout's `.slot.toml`
+    /// (`warm = false` switches it off). The daemon starts one only for a
+    /// repository a job built on it in the last 24 hours, one at a time per
+    /// repository, and cancels it when a job of a session waits for slots.
+    Warm(WarmArgs),
     /// List agent sessions that build outside the pool, with their commands.
     Sessions(SessionsArgs),
     /// Show how the pool was shared: slot time, CPU time and queue wait per
     /// project, repository or session, from the job log.
     Usage(UsageArgs),
+    /// The compile cache: what the sccache servers did, from the counters
+    /// the daemon records once a minute.
+    #[command(subcommand)]
+    Cache(CacheCmd),
     /// Agent hooks: refuse a build command that would run outside the pool.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -151,6 +177,9 @@ pub struct ServeArgs {
     /// Threads a test runner in a job may use when the caller sets none:
     /// `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS`
     /// (go jobs get their slot count). Default: a quarter of the pool, at least 2.
+    /// Local jobs only: a job synced from another host gets its width, the
+    /// free CPUs at its start split over the jobs that started in the last
+    /// 5 s, and a lower count its caller set is raised to it.
     #[arg(long)]
     pub test_threads: Option<usize>,
     /// Whether a headroom also sets systemd `CPUQuota` on the daemon unit, a
@@ -200,6 +229,13 @@ pub struct ServeArgs {
     /// Above `--evict-below`, eviction starts here instead.
     #[arg(long, default_value_t = 25.0, value_name = "GB")]
     pub min_free_disk: f64,
+    /// The disk floor of a job whose last 5 runs of the same command in the
+    /// same repository used no compile server and built into no target
+    /// directory, GB; at most `--min-free-disk`, and no job starts below it.
+    /// A first run waits at `--min-free-disk`. 0 lets such a job start on
+    /// any free space. Default: the value of `--min-free-disk`.
+    #[arg(long, value_name = "GB")]
+    pub min_free_disk_light: Option<f64>,
     /// A job waits while available memory, less what jobs that started in
     /// the last 30 s still take, is below its expected peak (from earlier
     /// runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway.
@@ -234,6 +270,14 @@ pub struct ServeArgs {
     /// kept. 0: no budget, only the disk floor evicts.
     #[arg(long, default_value_t = 0.0, value_name = "GB")]
     pub cache_budget: f64,
+    /// For remote clients: how the first job of a new worktree copies the
+    /// target directory of another worktree of the same repository.
+    /// `reflink`: only a reflink copy, none where the filesystem has no
+    /// reflinks (a byte copy of a large target directory can take longer
+    /// than the build it saves). `copy`: a reflink where the filesystem has
+    /// them, else a byte copy. Never hard links.
+    #[arg(long, value_enum, default_value_t = crate::server::cache::SeedCopy::Reflink)]
+    pub seed_copy: crate::server::cache::SeedCopy,
     /// When the filesystem of a local Cargo target directory has less free
     /// space than this, GB, delete target directories that jobs built into,
     /// least recently built first, until it has 10 GB more. The mark is
@@ -264,6 +308,11 @@ pub struct ServeArgs {
     /// does not start.
     #[arg(long)]
     pub sandbox: bool,
+    /// The host configuration file: its `[remote.<name>]` tables are the
+    /// remote nodes the daemon polls every 5 s and shows in `GET /api/nodes`
+    /// and the web UI. `off` reads none.
+    #[arg(long, env = "SLOT_CLUSTER_FILE", default_value_os_t = crate::hostconfig::default_path())]
+    pub cluster_file: PathBuf,
     /// One more path a sandboxed job may write, for example a package
     /// manager's store; repeat for more.
     #[arg(long, value_name = "PATH", requires = "sandbox")]
@@ -274,6 +323,18 @@ pub struct ServeArgs {
     /// cache server outside the sandbox cannot read sources at those paths.
     #[arg(long, requires = "sandbox")]
     pub sandbox_fixed_paths: bool,
+    /// A directory under which a remote client may mirror its tree at the
+    /// tree's own absolute path (`SLOT_REMOTE_SAME_PATH=1` on the client), so
+    /// absolute paths into the tree work on this server. Repeat for more;
+    /// `SLOT_SAME_PATH_ROOTS` lists them separated by `:`. Give `slot shell`
+    /// the same list.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "SLOT_SAME_PATH_ROOTS",
+        value_delimiter = ':'
+    )]
+    pub same_path_root: Vec<PathBuf>,
 }
 
 /// `slot proxy` options.
@@ -299,6 +360,18 @@ pub struct ShellArgs {
     /// Target dirs of synced workspaces (default: `<state-dir>/cache`).
     #[arg(long)]
     pub cache_root: Option<PathBuf>,
+    /// The daemon's web address, for the `state` step.
+    #[arg(long, env = "SLOT_HTTP", default_value = "127.0.0.1:7411")]
+    pub http: String,
+    /// A directory under which a client may sync its tree to the tree's own
+    /// absolute path and fetch from it, as with `slot serve`; repeat for more.
+    #[arg(
+        long,
+        value_name = "DIR",
+        env = "SLOT_SAME_PATH_ROOTS",
+        value_delimiter = ':'
+    )]
+    pub same_path_root: Vec<PathBuf>,
 }
 
 /// `slot gate` options.
@@ -356,6 +429,14 @@ pub struct SiblingsArgs {
     pub key: String,
 }
 
+/// `slot __cargo-git` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct CargoGitArgs {
+    /// `<entry>:<rev>` per database entry.
+    #[arg(required = true)]
+    pub wanted: Vec<String>,
+}
+
 /// `slot run` arguments.
 #[derive(Debug, Clone, Args)]
 pub struct RunArgs {
@@ -369,9 +450,20 @@ pub struct RunArgs {
     /// How long the job may run, as `slot --timeout DURATION`.
     #[arg(long, value_name = "DURATION", value_parser = crate::run_limit::parse_duration)]
     pub timeout: Option<u64>,
+    /// Run the command as a warm-up (`slot warm`): set by a daemon that
+    /// hands a warm-up to a node.
+    #[arg(long, hide = true)]
+    pub warm: bool,
     /// The command and its arguments.
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+/// `slot warm` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct WarmArgs {
+    /// The checkout of `main` to build; the working directory without it.
+    pub dir: Option<PathBuf>,
 }
 
 /// `slot status` options.
@@ -697,6 +789,38 @@ pub struct UsageArgs {
     pub json: bool,
 }
 
+/// `slot cache` subcommands.
+#[derive(Debug, Clone, Subcommand)]
+pub enum CacheCmd {
+    /// The compiler calls the sccache servers refused to cache, per
+    /// repository and reason, with hits and misses, and what a repository
+    /// can do about each reason.
+    ///
+    /// Reads `cache.jsonl` and `jobs.jsonl` in the state directory. A
+    /// minute's calls belong to the jobs that ran in it with compile-server
+    /// CPU: to one repository exactly when all of them are its, else split
+    /// by each job's compile-server CPU rate times its time in the minute
+    /// (shared). Minutes no such job explains are counted apart.
+    Refused(CacheRefusedArgs),
+}
+
+/// `slot cache refused` options.
+#[derive(Debug, Clone, Args)]
+pub struct CacheRefusedArgs {
+    /// The daemon's state directory.
+    #[arg(long, default_value_os_t = paths::default_state_dir())]
+    pub state_dir: PathBuf,
+    /// Window ending now: a number followed by m, h or d.
+    #[arg(long, default_value = "24h")]
+    pub since: String,
+    /// Group by repo or project (the namespace of the repository's remote).
+    #[arg(long, default_value = "repo")]
+    pub by: String,
+    /// Print JSON instead of text.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// `slot hook` subcommands.
 #[derive(Debug, Clone, Subcommand)]
 pub enum HookCmd {
@@ -755,6 +879,9 @@ impl ServeArgs {
             admission: crate::admission::Limits {
                 min_free_memory: gb_bytes(self.min_free_memory),
                 min_free_disk: gb_bytes(self.min_free_disk),
+                min_free_disk_light: gb_bytes(
+                    self.min_free_disk_light.unwrap_or(self.min_free_disk),
+                ),
             },
             upgrade_hold: std::time::Duration::from_secs(self.upgrade_hold),
             promote_after: std::time::Duration::from_secs(self.promote_after),
@@ -770,6 +897,7 @@ impl ServeArgs {
             cpu_bound_gap: std::time::Duration::from_millis(crate::cpu_limit::STARTING_MS as u64),
             cpu_pressure: None,
             cache_budget: gb_bytes(self.cache_budget),
+            seed_copy: self.seed_copy,
             evict: crate::evict::Settings {
                 floor: gb_bytes(self.evict_below),
                 margin: 10 * crate::admission::GB,
@@ -787,6 +915,9 @@ impl ServeArgs {
             } else {
                 None
             },
+            cluster_file: (self.cluster_file.as_os_str() != "off")
+                .then(|| self.cluster_file.clone()),
+            same_path_roots: self.same_path_root.clone(),
         })
     }
 }
@@ -797,6 +928,18 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("slot").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn here_is_a_global_flag_off_by_default() {
+        let cli = parse(&["--here", "git", "fetch"]).unwrap();
+        assert!(cli.here);
+        assert!(!cli.local);
+        assert!(matches!(cli.command, Cmd::External(_)));
+        let cli = parse(&["run", "--here", "--", "git", "push"]).unwrap();
+        assert!(cli.here);
+        assert!(matches!(cli.command, Cmd::Run(_)));
+        assert!(!parse(&["git", "clone", "x"]).unwrap().here);
     }
 
     #[test]

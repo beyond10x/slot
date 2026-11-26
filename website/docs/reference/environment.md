@@ -14,9 +14,14 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_WSROOT` | `.local/state/slot/ws` | workspace root on the remote host, relative to its home directory; must match the server's `--ws-root` |
 | `SLOT_REMOTE` | `slot` | the slot executable on the remote host |
 | `SLOT_ENV` | unset | extra variable names forwarded to a remote host, comma-separated |
-| `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job runs on this machine's daemon: seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
-| `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job runs on this machine's daemon; same format |
+| `SLOT_REMOTE_FALLBACK` | unset | `local`: a remote job that cannot start runs on this machine's daemon instead; unset: it does not run and `slot` exits with 3. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
+| `SLOT_SYNC_STALL` | `60s` | a remote sync that reads and writes no byte for this long is killed and the job did not start (see `SLOT_REMOTE_FALLBACK`): seconds, or a number with `s`, `m` or `h`. See [Remote builds](../remote-builds.md#when-the-server-is-unreachable). |
+| `SLOT_SYNC_LIMIT` | `5m` | a remote sync that runs longer than this is killed and the job did not start; same format |
+| `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
+| `SLOT_REMOTE_SAME_PATH_ROOT` | `$HOME` | with `SLOT_REMOTE_SAME_PATH`, only a repository below this directory keeps its own path on the remote host; any other goes to the remote workspace root (`SLOT_WSROOT`) |
+| `SLOT_NO_PRODUCTS` | unset | `1`: a remote `cargo build`, `test`, `bench` or `rustc` copies nothing back into the local target directory; the command runs on the remote host unchanged, and the client prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` where it would have copied. Unset or `0`: the products come back. See [Remote builds](../remote-builds.md#binaries-and-test-binaries-come-back). |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
+| `SLOT_PHASES_FILE` | unset | in remote mode, after the job: the file the client writes the job's sync, back time, node target directory and seed to, as JSON. The daemon sets it for a job it hands to a node; a caller has no need to. See [Recorded phases of a job](#recorded-phases-of-a-job). |
 | `SLOT_LOCAL_FALLBACK` | unset | `1`: with no daemon answering, run the command here at once, outside the pool. Unset or `0`: wait up to 60 s for the socket, then exit with 125 without running it. See [Getting started](../getting-started.md#when-the-daemon-is-not-running). |
 | `SLOT_TOKENS` | unset | slots a job holds, as `slot --tokens N` (which wins over it); capped at the slots in circulation, ignored with `--local`; by share (`slot admission shares`) the job asks for a share of N CPUs, at most the budget, and holds no slot. See [Toolchains](../toolchains.md#naming-the-slots) and [Admission by share](../how-it-works.md#admission-by-share). |
 | `SLOT_PRIORITY` | unset (`normal`) | a job's queue level, `urgent`, `high`, `normal` or `low`, as `slot --priority` (which wins over it); a rule set with `slot priority set` for the repository wins over both; ignored with `--local`. See [Priority](../how-it-works.md#priority). |
@@ -33,6 +38,8 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_GATE_DIRS` | default for `slot gate --dir`, directories separated by `:` |
 | `XDG_RUNTIME_DIR` | directory of the default socket; without it `/run/user/<uid>` when that exists, else `slot-<uid>.sock` in the temporary directory |
 | `XDG_STATE_HOME` | the default state directory is `$XDG_STATE_HOME/slot`, otherwise `~/.local/state/slot` |
+| `SLOT_CLUSTER_FILE` | default for `slot serve --cluster-file`: the host configuration file whose `[remote.<name>]` tables are the nodes the daemon polls; `off` reads none |
+| `XDG_CONFIG_HOME` | the default host configuration file is `$XDG_CONFIG_HOME/slot/cluster.toml`, otherwise `~/.config/slot/cluster.toml` |
 
 ## Set in every job
 
@@ -41,12 +48,15 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_JOB` | the job id, used to attribute sccache CPU time to the job |
 | `SLOT_SANDBOX`, `TMPDIR` | `bwrap` and `/tmp` (a private tmpfs), for every job of a daemon started with [`slot serve --sandbox`](../remote-builds.md#run-every-job-in-a-sandbox) |
 | `MAKEFLAGS`, `CARGO_MAKEFLAGS` | `-j --jobserver-auth=fifo:<state-dir>/jobserver.fifo`, for rust and other jobs; `fifo:<gate-dir>/jobserver.fifo` for a gated job; not set this way while `slot job-parallel` is on |
-| `CARGO_BUILD_JOBS`, `MAKEFLAGS` | only while [`slot job-parallel N`](../how-it-works.md#build-processes-per-job) is on, for every job: `<P>` and `-j<P>`, where P is N or the slots the job holds if those are more; `CARGO_MAKEFLAGS` and `MFLAGS` are then not set, and nothing names the pool's FIFO |
-| `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2); rust and other jobs, unless the caller set them |
-| `GOMAXPROCS` | slots held for go jobs; `--test-threads` for other jobs; unless the caller set it |
-| `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs |
+| `CARGO_BUILD_JOBS`, `MAKEFLAGS` | only while [`slot job-parallel N`](../how-it-works.md#build-processes-per-job) is on, for every job: `<P>` and `-j<P>`, where P is N or the slots the job holds if those are more, and for a remote job its width (`SLOT_WIDTH`) if that is more; `CARGO_MAKEFLAGS` and `MFLAGS` are then not set, and nothing names the pool's FIFO |
+| `SLOT_WIDTH` | for every remote job (synced from another host, so run on this machine as a node): its width, set once when it starts: the CPUs free at that moment (the host's CPUs less the busy ones, the mean of the last seconds) divided by the jobs that started in the last 5 s, this one counted, at least 1 and at most the host's CPUs. A Playwright or Vitest config reads it for its worker count (`workers: Number(process.env.SLOT_WIDTH ?? 2)`). The job's record carries it as `width`. Not set for a local job |
+| `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2) for local rust and other jobs, unless the caller set them; the width for a remote job, and a lower count the caller set is raised to it |
+| `GOMAXPROCS` | slots held for local go jobs; `--test-threads` for local other jobs; unless the caller set it. For a remote job the width (go jobs: or the slots held if more), and a lower count the caller set is raised to it |
+| `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs; for a remote go job `-p=<width>`, or the slots held if more |
 | `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
+| `CARGO_NET_OFFLINE` | `true`, for a remote cargo job that builds, once the server fetched the crates of the mirror's `Cargo.lock`; not set for a mirror without a `Cargo.lock`. See [Remote builds](../remote-builds.md#crates-are-fetched-once-per-cargolock). |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
+| `SLOT_PHASES_FILE` | `<state-dir>/phases-<id>.json`, for a job the daemon hands to a node: the remote-mode client that runs it writes what it measured there, and the daemon adds that to the job's record when the job ends (see [below](#recorded-phases-of-a-job)) |
 
 ## Dropped from the caller's environment
 
@@ -103,3 +113,26 @@ unchanged.
 | `compile cache off: RUSTC_WRAPPER is empty` | `RUSTC_WRAPPER` is set and empty; with `RUSTC_WRAPPER` unset and `CARGO_BUILD_RUSTC_WRAPPER` empty, the warning names that variable |
 | `private sccache server (port N)` | `SCCACHE_SERVER_PORT` is a port other than 4226 |
 | `private sccache directory` | `SCCACHE_DIR` is set |
+
+## Recorded phases of a job
+
+The record of a job in the [job log](../how-it-works.md#job-log) says where its time went. Each
+field is absent where it does not apply and in a line an older slot wrote: an absent field means
+unknown, never 0.
+
+| field | job | value |
+|---|---|---|
+| `sync_ms` | remote | milliseconds the client took to send the tree to the node, git directories and a same-path working directory included |
+| `sync_bytes` | remote | bytes that sync sent, as rsync counted them |
+| `back_ms` | remote | milliseconds the client took to copy the cargo products and the `--fetch` paths back after the job ended; absent when nothing came back |
+| `compile_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the start to the first test binary, as the job's output shows it: cargo's `Running …` or `Doc-tests …` line, nextest's `Starting N tests across …` line or cargo's JSON `build-finished` message; the whole run when no test binary ran |
+| `test_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the first test binary to the end; absent when no test binary ran |
+| `node_target_dir` | remote cargo | the target directory the job built into on the node |
+| `seeded_from` | remote cargo | what that directory held when the job queued: the workspace id of the sibling it was seeded from by a copy (reflink, or a byte copy with `slot serve --seed-copy copy`), `kept` (the build of an earlier job of the same tree) or `empty` |
+
+A node's record gets `sync_ms` and `sync_bytes` with the job's request. `back_ms` is measured
+after the job ended: the client sends it to the node in a second request, and the node appends
+it to its job log as a line of its own, `{"amend":<id>,"back_ms":<ms>}`, which a reader of job
+lines skips and the daemon applies to job `<id>` when it reads the log back. For a job the daemon
+hands to a node, its own record gets every remote field from the file in `SLOT_PHASES_FILE`, and
+its compile and test time from the output the node streams back.

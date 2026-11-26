@@ -109,6 +109,10 @@ pub struct Running {
     /// Index into [`State::conns`].
     #[serde(default)]
     pub conn: Option<usize>,
+    /// When the job's output showed its first test binary, Unix ms
+    /// ([`super::ring::Ring::tests_at`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests_at: Option<i64>,
 }
 
 /// Exit of a job the old process reaped.

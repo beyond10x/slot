@@ -7,9 +7,17 @@ mod http;
 pub mod limits;
 pub mod machine;
 mod metrics;
+pub mod nodes;
 pub mod priority;
 mod ring;
+pub mod spill;
+mod tally;
 mod upgrade;
+mod warm;
+
+use tally::Tally;
+
+use spill::Ran;
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
@@ -80,7 +88,8 @@ pub struct Config {
     /// Whether a headroom also sets `CPUQuota` on the daemon's systemd unit.
     pub cpu_quota: bool,
     /// Default thread count of test runners in a job (`RUST_TEST_THREADS`,
-    /// `NEXTEST_TEST_THREADS`, `GOMAXPROCS`) when the caller sets none.
+    /// `NEXTEST_TEST_THREADS`, `GOMAXPROCS`) when the caller sets none. A
+    /// remote job gets its width instead ([`crate::width`]).
     pub test_threads: usize,
     /// Jobserver FIFO and job log.
     pub state_dir: PathBuf,
@@ -152,6 +161,9 @@ pub struct Config {
     /// before the least recently used are deleted; 0 = no budget (the disk
     /// floor still evicts).
     pub cache_budget: u64,
+    /// How a new workspace's target directory is copied from its sibling
+    /// (`--seed-copy`).
+    pub seed_copy: cache::SeedCopy,
     /// Eviction of local target directories under a disk floor.
     pub evict: crate::evict::Settings,
     /// Free bytes on the filesystem of a path, for the disk hold and
@@ -168,6 +180,12 @@ pub struct Config {
     /// Run every job in this sandbox (`slot serve --sandbox`); `None` runs
     /// jobs as the daemon's user with its whole filesystem.
     pub sandbox: Option<crate::sandbox::Sandbox>,
+    /// The host configuration file (`cluster.toml`) whose remote nodes the
+    /// daemon polls; `None` polls none.
+    pub cluster_file: Option<PathBuf>,
+    /// Directories under which a remote client may mirror its tree at its
+    /// own absolute path (`--same-path-root`); empty refuses such jobs.
+    pub same_path_roots: Vec<PathBuf>,
 }
 
 /// systemd slice the scopes of jobs under `--memory-max` run in; the
@@ -260,6 +278,8 @@ struct TokenMemo {
     surplus: Option<usize>,
 }
 
+// Each flag is a fact of its own that the queue and the sampler read alone.
+#[allow(clippy::struct_excessive_bools)]
 struct Live {
     job: Job,
     pid: Option<i32>,
@@ -308,6 +328,12 @@ struct Live {
     /// It claimed its start: with admission by share it holds no slot, so
     /// `held` does not tell a job that is about to start from a queued one.
     claimed: bool,
+    /// It may go to a remote node ([`spill`]) and has not been there.
+    spillable: bool,
+    /// The target directory its environment names (`CARGO_TARGET_DIR`,
+    /// [`crate::evict::env_target`]), whatever its toolchain: eviction
+    /// keeps it.
+    env_target: Option<PathBuf>,
 }
 
 impl Live {
@@ -419,6 +445,8 @@ struct Inner {
     next_id: i64,
     active: BTreeMap<i64, Live>,
     done: VecDeque<Done>,
+    /// Jobs this node ended over the last 25 hours, from the whole job log.
+    tally: Tally,
     log: File,
     tag_cache: HashMap<i32, i64>,
     sys_prev: (u64, u64),
@@ -434,6 +462,8 @@ struct Inner {
     /// The host's busy CPUs over the last seconds, in parts, for the CPU
     /// limit.
     host_busy: cpu_limit::RecentParts,
+    /// When the jobs that got a width started, for [`crate::width`].
+    starts: crate::width::Starts,
     /// When a job last started on the CPU hold's bound, Unix ms.
     cpu_bound_ms: i64,
     controller: policy::Controller,
@@ -445,6 +475,14 @@ struct Inner {
     /// Local target directories jobs built into: repository and last build,
     /// Unix milliseconds. Eviction only ever deletes one of these.
     targets: HashMap<PathBuf, (String, i64)>,
+    /// Working directories of the jobs of the log and when a job last ran
+    /// in each, Unix ms: eviction keeps the target directories in the tree
+    /// of one used in the last hour ([`crate::evict::TREE_KEEP`]).
+    ran_in: HashMap<PathBuf, i64>,
+    /// Repositories and when a job of each last started here, Unix ms,
+    /// warm-ups left out: a merge warms only a repository that built here
+    /// in the last [`warm::WITHIN_MS`].
+    built: HashMap<String, i64>,
     /// Machine base: the cgroup readings and their averages.
     machine: machine::Monitor,
     /// Machine base: the numbers of the last tick.
@@ -492,6 +530,8 @@ pub struct Server {
     /// milliseconds; 0 while there are none).
     unaccounted: AtomicU64,
     unaccounted_since: AtomicI64,
+    /// Remote nodes of the host configuration.
+    remotes: nodes::Remotes,
     /// What eviction of target directories did last.
     evict: Mutex<crate::evict::Report>,
     /// Target directories being deleted now: their jobs wait.
@@ -537,6 +577,9 @@ pub struct Server {
     shares: Mutex<crate::shares::Settings>,
     /// When this process started, Unix ms.
     born_ms: i64,
+    /// Repositories with a warm-up queued or running in this process,
+    /// from the word of the merge to the job's end.
+    warming: Mutex<HashSet<String>>,
 }
 
 /// Root of the cgroup v2 hierarchy.
@@ -646,16 +689,27 @@ impl Server {
         let mut next_id = 0;
         let mut memory = admission::History::default();
         let mut targets = HashMap::new();
+        let mut ran_in = HashMap::new();
+        let mut built = HashMap::new();
+        let mut tally = Tally::default();
+        let started = (cfg.clock)();
         if let Ok(f) = File::open(&log_path) {
             for line in BufReader::new(f).lines().map_while(Result::ok) {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
                     memory.record(&job);
                     record_target(&mut targets, &job);
+                    record_ran(&mut ran_in, &job);
+                    warm::record_built(&mut built, &job);
+                    tally.record(&job, started);
                     done.push_back(Done { job, out: None });
                     if done.len() > cfg.keep_jobs {
                         done.pop_front();
                     }
+                } else if let Ok(a) = serde_json::from_str::<crate::phases::Amended>(&line)
+                    && let Some(d) = done.iter_mut().rev().find(|d| d.job.id == a.amend)
+                {
+                    a.apply(&mut d.job);
                 }
             }
         }
@@ -697,6 +751,7 @@ impl Server {
         let sccache_watch = cfg.sccache_watch;
         let upgrade_hold = cfg.upgrade_hold;
         let evict_settings = cfg.evict;
+        let remotes = nodes::Remotes::load(cfg.cluster_file.as_deref(), &host);
         let server = Arc::new(Self {
             cfg,
             pool,
@@ -704,6 +759,7 @@ impl Server {
                 next_id,
                 active: BTreeMap::new(),
                 done,
+                tally,
                 log,
                 tag_cache: HashMap::new(),
                 sys_prev: (0, 0),
@@ -717,6 +773,7 @@ impl Server {
                 title_pending: HashSet::new(),
                 last_census: HostCensus::default(),
                 host_busy: cpu_limit::RecentParts::default(),
+                starts: crate::width::Starts::default(),
                 cpu_bound_ms: 0,
                 controller: policy::Controller::new(policy::Settings::new(
                     cores as usize,
@@ -725,6 +782,8 @@ impl Server {
                 memory,
                 handing_over: false,
                 targets,
+                ran_in,
+                built,
                 machine: machine::Monitor::default(),
                 machine_shown: machine::Shown::default(),
                 budget: crate::shares::Budget::new(cores, f64::from(cores)),
@@ -762,6 +821,7 @@ impl Server {
             removed: AtomicU64::new(0),
             unaccounted: AtomicU64::new(0),
             unaccounted_since: AtomicI64::new(0),
+            remotes,
             evict: Mutex::new(crate::evict::Report {
                 floor: crate::evict::below(saved.evict_below_gb, evict_settings.floor),
                 dry_run: evict_settings.dry_run,
@@ -791,6 +851,7 @@ impl Server {
             )),
             shares: Mutex::new(saved.shares()),
             born_ms: now_ms(),
+            warming: Mutex::new(HashSet::new()),
         });
         server.apply_saved_admission();
         Ok(server)
@@ -923,6 +984,7 @@ impl Server {
         tokio::spawn(Arc::clone(&self).token_watch());
         tokio::spawn(Arc::clone(&self).priority_watch());
         tokio::spawn(Arc::clone(&self).run_limit_watch());
+        tokio::spawn(Arc::clone(&self).node_poll());
         // Always: `slot evict-below` may turn eviction on at run time.
         tokio::spawn(Arc::clone(&self).evict_watch());
         if self.cfg.sccache_watch {
@@ -1239,6 +1301,7 @@ impl Server {
                         output: Vec::new(),
                         exited: l.exited,
                         conn: None,
+                        tests_at: l.out.tests_at(),
                     },
                     l.conn,
                     Arc::clone(&l.out),
@@ -1300,7 +1363,7 @@ impl Server {
             let s = Arc::clone(self);
             tokio::spawn(async move {
                 let _keep = keep;
-                let done = s.supervise(id, pid, &tx, gone).await;
+                let done = s.supervise(id, pid, &tx, gone, false).await;
                 drop(tx);
                 s.end_conn(conn, done.is_some()).await;
             });
@@ -1340,7 +1403,7 @@ impl Server {
     ) -> (
         mpsc::UnboundedSender<Frame>,
         watch::Receiver<bool>,
-        Option<watch::Sender<bool>>,
+        Option<Arc<watch::Sender<bool>>>,
     ) {
         let id = r.job.id;
         let (tx, gone, stop, keep) = if let Some(a) = conn {
@@ -1348,9 +1411,20 @@ impl Server {
         } else {
             let (tx, _rx) = mpsc::unbounded_channel();
             let (g, rx) = watch::channel(false);
-            (tx, rx, None, Some(g))
+            let g = Arc::new(g);
+            // Only the daemon stops it: a warm-up a job of a session
+            // preempts. No user may `slot cancel` it.
+            let stop = Stop {
+                uid: None,
+                gone: Arc::clone(&g),
+                frames: tx.clone(),
+            };
+            (tx, rx, Some(stop), Some(g))
         };
         let ring = Arc::new(Ring::from_tail(OUTPUT_KEEP, r.output));
+        if let Some(at) = r.tests_at {
+            ring.mark_tests(at);
+        }
         let pumps = self.start_pumps([out, err], &tx, &ring, &r.rewrite);
         {
             let mut g = self.inner.lock().expect("server lock");
@@ -1367,6 +1441,8 @@ impl Server {
                     // by slots it asked for its slots.
                     share: r.job.share.unwrap_or(f64::from(r.job.tokens.max(1))),
                     claimed: true,
+                    spillable: false,
+                    env_target: crate::evict::pid_env_target(r.pid, Path::new(&r.job.cwd)),
                     job: r.job,
                     pid: Some(r.pid),
                     held: r.held,
@@ -1531,10 +1607,16 @@ impl Server {
         let Ok(req) = serde_json::from_str::<Request>(&line) else {
             return;
         };
-        if let Some(id) = req.cancel {
-            let (code, msg) = self.cancel(id, uid).await;
+        let short = match (req.cancel, req.amend) {
+            (Some(id), _) => Some(self.cancel(id, uid).await),
+            (None, Some(a)) => Some(self.amend(a)),
+            (None, None) if req.warm => Some(self.warm(&req, uid)),
+            (None, None) => None,
+        };
+        if let Some((code, msg)) = short {
             let mut out = Vec::new();
-            for f in [Frame::Info { msg }, Frame::Exit { code }] {
+            let info = (!msg.is_empty()).then_some(Frame::Info { msg });
+            for f in info.into_iter().chain([Frame::Exit { code }]) {
                 if let Ok(b) = serde_json::to_vec(&f) {
                     out.extend(b);
                     out.push(b'\n');
@@ -1557,6 +1639,56 @@ impl Server {
             )
             .await;
         self.end_conn(Some(a), done.is_some()).await;
+    }
+
+    /// Fetch once (`cargo_fetch.rs`) for a cargo job of workspace `id` that
+    /// runs in `cwd`: whether the job runs offline, or why it goes back to
+    /// the client.
+    async fn fetch_once(
+        &self,
+        id: &str,
+        root: &Path,
+        cwd: &Path,
+        argv: &[String],
+        env: &[String],
+        tx: &mpsc::UnboundedSender<Frame>,
+    ) -> Result<bool, String> {
+        use crate::cargo_fetch::{Check, Outcome, cargo_of, ensure, label, locked};
+        let ws_root = self.cfg.ws_root.clone();
+        let root = root.to_path_buf();
+        let id = id.to_string();
+        let cwd = cwd.to_path_buf();
+        let cargo = cargo_of(argv);
+        let locked = locked(argv);
+        let what = label(locked);
+        let env = env.to_vec();
+        let out = tokio::task::spawn_blocking(move || {
+            ensure(&Check {
+                ws_root: &ws_root,
+                root: &root,
+                id: &id,
+                cwd: &cwd,
+                cargo,
+                env: &env,
+                locked,
+                limit: crate::cargo_fetch::LIMIT,
+            })
+        })
+        .await
+        .map_err(|e| format!("{what} failed: {e}"))??;
+        Ok(match out {
+            Outcome::NoLock => false,
+            Outcome::Current => true,
+            Outcome::Fetched(t) => {
+                let _ = tx.send(Frame::Info {
+                    msg: format!(
+                        "slot: new Cargo.lock on this mirror: {what} took {:.1} s; its cargo jobs run offline",
+                        t.as_secs_f64()
+                    ),
+                });
+                true
+            }
+        })
     }
 
     /// Sends a client its last frames unless a handover took the table;
@@ -1591,6 +1723,41 @@ impl Server {
             .map(|(k, v)| format!("{k}={v}"))
             .chain(req.env.iter().cloned())
             .collect()
+    }
+
+    /// Where the client of job `id`, handed to a node, writes what it
+    /// measured ([`crate::phases::FILE_ENV`]).
+    fn phases_file(&self, id: i64) -> PathBuf {
+        self.cfg.state_dir.join(format!("phases-{id}.json"))
+    }
+
+    /// Adds what a client measured after its remote job ended to the job's
+    /// record: in the kept jobs and as an [`crate::phases::Amended`] line of
+    /// the job log. Only an ended remote job whose record has no back time
+    /// yet takes it. `(exit code, message)`.
+    fn amend(&self, a: crate::proto::Amend) -> (i32, String) {
+        let job = {
+            let mut g = self.inner.lock().expect("server lock");
+            let Some(d) = g.done.iter_mut().rev().find(|d| d.job.id == a.id) else {
+                return (1, format!("slot: job {} is not among the ended jobs", a.id));
+            };
+            if !d.job.remote || d.job.back_ms.is_some() {
+                return (1, format!("slot: job {} takes no back time", a.id));
+            }
+            let line = crate::phases::Amended {
+                amend: a.id,
+                back_ms: a.back_ms,
+            };
+            line.apply(&mut d.job);
+            let job = d.job.clone();
+            if let Ok(mut b) = serde_json::to_vec(&line) {
+                b.push(b'\n');
+                let _ = g.log.write_all(&b);
+            }
+            job
+        };
+        self.send(&Event::Job { job });
+        (0, String::new())
     }
 
     /// `slot cancel <id>` from a client with user id `uid`: stops a queued
@@ -1628,6 +1795,64 @@ impl Server {
         (1, format!("slot: job {id} still stopping after 10s"))
     }
 
+    /// Where workspace `ws` is mirrored: `<ws-root>/<id>`, or for a
+    /// same-path mirror the client's own root, which must lie below a
+    /// `--same-path-root`.
+    fn tree(&self, ws: &crate::proto::Workspace) -> Result<PathBuf> {
+        if !ws.same_path {
+            return Ok(self.cfg.ws_root.join(&ws.id));
+        }
+        let root = Path::new(&ws.client_root);
+        if self.below_same_path_root(root) {
+            return Ok(root.to_path_buf());
+        }
+        bail!(
+            "same-path mirror `{}` is not below a --same-path-root of this server",
+            ws.client_root
+        )
+    }
+
+    /// Whether `p` is absolute, without `.` or `..`, and below one of the
+    /// `--same-path-root` directories.
+    fn below_same_path_root(&self, p: &Path) -> bool {
+        crate::same_path::plain(p)
+            && self
+                .cfg
+                .same_path_roots
+                .iter()
+                .any(|r| p.starts_with(r) && p != r)
+    }
+
+    /// A same-path job's own target directory (`Workspace::target_dir`),
+    /// which must lie below a `--same-path-root`; `None` when it names none.
+    fn same_path_target(&self, ws: &crate::proto::Workspace) -> Result<Option<PathBuf>> {
+        if !ws.same_path || ws.target_dir.is_empty() {
+            return Ok(None);
+        }
+        let t = Path::new(&ws.target_dir);
+        if self.below_same_path_root(t) {
+            return Ok(Some(t.to_path_buf()));
+        }
+        bail!(
+            "target directory `{}` is not below a --same-path-root of this server",
+            ws.target_dir
+        )
+    }
+
+    /// Where the job of workspace `ws` builds: `<cache>/target/<id>`, or a
+    /// same-path job's own target directory (else `target` in its tree).
+    fn job_target(&self, ws: &crate::proto::Workspace) -> PathBuf {
+        if ws.same_path {
+            if let Ok(Some(t)) = self.same_path_target(ws) {
+                return t;
+            }
+            if let Ok(t) = self.tree(ws) {
+                return t.join("target");
+            }
+        }
+        self.cfg.cache_root.join("target").join(&ws.id)
+    }
+
     fn resolve(&self, req: &Request) -> Result<(PathBuf, String, String)> {
         let Some(ws) = &req.workspace else {
             let cwd = PathBuf::from(&req.cwd);
@@ -1639,7 +1864,8 @@ impl Server {
         if ws.id.is_empty() || ws.id.contains(['/', '.']) {
             bail!("bad workspace id");
         }
-        let root = self.cfg.ws_root.join(&ws.id);
+        let root = self.tree(ws)?;
+        self.same_path_target(ws)?;
         let mut cwd = root.clone();
         for c in Path::new(&ws.rel_cwd).components() {
             match c {
@@ -1662,7 +1888,7 @@ impl Server {
     /// job: the client is answered by the next process.
     async fn run_job(
         self: &Arc<Self>,
-        req: Request,
+        mut req: Request,
         tx: mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
         stop: Option<Stop>,
@@ -1678,11 +1904,36 @@ impl Server {
         };
         // A mistyped subcommand (`slot cancle 12`) would otherwise wait in
         // the queue for slots and fail only when it starts.
-        let base = Self::base_env(&req);
+        let mut base = Self::base_env(&req);
         if !req.argv[0].contains('/')
             && let Err(e) = look_path(&req.argv[0], &base)
         {
             return self.reply(&tx, 127, Some(format!("slot: {e}; not queued")));
+        }
+        if req.fetch_once
+            && let Some(ws) = req.workspace.as_ref()
+            && crate::cargo_fetch::applies(&req.argv)
+        {
+            let root = PathBuf::from(&from);
+            match self
+                .fetch_once(&ws.id, &root, &cwd, &req.argv, &base, &tx)
+                .await
+            {
+                Ok(offline) => {
+                    if offline && !req.env.iter().any(|e| e == crate::cargo_fetch::OFFLINE) {
+                        req.env.push(crate::cargo_fetch::OFFLINE.to_string());
+                        base = Self::base_env(&req);
+                    }
+                }
+                Err(msg) => {
+                    let g = self.inner.lock().expect("server lock");
+                    if g.handing_over {
+                        return None;
+                    }
+                    let _ = tx.send(Frame::Fallback { msg });
+                    return Some(());
+                }
+            }
         }
         // A gated job is shown, counted and sized by the command its client
         // runs in a sandbox; the daemon starts only `req.argv`, the hold.
@@ -1748,7 +1999,8 @@ impl Server {
             };
             let expect_rss = g.memory.expected(&req.repo, &shown, tc.name());
             let expect_cores = self.expected_cores(&g.memory, &req.repo, &shown);
-            let (priority, promoted) = self.level_of(&req.repo, req.priority, enqueued_ms);
+            let (priority, promoted) =
+                self.level_of(&req.repo, req.priority, enqueued_ms, req.warm);
             let predicted_ms = g.memory.expected_runtime(&req.repo, &shown);
             // A client that names slots asks for that share: one of 0.21.0
             // and older knows no other way to ask.
@@ -1778,6 +2030,7 @@ impl Server {
                 compile_server_cpu_s: 0.0,
                 peak_rss: 0,
                 wait_reason: String::new(),
+                local_reason: spill::local_reason(&req, self.remotes.spills()),
                 target_dir: target_dir
                     .as_ref()
                     .map(|t| t.to_string_lossy().into_owned())
@@ -1797,6 +2050,17 @@ impl Server {
                 lent_s: 0.0,
                 admission: crate::shares::Mode::Slots,
                 node: LOCAL_NODE.to_string(),
+                from_node: false,
+                sync_ms: req.workspace.as_ref().and(req.sync_ms),
+                sync_bytes: req.workspace.as_ref().and(req.sync_bytes),
+                back_ms: None,
+                compile_ms: None,
+                test_ms: None,
+                node_target_dir: None,
+                seeded_from: None,
+                width: None,
+                warm: req.warm,
+                cancel_reason: String::new(),
             };
             g.active.insert(
                 id,
@@ -1825,6 +2089,8 @@ impl Server {
                     overdue: watch::Sender::new(false),
                     share,
                     claimed: false,
+                    spillable: false,
+                    env_target: crate::evict::env_target(&req.env, &cwd),
                 },
             );
             (id, share)
@@ -1842,7 +2108,16 @@ impl Server {
         }
         self.publish(id);
         if let Some(ws) = &req.workspace {
-            self.prepare_cache(&ws.id, &req.repo, &tx).await;
+            // What the job's target directory holds before it is seeded.
+            let target = self.job_target(ws);
+            let held = crate::phases::has_entries(&target);
+            let seeded = self.prepare_cache(&ws.id, &req.repo, &tx).await;
+            if tc.name() == "rust"
+                && let Some(l) = self.inner.lock().expect("server lock").active.get_mut(&id)
+            {
+                l.job.node_target_dir = Some(target.to_string_lossy().into_owned());
+                l.job.seeded_from = Some(crate::phases::seeded_from(seeded, held));
+            }
         }
 
         let ahead = self.pool.waiting_before(self.queued_level(id));
@@ -1887,7 +2162,21 @@ impl Server {
         // another job may be compiling into.
         let shares_target = target_dir.is_some() && crate::cargo_lock::compiles(&shown);
         let mut told_target = false;
+        // Whether the job may go to a remote node of the cluster file.
+        let mut may_spill = self.spill_eligible(id, &req);
         let held = loop {
+            if may_spill && let Some(t) = self.spill_pick(id) {
+                match self
+                    .run_spilled(id, &req, &cwd, t, &tx, gone.clone(), &out)
+                    .await?
+                {
+                    Ran::Requeue => {
+                        may_spill = false;
+                        continue;
+                    }
+                    Ran::Finished => return Some(()),
+                }
+            }
             if !self.admission_open(gone.clone()).await {
                 return self.finish(id, &tx, cancelled).ok();
             }
@@ -1936,6 +2225,10 @@ impl Server {
             // directory: once another job compiles there, or one that is
             // served before it queues for the directory, it leaves the
             // queue, so it gathers no slot it could not use.
+            // A job of a session that still waits for its slots a moment
+            // after it queued cancels the running warm-ups.
+            let preempt_at = tokio::time::Instant::now() + warm::PREEMPT_AFTER;
+            let mut preempted = req.warm;
             let in_use = loop {
                 tokio::select! {
                     () = waiter.ready() => break false,
@@ -1945,8 +2238,18 @@ impl Server {
                         }
                         return self.finish(id, &tx, cancelled).ok();
                     }
+                    () = tokio::time::sleep_until(preempt_at), if !preempted => {
+                        preempted = true;
+                        self.preempt_warm(id);
+                    }
                     () = tokio::time::sleep(self.cfg.target_poll), if shares_target => {
                         if self.target_wait(id, false).is_some() {
+                            break true;
+                        }
+                    }
+                    // A node has room for it: it leaves the queue and goes.
+                    () = tokio::time::sleep(spill::TICK), if may_spill => {
+                        if self.spill_due(id) && self.remotes.has_room(now_ms()) {
                             break true;
                         }
                     }
@@ -2007,6 +2310,9 @@ impl Server {
                         // By share the job waited in the queue with a
                         // reason; by slots it has none here.
                         l.job.wait_reason.clear();
+                        if l.spillable && l.job.local_reason.is_empty() {
+                            l.job.local_reason = spill::HERE_FIRST.into();
+                        }
                         l.waiter = None;
                         l.cpu_wait = false;
                         l.job.collected = 0;
@@ -2031,11 +2337,16 @@ impl Server {
             }
         };
 
+        // A job synced from another host runs on this machine as a node:
+        // its width follows the free cores. A local job keeps the
+        // workstation rule (`test_threads`, the pool's jobserver).
+        let width = req.workspace.is_some().then(|| self.job_width(id));
         let ctx = Context {
             jobserver_auth: self.pool.auth(),
             held,
             free_tokens: self.pool.free(),
             test_threads: self.cfg.test_threads,
+            width,
             cache_dir: if req.workspace.is_some() {
                 self.cfg.cache_root.to_string_lossy().into_owned()
             } else {
@@ -2048,11 +2359,25 @@ impl Server {
                 .unwrap_or_default(),
         };
         let mut env = tc.env(&ctx, base);
+        // A same-path job builds where the client would, so the paths cargo
+        // prints hold on both machines.
+        if let Some(ws) = req.workspace.as_ref().filter(|w| w.same_path) {
+            env = match self.same_path_target(ws) {
+                Ok(Some(t)) => toolchain::set(env, "CARGO_TARGET_DIR", &t.to_string_lossy()),
+                _ => toolchain::unset(env, &["CARGO_TARGET_DIR"]),
+            };
+        }
         // The bound in force at the start is the job's, like its run-time
         // limit: a later `slot job-parallel` changes the jobs that start
-        // after it. With a bound the job gets no pool jobserver.
+        // after it. With a bound the job gets no pool jobserver. A job with
+        // a width raises a lower bound to it; without a bound its compilers
+        // draw from the pool's jobserver, which no width narrows.
         let own =
-            job_parallel::for_job(*self.job_parallel.lock().expect("job parallel lock"), held);
+            job_parallel::for_job(*self.job_parallel.lock().expect("job parallel lock"), held)
+                .map(|p| width.map_or(p, |w| w.max(p)));
+        if let Some(w) = width {
+            env = toolchain::set(env, crate::width::ENV, &w.to_string());
+        }
         if let Some(p) = own {
             env = toolchain::own_jobserver(env, p);
         }
@@ -2063,9 +2388,9 @@ impl Server {
         // the sandbox hides.
         if let Some(sandbox) = &self.cfg.sandbox {
             env = crate::sandbox::Sandbox::env(env);
-            let workspace = req.workspace.as_ref().map(|w| self.cfg.ws_root.join(&w.id));
+            let workspace = req.workspace.as_ref().and_then(|w| self.tree(w).ok());
             let target_dir = match &req.workspace {
-                Some(w) => Some(self.cfg.cache_root.join("target").join(&w.id)),
+                Some(w) => Some(self.job_target(w)),
                 None => crate::evict::target_dir(&shown, &env, &cwd),
             };
             let job = crate::sandbox::Job {
@@ -2168,12 +2493,7 @@ impl Server {
         // The process is reaped by pid (`reap`), here or after a handover.
         drop(child);
         let target_dir = req.workspace.as_ref().map_or_else(String::new, |w| {
-            self.cfg
-                .cache_root
-                .join("target")
-                .join(&w.id)
-                .to_string_lossy()
-                .into_owned()
+            self.job_target(w).to_string_lossy().into_owned()
         });
         // With fixed paths a synced workspace's job names its tree by the
         // fixed path; its output is rewritten from there.
@@ -2192,6 +2512,7 @@ impl Server {
         };
         {
             let mut g = self.inner.lock().expect("server lock");
+            let mut seeded_from = None;
             if let Some(l) = g.active.get_mut(&id) {
                 l.pid = Some(pid);
                 l.job.started_ms = now_ms();
@@ -2200,17 +2521,32 @@ impl Server {
                 l.tracker.sample(&Snapshot::scan(), pid, &[], 0.0);
                 l.req = None;
                 l.pumps = pumps;
+                seeded_from.clone_from(&l.job.seeded_from);
             }
-            let _ = tx.send(Frame::Start { id, target_dir });
+            let _ = tx.send(Frame::Start {
+                id,
+                target_dir,
+                seeded_from,
+            });
         }
         self.publish(id);
-        let done = self.supervise(id, pid, &tx, gone).await;
+        let done = self.supervise(id, pid, &tx, gone, false).await.map(drop);
         if done.is_some()
             && let Some(ws) = &req.workspace
         {
             let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
             let ws = ws.id.clone();
-            tokio::task::spawn_blocking(move || cache.record_size(&ws));
+            // A warm-up that built leaves its target directory the most
+            // recently used of the repository: the one a new workspace is
+            // seeded from.
+            let warmed = req.warm && self.ended_ok(id);
+            let repo = req.repo.clone();
+            tokio::task::spawn_blocking(move || {
+                cache.record_size(&ws);
+                if warmed {
+                    cache.touch(&ws, &repo, now_ms());
+                }
+            });
         }
         done
     }
@@ -2224,7 +2560,8 @@ impl Server {
         pid: i32,
         tx: &mpsc::UnboundedSender<Frame>,
         gone: watch::Receiver<bool>,
-    ) -> Option<()> {
+        requeue: bool,
+    ) -> Option<Ran> {
         let s = Arc::clone(self);
         let wait = tokio::task::spawn_blocking(move || s.reap(id, pid));
         tokio::pin!(wait);
@@ -2297,6 +2634,8 @@ impl Server {
                 msg: None,
                 note_wait: false,
             }
+        } else if requeue && exited.code == spill::INFRA_EXIT {
+            return Some(Ran::Requeue);
         } else {
             End {
                 state: if exited.code == 0 {
@@ -2311,7 +2650,7 @@ impl Server {
                 note_wait: true,
             }
         };
-        self.finish(id, tx, end).ok()
+        self.finish(id, tx, end).ok().map(|()| Ran::Finished)
     }
 
     /// Waits for job `id`'s process to exit, reads its CPU time while it is
@@ -2365,6 +2704,12 @@ impl Server {
                     .ok()
                     .and_then(|r| r.components().next())
                     .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .or_else(|| {
+                        if self.cfg.same_path_roots.is_empty() {
+                            return None;
+                        }
+                        crate::mirror::linked_id(&self.cfg.ws_root, Path::new(&l.job.cwd))
+                    })
             })
             .collect()
     }
@@ -2372,23 +2717,38 @@ impl Server {
     /// Before a remote job of workspace `ws` (repository `repo`) queues:
     /// records the use, evicts least recently used target directories over
     /// the budget or the disk floor, and seeds a new workspace's target
-    /// directory by reflink. Says what it did on the job's stderr and in the
-    /// journal.
-    async fn prepare_cache(&self, ws: &str, repo: &str, tx: &mpsc::UnboundedSender<Frame>) {
+    /// directory by a copy (`--seed-copy`). Says what it did on the job's
+    /// stderr and in the journal. Returns the workspace it seeded from, if
+    /// it did.
+    async fn prepare_cache(
+        &self,
+        ws: &str,
+        repo: &str,
+        tx: &mpsc::UnboundedSender<Frame>,
+    ) -> Option<String> {
         let cache = cache::Cache::new(&self.cfg.cache_root, &self.cfg.ws_root);
         let busy = self.busy_workspaces();
         let budget = self.cfg.cache_budget;
         let floor = self.cfg.admission.min_free_disk;
         let (ws, repo) = (ws.to_string(), repo.to_string());
+        // A same-path job builds at its tree's own path; another tree's target
+        // carries freshness records and build-script output made for that
+        // tree, which cargo may take as fresh here. Such a job is not seeded.
+        let same_path = !self.cfg.same_path_roots.is_empty();
+        let how = self.cfg.seed_copy;
         let Ok((gone, seeded)) = tokio::task::spawn_blocking(move || {
             cache.touch(&ws, &repo, now_ms());
             let gone = cache.evict(budget, floor, &busy);
-            let seeded = cache.seed(&ws, &repo, &busy);
+            let seeded = if same_path {
+                Err("same-path workspace".to_string())
+            } else {
+                cache.seed(&ws, &repo, &busy, how)
+            };
             (gone, seeded)
         })
         .await
         else {
-            return;
+            return None;
         };
         for (id, bytes) in gone {
             let msg = format!(
@@ -2399,16 +2759,24 @@ impl Server {
             let _ = tx.send(Frame::Info { msg });
         }
         match seeded {
-            Ok((src, took)) => {
+            Ok(s) => {
                 let msg = format!(
-                    "slot: target directory seeded from workspace {src} by reflink in {:.1}s",
-                    took.as_secs_f64()
+                    "slot: target directory seeded from workspace {} by a copy in {:.1}s; \
+                     {} source file(s) differ from its sources and build again",
+                    s.from,
+                    s.took.as_secs_f64(),
+                    s.differ
                 );
                 eprintln!("{msg}");
                 let _ = tx.send(Frame::Info { msg });
+                Some(s.from)
             }
-            Err(e) if e.contains("reflink") => eprintln!("slot: target directory not seeded: {e}"),
-            Err(_) => {}
+            Err(e) => {
+                if e.starts_with("no reflink copy") || e.starts_with("no copy") {
+                    eprintln!("slot: target directory not seeded: {e}");
+                }
+                None
+            }
         }
     }
 
@@ -2422,7 +2790,14 @@ impl Server {
             .iter()
             .filter_map(|p| disk_free(p).map(|f| (p.display().to_string(), f)))
             .collect();
-        if let Some(r) = admission::disk_wait(&free, limits) {
+        // A job whose last runs compiled nothing waits at the light floor.
+        let light = {
+            let g = self.inner.lock().expect("server lock");
+            g.active
+                .get(&id)
+                .is_some_and(|l| g.memory.compiles_nothing(&l.job.repo, &l.job.argv))
+        };
+        if let Some(r) = admission::disk_wait(&free, limits, light) {
             // Eviction starts where the disk hold starts: its mark is at
             // least `--min-free-disk`.
             self.evict_wake.notify_one();
@@ -2647,6 +3022,21 @@ impl Server {
             live.job.state = end.state;
             live.job.exit = end.code;
             live.job.ended_ms = now_ms();
+            if live.job.started_ms > 0 && crate::phases::runs_tests(&live.job.argv) {
+                (live.job.compile_ms, live.job.test_ms) = crate::phases::split(
+                    live.job.started_ms,
+                    live.out.tests_at(),
+                    live.job.ended_ms,
+                );
+            }
+            // A job handed to a node: what its client measured.
+            if !matches!(live.job.node.as_str(), "" | LOCAL_NODE) && !live.job.from_node {
+                let path = self.phases_file(id);
+                if let Some(r) = crate::phases::Report::read(&path) {
+                    r.apply(&mut live.job);
+                }
+                let _ = std::fs::remove_file(&path);
+            }
             live.job.cpu_s = live.job.compile_server_cpu_s + end.cpu.unwrap_or(0.0);
             let ran_ms = live.job.ended_ms - live.job.started_ms;
             if live.job.share.is_some() && live.job.started_ms > 0 && ran_ms > 0 {
@@ -2666,8 +3056,14 @@ impl Server {
             }
             let job = live.job.clone();
             g.metrics.record(&job);
-            g.memory.record(&job);
+            // A job that ran on a node says nothing of this machine.
+            if job.node == LOCAL_NODE {
+                g.memory.record(&job);
+            }
             record_target(&mut g.targets, &job);
+            record_ran(&mut g.ran_in, &job);
+            warm::record_built(&mut g.built, &job);
+            g.tally.record(&job, job.ended_ms);
             if let Ok(mut line) = serde_json::to_vec(&job) {
                 line.push(b'\n');
                 let _ = g.log.write_all(&line);
@@ -3083,8 +3479,18 @@ impl Server {
     }
 
     /// The level a queued job of `repo` that asked for `own` and queued at
-    /// `enqueued_ms` is ordered by now, and whether it was promoted.
-    fn level_of(&self, repo: &str, own: Option<Priority>, enqueued_ms: i64) -> (Priority, bool) {
+    /// `enqueued_ms` is ordered by now, and whether it was promoted. A
+    /// warm-up is `low` whatever a rule says, and never promoted.
+    fn level_of(
+        &self,
+        repo: &str,
+        own: Option<Priority>,
+        enqueued_ms: i64,
+        warm: bool,
+    ) -> (Priority, bool) {
+        if warm {
+            return (Priority::Low, false);
+        }
         let now = (self.cfg.clock)();
         let waited = Duration::from_millis(u64::try_from(now - enqueued_ms).unwrap_or(0));
         let table = self.priority.lock().expect("priority lock");
@@ -3123,7 +3529,7 @@ impl Server {
     fn rerank(&self) {
         let changed: Vec<i64> = {
             let mut g = self.inner.lock().expect("server lock");
-            let queued: Vec<(i64, String, Option<Priority>, i64)> = g
+            let queued: Vec<(i64, String, Option<Priority>, i64, bool)> = g
                 .active
                 .values()
                 .filter(|l| l.job.state == JobState::Queued)
@@ -3133,12 +3539,13 @@ impl Server {
                         l.job.repo.clone(),
                         l.req.as_ref().and_then(|r| r.priority),
                         l.job.enqueued_ms,
+                        l.job.warm,
                     )
                 })
                 .collect();
             let mut changed = Vec::new();
-            for (id, repo, own, enqueued_ms) in queued {
-                let (level, promoted) = self.level_of(&repo, own, enqueued_ms);
+            for (id, repo, own, enqueued_ms, warm) in queued {
+                let (level, promoted) = self.level_of(&repo, own, enqueued_ms, warm);
                 let Some(l) = g.active.get_mut(&id) else {
                     continue;
                 };
@@ -3656,6 +4063,27 @@ impl Server {
             .min(f64::from(self.cores))
     }
 
+    /// The width of remote job `id` as it starts ([`crate::width`]),
+    /// written into its record: the host's free CPUs by the CPU limit's
+    /// figure (the last system sample while it has none), split over the
+    /// jobs that got a width in the last seconds. Under the server lock, so
+    /// two jobs that start at once count each other.
+    fn job_width(&self, id: i64) -> usize {
+        let now = now_ms();
+        let cores = f64::from(self.cores);
+        let mut g = self.inner.lock().expect("server lock");
+        let busy = match self.cpu_figure(&g, now) {
+            cpu_limit::Figure::Busy(parts) => parts.host(),
+            cpu_limit::Figure::Pending | cpu_limit::Figure::Unknown => g.sys_cpu * cores,
+        };
+        let recent = g.starts.record(now);
+        let w = crate::width::width(self.cores, cores - busy, recent);
+        if let Some(l) = g.active.get_mut(&id) {
+            l.job.width = u32::try_from(w).ok();
+        }
+        w
+    }
+
     /// The host's busy CPUs as the CPU limit reads them: the mean of the
     /// census sampler's last samples, in the parts pool, compile cache and
     /// outside ([`census::Sample::parts`]). No scan of its own.
@@ -4131,13 +4559,18 @@ impl Server {
                     .values()
                     .filter(|l| !l.job.target_dir.is_empty())
                     .map(|l| PathBuf::from(&l.job.target_dir))
+                    .chain(g.active.values().filter_map(|l| l.env_target.clone()))
                     .chain(failed)
                     .collect();
+                // The trees of queued and running jobs, and of every job
+                // that ran in the last hour: the steps of one long task
+                // keep their target directories between them.
                 let cwds: HashSet<PathBuf> = g
                     .active
                     .values()
                     .filter(|l| !l.job.cwd.is_empty())
                     .map(|l| PathBuf::from(&l.job.cwd))
+                    .chain(crate::evict::ran_recently(&g.ran_in, now_ms()))
                     .collect();
                 (g.targets.clone(), dirs, cwds)
             };
@@ -4229,8 +4662,13 @@ impl Server {
                     &c.path,
                     Path::new(&l.job.target_dir),
                     Path::new(&l.job.cwd),
-                )
-            });
+                ) || l
+                    .env_target
+                    .as_deref()
+                    .is_some_and(|t| crate::evict::holds_target(&c.path, t))
+            }) || crate::evict::ran_recently(&g.ran_in, now_ms())
+                .iter()
+                .any(|cwd| crate::evict::job_keeps(&c.path, Path::new(""), cwd));
             if busy {
                 return "kept: a job started".into();
             }
@@ -4418,30 +4856,35 @@ impl Server {
 
     /// The `GET /api/jobs` list (view `slot.pool.Jobs` of `spec/`): every
     /// job of `GET /api/state`, the running and queued ones first as
-    /// `active` lists them, then the ended ones newest first.
+    /// `active` lists them, then the ended ones newest first. The jobs of
+    /// the remote nodes are among them, as in `GET /api/state`.
     pub fn jobs(&self) -> Vec<Job> {
-        let g = self.inner.lock().expect("server lock");
-        let mut jobs = Self::active_jobs(&g);
-        jobs.extend(g.done.iter().rev().map(|d| on_local_node(d.job.clone())));
+        let st = self.state();
+        let mut jobs = st.active;
+        jobs.extend(st.done.into_iter().rev());
         jobs
     }
 
     /// The `GET /api/jobs/{id}` answer (view `slot.pool.JobDetail`): the
-    /// job of that id, as `jobs` lists it, or none.
+    /// job of that id, as `jobs` lists it, or none. A node numbers its own
+    /// jobs: when the local pool and a node both hold the id, the local
+    /// job is the answer.
     pub fn job(&self, id: i64) -> Option<Job> {
-        let g = self.inner.lock().expect("server lock");
-        if let Some(l) = g.active.get(&id) {
-            return Some(Self::shown(l));
-        }
-        g.done
-            .iter()
-            .rev()
-            .find(|d| d.job.id == id)
-            .map(|d| on_local_node(d.job.clone()))
+        let local = {
+            let g = self.inner.lock().expect("server lock");
+            g.active.get(&id).map(Self::shown).or_else(|| {
+                g.done
+                    .iter()
+                    .rev()
+                    .find(|d| d.job.id == id)
+                    .map(|d| on_local_node(d.job.clone()))
+            })
+        };
+        local.or_else(|| self.jobs().into_iter().find(|j| j.id == id))
     }
 
-    /// The `GET /api/state` snapshot.
-    pub fn state(&self) -> State {
+    /// The `GET /api/state` snapshot of the local pool.
+    fn local_state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
         let m = &g.machine_shown;
         // A guard taken inside the struct literal would live until its end,
@@ -4459,6 +4902,8 @@ impl Server {
             cpu_pressure_max: cpu.cpu_pressure_max,
             headroom_base: base,
             busy_cores: m.busy,
+            host_busy_cores: Some(g.sys_cpu * f64::from(self.cores)),
+            load1: procstat::load1(),
             target_cores: m.target,
             outside_cores: m.outside,
             outside: m.owners.clone(),
@@ -4494,9 +4939,8 @@ impl Server {
         }
     }
 
-    /// The `GET /api/nodes` answer: the daemon's own machine, the only node
-    /// until remote nodes join.
-    pub fn nodes(&self) -> Vec<Node> {
+    /// The daemon's own machine as a node of `GET /api/nodes`.
+    fn local_node(&self) -> Node {
         let now = now_ms();
         let g = self.inner.lock().expect("server lock");
         let cpu_busy = match self.cpu_figure(&g, now) {
@@ -4508,7 +4952,7 @@ impl Server {
         let disk_free = self.cfg.disk_free.unwrap_or(admission::disk_free);
         // Eviction's last look; before one, the filesystem of the state.
         let evicted = self.evict.lock().expect("evict lock").free;
-        let local = local_node(&LocalFacts {
+        local_node(&LocalFacts {
             cluster: &self.host,
             cpus: self.cores,
             slots: self.pool.limit() as u32,
@@ -4523,8 +4967,15 @@ impl Server {
             joined_ms: self.born_ms,
             cpu_busy,
             jobs: &jobs,
-        });
-        vec![local]
+            host: HostFacts {
+                booted_ms: procstat::boot_time_ms(),
+                poweroff_ms: procstat::scheduled_poweroff_ms(),
+                busy: g.sys_cpu * f64::from(self.cores),
+                load1: procstat::load1(),
+            },
+            ended: &g.tally,
+            now,
+        })
     }
 
     fn output(&self, id: i64) -> Output {
@@ -4568,6 +5019,22 @@ struct LocalFacts<'a> {
     cpu_busy: f64,
     /// Queued and running jobs.
     jobs: &'a [&'a Job],
+    host: HostFacts,
+    /// The jobs this node ended.
+    ended: &'a Tally,
+    now: i64,
+}
+
+/// What the daemon reads of the whole machine, beyond its pool.
+struct HostFacts {
+    /// Boot time, Unix ms.
+    booted_ms: Option<i64>,
+    /// The poweroff systemd has scheduled, Unix ms.
+    poweroff_ms: Option<i64>,
+    /// CPUs busy on the whole machine over the last sample.
+    busy: f64,
+    /// One-minute load average.
+    load1: Option<f64>,
 }
 
 const GIB: u64 = 1 << 30;
@@ -4599,7 +5066,7 @@ fn local_node(f: &LocalFacts<'_>) -> Node {
                 .filter(|j| j.state == JobState::Queued)
                 .count(),
         ),
-        slot_version: env!("CARGO_PKG_VERSION").to_string(),
+        slot_version: env!("SLOT_VERSION").to_string(),
         cpu_busy_milli: Some((f.cpu_busy.max(0.0) * 1000.0).round() as u32),
         memory_used_mib: Some(
             u32::try_from(f.memory.saturating_sub(f.available) >> 20).unwrap_or(u32::MAX),
@@ -4612,6 +5079,12 @@ fn local_node(f: &LocalFacts<'_>) -> Node {
         deadline: None,
         gone_reason: None,
         left_at: None,
+        booted_at: f.host.booted_ms.map(crate::types::rfc3339),
+        poweroff_at: f.host.poweroff_ms.map(crate::types::rfc3339),
+        host_cpu_milli: Some((f.host.busy.max(0.0) * 1000.0).round() as u32),
+        load1: f.host.load1,
+        ended_hour: Some(f.ended.last_hour(f.now)),
+        ended_hours: Some(f.ended.hours(f.now)),
     }
 }
 
@@ -4725,6 +5198,9 @@ fn pump(
             return;
         }
         let s = String::from_utf8_lossy(&b).into_owned();
+        if out.tests_at().is_none() && crate::phases::starts_tests(&s) {
+            out.mark_tests(now_ms());
+        }
         out.write(t, s.clone());
         let f = if t == "out" {
             Frame::Out { b: s }
@@ -4983,6 +5459,17 @@ fn record_target(targets: &mut HashMap<PathBuf, (String, i64)>, job: &Job) {
     if when >= e.1 {
         *e = (job.repo.clone(), when);
     }
+}
+
+/// Notes that `job` ran (or waited) in its working directory, with the
+/// latest of its end, start and enqueue time.
+fn record_ran(ran_in: &mut HashMap<PathBuf, i64>, job: &Job) {
+    if job.cwd.is_empty() {
+        return;
+    }
+    let when = job.ended_ms.max(job.started_ms).max(job.enqueued_ms);
+    let e = ran_in.entry(PathBuf::from(&job.cwd)).or_insert(when);
+    *e = (*e).max(when);
 }
 
 fn look_path(name: &str, env: &[String]) -> Result<PathBuf> {

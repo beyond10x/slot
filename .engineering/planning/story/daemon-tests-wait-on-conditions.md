@@ -19,8 +19,8 @@ scope:
   path: docs/design.md
 revision: 8
 transitions:
-- {from: "draft", to: "proposed", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 2}
-- {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "human:timo", revision: 3}
+- {from: "draft", to: "proposed", at: "2026-11-22T18:26:42Z", actor: "agent:slot", revision: 2}
+- {from: "proposed", to: "active", at: "2026-11-22T18:26:42Z", actor: "agent:slot", revision: 3}
 ---
 ## Outcome
 

@@ -142,6 +142,38 @@ pub fn siblings(ws_root: &Path, id: &str, key: &str) -> Result<Vec<String>, Stri
         .collect())
 }
 
+/// Makes `<ws_root>/<id>` a symbolic link to `tree`, a same-path mirror, so
+/// later syncs of the repository find it as a sibling by id. A real
+/// directory there (a mirror synced without same-path) is left alone.
+pub fn link(ws_root: &Path, id: &str, tree: &Path) -> Result<(), String> {
+    if !valid_id(id) {
+        return Err(format!("bad workspace id `{id}`"));
+    }
+    let at = ws_root.join(id);
+    match std::fs::symlink_metadata(&at) {
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::read_link(&at).ok().as_deref() == Some(tree) {
+                return Ok(());
+            }
+            std::fs::remove_file(&at).map_err(|e| format!("{}: {e}", at.display()))?;
+        }
+        Ok(_) => return Ok(()),
+        Err(_) => {}
+    }
+    std::fs::create_dir_all(ws_root).map_err(|e| format!("{}: {e}", ws_root.display()))?;
+    std::os::unix::fs::symlink(tree, &at).map_err(|e| format!("{}: {e}", at.display()))
+}
+
+/// The workspace id whose same-path link (`link`) names a tree that holds
+/// `path`.
+pub fn linked_id(ws_root: &Path, path: &Path) -> Option<String> {
+    std::fs::read_dir(ws_root).ok()?.flatten().find_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let to = std::fs::read_link(e.path()).ok()?;
+        (valid_id(&name) && path.starts_with(&to)).then_some(name)
+    })
+}
+
 /// Forgets the key of mirror `id`, when the mirror is deleted.
 pub fn forget(ws_root: &Path, id: &str) {
     if valid_id(id) {
@@ -268,5 +300,25 @@ mod tests {
         assert_eq!(siblings(ws, "d1", "00000000000000bb").unwrap(), [""; 0]);
         assert!(siblings(ws, "../x", key).is_err());
         assert!(siblings(ws, "d1", "../../etc").is_err());
+    }
+
+    #[test]
+    fn a_same_path_mirror_is_linked_by_id_and_a_real_mirror_is_kept() {
+        let t = tempfile::tempdir().unwrap();
+        let ws = t.path().join("ws");
+        let tree = t.path().join("trees/a");
+        std::fs::create_dir_all(&tree).unwrap();
+        link(&ws, "a1", &tree).unwrap();
+        link(&ws, "a1", &tree).unwrap();
+        assert_eq!(std::fs::read_link(ws.join("a1")).unwrap(), tree);
+        assert_eq!(linked_id(&ws, &tree.join("sub")).as_deref(), Some("a1"));
+        assert_eq!(linked_id(&ws, &t.path().join("trees/b")), None);
+        let moved = t.path().join("trees/b");
+        link(&ws, "a1", &moved).unwrap();
+        assert_eq!(std::fs::read_link(ws.join("a1")).unwrap(), moved);
+        std::fs::create_dir_all(ws.join("b1")).unwrap();
+        link(&ws, "b1", &tree).unwrap();
+        assert!(ws.join("b1").is_dir() && !ws.join("b1").is_symlink());
+        assert!(link(&ws, "../x", &tree).is_err());
     }
 }

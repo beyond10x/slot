@@ -51,7 +51,9 @@ prefix the build and test commands inside it, so a slot is held only while one o
 
 Test binaries in rust, go and wrapper jobs get `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and
 `GOMAXPROCS` from the daemon (a quarter of the pool; go jobs their slot count). Set them yourself
-only when a suite needs a specific value; yours is kept.
+only when a suite needs a specific value; yours is kept. A job that runs on a build node gets its
+width instead: the node's free cores at its start, split over the jobs started with it, also as
+`SLOT_WIDTH` for a Playwright or Vitest config; a lower count you set is raised to it there.
 
 Leave out commands that do not build: `git`, `cargo fmt`, `cargo metadata`, editors and
 rust-analyzer. When the command's own name is a slot subcommand (`serve`, `proxy`, `run`,
@@ -118,7 +120,8 @@ named like a build (`pnpm build`, `yarn typecheck`, `npm run test:unit`, not `de
 build|test|conformance` unless the PATH shim covers it.
 It looks into `bash -c '…'`, `sh -euc '…'`, `eval '…'` and every part of `a && b; c | d`, behind
 `if`, `while`, `until`, `for … do`, `!` and `{`, and behind `env -u FOO` and `timeout -k 5 60`,
-and ignores quoted text, comments and heredoc bodies. `slot …`, `SLOT_SHIM_OFF=1 …` and every
+and ignores quoted text, comments and heredoc bodies. `slot …`, `SLOT_SHIM_OFF=1 …`, a task runner behind
+`SLOT_ORCHESTRATOR=1` (a gate whose steps each call `slot`; the shims stay on) and every
 command inside a slot job (`SLOT_JOB` set) pass. The user sets `SLOT_HOOK=warn` (advice as
 context, nothing refused) or `SLOT_HOOK=off`; a session never sets it to get around a refusal.
 

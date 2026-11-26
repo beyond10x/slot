@@ -30,7 +30,14 @@ pub struct Limits {
     pub min_free_memory: u64,
     /// Free space the build's filesystem must keep, bytes.
     pub min_free_disk: u64,
+    /// Free space the filesystem must keep for a job that compiled nothing
+    /// in its last [`LIGHT_RUNS`] runs, bytes; at most `min_free_disk`.
+    pub min_free_disk_light: u64,
 }
+
+/// Runs of a command that must all have compiled nothing before it waits
+/// at the light disk floor.
+pub const LIGHT_RUNS: usize = 5;
 
 /// CPUs one run used and when it ended, Unix ms.
 type CoresRun = (f64, i64);
@@ -55,6 +62,9 @@ pub struct History {
     cores: HashMap<(String, Vec<String>), VecDeque<CoresRun>>,
     /// The runs that ended ok, for the best earlier run of a command.
     ok_runs: HashMap<(String, Vec<String>), VecDeque<OkRun>>,
+    /// Whether each of the last [`LIGHT_RUNS`] runs of a command that
+    /// started compiled: used a compile server or had a target directory.
+    compiled: HashMap<(String, Vec<String>), VecDeque<bool>>,
 }
 
 fn p90(v: &VecDeque<u64>) -> u64 {
@@ -66,6 +76,16 @@ fn p90(v: &VecDeque<u64>) -> u64 {
 impl History {
     /// Adds a finished job; jobs that never ran or have no sample are skipped.
     pub fn record(&mut self, j: &Job) {
+        if !j.repo.is_empty() && j.started_ms > 0 && j.ended_ms >= j.started_ms {
+            let c = self
+                .compiled
+                .entry((j.repo.clone(), j.argv.clone()))
+                .or_default();
+            c.push_back(j.compile_server_cpu_s > 0.0 || !j.target_dir.is_empty());
+            if c.len() > LIGHT_RUNS {
+                c.pop_front();
+            }
+        }
         if !j.repo.is_empty()
             && j.started_ms > 0
             && j.ended_ms >= j.started_ms
@@ -172,6 +192,15 @@ impl History {
             .min()
     }
 
+    /// Whether a command compiled nothing in its last [`LIGHT_RUNS`] runs in
+    /// this repository: none used a compile server or had a target
+    /// directory. False with fewer runs and without a repository.
+    pub fn compiles_nothing(&self, repo: &str, argv: &[String]) -> bool {
+        self.compiled
+            .get(&(repo.to_string(), argv.to_vec()))
+            .is_some_and(|v| v.len() >= LIGHT_RUNS && v.iter().all(|c| !c))
+    }
+
     /// Expected peak memory of a job, bytes.
     pub fn expected(&self, repo: &str, argv: &[String], toolchain: &str) -> u64 {
         if let Some(v) = self.by_command.get(&(repo.to_string(), argv.to_vec()))
@@ -250,20 +279,29 @@ pub fn gb(bytes: u64) -> String {
 }
 
 /// Why a job must wait for disk: the first of `free` (path, bytes) below
-/// the limit.
-pub fn disk_wait(free: &[(String, u64)], limits: Limits) -> Option<String> {
-    if limits.min_free_disk == 0 {
+/// its floor. A job that compiled nothing in its last [`LIGHT_RUNS`] runs
+/// (`light`) has the light floor, at most the build floor; every other job
+/// the build floor. The text names the floor that holds the job.
+pub fn disk_wait(free: &[(String, u64)], limits: Limits, light: bool) -> Option<String> {
+    let build = limits.min_free_disk;
+    if build == 0 {
         return None;
     }
-    free.iter()
-        .find(|(_, f)| *f < limits.min_free_disk)
-        .map(|(p, f)| {
+    let light_floor = limits.min_free_disk_light.min(build);
+    let (floor, needs) = if light && light_floor < build {
+        (
+            light_floor,
             format!(
-                "{} free on the filesystem of {p}, builds need {}",
-                gb(*f),
-                gb(limits.min_free_disk)
-            )
-        })
+                "this job needs {} (no compile in its last {LIGHT_RUNS} runs)",
+                gb(light_floor)
+            ),
+        )
+    } else {
+        (build, format!("builds need {}", gb(build)))
+    };
+    free.iter()
+        .find(|(_, f)| *f < floor)
+        .map(|(p, f)| format!("{} free on the filesystem of {p}, {needs}", gb(*f)))
 }
 
 /// Why a job must wait for memory: what is available, less what jobs that
@@ -323,6 +361,7 @@ mod tests {
             compile_server_cpu_s: 0.0,
             peak_rss: rss,
             wait_reason: String::new(),
+            local_reason: String::new(),
             target_dir: String::new(),
             priority: crate::types::Priority::Normal,
             promoted: false,
@@ -339,6 +378,17 @@ mod tests {
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
             node: String::new(),
+            from_node: false,
+            sync_ms: None,
+            sync_bytes: None,
+            back_ms: None,
+            compile_ms: None,
+            test_ms: None,
+            node_target_dir: None,
+            seeded_from: None,
+            width: None,
+            warm: false,
+            cancel_reason: String::new(),
         }
     }
 
@@ -422,17 +472,108 @@ mod tests {
         let l = Limits {
             min_free_memory: 0,
             min_free_disk: 25 * GB,
+            min_free_disk_light: 0,
         };
-        assert_eq!(disk_wait(&[("/w".into(), 30 * GB)], l), None);
+        assert_eq!(disk_wait(&[("/w".into(), 30 * GB)], l, false), None);
         assert_eq!(
-            disk_wait(&[("/w".into(), 30 * GB), ("/t".into(), 18 * GB)], l).as_deref(),
+            disk_wait(&[("/w".into(), 30 * GB), ("/t".into(), 18 * GB)], l, false).as_deref(),
             Some("18.0 GB free on the filesystem of /t, builds need 25.0 GB")
         );
         assert_eq!(
-            disk_wait(&[("/t".into(), 0)], Limits::default()),
+            disk_wait(&[("/t".into(), 0)], Limits::default(), false),
             None,
             "off"
         );
+    }
+
+    /// A job that compiled nothing in its last 5 runs waits at the light
+    /// floor and is told so; no job starts below it; the light floor is at
+    /// most the build floor, and equal to it a light job reads as a build.
+    #[test]
+    fn a_light_job_waits_at_the_light_floor_and_none_starts_below_it() {
+        let l = Limits {
+            min_free_memory: 0,
+            min_free_disk: 40 * GB,
+            min_free_disk_light: 10 * GB,
+        };
+        let at = |f: u64, light: bool, l: Limits| disk_wait(&[("/w".into(), f)], l, light);
+        assert_eq!(at(20 * GB, true, l), None, "light: starts at 20 GB");
+        assert_eq!(
+            at(20 * GB, false, l).as_deref(),
+            Some("20.0 GB free on the filesystem of /w, builds need 40.0 GB")
+        );
+        assert_eq!(
+            at(5 * GB, true, l).as_deref(),
+            Some(
+                "5.0 GB free on the filesystem of /w, \
+                 this job needs 10.0 GB (no compile in its last 5 runs)"
+            ),
+            "the hard floor"
+        );
+        let same = Limits {
+            min_free_disk_light: 40 * GB,
+            ..l
+        };
+        assert_eq!(
+            at(20 * GB, true, same).as_deref(),
+            Some("20.0 GB free on the filesystem of /w, builds need 40.0 GB"),
+            "the default: as before"
+        );
+        let above = Limits {
+            min_free_disk_light: 60 * GB,
+            ..l
+        };
+        assert_eq!(at(45 * GB, true, above), None, "at most the build floor");
+        let off = Limits {
+            min_free_disk: 0,
+            ..l
+        };
+        assert_eq!(at(1, true, off), None, "the build floor 0 turns both off");
+    }
+
+    /// A command compiles nothing after 5 runs in its repository with no
+    /// compile server CPU and no target directory; fewer runs, a compile or
+    /// a target directory among the last 5, or no repository say it may.
+    #[test]
+    fn compiles_nothing_needs_5_runs_without_a_compile() {
+        let mut h = History::default();
+        let j = job("a", "task test", "other", 0);
+        assert!(!h.compiles_nothing("a", &j.argv), "a first run");
+        for _ in 0..4 {
+            h.record(&j);
+        }
+        assert!(!h.compiles_nothing("a", &j.argv), "4 runs");
+        h.record(&j);
+        assert!(h.compiles_nothing("a", &j.argv), "5 runs");
+        assert!(!h.compiles_nothing("b", &j.argv), "another repository");
+
+        let mut built = j.clone();
+        built.compile_server_cpu_s = 0.5;
+        h.record(&built);
+        assert!(!h.compiles_nothing("a", &j.argv), "a compile in the last 5");
+        for _ in 0..4 {
+            h.record(&j);
+        }
+        assert!(!h.compiles_nothing("a", &j.argv), "still in the last 5");
+        h.record(&j);
+        assert!(h.compiles_nothing("a", &j.argv), "out of the last 5");
+
+        let mut targeted = j.clone();
+        targeted.target_dir = "/w/target".into();
+        h.record(&targeted);
+        assert!(!h.compiles_nothing("a", &j.argv), "a target directory");
+
+        let mut queued = job("q", "task test", "other", 0);
+        queued.started_ms = 0;
+        for _ in 0..5 {
+            h.record(&queued);
+        }
+        assert!(!h.compiles_nothing("q", &queued.argv), "never started");
+        let none = job("", "task test", "other", 0);
+        for _ in 0..5 {
+            h.record(&none);
+        }
+        assert!(!h.compiles_nothing("", &none.argv), "no repository");
     }
 
     #[test]
@@ -440,6 +581,7 @@ mod tests {
         let l = Limits {
             min_free_memory: 4 * GB,
             min_free_disk: 0,
+            min_free_disk_light: 0,
         };
         assert_eq!(memory_wait(50 * GB, 0, 4 * GB, l, true), None);
         assert!(memory_wait(7 * GB, 0, 4 * GB, l, true).is_some());

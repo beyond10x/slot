@@ -113,6 +113,35 @@ A single static binary on `PATH` (Go; see §10).
 - **Job log.** One JSONL line per job: ws-id, repo, argv, enqueue, start, end, exit code, peak RSS,
   tokens held. This replaces mining session logs for the numbers in section 1.
 
+### 3.2a Same-path mirrors
+
+`SLOT_REMOTE_SAME_PATH=1` on the client mirrors the tree at the client's absolute toplevel instead
+of `<ws-root>/<id>`, so absolute paths into the tree and the compiler's working directory are the
+same on both machines; it assumes the server's account has the same home. The request carries
+`workspace.same_path`; the daemon (`slot serve --same-path-root DIR`, repeatable) runs the job
+there only below such a DIR, and `slot shell --same-path-root DIR` admits the sync, fetches and
+`slot __siblings <ws-root> <id> <key> <tree>` below it. The sibling step makes `<ws-root>/<id>` a
+symbolic link to the tree, so sibling seeding by id and the busy set of eviction keep working;
+the sync names a sibling as the absolute `--copy-dest=<ws-root>/<id>`. Eviction removes the link,
+not the tree. The sandbox binds the tree writable at its path (`--sandbox-fixed-paths` is not
+combined with it).
+
+A same-path job runs as on a CI runner (`same_path.rs`). The tree sync keeps a linked worktree's
+`.git` file (`--exclude=/.git/`); the git directories (`--git-common-dir`, and `--git-dir` when
+outside it) follow in syncs of their own at their paths, `*.lock` excluded, one at a time per
+directory and host. A working directory the tree sync leaves out (under a toolchain exclude or
+`git check-ignore`) is synced on its own with the `.gitignore` filter and `--exclude=/target/`.
+Outside any git checkout the working directory is the tree, unless it is the same-path root or
+above it, lies directly under it, or holds a repository within two levels
+(`same_path::tree_refusal`, checked before any sync; a folder that cannot be read is refused):
+the job ends with exit 3 and nothing is synced. A folder of several repositories was once synced
+whole, with every git-ignored file in it. The request carries
+`workspace.target_dir`: `CARGO_TARGET_DIR` of the client, else `cargo metadata`'s
+`target_directory` for the command's manifest, else `target` beside the nearest lock file; empty
+for a command that is not cargo. The daemon admits it only below a `--same-path-root`, sets
+`CARGO_TARGET_DIR` to it (or unsets it, keeping cargo's default in the tree), binds it writable
+in the sandbox and names it in the `start` frame, so products are fetched to the same path.
+
 ### 3.3 Transport and access
 
 - ssh with a dedicated key whose `authorized_keys` entry has
@@ -553,7 +582,17 @@ Before a job takes slots, `Server::short_of` checks, in this order:
 - **Disk.** `statvfs` of the job's directory and of its `CARGO_TARGET_DIR` (relative to the
   directory when relative), at the nearest existing ancestor. Under `--min-free-disk` (GB,
   default 25, 0 off) the job waits. Disk does not come back by waiting for other jobs, so a job
-  alone waits too, until space is freed.
+  alone waits too, until space is freed. A job whose last 5 runs of the same `(repo, argv)`
+  (`admission::History`, from `jobs.jsonl`) all had `compile_server_cpu_s` 0 and no
+  `target_dir` waits at `--min-free-disk-light` instead (GB, default the value of
+  `--min-free-disk`, at most that value; 0 lets it start on any free space). A first run, a job
+  without a repository and a job with a compile in its last 5 wait at `--min-free-disk`. The
+  reason names the floor: `builds need 40.0 GB` or `this job needs 10.0 GB (no compile in its
+  last 5 runs)`. Why: toolchain `other` covers `task check`, whose cargo calls run inside the
+  job, so the toolchain cannot tell a build from a job that writes next to nothing; its own
+  record can. Risk: a script that starts compiling after 5 runs without writes fills the disk
+  down to the light floor before its record shows the compile; the light floor is the hard
+  floor no job starts below.
 - **Memory.** `MemAvailable` less a reservation must cover the job's expected peak plus
   `--min-free-memory` (GB, default 4, 0 off). The reservation is, for each job that started in the
   last 30 s, its expected peak less its sampled memory: a burst of jobs admitted together would
@@ -816,6 +855,14 @@ Seeding and eviction (`server/cache.rs`), measured on the same guest with the ca
 
 The budget counts each target directory in full, so reflinked copies count once per worktree
 although they share blocks: xfs showed 4.2 GB used for two directories recorded as 9.7 GB.
+
+"Sources older than the copied outputs" was also the defect: it held for a source that differed
+from the sibling's too, so cargo ran the sibling's build of the old source. Since then the sync
+keeps the server's modification times (`--no-times`; a changed file gets the time the sync wrote
+it), and after a seed every source file of the new mirror with the sibling's bytes takes the
+sibling's time, every other one a time after every file of the copy (`cache::align_sources`).
+The second row's 0 units hold only for sources that match the sibling's byte for byte. Not
+measured again on the guest.
 
 The forced command (`slot shell`, `shell.rs`) on the same guest, with a second key whose
 `authorized_keys` line is `command="…/slot shell --cache-root …",restrict`: a build, a build with

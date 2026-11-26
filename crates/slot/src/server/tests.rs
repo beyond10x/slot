@@ -81,6 +81,7 @@ fn config(root: &Path, tokens: usize) -> Config {
         cpu_bound_gap: Duration::from_millis(cpu_limit::STARTING_MS as u64),
         cpu_pressure: None,
         cache_budget: 0,
+        seed_copy: cache::SeedCopy::Reflink,
         evict: crate::evict::Settings {
             floor: 0,
             margin: 0,
@@ -91,6 +92,8 @@ fn config(root: &Path, tokens: usize) -> Config {
         exec_shim: None,
         handover: true,
         sandbox: None,
+        cluster_file: None,
+        same_path_roots: Vec::new(),
     }
 }
 
@@ -124,7 +127,7 @@ fn collect(c: UnixStream) -> Res {
         match serde_json::from_str::<Frame>(&line).unwrap() {
             Frame::Out { b } => r.out += &b,
             Frame::Err { b } => r.err += &b,
-            Frame::Info { msg } => r.info += &msg,
+            Frame::Info { msg } | Frame::Fallback { msg } => r.info += &msg,
             Frame::Start { .. } => r.started = true,
             Frame::Exit { code } => {
                 r.code = code;
@@ -188,7 +191,7 @@ fn nodes_answers_the_local_machine_and_jobs_name_it() {
         n.joined_at.as_deref().is_some_and(|t| t.ends_with('Z')),
         "{text}"
     );
-    assert_eq!(n.slot_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(n.slot_version, env!("SLOT_VERSION"));
     assert!(!text.contains("\"deadline\""), "{text}");
 }
 
@@ -222,6 +225,14 @@ fn the_local_node_counts_jobs_slots_and_sizes() {
         joined_ms: 1_763_899_200_000,
         cpu_busy: 3.4567,
         jobs: &jobs,
+        host: HostFacts {
+            booted_ms: None,
+            poweroff_ms: None,
+            busy: 0.0,
+            load1: None,
+        },
+        ended: &Tally::default(),
+        now: 1_763_899_200_000,
     });
     assert_eq!((n.slots_in_use, n.running_jobs, n.queued_jobs), (5, 2, 1));
     assert_eq!((n.memory_gib, n.disk_gib), (32, 1800));
@@ -231,6 +242,109 @@ fn the_local_node_counts_jobs_slots_and_sizes() {
     assert_eq!(n.joined_at.as_deref(), Some("2025-11-23T12:00:00Z"));
     assert_eq!(n.cluster_id, "host");
     assert_eq!(on_local_node(a.clone()).node, LOCAL_NODE);
+}
+
+/// The local node reports the machine's boot, its scheduled poweroff, the
+/// CPUs busy on the whole host and its load, beside the pool's own CPUs.
+#[test]
+fn the_local_node_reports_boot_poweroff_and_the_whole_host() {
+    let tally = Tally::default();
+    let n = local_node(&LocalFacts {
+        cluster: "host",
+        cpus: 20,
+        slots: 16,
+        memory: 32 << 30,
+        available: 20 << 30,
+        disk_total: 1800 << 30,
+        disk_free: 604 << 30,
+        joined_ms: 1_763_899_200_000,
+        cpu_busy: 0.0,
+        jobs: &[],
+        host: HostFacts {
+            booted_ms: Some(1_763_895_600_000),
+            poweroff_ms: Some(1_763_942_400_000),
+            busy: 4.1234,
+            load1: Some(5.31),
+        },
+        ended: &tally,
+        now: 1_763_899_200_000,
+    });
+    assert_eq!(n.cpu_busy_milli, Some(0));
+    assert_eq!(n.host_cpu_milli, Some(4123));
+    assert_eq!(n.load1, Some(5.31));
+    assert_eq!(n.booted_at.as_deref(), Some("2025-11-23T11:00:00Z"));
+    assert_eq!(n.poweroff_at.as_deref(), Some("2025-11-24T00:00:00Z"));
+}
+
+/// A job-log line of a finished job, `ended_ms` and `exit` given.
+fn log_line(id: i64, ended_ms: i64, state: &str, exit: i32, node: &str) -> String {
+    format!(
+        r#"{{"id":{id},"argv":["true"],"cwd":"/w","repo":"r","toolchain":"other","remote":false,"tokens":1,"state":"{state}","enqueued_ms":{s},"started_ms":{s},"ended_ms":{ended_ms},"exit":{exit},"cpu_s":0.0,"compile_server_cpu_s":0.0,"peak_rss":0,"node":"{node}"}}"#,
+        s = ended_ms - 1000
+    )
+}
+
+/// The node's counts of finished jobs come from its whole job log, not
+/// from the finished jobs it keeps for the page: the last 60 minutes and
+/// each clock hour of the last 25, failures split by cause; a job this
+/// daemon handed to a node counts on that node, not here.
+#[test]
+fn the_local_node_counts_ended_jobs_from_the_job_log_by_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let mut cfg = config(&root, 2);
+    cfg.keep_jobs = 3;
+    std::fs::create_dir_all(&cfg.state_dir).unwrap();
+    let now = now_ms();
+    let min = 60_000;
+    let mut lines = Vec::new();
+    let mut id = 0;
+    let mut add = |ago_min: i64, state: &str, exit: i32, node: &str| {
+        id += 1;
+        lines.push(log_line(id, now - ago_min * min, state, exit, node));
+    };
+    for _ in 0..20 {
+        add(10, "ok", 0, "local");
+    }
+    add(11, "failed", 101, "local");
+    add(12, "failed", 1, "");
+    add(13, "failed", 124, "local");
+    add(14, "failed", 127, "local");
+    add(15, "failed", 3, "local");
+    add(16, "failed", 125, "local");
+    add(17, "cancelled", -1, "local");
+    add(20, "failed", 101, "build-1");
+    add(180, "ok", 0, "local");
+    add(30 * 60, "ok", 0, "local");
+    std::fs::write(cfg.state_dir.join("jobs.jsonl"), lines.join("\n") + "\n").unwrap();
+    let server = Server::new(cfg).unwrap();
+    let n = server.nodes().remove(0);
+    assert_eq!(
+        n.ended_hour,
+        Some(crate::types::Outcomes {
+            ok: 20,
+            test: 2,
+            timeout: 1,
+            infra: 3,
+            cancelled: 1,
+        })
+    );
+    let hours = n.ended_hours.unwrap_or_default();
+    let ok: u32 = hours.iter().map(|h| h.n.ok).sum();
+    assert_eq!(ok, 21, "the job of 3 h ago counts, the one of 30 h ago not");
+    assert!(hours.windows(2).all(|w| w[0].t < w[1].t), "oldest first");
+    assert!(hours.iter().all(|h| h.t % 3_600_000 == 0), "whole hours");
+}
+
+/// A job that ends is counted at once, by its cause.
+#[test]
+fn an_ended_job_is_counted_by_its_cause() {
+    let f = start(2);
+    assert_eq!(run(&f, sh(&f.root, "exit 127")).code, 127);
+    assert_eq!(run(&f, sh(&f.root, "exit 0")).code, 0);
+    let n = f.server.nodes().remove(0);
+    let h = n.ended_hour.unwrap_or_default();
+    assert_eq!((h.ok, h.infra, h.test), (1, 1, 0));
 }
 
 #[test]
@@ -598,6 +712,8 @@ fn workspace_is_confined_and_paths_rewritten() {
             id: "../x".into(),
             rel_cwd: ".".into(),
             client_root: String::new(),
+            same_path: false,
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -608,13 +724,65 @@ fn workspace_is_confined_and_paths_rewritten() {
         workspace: Some(Workspace {
             id: "abc".into(),
             rel_cwd: "../../..".into(),
+            same_path: false,
             client_root: "/client".into(),
+            ..Workspace::default()
         }),
         ..Request::default()
     };
     let r = run(&f, req);
     assert_eq!(r.code, 0, "{r:?}");
     assert_eq!(r.out.trim(), "/client");
+}
+
+/// On an idle node of 64 CPUs a remote job gets the whole node as its
+/// width, past the 16 test threads of the workstation rule, and raises a
+/// lower count its caller sent; a second job started within the window
+/// gets half. A local job keeps the workstation rule.
+#[test]
+fn a_remote_job_on_an_idle_64_cpu_node_gets_the_free_cores() {
+    let f = start_cfg(64, |c| {
+        c.host_cpus = Some(64);
+        c.test_threads = 16;
+        c.cpu_busy = Some(|| Some(cpu_limit::Parts::default()));
+    });
+    std::fs::create_dir_all(f.root.join("ws/w1")).unwrap();
+    let show = "echo $RUST_TEST_THREADS $NEXTEST_TEST_THREADS w=$SLOT_WIDTH j=$CARGO_BUILD_JOBS";
+    let remote = || Request {
+        argv: vec!["sh".into(), "-c".into(), show.into()],
+        env: vec![
+            "RUST_TEST_THREADS=1".into(),
+            "NEXTEST_TEST_THREADS=4".into(),
+        ],
+        workspace: Some(Workspace {
+            id: "w1".into(),
+            rel_cwd: ".".into(),
+            client_root: "/c".into(),
+            ..Workspace::default()
+        }),
+        ..Request::default()
+    };
+    let r = run(&f, remote());
+    assert_eq!(r.out.trim(), "64 64 w=64 j=", "{r:?}");
+    let r = run(&f, remote());
+    assert_eq!(r.out.trim(), "32 32 w=32 j=", "{r:?}");
+    // A bound per job lower than the width is raised to it: the third
+    // start within the window gets a third of the free CPUs.
+    assert_eq!(set_job_parallel(&f, Some(4)), Some(4));
+    let r = run(&f, remote());
+    assert_eq!(r.out.trim(), "21 21 w=21 j=21", "{r:?}");
+    let widths: Vec<_> = f.server.state().done.iter().map(|j| j.width).collect();
+    assert_eq!(widths, [Some(64), Some(32), Some(21)], "oldest first");
+
+    let mut local = sh(&f.root, show);
+    local.env = std::env::vars()
+        .filter(|(k, _)| k == "PATH")
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(["NEXTEST_TEST_THREADS=4".to_string()])
+        .collect();
+    let r = run(&f, local);
+    assert_eq!(r.out.trim(), "16 4 w= j=4", "{r:?}");
+    assert_eq!(f.server.state().done.last().unwrap().width, None);
 }
 
 #[test]
@@ -630,8 +798,10 @@ fn remote_job_gets_server_path_and_client_flags() {
         env: vec!["RUSTFLAGS=-Cx".into()],
         workspace: Some(Workspace {
             id: "w1".into(),
+            same_path: false,
             rel_cwd: ".".into(),
             client_root: "/c".into(),
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -720,6 +890,7 @@ fn history_survives_restart() {
         cpu_bound_gap: Duration::from_millis(cpu_limit::STARTING_MS as u64),
         cpu_pressure: None,
         cache_budget: 0,
+        seed_copy: cache::SeedCopy::Reflink,
         evict: crate::evict::Settings {
             floor: 0,
             margin: 0,
@@ -730,6 +901,8 @@ fn history_survives_restart() {
         exec_shim: None,
         handover: true,
         sandbox: None,
+        cluster_file: None,
+        same_path_roots: Vec::new(),
     })
     .unwrap();
     let st = again.state();
@@ -787,6 +960,7 @@ fn a_job_waits_while_the_disk_is_short_and_can_be_cancelled() {
         crate::admission::Limits {
             min_free_memory: 0,
             min_free_disk: u64::MAX,
+            min_free_disk_light: 0,
         },
     );
     let c = send(&f.socket, sh(&f.root, "echo ran"));
@@ -811,6 +985,7 @@ fn memory_short_holds_a_job_only_while_another_runs() {
         crate::admission::Limits {
             min_free_memory: u64::MAX / 4,
             min_free_disk: 0,
+            min_free_disk_light: 0,
         },
     );
     let alone = run(&f, sh(&f.root, "echo alone"));
@@ -1527,7 +1702,7 @@ fn a_rust_job_logs_its_cache_environment_and_is_warned_when_the_cache_is_off() {
     for line in BufReader::new(c).lines() {
         match serde_json::from_str::<Frame>(&line.unwrap()).unwrap() {
             Frame::Info { msg } if !started => before_start.push(msg),
-            Frame::Info { .. } | Frame::Err { .. } => {}
+            Frame::Info { .. } | Frame::Err { .. } | Frame::Fallback { .. } => {}
             Frame::Out { b } => {
                 assert!(!before_start.is_empty(), "output before the warnings");
                 out += &b;
@@ -1977,9 +2152,11 @@ fn the_target_directory_holds_back_only_builds_into_the_same_directory() {
         cwd: String::new(),
         env: Vec::new(),
         workspace: Some(Workspace {
+            same_path: false,
             id: "w1".into(),
             rel_cwd: ".".into(),
             client_root: "/c".into(),
+            ..Workspace::default()
         }),
         ..fake_build(&f.root, &target, "echo ran")
     };
@@ -3421,7 +3598,10 @@ fn eviction_starts_at_the_disk_holds_mark_and_the_held_job_starts() {
     assert!(target.exists(), "60 GB free: nothing to delete");
 
     FREE.store(45 * GB, SeqCst);
-    let (c, id) = submit(&f, sh(&f.root, "echo ran"));
+    // The job works in another tree: its own would keep the target.
+    let elsewhere = f.root.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (c, id) = submit(&f, sh(&elsewhere, "echo ran"));
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let r = collect(c);
     assert!(
@@ -3470,6 +3650,90 @@ fn evict_below_0_stays_off_whatever_the_disk_hold_is() {
     let e = f.server.state().evict;
     assert_eq!((e.floor, e.checked_ms), (0, 0), "{e:?}");
     drop(c);
+}
+
+/// Records five ended runs of `sh -c echo light` in `repo`; the run at
+/// index `compiled` used a compile server for 3 s, the one at index
+/// `targeted` built into a target directory. Returns the command's request.
+fn give_light_history(
+    f: &Fixture,
+    repo: &str,
+    compiled: Option<usize>,
+    targeted: Option<usize>,
+) -> Request {
+    let mut req = sh(&f.root, "echo light");
+    req.repo = repo.into();
+    let mut j = serde_json::from_str::<Job>(
+        r#"{"id":1,"argv":[],"cwd":"/w","repo":"","toolchain":"other",
+        "remote":false,"tokens":1,"state":"ok","enqueued_ms":1,"started_ms":0,
+        "ended_ms":0,"exit":0,"cpu_s":1.0,"compile_server_cpu_s":0.0,"peak_rss":0}"#,
+    )
+    .unwrap();
+    j.repo = repo.into();
+    j.argv.clone_from(&req.argv);
+    let now = now_ms();
+    for i in 0..crate::admission::LIGHT_RUNS {
+        j.started_ms = now - 10_000 * (5 - i as i64);
+        j.ended_ms = j.started_ms + 2_000;
+        j.compile_server_cpu_s = if compiled == Some(i) { 3.0 } else { 0.0 };
+        j.target_dir = if targeted == Some(i) {
+            f.root.join("target").to_string_lossy().into_owned()
+        } else {
+            String::new()
+        };
+        f.server.inner.lock().unwrap().memory.record(&j);
+    }
+    req
+}
+
+/// With 20 GB free, `--min-free-disk 40` and `--min-free-disk-light 10`: a
+/// command whose last 5 runs compiled nothing and built into no target
+/// directory starts; the same command in a repository where it never ran
+/// waits at the build floor, and so does one with a compile or a target
+/// directory in its last 5 runs.
+#[test]
+fn a_job_that_compiled_nothing_in_its_last_5_runs_starts_above_the_light_floor() {
+    const GB: u64 = crate::admission::GB;
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(20 * GB)
+    }
+    let f = start_cfg(2, |c| {
+        c.disk_free = Some(free);
+        c.admission.min_free_disk = 40 * GB;
+        c.admission.min_free_disk_light = 10 * GB;
+        c.resource_poll = Duration::from_millis(20);
+    });
+    let light = give_light_history(&f, "quiet", None, None);
+    let compiled = give_light_history(&f, "built-once", Some(4), None);
+    let targeted = give_light_history(&f, "targeted-once", None, Some(0));
+    let mut first = sh(&f.root, "echo light");
+    first.repo = "never-ran".into();
+
+    let mut held = Vec::new();
+    for req in [first, compiled, targeted] {
+        let (c, id) = submit(&f, req);
+        wait_for_jobs(&f, "the job to be held at the build floor", || {
+            reason_of(&f, id).contains("builds need 40.0 GB")
+        });
+        held.push((c, id));
+    }
+    let (c, id) = submit(&f, light);
+    // A held job sends nothing more: the read ends after 5 s.
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let r = collect(c);
+    assert_eq!(
+        (r.code, r.out.as_str()),
+        (0, "light\n"),
+        "job {id}: {r:?}, reason {:?}",
+        reason_of(&f, id)
+    );
+    assert!(!r.info.contains("waiting"), "started at once: {r:?}");
+    std::thread::sleep(Duration::from_millis(100));
+    for (_, id) in &held {
+        assert_eq!(state_of(&f, *id), JobState::Queued, "job {id}");
+    }
+    drop(held);
 }
 
 /// Status and text of the answer to `PUT /api/evict-below` with `body`.
@@ -3599,13 +3863,13 @@ fn the_idle_keep_is_set_at_run_time_and_applies_at_the_next_look() {
         .lock()
         .unwrap()
         .targets
-        .insert(target.clone(), ("recent".into(), now_ms() - 40 * 60_000));
+        .insert(target.clone(), ("recent".into(), now_ms() - 90 * 60_000));
     let v = evict_view(put_evict_below(&f, r#"{"evict_below_gb":50}"#));
     assert_eq!((v.evict_idle_s, v.idle_s), (None, 7200), "the default");
     wait_for_jobs(&f, "the look at the new mark", || {
         f.server.state().evict.checked_ms > 0
     });
-    assert!(target.exists(), "built 40 min ago: kept at 2 h");
+    assert!(target.exists(), "built 90 min ago: kept at 2 h");
 
     let v = evict_view(put_evict_below(&f, r#"{"evict_idle_s":1800}"#));
     assert_eq!((v.evict_idle_s, v.idle_s), (Some(1800), 1800));
@@ -4998,6 +5262,8 @@ fn a_sandboxed_workspace_job_writes_only_what_it_builds() {
             id: "mine".into(),
             rel_cwd: ".".into(),
             client_root: "/client".into(),
+            same_path: false,
+            ..Workspace::default()
         }),
         ..Request::default()
     };
@@ -5182,4 +5448,296 @@ fn with_fixed_paths_two_worktrees_build_at_the_same_paths() {
         "{:?}",
         started.elapsed()
     );
+}
+
+/// A synced cargo test job of workspace `ws`, repository `r`, whose client
+/// measured its sync; the command, `cargo-test` as a link to the shell,
+/// compiles for 300 ms into its target directory and then runs its tests
+/// for 200 ms.
+fn synced_test(f: &Fixture, ws: &str) -> Request {
+    std::fs::create_dir_all(f.root.join("ws").join(ws)).unwrap();
+    let script = "mkdir -p \"$CARGO_TARGET_DIR/debug\"; echo '   Compiling x v0.1.0' >&2; \
+                  sleep 0.3; echo '     Running unittests src/lib.rs (target/debug/deps/x-1)' >&2; \
+                  sleep 0.2; echo 'test adds ... ok'";
+    Request {
+        cwd: String::new(),
+        env: Vec::new(),
+        repo: "r".into(),
+        sync_ms: Some(1234),
+        sync_bytes: Some(5678),
+        workspace: Some(Workspace {
+            id: ws.into(),
+            rel_cwd: ".".into(),
+            client_root: "/srv/acct/r".into(),
+            ..Workspace::default()
+        }),
+        ..fake_build(&f.root, &f.root.join("unused"), script)
+    }
+}
+
+/// Runs `req` and returns its result and the `seeded_from` of its start
+/// frame.
+fn run_seeded(f: &Fixture, req: Request) -> (Res, Option<String>) {
+    let mut r = Res {
+        code: -999,
+        ..Res::default()
+    };
+    let mut seeded = None;
+    for line in BufReader::new(send(&f.socket, req)).lines() {
+        let Ok(line) = line else { break };
+        match serde_json::from_str::<Frame>(&line).unwrap() {
+            Frame::Out { b } => r.out += &b,
+            Frame::Err { b } => r.err += &b,
+            Frame::Info { msg } | Frame::Fallback { msg } => r.info += &msg,
+            Frame::Start { seeded_from, .. } => {
+                r.started = true;
+                seeded = seeded_from;
+            }
+            Frame::Exit { code } => {
+                r.code = code;
+                break;
+            }
+        }
+    }
+    (r, seeded)
+}
+
+/// A synced cargo test job's record carries the sync its client measured,
+/// the target directory it built into on this server and what that held
+/// when the job queued (also in its start frame), and its compile and test
+/// time split at the first test binary. The client's back time comes after
+/// the job, once, and is in the job log for the next start. A local job
+/// takes none of the sync fields, and a job that runs no tests has no split.
+#[test]
+fn a_jobs_record_names_its_sync_phases_and_seed_on_the_node() {
+    let f = start(1);
+    let target = f.root.join("cache/target/w1");
+    let (r, seeded) = run_seeded(&f, synced_test(&f, "w1"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(seeded.as_deref(), Some("empty"));
+    let first = last_logged(&f);
+    assert_eq!((first.sync_ms, first.sync_bytes), (Some(1234), Some(5678)));
+    assert_eq!(first.back_ms, None);
+    assert_eq!(
+        first.node_target_dir.as_deref(),
+        Some(target.to_str().unwrap())
+    );
+    assert_eq!(first.seeded_from.as_deref(), Some("empty"));
+    let (compile, test) = (first.compile_ms.unwrap(), first.test_ms.unwrap());
+    assert!(compile >= 250, "compile {compile} ms, test {test} ms");
+    assert!(test >= 150, "compile {compile} ms, test {test} ms");
+    assert_eq!(
+        compile + test,
+        u64::try_from(first.ended_ms - first.started_ms).unwrap()
+    );
+
+    let (r, seeded) = run_seeded(&f, synced_test(&f, "w1"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert_eq!(seeded.as_deref(), Some("kept"));
+    assert_eq!(last_logged(&f).seeded_from.as_deref(), Some("kept"));
+
+    // A sibling of the same repository is seeded from w1 where the
+    // filesystem makes reflink copies, else it starts empty.
+    let (r, seeded) = run_seeded(&f, synced_test(&f, "w2"));
+    assert_eq!(r.code, 0, "{r:?}");
+    let want = if r.info.contains("seeded from workspace w1") {
+        "w1"
+    } else {
+        "empty"
+    };
+    assert_eq!(seeded.as_deref(), Some(want), "{}", r.info);
+    assert_eq!(last_logged(&f).seeded_from.as_deref(), Some(want));
+
+    let amend = |id, back_ms| Request {
+        amend: Some(crate::proto::Amend { id, back_ms }),
+        ..Request::default()
+    };
+    assert_eq!(run(&f, amend(first.id, Some(77))).code, 0);
+    assert_eq!(done_job(&f, first.id).back_ms, Some(77));
+    let r = run(&f, amend(first.id, Some(99)));
+    assert_eq!(r.code, 1, "once: {r:?}");
+    assert_eq!(done_job(&f, first.id).back_ms, Some(77));
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let line = format!(r#"{{"amend":{},"back_ms":77}}"#, first.id);
+    assert!(log.lines().any(|l| l == line), "{log}");
+
+    let mut local = fake_build(&f.root, &f.root.join("target"), "echo ran");
+    local.sync_ms = Some(1);
+    local.sync_bytes = Some(2);
+    assert_eq!(run(&f, local).code, 0);
+    let j = last_logged(&f);
+    assert_eq!((j.sync_ms, j.sync_bytes), (None, None));
+    assert_eq!((j.node_target_dir, j.seeded_from), (None, None));
+    assert_eq!(j.compile_ms.map(|_| ()), Some(()), "a cargo test job");
+    assert_eq!(j.test_ms, None, "no test binary ran");
+    let r = run(&f, amend(j.id, Some(5)));
+    assert_eq!(r.code, 1, "a local job: {r:?}");
+    assert_eq!(run(&f, sh(&f.root, "true")).code, 0);
+    let j = last_logged(&f);
+    assert_eq!((j.compile_ms, j.test_ms), (None, None));
+
+    let again = Server::new(config(&f.root, 1)).unwrap();
+    let read = again
+        .state()
+        .done
+        .into_iter()
+        .find(|j| j.id == first.id)
+        .unwrap();
+    assert_eq!(read.back_ms, Some(77), "the amend line, read at start");
+}
+
+/// What `slot warm` sends after a merge to `main` of repository `repo`:
+/// `script` stands for the build of the tree's tests.
+fn merge_of(f: &Fixture, repo: &str, script: &str) -> Request {
+    let mut r = sh(&f.root, script);
+    r.repo = repo.into();
+    r.warm = true;
+    r
+}
+
+fn warm_jobs(f: &Fixture) -> Vec<Job> {
+    f.server
+        .state()
+        .active
+        .into_iter()
+        .filter(|j| j.warm)
+        .collect()
+}
+
+/// Told of a merge of a repository that built here in the last 24 hours,
+/// the daemon answers at once and starts one warm-up job at `low`, the
+/// lowest level, over a rule that puts the repository on `high`; a second
+/// word of the same merge starts none. A job a session submits next waits
+/// for the slot and preempts it: the warm-up ends cancelled with the job
+/// that preempted it as its reason, and the session's job runs.
+#[test]
+fn a_merge_starts_one_low_warm_up_and_a_sessions_next_job_preempts_it() {
+    let f = start(1);
+    let mut built = sh(&f.root, "true");
+    built.repo = "r".into();
+    assert_eq!(run(&f, built).code, 0);
+    f.server
+        .set_priority(&priority::Request {
+            pattern: Some("r".into()),
+            level: Some(Priority::High),
+            promote_after_s: None,
+        })
+        .unwrap();
+
+    // `sleep 30` stands for the build; the session's job preempts it.
+    let told = Instant::now();
+    let r = run(&f, merge_of(&f, "r", "sleep 30"));
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(r.info.contains("warm-up"), "{r:?}");
+    assert!(
+        told.elapsed() < Duration::from_secs(5),
+        "answered without waiting for the build: {:?}",
+        told.elapsed()
+    );
+    wait_for("the warm-up to run", || {
+        warm_jobs(&f).iter().any(|j| j.state == JobState::Running)
+    });
+    let again = run(&f, merge_of(&f, "r", "sleep 30"));
+    assert_eq!(again.code, 0, "{again:?}");
+    assert!(again.info.contains("not warmed"), "{again:?}");
+    let warm = warm_jobs(&f);
+    assert_eq!(warm.len(), 1, "one warm-up: {warm:?}");
+    assert_eq!((warm[0].priority, warm[0].promoted), (Priority::Low, false));
+
+    let mut next = sh(&f.root, "echo session");
+    next.repo = "r".into();
+    let r = run(&f, next);
+    assert_eq!((r.code, r.out.trim()), (0, "session"), "{r:?}");
+    let st = f.server.state();
+    let session = st
+        .done
+        .iter()
+        .find(|j| j.argv.iter().any(|a| a == "echo session"))
+        .expect("the session's job ended");
+    let ended = done_job(&f, warm[0].id);
+    assert_eq!(ended.state, JobState::Cancelled, "{ended:?}");
+    assert_eq!(
+        ended.cancel_reason,
+        format!("preempted by job {}", session.id)
+    );
+    let log = std::fs::read_to_string(f.root.join("state/jobs.jsonl")).unwrap();
+    let logged: Job = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Job>(l).ok())
+        .find(|j| j.id == ended.id)
+        .expect("the warm-up is in the job log");
+    assert!(logged.warm, "{logged:?}");
+    assert_eq!(logged.cancel_reason, ended.cancel_reason);
+}
+
+/// A repository that built here in no job of the last 24 hours is not
+/// warmed, and nothing is queued: a job of 25 hours ago in the job log does
+/// not count, one of 23 hours ago does.
+#[test]
+fn a_repository_that_built_in_no_job_of_the_last_day_is_not_warmed() {
+    let hour = 3_600_000;
+    let f = start_cfg(1, |c| {
+        std::fs::create_dir_all(&c.state_dir).unwrap();
+        let now = now_ms();
+        let lines = [
+            log_line(1, now - 25 * hour, "ok", 0, "local"),
+            log_line(2, now - 23 * hour, "ok", 0, "local")
+                .replace(r#""repo":"r""#, r#""repo":"q""#),
+        ];
+        std::fs::write(c.state_dir.join("jobs.jsonl"), lines.join("\n") + "\n").unwrap();
+    });
+    for repo in ["r", "never"] {
+        let r = run(&f, merge_of(&f, repo, "true"));
+        assert_eq!(r.code, 0, "{r:?}");
+        assert!(r.info.contains("not warmed"), "{repo}: {r:?}");
+    }
+    assert_eq!(f.server.state().active.len(), 0, "nothing queued");
+    assert_eq!(f.server.inner.lock().unwrap().next_id, 2, "nothing queued");
+    let r = run(&f, merge_of(&f, "q", "true"));
+    assert!(r.info.contains("warm-up"), "{r:?}");
+    assert!(!r.info.contains("not warmed"), "{r:?}");
+    wait_for("the warm-up of q to end", || {
+        f.server
+            .state()
+            .done
+            .iter()
+            .any(|j| j.warm && j.repo == "q")
+    });
+}
+
+/// A warm-up on a node builds into the target directory of its own
+/// workspace and leaves it as the one a new workspace of the repository is
+/// seeded from, even when another workspace's job started while it built.
+/// That job had slots free and did not preempt it.
+#[test]
+fn a_warm_up_leaves_the_target_directory_new_workspaces_are_seeded_from() {
+    let f = start(2);
+    assert_eq!(run(&f, synced_test(&f, "a1")).code, 0);
+    let mut warm = synced_test(&f, "b0");
+    warm.argv[2] = "mkdir -p \"$CARGO_TARGET_DIR/debug\"; sleep 1".into();
+    warm.warm = true;
+    let r = run(&f, warm);
+    assert_eq!(r.code, 0, "{r:?}");
+    wait_for("the warm-up to run", || {
+        warm_jobs(&f).iter().any(|j| j.state == JobState::Running)
+    });
+    // Queued after the warm-up started, ends before it.
+    let r = run(&f, synced_test(&f, "a1"));
+    assert_eq!(r.code, 0, "{r:?}");
+    wait_for("the warm-up to end", || {
+        f.server.state().done.iter().any(|j| j.warm)
+    });
+    let st = f.server.state();
+    let ended = st.done.iter().find(|j| j.warm).unwrap();
+    assert_eq!(ended.state, JobState::Ok, "{ended:?}");
+    assert_eq!(
+        ended.node_target_dir.as_deref(),
+        Some(f.root.join("cache/target/b0").to_str().unwrap())
+    );
+    // The record is touched off the request path, after the job ended.
+    let cache = cache::Cache::new(&f.root.join("cache"), &f.root.join("ws"));
+    let seeded_from = || cache.seed_source("c2", "r", &HashSet::new()).map(|e| e.id);
+    wait_for("the warm-up's target directory to be the seed", || {
+        seeded_from().as_deref() == Some("b0")
+    });
 }

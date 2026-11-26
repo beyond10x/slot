@@ -16,6 +16,7 @@ slot [OPTIONS] <COMMAND>
 ```
 
 - `--local`: Run the command here, without the daemon (default `false`)
+- `--here`: Keep the job in this host's pool, never on a build node: for a step that needs this host's credentials while it runs (a clone, a fetch, a push). `slot status` shows `local: here: needs this host` under it (default `false`)
 - `--tokens`: Slots the job holds, in place of the count slot derives from the command. For work the daemon cannot see, such as a script that starts `docker run --cpus 4`: `slot --tokens 4 ./build.sh`. The daemon caps it at the slots in circulation (the pool less the headroom), so the job never waits forever. Ignored with `--local` (env `SLOT_TOKENS`)
 - `--priority`: The job's queue level: queued `urgent` jobs get free slots first, then `high`, `normal` and `low` ones; with no slot free, an `urgent` job starts on one the headroom holds back. A rule set with `slot priority set` for the job's repository wins over it. Ignored with `--local` (env `SLOT_PRIORITY`)
 - `--timeout`: How long the job may run, counted from its start, in place of the daemon's run-time limit (`slot run-limit`): seconds, or a number with `s`, `m` or `h`, such as `90s`, `30m` or `1h`. The daemon ends a job that runs longer (SIGTERM, SIGKILL 5 s later) and the job exits 124. It is capped at the most a job may name, 1 h unless `slot run-limit --max` changed it. A `timeout` command in front of the job's command does not extend it. Ignored with `--local` (env `SLOT_TIMEOUT`)
@@ -33,7 +34,7 @@ slot serve [OPTIONS]
 - `--http`: Web UI address; `off` disables it (default `127.0.0.1:7411`)
 - `--tokens`: Build slots in the pool (jobserver tokens); default: the number of CPUs
 - `--go-tokens`: Slots a go job holds; go's -p is set to match (default `4`)
-- `--test-threads`: Threads a test runner in a job may use when the caller sets none: `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (go jobs get their slot count). Default: a quarter of the pool, at least 2
+- `--test-threads`: Threads a test runner in a job may use when the caller sets none: `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (go jobs get their slot count). Default: a quarter of the pool, at least 2. Local jobs only: a job synced from another host gets its width, the free CPUs at its start split over the jobs that started in the last 5 s, and a lower count its caller set is raised to it
 - `--cpu-quota`: Whether a headroom also sets systemd `CPUQuota` on the daemon unit, a hard cap on every job together; `false` keeps only the token limit (default `true`)
 - `--state-dir`: Jobserver FIFO and job log
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
@@ -46,17 +47,21 @@ slot serve [OPTIONS]
 - `--call-ignore`: Applications whose capture is not a call (level meters, mixers), comma-separated; replaces the default list (default `claude,pavucontrol,pwvucontrol,easyeffects,helvum,qpwgraph,coppwr,noisetorch`)
 - `--sccache-watch`: Watch this user's sccache servers and write back the jobserver tokens a server lost, once it had none free for 60 s while compiles waited, and append each server's counters to `cache.jsonl` in the state directory once a minute; `false` turns both off (default `true`)
 - `--min-free-disk`: A job waits while the filesystem of its directory or of `CARGO_TARGET_DIR` has less free space than this, GB; 0 turns it off. Above `--evict-below`, eviction starts here instead (default `25`)
+- `--min-free-disk-light`: The disk floor of a job whose last 5 runs of the same command in the same repository used no compile server and built into no target directory, GB; at most `--min-free-disk`, and no job starts below it. A first run waits at `--min-free-disk`. 0 lets such a job start on any free space. Default: the value of `--min-free-disk`
 - `--min-free-memory`: A job waits while available memory, less what jobs that started in the last 30 s still take, is below its expected peak (from earlier runs) plus this, GB; 0 turns it off. A job alone in the pool runs anyway (default `4`)
 - `--upgrade-hold`: After `systemctl --user reload slot`, the longest time no new job starts while jobs still run, seconds. Then jobs start again, and the next hold begins when the running jobs are expected to end within it (from earlier runs of the same command) or none runs. 0 never holds (default `60`)
 - `--promote-after`: A queued `normal` or `low` job that has waited longer than this is ordered as `high`, so no level waits forever; 0 never promotes. `slot priority promote-after` changes it at run time; a value set that way wins over this option until `slot priority promote-after default` removes it (default `1800`)
 - `--pass-for`: A queued job may be passed by later jobs of its own level only until it has waited this long: by a job predicted to run 5 s or less, and by a job that fits in the slots a larger request collected and cannot use yet. From then on it starts before every job that came after it. A job of a lower level never passes it. 0: nobody passes; the queue is served by level, then arrival (default `300`)
 - `--cache-budget`: For remote clients: GB the target directories of synced workspaces may take together. Before a remote job starts, the least recently used target directories and their source copies are deleted while the total is over this, or while the disk has less than `--min-free-disk` free; a workspace with a queued or running job is kept. 0: no budget, only the disk floor evicts (default `0`)
+- `--seed-copy`: For remote clients: how the first job of a new worktree copies the target directory of another worktree of the same repository. `reflink`: only a reflink copy, none where the filesystem has no reflinks (a byte copy of a large target directory can take longer than the build it saves). `copy`: a reflink where the filesystem has them, else a byte copy. Never hard links (default `reflink`)
 - `--evict-below`: When the filesystem of a local Cargo target directory has less free space than this, GB, delete target directories that jobs built into, least recently built first, until it has 10 GB more. The mark is `--min-free-disk` when that is larger, so eviction runs whenever jobs wait for disk; a job that starts to wait makes it look at once. A directory a queued or running job builds into or whose checkout it runs in, one built in the last 2 h, and one a process uses are kept. 0 turns it off, whatever `--min-free-disk` is. `slot evict-below` replaces this mark at run time (default `40`)
 - `--evict-dry-run`: Only report in the journal and `slot status` which target directories eviction would delete. `dry_run` in `<state-dir>/evict.json`, read every minute, wins over this (default `false`)
 - `--handover`: On `systemctl --user reload slot`, re-execute at once and hand the running and queued jobs, their slots and their clients to the new binary; `false`, or a new binary older than 0.11.0, uses the `--upgrade-hold` rule instead (default `true`)
 - `--sandbox`: Run every job in a sandbox (bubblewrap): the whole filesystem read-only and in its own pid namespace; writable are only the job's checkout, its target directory, a private /tmp and the download caches of cargo and Go. Other workspaces, other jobs' target directories and the user's runtime directory are hidden. Without a working `bwrap` the daemon does not start (default `false`)
+- `--cluster-file`: The host configuration file: its `[remote.<name>]` tables are the remote nodes the daemon polls every 5 s and shows in `GET /api/nodes` and the web UI. `off` reads none (env `SLOT_CLUSTER_FILE`)
 - `--sandbox-write`: One more path a sandboxed job may write, for example a package manager's store; repeat for more
 - `--sandbox-fixed-paths`: With --sandbox: mount each job's checkout at /work/src and its target directory at /work/target, so every worktree of a repository builds at the same paths. The job then runs without a rustc wrapper: the compile cache server outside the sandbox cannot read sources at those paths (default `false`)
+- `--same-path-root`: A directory under which a remote client may mirror its tree at the tree's own absolute path (`SLOT_REMOTE_SAME_PATH=1` on the client), so absolute paths into the tree work on this server. Repeat for more; `SLOT_SAME_PATH_ROOTS` lists them separated by `:`. Give `slot shell` the same list (env `SLOT_SAME_PATH_ROOTS`)
 
 ### `slot proxy`
 
@@ -80,6 +85,8 @@ slot shell [OPTIONS]
 - `--state-dir`: The daemon's state directory
 - `--ws-root`: Where remote clients sync workspaces (default: `<state-dir>/ws`)
 - `--cache-root`: Target dirs of synced workspaces (default: `<state-dir>/cache`)
+- `--http`: The daemon's web address, for the `state` step (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+- `--same-path-root`: A directory under which a client may sync its tree to the tree's own absolute path and fetch from it, as with `slot serve`; repeat for more (env `SLOT_SAME_PATH_ROOTS`)
 
 ### `slot gate`
 
@@ -254,6 +261,18 @@ slot cancel [OPTIONS] <ID>
 
 - `<ID>`: Job id, as `slot status` shows it (`#12` or `12`)
 
+### `slot warm`
+
+After a merge to `main`: build the tests of a checkout of `main` at the lowest level, so the next worktree of the repository starts from a built target directory.
+
+Run it in the checkout after it took the merge, for example from its `post-merge` hook. It returns at once; the daemon runs `cargo test --no-run`, or the `warm` command of the checkout's `.slot.toml` (`warm = false` switches it off). The daemon starts one only for a repository a job built on it in the last 24 hours, one at a time per repository, and cancels it when a job of a session waits for slots.
+
+```text
+slot warm [OPTIONS] [DIR]
+```
+
+- `<DIR>`: The checkout of `main` to build; the working directory without it
+
 ### `slot sessions`
 
 List agent sessions that build outside the pool, with their commands
@@ -279,6 +298,29 @@ slot usage [OPTIONS]
 - `--since`: Window ending now: a number followed by m, h or d (default `24h`)
 - `--by`: Group by project (the namespace of the repository's remote), repo or session (default `project`)
 - `--top`: Rows to print (default `15`)
+- `--json`: Print JSON instead of text (default `false`)
+
+### `slot cache`
+
+The compile cache: what the sccache servers did, from the counters the daemon records once a minute
+
+```text
+slot cache [OPTIONS] <COMMAND>
+```
+
+#### `slot cache refused`
+
+The compiler calls the sccache servers refused to cache, per repository and reason, with hits and misses, and what a repository can do about each reason.
+
+Reads `cache.jsonl` and `jobs.jsonl` in the state directory. A minute's calls belong to the jobs that ran in it with compile-server CPU: to one repository exactly when all of them are its, else split by each job's compile-server CPU rate times its time in the minute (shared). Minutes no such job explains are counted apart.
+
+```text
+slot cache refused [OPTIONS]
+```
+
+- `--state-dir`: The daemon's state directory
+- `--since`: Window ending now: a number followed by m, h or d (default `24h`)
+- `--by`: Group by repo or project (the namespace of the repository's remote) (default `repo`)
 - `--json`: Print JSON instead of text (default `false`)
 
 ### `slot hook`

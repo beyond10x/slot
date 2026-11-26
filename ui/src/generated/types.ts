@@ -185,11 +185,89 @@ lent_s?: number,
  */
 admission?: Admission, 
 /**
+ * Why the job runs on this machine while a remote node is configured:
+ * `local requested`, `cache rule`, `sync failed: …`, `nested job`,
+ * `gated job`, `remote job`, `sent back by a node`, `slots free here
+ * first` or the text of `SLOT_LOCAL_REASON`. Empty for a job that
+ * went to a node and without nodes.
+ */
+local_reason: string, 
+/**
  * Id of the node the job runs or ran on ([`Node::node_id`]): `local`
  * for every job of a daemon without remote nodes. Empty in a job-log
  * line written before nodes; the API shows such a job as `local`.
  */
-node: string, };
+node: string, 
+/**
+ * The row came from the daemon of node [`Job::node`]: `id` is the id
+ * that node gave the job, so a job is named by `node` and `id`
+ * together. False for this daemon's own jobs, a job it handed to a
+ * node included.
+ */
+from_node?: boolean, 
+/**
+ * A remote job: milliseconds its client took to send the tree to the
+ * node, before the job queued there. Absent for a local job and from a
+ * client or daemon that does not measure it (`crate::phases`).
+ */
+sync_ms?: number, 
+/**
+ * A remote job: bytes that sync sent, as rsync counted them. Absent
+ * where `sync_ms` is, and when rsync did not say.
+ */
+sync_bytes?: number, 
+/**
+ * A remote job: milliseconds its client took to copy the cargo
+ * products and the `--fetch` paths back after the job ended. Absent
+ * when nothing was copied back, and from a client that does not say.
+ */
+back_ms?: number, 
+/**
+ * A cargo `test`, `nextest` or `bench` job: milliseconds from its
+ * start to the first test binary it ran, as its output shows it (a
+ * `Running …` or `Doc-tests …` line of cargo, nextest's `Starting …`
+ * line or cargo's `build-finished` message); the whole run when no
+ * test binary ran. Absent for other jobs and from an older daemon.
+ */
+compile_ms?: number, 
+/**
+ * A cargo `test`, `nextest` or `bench` job: milliseconds from the
+ * first test binary to its end. Absent when no test binary ran.
+ */
+test_ms?: number, 
+/**
+ * A remote cargo job: the target directory it built into on the node.
+ */
+node_target_dir?: string, 
+/**
+ * A remote cargo job: what its target directory on the node held when
+ * the job queued: the workspace id of the sibling it was seeded from,
+ * `empty` (absent or empty, and not seeded) or `kept` (the directory
+ * of an earlier job of the same tree).
+ */
+seeded_from?: string, 
+/**
+ * A remote job: its width, set once when it started (`crate::width`):
+ * the node's free cores then, split over the jobs that started in the
+ * last seconds, at least 1 and at most the node's CPUs. The job got it
+ * as `SLOT_WIDTH`, test threads, `GOMAXPROCS`, go's `-p` and, with
+ * `slot job-parallel` on, as its bound if that was lower. Absent for a
+ * local job and from an older daemon.
+ */
+width?: number, 
+/**
+ * A warm-up job (`slot warm`): started after a merge to `main` to
+ * build that tree's tests into the target directory new worktrees of
+ * its repository start from. It is queued at `low`, never promoted,
+ * and cancelled when a job of a session waits for slots.
+ */
+warm?: boolean, 
+/**
+ * Why the daemon cancelled the job, such as `preempted by job 12`;
+ * empty when its client or `slot cancel` ended it, and for a job that
+ * was not cancelled.
+ */
+cancel_reason?: string, };
 
 export type Unit = { 
 /**
@@ -468,6 +546,17 @@ headroom_base: HeadroomBase,
  * Machine base: CPUs busy on the host over the last second; 0 otherwise.
  */
 busy_cores: number, 
+/**
+ * CPUs busy on the whole host over the last second, every program
+ * counted, whatever the headroom base; absent from a daemon that
+ * predates it.
+ */
+host_busy_cores?: number, 
+/**
+ * One-minute load average of the whole host; absent from a daemon that
+ * predates it.
+ */
+load1?: number, 
 /**
  * Machine base: CPUs the host may use with the headroom kept free; 0
  * when the machine base is not in force (pool base or no headroom).
@@ -839,6 +928,39 @@ export type NodeKind = "Local" | "Remote";
 
 export type NodeState = "Joining" | "Ready" | "Draining" | "Gone";
 
+export type Outcomes = { 
+/**
+ * Exited 0.
+ */
+ok: number, 
+/**
+ * Failed with any other exit: the command's own failure, a red test.
+ */
+test: number, 
+/**
+ * Ended at a run-time limit (exit 124).
+ */
+timeout: number, 
+/**
+ * Failed for the infrastructure: the connection to a daemon or a node
+ * was lost (3), the command could not be run (125) or found (127).
+ */
+infra: number, 
+/**
+ * Cancelled.
+ */
+cancelled: number, };
+
+export type HourOutcomes = { 
+/**
+ * Start of the hour, Unix milliseconds.
+ */
+t: number, 
+/**
+ * The jobs that ended in it.
+ */
+n: Outcomes, };
+
 export type Node = { 
 /**
  * Node name, unique in its cluster; `local` for the daemon's machine.
@@ -936,6 +1058,37 @@ gone_reason?: GoneReason,
 /**
  * When the node left, RFC 3339; with `Gone` only.
  */
-left_at?: string, };
+left_at?: string, 
+/**
+ * When the machine booted, RFC 3339, as the node reads it (`btime` of
+ * `/proc/stat`); absent from a daemon that predates it.
+ */
+booted_at?: string, 
+/**
+ * The poweroff systemd has scheduled on the machine, RFC 3339, as the
+ * node reads it (`/run/systemd/shutdown/scheduled`); absent when none
+ * is scheduled and from a daemon that predates it.
+ */
+poweroff_at?: string, 
+/**
+ * CPUs busy on the whole machine, every program counted, in
+ * thousandths of a CPU (`/proc/stat`).
+ */
+host_cpu_milli?: number, 
+/**
+ * One-minute load average of the whole machine (`/proc/loadavg`).
+ */
+load1?: number, 
+/**
+ * Jobs of this node that ended in the last 60 minutes, by result, as
+ * its own job log has them.
+ */
+ended_hour?: Outcomes, 
+/**
+ * Jobs of this node that ended, by result, per clock hour (UTC) of the
+ * last 25 hours, oldest first; hours without a job are left out. A
+ * reader sums the hours from its own midnight for "today".
+ */
+ended_hours?: Array<HourOutcomes>, };
 
 export type GoneReason = "Drained" | "Lost" | "Deadline" | "RefusedAtJoin" | "Reclaimed";

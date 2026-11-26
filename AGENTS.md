@@ -22,11 +22,10 @@ what is specific to slot.
 |---|---|
 | `crates/slot` | library: jobserver pool, toolchains, daemon, client, `/proc` sampling, CLI definition |
 | `crates/slot-cli` | the `slot` binary |
-| `crates/slot-docs` | generators: CLI reference, UI TypeScript types, the UI pages of the UI spec (`ui-pages`), site provenance |
+| `crates/slot-docs` | generators: CLI reference, UI TypeScript types, site provenance |
 | `ui/` | web UI, Vue 3 + TypeScript + Vite + pnpm; built into `ui/dist`, embedded at compile time |
 | `website/` | public documentation site, Docusaurus on `@beyond10x/docs-system` |
-| `spec/` | ESS specification: the compute cluster and the pool's jobs (`domains/pool.yaml`), the HTTP binding (`http.yaml`) (§ ESS) |
-| `spec/ui/` | the UI spec (`slot.ui.yaml`, `ess-ui/1`) and its host names (`slot.hosts`); `slot-docs ui-pages` generates `ui/src/generated/pages/` from it onto the components of `ui/src/components/spec/`, and `ui/src/hosts.ts` registers the hand-written host slots (`ui/src/components/hosts/`) |
+| `spec/` | ESS specification of the compute cluster (§ ESS) |
 | `plugin/`, `.claude-plugin/marketplace.json` | the `slot` agent plugin (skills, hook, slot-warden agent) and its marketplace; plugin version = workspace version |
 
 ## Boundary
@@ -39,7 +38,11 @@ what is specific to slot.
   `CARGO_BUILD_JOBS`: they would bypass the pool. With `slot job-parallel` on it sets
   `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` itself and leaves the pool's jobserver out of the job.
 - Remote mode forwards only variables a toolchain's `client_env` admits, plus names listed in
-  `SLOT_ENV`. Credentials never cross.
+  `SLOT_ENV`. Credentials never cross: a name that looks like one stays even when listed
+  (`toolchain::credential`).
+- Remote mode's safety rules live in the binary, not in a wrapper: the never-sync list
+  (`never_sync.rs`), the credential names, and symlinks sent as links (`sync::preflight`). The
+  list's content is host configuration; never write a listed path into source, a test or a doc.
 - After a normal exit the daemon does not kill the job's process group: a sccache server started
   by that job lives in it. On cancel the group is killed.
 
@@ -61,10 +64,8 @@ tooling are tooling").
 
 `task check` is the complete offline gate: `cargo fmt --check`, `cargo clippy -D warnings`,
 `cargo test`, the UI's typecheck, tests and build, the UX gates (`task ui-ux`), the docs site
-build and its UX gates (`task site`, `task site-ux`), the UI spec check (`task ui-spec-check`:
-`ess specify validate`, `ess specify http validate`, `ess ui check --hosts`, with the `ess` release
-`spec/ess-inputs.yaml` requires), and the drift checks of the generated CLI reference, UI types and
-UI pages (`slot-docs ui-pages --check`). It prints `rustc --version` first: `rust-toolchain.toml` pins the one
+build and its UX gates (`task site`, `task site-ux`), and the drift checks of the generated CLI
+reference and UI types. It prints `rustc --version` first: `rust-toolchain.toml` pins the one
 rustc of the local gate and of every workflow, which install the version that file names.
 CI runs it in `.github/workflows/gate.yml`.
 
@@ -156,7 +157,8 @@ and a review were once started on 0.10.0 while `origin/main` was 0.19.0).
 Pass `--seed-target` (`worktree` 0.21.0 and later; `WORKTREE_SEED_TARGET=1` does the same): it
 copies the dependency artifacts of the repository's newest built checkout into the new tree's
 `target/`, so the first `cargo` call there does not compile every dependency again.
-Build with `CARGO_INCREMENTAL=0` and the host's debug setting (no `CARGO_PROFILE_DEV_DEBUG`), and finish the tree
+Build with `CARGO_INCREMENTAL=0` and the host's `debug` setting (no `CARGO_PROFILE_DEV_DEBUG`),
+and finish the tree
 with `worktree finish --discard-cache --archive` when the change is merged.
 
 ## Upgrading a running daemon
@@ -199,10 +201,15 @@ beyond10x/slot` and `b10x-gates api`. Never push, tag or write to GitHub as a pe
 without it they stop with `protected file … unavailable`. A plain `git commit` is refused by a
 hook: commit with `b10x-gates bot --repository beyond10x/slot -- commit -F <file>`.
 
-Standing exception: agents working on slot commit, merge, tag and release without asking each
-time, under the operator's standing instruction of 2026-11-12 ("from time to time you issue some
+Standing exception: agents working on slot commit, tag and release without asking each time,
+under the operator's standing instruction of 2026-11-12 ("from time to time you issue some
 commits of your own code and cut releases"; "always update your documentation when you make a
 release"). Every commit still goes through the bot and a pull request below.
+
+Merges are the operator's: a session sends the operator one line,
+`beyond10x/slot#<n> <full head sha>`, when the checks are green, and does not merge itself; the
+operator merges after its own scan of the diff. A change that widens what the node accepts
+(`slot shell`, a copy path to a node, a deny list) gets a read-only review first.
 
 `main` takes changes only through a pull request whose required checks passed
 (`common / Security and privacy`, `gate`, `Build documentation`); a direct push is refused.
@@ -211,7 +218,9 @@ release"). Every commit still goes through the bot and a pull request below.
    beyond10x/slot -- pr create --base main --head <branch> --title … --body-file <file>`.
 2. `gh pr checks <n> -R beyond10x/slot --required --watch`, run in the background: the session
    must not block on it.
-3. Merge as the bot with a merge commit through the API: `{"merge_method":"merge","sha":"<head>"}`
+3. Send the PR line to the operator, who merges (above). How the merge is made, for
+   reference: as the bot with a merge commit through the API:
+   `{"merge_method":"merge","sha":"<head>"}`
    to `PUT /repos/beyond10x/slot/pulls/<n>/merge` with `b10x-gates api`. `gh pr merge` refuses
    (it reads the merge state without the bot's bypass), and a rebase merge makes GitHub the
    committer, which the identity ruleset rejects.
@@ -380,13 +389,19 @@ Open, one line each, with where the design lives. A session starts with (e).
   belongs in `limits.json`. The eviction mark is there already (`slot evict-below`).
 - (ac) The compute cluster: several build nodes behind the local daemon, specified in `spec/`,
   designed in `docs/design/remote-pool.md`, planned in `epic:compute-cluster`.
+- (ad) A node's `price_per_hour_cents` in `cluster.toml` is typed by hand; after a change of
+  instance size it was halved, not read (2026-11-24):
+  `story:a-nodes-price-is-read-from-the-provider`. The resize procedure is in
+  `contrib/node/README.md` § A change of instance size.
 
 ## Never
 
 - Never put private names, home paths, host names or planning ids in source, a page, a crate
   `description` or a commit: the repository is public.
+- Never run an `aep` command that writes without `AEP_ACTOR=agent:slot` in its environment.
+  Without it the store records `human:<login>` in each transition and evidence record. The 200
+  evidence files written before this rule still carry it: evidence is never rewritten, and
+  `aep plan artifact redact` does not reach them.
 - Never commit `ui/dist/`, `ui/node_modules/` or `website/build/`.
-- Never hand-edit `ui/src/generated/` or `website/docs/reference/cli.md`: change the source (`types.rs`,
-  `spec/ui/slot.ui.yaml`, the CLI) and run `task generate`. A layout or value the UI spec cannot
-  say is a host slot or a friction entry in `docs/design/ess-ui-friction.md`, never an edit of a
-  generated page.
+- Never hand-edit `ui/src/generated/types.ts` or `website/docs/reference/cli.md`: run
+  `task generate`.

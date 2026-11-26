@@ -11,6 +11,459 @@
   `ui/src/generated/`; `task check` regenerates and compares them, and checks the spec with
   `ess ui check`.
 
+- Node aep for runbook's driver: `provision.sh` installs the aep 0.80.0 release binary at
+  `~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep` (`HOME_PINS`, the archive SHA-256 of
+  the driver's `aep-pin.json`), where its tests look; the driver compares the file's digest with
+  the pin, so the source-built aep on the node's PATH could not fill it. `toolchains.sh` prints
+  `tool sdc-aep-<version> <16 hex digits of the SHA-256>` for each such file, so `push.sh check`
+  covers it (copy `toolchains.sh` to `~/.local/share/slot/` after the merge).
+
+- Node pnpm: `provision.sh` installs pnpm 11.9.0, the release the workstation runs, as an archive
+  pin (the npm tarball, SHA-256 pinned) and links `pnpm` and `pnpx` in `/usr/local/bin`. A
+  repository's `pnpm` step (spindle's `task ui`) exited 201 on the node.
+
+- Node home trees: `provision.sh` installs the ess releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 in
+  `~/.local/share/ess-versions/<version>/ess` and `@types/node` 26.3.0 with `undici-types` 8.3.0 in
+  `~/.local/share/ess-node/node_modules` (`HOME_PINS`, SHA-256 pinned). A repository that calls an
+  ess release by that path, and the TypeScript cases of ess that read `ESS_TYPES_NODE`, found
+  nothing on the node. The Playwright browsers are in the same list: the Chrome for Testing
+  headless shell of revision 1254 (Playwright 1.65.0, 158.0.8127.18) and 1234 (1.62.1,
+  151.0.7922.34) in `~/.cache/ms-playwright/chromium_headless_shell-<revision>`, from the pinned
+  zip with the two marker files Playwright looks for. Playwright's own `install` does not know
+  Amazon Linux. `unzip` is a base package.
+
+- Node rust default and `libubsan`: `provision.sh` runs `rustup default stable` when
+  `RUST_TOOLCHAINS` has `stable` (rustup had made 1.85.0, the first toolchain installed, the
+  default; the workstation's is `stable`); `check` names a different default (`rust:default`).
+  `libubsan` is a base package.
+
+- Node `make` 4.4.1: `provision.sh` builds GNU Make 4.4.1 from its SHA-256 pinned tarball and
+  links it as `make` and `gmake` in `/usr/local/bin`. The node's make 4.3 does not read the
+  `--jobserver-auth=fifo:` form of `MAKEFLAGS`, so cmake and make builds did not use the pool.
+  `toolchains.sh` prints a `tool make` line, so `push.sh check` names a difference.
+
+- Node `aep` 0.80.0: `provision.sh` builds it on the node, as the build user, from the commit of
+  the release tag (`SOURCE_PINS`: `cargo install --locked --git … --rev …`), because the release
+  binary needs glibc 2.39 and the node has 2.34. `check` reads `aep --version`.
+
+- Node jobs started by the workstation's shims: they name the real binary by absolute path, so a
+  node without `/usr/bin/cargo` refused every cargo job ("cargo fetch --locked failed:
+  /usr/bin/cargo: No such file or directory"). `provision.sh` links `/usr/bin/cargo`,
+  `cargo-clippy`, `cargo-fmt`, `clippy-driver`, `rustc`, `rustdoc`, `rustfmt` and `rustup` to the
+  build user's rustup proxies and `/usr/bin/go`, `gofmt` to `/usr/local/bin`; it never replaces a
+  real file.
+
+- Node CLIs the workstation has on PATH: `provision.sh` installs `ess` 0.99.2 and `cargo-about`
+  0.9.1 (tool pins, SHA-256 from the release's checksum file) and `yq` v4.30.8 of mikefarah
+  (archive pin, linked as `yq`), the packages `glibc-static`, `bubblewrap` and `socat`, and puts
+  `/usr/sbin` in the job PATH. `toolchains.sh` prints a `tool` line for `ess`, `aep`, `yq` and
+  `cargo-about`, so `push.sh check` names a difference. `aep` has no archive pin: its release
+  binary needs glibc 2.39 and the node has 2.34 (it is built from source, see above).
+
+- Node tools of the consumers' test lanes: `provision.sh` installs `typescript` 6.0.3 (`tsc`),
+  `prettier` 3.8.1 and `esbuild` 0.28.2 from their npm tarballs (SHA-256 pinned, into
+  `/usr/local/<name>-<version>`, linked in `/usr/local/bin`; `path:name` in an `ARCHIVE_PINS` line
+  names the link), and `zstd` and `python3` as base packages. `toolchains.sh` prints a
+  `tool <name> <version>` line for each tool and `push.sh check` compares them. `push.sh check`
+  no longer reports a rust toolchain that only the node has (1.85.0 for an MSRV job).
+
+- Node parity of rust toolchains: the `rust` line of `toolchains.sh` lists the installed targets and
+  `clippy`, `rustfmt`, `rust-src` and `llvm-tools` (sorted, comma separated; `rust-docs` and the
+  manifests are left out) in place of a digest, so a difference in `push.sh check` names the
+  target. `RUST_TARGETS` and `RUST_COMPONENTS` take `<toolchain>:<name>,<name>` entries beside bare
+  names, so a node mirrors the targets and components each workstation toolchain has; the prefix
+  must be a word of `RUST_TOOLCHAINS`, and an entry with a comma but no prefix, with two colons or
+  with an empty name is refused. A target a toolchain has beyond its entries (the host's aside),
+  and a clippy, rustfmt, rust-src or llvm-tools component beyond them, is surplus: `check` names
+  it and `apply` removes it (`rustup target remove`, `rustup component remove`).
+
+- Node provisioning, from a review: tests run the real download paths (slot, pinned tools,
+  rustup-init, go and node) against a file with the wrong SHA-256 and see nothing unpacked or run;
+  `apply` restarts `sccache-node` when its unit changed and `slot-node` when its unit, its
+  arguments or the slot binary changed and no job runs (else `pending: running: ...`), and `check`
+  names a running unit whose loaded definition (`systemctl show`), process environment or slot
+  version is not what its file and the config say; each rust toolchain that is there gets the
+  `RUST_COMPONENTS` and `RUST_TARGETS` it lacks (`rustup component add`, `rustup target add`);
+  `tar` as root takes no owner from an archive and unpacked trees lose setuid and setgid; commands
+  of the build user run with a clean environment (`env -i`, the units' `PATH`) and their own
+  session (`setpriv --setsid`); the metadata service is closed and read back before the key,
+  rustup or a pinned tool goes in (`failed: imds:` otherwise); the units' `PATH` puts the store's
+  `nodebin`, the user's `~/.cargo/bin` and `/usr/local/bin` ahead of `/usr/bin` and drops
+  `/usr/local/go/bin`; `push.sh` drops control characters from the node's output and is documented
+  as a version parity report, not an integrity check; `EXTRA_PACKAGES` is validated like the
+  `RUST_*` keys (letters, digits, `.`, `_`, `+`, `-`, no leading dash).
+
+- A build node starts bare and `provision.sh apply` makes it complete; nothing is copied from the
+  workstation to a node any more. `slot-node` and `sccache-node` use the node's own `/usr` and
+  `/etc` (no `rootfs` binds, no wait for a copy) and start on the first `apply`. New `p_rust`
+  installs rustup 1.29.3 (checked against its SHA-256) for the build user into the store, then
+  each toolchain of `RUST_TOOLCHAINS` with `RUST_COMPONENTS` (default `clippy rustfmt`) and
+  `RUST_TARGETS`; `check` names `rustup` and `rust:<name>` when missing. `sccache` joins the
+  pinned tools and `sccache-node.service` runs it from the store's cargo bin. Everything else
+  comes from `EXTRA_PACKAGES`. `toolchains.sh` prints go, node and the C tools by version and
+  drops the digests of `/usr`, `/etc` and the mingw sysroot. `push.sh` keeps only `check`
+  (the rust, go and node lines and the pinned tools' releases) and `compare`; `apply` and `bins`
+  are gone, and so are the config keys `HOME_COPIES`, `ETC_EXTRA` and `SKIP_BINS` (a config file
+  that sets one is refused) and `/etc/slot-node/copies`.
+- The node carries the workstation's go and node releases: `ARCHIVE_PINS` in `provision.sh` (go
+  1.27.1 from go.dev/dl, node v22.23.3 from nodejs.org/dist) are checked with `sha256sum -c
+  --strict`, unpacked as root into `/usr/local/<name>-<version>` and linked into `/usr/local/bin`;
+  `check` names a missing link or another version. `cargo-nextest` 0.9.143 and `task` 3.54.0 join
+  the pinned tools (`task --version` prints the bare version, read as `task <version>`).
+  `toolchains.sh` prints the go line as the bare version (`go go1.27.1`, cut at the first `-`) and
+  looks in `/usr/local/bin` first. `node.conf.example` lists the consumers' rust toolchains, the
+  `wasm32-unknown-unknown` target and the dnf packages; a job that needs a package Amazon Linux
+  2023 lacks (mingw, `musl-gcc`, `dash`, `mawk`, `erlang`, `elixir`, `odin`, `gh`) is held by name.
+- The git dependencies of a remote job reach the node with it. Before the job is placed (remote
+  mode, and a job the daemon hands to a node), the client reads every `Cargo.lock` the sync
+  sends, takes the `git+` sources and their locked revisions, maps each to its cargo git
+  database entry with `cargo metadata`, runs `cargo fetch --locked` here for a lock file whose
+  revision is not in this machine's database, asks the node which entries lack their revision
+  (`slot __cargo-git`, answered with entry names only), and copies only those into the node
+  account's `~/.cargo/git/db`: `slot: git dependencies: N copied to <host> in S s`. Only
+  `objects/`, `refs/`, `packed-refs` and `HEAD` cross, never `config`. A node answer that names
+  an entry not asked for refuses the job. A wrapper's inner cargo call on a node without a way to
+  a private forge now finds its revision there. `slot shell` admits the probe and a copy into one
+  database entry that is not a symbolic link, without options that follow links or delete. A
+  node's copy list needs no cargo git entries.
+- A `git+` source on a remote deny list keeps the job on this machine with the reason
+  `git dependency denied: <source>`. `remote-deny` and `$XDG_CONFIG_HOME/slot/remote-deny-origins`
+  may each hold `/abs/path` lines (a `git+file` source under the prefix) and `origin:<pattern>`
+  lines, a shell pattern (`*`, `?`, `[...]`, as `case` matches, without regard to case) against
+  the URL cargo fetches (without `git+`, query and revision), e.g.
+  `origin:*git.example.org[:/]team/*`. The URL is also matched normalised, after git's
+  `insteadOf` rewrite and with an ssh alias resolved. ` #` starts a comment; any other line
+  keeps every job here, as does a URL that cannot be taken apart, a lock file that does not parse
+  or a source without a full revision. The lists are checked again before each entry is copied. The
+  tree check of `remote-deny` skips `origin:` lines without a warning. With both files naming
+  nothing no lock file is read.
+- An `origin:` pattern also matches a URL's host and path without user, port, trailing `/` or
+  `.git`: `*git.example.org[:/]team/*` denies `ssh://git@git.example.org:2222/team/x`. A git or
+  ssh lookup that fails, prints nothing or runs over 10 s, a relative cargo home, a cargo config
+  that replaces a git source, or a cargo config with a top-level `include` keeps the job here. A
+  pattern that names a scheme (`https://h/team/*`) also denies the same host and path over
+  `ssh`, `git` and `http`, and git's `[user@host:port]:path` form is read with its port. The
+  database entry is the first component below this machine's `git/checkouts/`, never a later
+  `git/checkouts/` inside a checkout. `slot shell` refuses a copy when the cargo home, its `git/`
+  or `git/db` is a symbolic link.
+- A remote job whose tree is not one repository's work tree does not run: the same-path root or
+  a directory above it, a folder outside git directly under the same-path root, or a folder
+  outside git that holds a repository within two levels. `slot` prints `slot: remote build on
+  <host> did not start (<dir> is not one repository's work tree (…); nothing is synced)` and
+  exits with 3 before any sync. A folder that cannot be read is refused. Why: a `cargo` call
+  started in a folder of several repositories synced that whole folder to the build server,
+  git-ignored files included.
+- The node installs `geckodriver` 0.37.1 (`TOOL_PINS`), the release on the forge runner image of
+  browser test lanes that run `wasm-bindgen-test-runner` in headless Firefox; Firefox is the
+  workstation's, copied with `/usr` (159.0 on 2026-11-25; the forge image has 160.0). A pin's download directory may name the version with `%s`
+  (`…/download/v%s`), its archive may hold the binary at its top, and `check` reads the first
+  line of `--version`. `push.sh check` prints `pin <name> <version>` for each pinned tool on the
+  node and reports another release or a missing one as drift.
+- Breaking: a remote job that cannot start (ssh refused or timed out, a failed sync or fetch)
+  no longer runs on this machine's daemon. `slot` prints `slot: remote build on <host> did not
+  start (…); the job did not run (set SLOT_REMOTE_FALLBACK=local …)` and exits with 3. The
+  fallback documented since 0.8.0 runs only with `SLOT_REMOTE_FALLBACK=local`. Why: a build sent
+  to a server ran on the workstation when the server could not be reached, without anyone asking.
+- The node's `ess` is the workstation's again: `ess` leaves `TOOL_PINS`, `push.sh` copies it, and
+  `push.sh check` compares its SHA-256 (`sum ess …`). ess chooses the release per repository
+  itself (an exact `requires` runs that release from its own cache, a line pin the base), so one
+  base on both machines gives one choice. A single pinned ess 0.99.1 refused a repository whose
+  line pin `0.98` ran under `--strict-requires`.
+
+## 0.38.0 — 2026-11-25
+
+- `slot serve --min-free-disk-light <GB>` is a second disk floor for a job whose last 5 runs of
+  the same command in the same repository used no compile server (`compile_server_cpu_s` 0) and
+  built into no target directory. Such a job waits only below this floor; every other job, a
+  first run included, waits at `--min-free-disk`. No job starts below it: it is at most
+  `--min-free-disk`. The default is the value of `--min-free-disk`, so a daemon without the
+  option waits as before. A job held for disk says which floor holds it: `builds need 40.0 GB` or
+  `this job needs 10.0 GB (no compile in its last 5 runs)`, in its wait reason and `slot status`.
+  Why: a test run of a script repository, a profiler or a documentation check writes next to
+  nothing, but waited at the floor of a build.
+- `contrib/node/provision.sh` installs pinned cargo tools on the node at the release its
+  consumers' CI installs, from the release archive checked against its SHA-256: `ess` 0.99.1 and
+  `wasm-bindgen` 0.2.130 (with `wasm-bindgen-test-runner` and `wasm2es6js`). `check` reports a
+  binary whose `--version` is another release; `provision.sh pins` lists them. `push.sh` no
+  longer copies the workstation's binaries of those names; `push.sh bins` lists what it copies.
+
+## 0.37.0 — 2026-11-25
+
+- `slot cache refused [--since 24h] [--by repo|project] [--json]` lists, per repository, the
+  compiler calls the sccache servers refused to cache by reason, with hits and misses, from
+  `cache.jsonl` and `jobs.jsonl` in the state directory. A minute's calls go to the jobs that ran
+  in it with compile-server CPU: to one repository exactly, or split across several by each job's
+  compile-server CPU rate times its time in the minute (shared, its own column). Minutes no job
+  explains get a line of their own, and every reason a line with its remedy.
+- `contrib/node/` provisions a cloud build node and reports where a running one differs from it.
+  `provision.sh` (root on the node) sets up the instance store array, the job tmp filesystem,
+  the binds of the same-path mirror roots, packages, the build user, the units, the build key and
+  the slot release; `push.sh` (workstation) copies the workstation's `/usr`, `/etc` entries, rust
+  toolchains and cargo tools to the node. Both have `check` (one `drift:` line per difference,
+  exit 1) and `apply`. Everything private is in a config file outside the repository
+  (`node.conf.example`). The node's slots follow the CPUs found. A unit rebuilds the instance
+  store at boot, so a stop and start no longer leaves bind lines in `/etc/fstab` that point at
+  an empty disk. `task check` runs `contrib/node/test.sh`.
+- `provision.sh apply` installs the slot release into the instance store and the build user's
+  home again, and reads every installed path back: a failed install exits 1 with a `failed:`
+  line instead of `changed:`.
+- `push.sh check` compares the copied home directories file by file (name and size): a file
+  missing or of another size on the node is drift, a file a node job added there (a cache) is
+  not. `push.sh compare HERE NODE` runs the comparison on two digest files.
+- `push.sh apply` uses an ssh control connection of its own and ends it on exit. A control
+  connection shared through the ssh config stayed logged in to the node's setup login after
+  `provision.sh apply` had removed the setup key.
+- `provision.sh apply` without `--open` ends every login of this boot made with the setup key that
+  still runs: its logind session (every process the login started) or, without one, its
+  connection; found by the key's fingerprint in the sshd log. `check` reports them.
+- `provision.sh apply` writes the approved `HOME_COPIES` to `/etc/slot-node/copies`;
+  `push.sh apply` prints its copy list and refuses to copy when it differs from the node's.
+- `provision.sh` runs under umask 022, so a bundle's umask 077 no longer leaves `/etc/slot-node`
+  at mode 700, where the build user could not read the copy list and `push.sh apply` refused to
+  copy. `check` reports the directory at any mode but 755 and `apply` sets it.
+- The node's line for a git or ssh call that asks for a credential names `slot --here` only for
+  the step that reads a credential while it runs, never for a whole task, and sends a step that
+  needs docker or a local service to `.slot.toml` `local`. Before, it offered `--here` for the
+  step, and callers sent whole tasks back to the workstation with it.
+- The node's cargo config turns incremental compilation off. The compile cache refuses every
+  incremental rustc call; on one node 2,929 calls in 3.7 hours were refused for that reason. A
+  job that sets `CARGO_INCREMENTAL` itself still overrides it.
+
+## 0.36.0 — 2026-11-24
+
+- Products copied back from a node no longer pile up in the local target directory. After a
+  remote cargo job's products are copied back, the client removes, in each directory it copied
+  into, every older file of the same target: a file named `<stem>-<16 lowercase hex>`, with or
+  without an extension, for a stem it just copied, whose hash is not one it just copied.
+  Directories and every other name stay, and nothing is removed for a product that did not
+  arrive. Before, each rebuild of a test target under a new hash left the old binary behind, and
+  the private target directories of worktrees that built on a node grew by several GB each. The
+  products line names what went:
+  `slot: fetched 3 artifacts, 41.2 MB, in 0.9 s; removed 2 superseded files, 38.4 MB`.
+- `SLOT_NO_PRODUCTS=1` turns the copy-back off for a job: the command runs on the node unchanged
+  (no `--message-format` added) and the client prints `slot: artifacts not fetched:
+  SLOT_NO_PRODUCTS is set` where it would have copied.
+- A changed source is never taken as built on a build node. The sync gave each file on the node
+  the modification time it had on the workstation (rsync `-a`). cargo decides by those times, so
+  an edit made before a build the node ran on the old content, and synced after that build, was
+  older than it: cargo reported the crate fresh and ran the old code. Touching the file on the
+  node did not help, because the next sync set the workstation's time again. The sync now leaves
+  the node its own times (`--no-times`, with the content comparison `--checksum` as before, and
+  the same for a same-path tree's extra directory): a file whose content changed gets the time
+  the sync wrote it, and an unchanged one keeps its time on the node. Seeding a new worktree's
+  target directory from a sibling's now sets the times of the new mirror after the copy: a
+  source file with the sibling's bytes takes the sibling's time, every other one a time after
+  every file of the copy, so cargo rebuilds each crate whose sources differ from the sibling's.
+  The job's stderr counts those files. The copy stays a copy (`cp -a`), never a hard link into
+  the sibling's target; `slot serve --seed-copy copy` takes a byte copy where the filesystem has
+  no reflinks (default `reflink`: no seed there, as before).
+- A job's record says where its time went. A remote job carries `sync_ms` and `sync_bytes` (the
+  tree to the node, as its client measured it) and `back_ms` (the cargo products and `--fetch`
+  paths back); a cargo `test`, `nextest` or `bench` job carries `compile_ms` and `test_ms`, split
+  where its output shows the first test binary (cargo's `Running …`/`Doc-tests …` line, nextest's
+  `Starting N tests across …` line or cargo's `build-finished` message); a remote cargo job
+  carries `node_target_dir` and `seeded_from` (the sibling workspace it was seeded from, `kept` or
+  `empty`). Each field is absent where it does not apply and in older lines, never 0. The node's
+  record gets the sync with the request; the back time arrives after the job in a second request
+  (`amend`) and is appended to the node's job log as `{"amend":<id>,"back_ms":<ms>}`, which
+  readers of job lines skip and the daemon applies when it reads the log back. A job the daemon
+  hands to a node gets the client's figures from the file in the new `SLOT_PHASES_FILE`. The
+  `start` frame names `seeded_from`.
+- A job on a build node gets a width when it starts: the node's free CPUs at that moment (CPUs
+  less the busy ones of the last seconds) divided by the jobs that started in the last 5 s, this
+  one counted, at least 1 and at most the node's CPUs. A job is on a node when it was synced from
+  another host. It gets the width as the new `SLOT_WIDTH` (for a Playwright or Vitest config),
+  `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` and `GOMAXPROCS` (a lower count the caller set is
+  raised to it) and go's `-p`; while `slot job-parallel` is on, a lower bound per job
+  (`CARGO_BUILD_JOBS`, `MAKEFLAGS=-j`) is raised to it. The job record carries it as `width`.
+  Before, every job got a quarter of the pool as test threads (16 on a node of 64 CPUs). Local
+  jobs keep `--test-threads`, the bound and the caller's counts.
+- `slot warm [DIR]`: after a merge to `main`, the checkout tells the daemon, and the daemon builds
+  that tree's tests (`cargo test --no-run`, or `warm = "<command>"` in `.slot.toml`; `warm =
+  false` switches it off) as a warm-up job without the client. It starts one only for a
+  repository a job built on it in the last 24 hours, one at a time per repository. The job is
+  queued at `low` over any priority rule and never promoted; a job of a session that still waits
+  for its slots 50 ms after it queued cancels every running warm-up, which ends `cancelled` with
+  the new `cancel_reason` `preempted by job <id>`. On a node a warm-up that ends with exit 0
+  leaves its target directory the most recently used of the repository, the one the next new
+  worktree is seeded from. A daemon hands a warm-up to a node as `slot run --warm`; it goes only
+  while no other job waits for a node. The request and the job record carry the new `warm`.
+
+## 0.35.0 — 2026-11-24
+
+- A job's output reaches the caller whole when another process sharing the caller's stdout has
+  made it non-blocking (a test runner or bundler in the same pipeline). Before, the client gave up
+  on the first `EAGAIN` and the rest of that output block was lost mid-line while later lines
+  arrived.
+- A node reports what only it knows, in its row of `GET /api/nodes`: the machine's boot
+  (`booted_at`), the poweroff systemd has scheduled (`poweroff_at`), the CPUs busy on the whole
+  machine and its load (`host_cpu_milli`, `load1`; `/api/state` adds `host_busy_cores` and
+  `load1`), and the jobs it ended in the last 60 minutes and per hour of the last 25, by result
+  (`ended_hour`, `ended_hours`: `ok`, `test`, `timeout`, `infra`, `cancelled`), counted from its
+  whole job log. The web view's node cards show those counts for the last 60 minutes and today,
+  the same windows on every node (before: the local daemon's kept jobs against a node's last 30),
+  and the whole host's CPU and load (before: the pool's CPU only, 0.0 on a busy host). A remote
+  node's lease ring counts to its scheduled poweroff, and its card is red when that lies more
+  than 5 minutes from the deadline of the cluster file or when none is scheduled. The cloud cost
+  runs from the machine's boot to now (before: from the daemon's join to the deadline, so a node
+  that outlived a stale deadline cost nothing more). Failed jobs are split by cause in the header
+  and on the cards: test, timeout (124), infra (3, 125, 127). UXF-039 to UXF-043.
+- The output of a node's job opens in the web view: `GET /api/jobs/<id>/output?node=<name>` reads
+  it from the node with the new read-only `slot shell` step `slot output <id> [<from>]` (the node
+  daemon's `GET /api/jobs/<id>/output-tail?from=<n>`), every 2 s until the job ended. Before, the
+  pane said the output stayed on the node. UXF-044.
+- Web view with build nodes: a node job's cell holds its id (up to 7 digits) and its node on a
+  line below, clear of the tool column (UXF-050). Panels that count this host only say so ("slots
+  in use on this host", the Cores charts, "Share of the pool on this host"); the Running line
+  splits node jobs from this host's; Finished keeps the jobs that ended last, so a node's jobs
+  appear there (UXF-051). A job's session is its title wherever the daemon resolved one (also
+  from `api/usage` grouped by session), "no session" when it has none, and the cluster page's
+  job list has a session column (UXF-052). Below 1100 px the cluster page stacks instead of
+  scrolling sideways; the layout gates hold it at 800x600 and 1024x768 (UXF-053). With an empty
+  queue the endpoint panel lists each node's running jobs and busy slots (UXF-054).
+- Remote mode's safety rules are in the `slot` binary, so they hold however it is called (with
+  `SLOT_HOST` already set, through a wrapper or without one):
+  - The never-sync list: a file of absolute path prefixes (`never_sync_file` of `cluster.toml`,
+    default `$XDG_CONFIG_HOME/slot/remote-deny`, `#` comments). A job whose working directory,
+    checkout root, git directories or a tree an argument names (`--manifest-path`, `-C`, `--dir`,
+    `--directory`) lies under a listed prefix, or whose tree is `/` or holds the home directory,
+    is never synced: it runs in the local pool with `local_reason` `never sync: <prefix>`, which
+    also keeps the daemon from handing it to a node. Prefixes match whole path components, as
+    written and with symlinks resolved. An unreadable list keeps every job local.
+  - A variable whose name looks like a credential never crosses, even when `SLOT_ENV` lists it.
+    The list grew by `PASS`, `SSH_`, `AWS_SECRET` and the words `PAT`, `DSN` and `KEY`; the
+    client names each name it held back on stderr, never the value. Before, any name in
+    `SLOT_ENV` crossed.
+  - Symlinks stay links: before the sync the client lists the tree with the same `rsync`
+    (`--list-only`), counts links that leave the tree on the sync line (`2 symlinks leave the
+    tree (sent as links)`), and refuses the sync, running the job here, when that `rsync` would
+    send such a link's target in its place (a `PATH` wrapper with `--copy-unsafe-links`).
+
+## 0.34.0 — 2026-11-24
+
+- `slot --version` and a node's `slot_version` name a build that is not of its release tag:
+  `0.34.0+g31e76f1`, with `.dirty` when tracked files changed. A build of the tag (or a CI run
+  started for it) prints the bare version.
+- Same-path remote mode keeps a tree's own path on the server only for a tree under the client's
+  home (`SLOT_REMOTE_SAME_PATH_ROOT` names another directory); any other tree (a runner's work directory elsewhere) goes to the server's
+  workspace root. Before, the server's `slot shell` refused such a tree's sync (`rsync path … is
+  outside`).
+- A node's job keeps the id its node gave it: `GET /api/state`, the job events, `slot status`
+  and the web view show that positive id, with the node in `node` and `from_node: true`. Before,
+  the daemon moved such ids below 0 (`-1000000007499`), and only two tables of the web view
+  rewrote them. The web view names a job by node and id together, so a node's job and a local
+  job of the same id are two rows; labels read `output of job 7089 on build-1d`; the output pane
+  of a node's job says its output stays on that node. `slot status` prints `#7089 on build-1d`.
+  UXF-038 holds it in the UX gate.
+- The daemon reads the host configuration file again when it changes, at the next node poll: a
+  node's deadline, price, place and machine type follow the file without a restart. Before, a
+  lease extended in the file kept showing the old deadline until the daemon restarted.
+
+- `contrib/rustc-gate`, set as `rustc-wrapper`, refuses a compile outside a slot job (no
+  `SLOT_JOB`) with exit 3 and the `slot run -- …` command that replaces it; `slot --local`,
+  `SLOT_SHIM_OFF=1`, `SLOT_EDITOR=1` (rust-analyzer) and queries such as `rustc -vV` pass.
+  `contrib/rustc-gate.test.sh` runs in `task check`.
+- The PATH shim (`contrib/slot-shim`) sends every `cargo` subcommand through slot except the ones
+  that compile nothing (`fmt`, `metadata`, `tree`, `update`, `clean`, `add`, … and `mutants`).
+  Before, `cargo run` and aliases such as `cargo xtask` compiled outside the pool.
+  `contrib/slot-shim.test.sh` checks the routing and runs in `task check`.
+- `slot --here <command>` keeps the job in this host's pool, never on a build node, for a step
+  that needs this host's credentials while it runs (a clone, a fetch, a push): the client skips
+  remote mode (`SLOT_HOST`) for the call and the job carries the reason `here: needs this host`.
+  Unlike `--local` it still goes through the daemon's queue and slots.
+- A job that runs or waits on this machine while a remote node is configured names why: the
+  job record's new `local_reason` (`/api/state`, job events, UI types) and a `  local: <reason>`
+  line under the job in `slot status`. Reasons: `local requested`, `cache rule`, `nested job`,
+  `gated job`, `remote job`, `sent back by a node`, `slots free here first`, `sync failed: <first
+  line>` (sent by a remote-mode client in the new request field `local_reason` when it falls back
+  to the local daemon), or the text of `SLOT_LOCAL_REASON`. A job with a named reason is not
+  handed to a node.
+- Eviction no longer deletes a target directory a job still uses. It keeps every target directory
+  in the tree of a queued or running job (git's top level of its working directory, else the
+  working directory; nested ones such as `target/ignite-test/rt` or `driver/target` too), one equal
+  to, inside or holding the target its `CARGO_TARGET_DIR` names, one with a `.cargo-lock` a process
+  holds locked (`/proc/locks`), and every target directory in the tree of any job that ran in the
+  last hour, whatever the idle keep: the steps of one long task run as several jobs in a row.
+
+- Spill-over: the daemon hands every queued local job to a remote node of the host
+  configuration file while the node is Ready, before its deadline and has free slots by its last
+  answer (less the jobs handed to it in the last 15 s), oldest first. The job's process is
+  `slot run -- <command>` in remote mode with `SLOT_HOST`, `SLOT_SSH` and `SLOT_REMOTE` from the
+  node's `ssh` line and `slot_path` and `SLOT_REMOTE_SAME_PATH=1`; it holds no local slot, its
+  output and exit code pass through, and its record has `node` set. Exit 3 (sync, ssh or
+  connection failed) puts the job back in the local queue once. Keys: `spill` per node (default
+  `true`) and `spill_after_s` (default 0) at the top of the file. Never handed: nested jobs, `SLOT_NO_REMOTE=1` jobs, a
+  remote client's job and a gate's hold. `slot status` prints `spill: N jobs to <node>`.
+
+- The daemon shows remote build nodes: each `[remote.<name>]` table of the host configuration
+  file (`$XDG_CONFIG_HOME/slot/cluster.toml`, `slot serve --cluster-file`, `SLOT_CLUSTER_FILE`)
+  is polled every 5 s over ssh with the new read-only `slot shell` step `state`, which prints the
+  node daemon's own row of `/api/nodes` and its jobs. `GET /api/nodes` lists each node (kind
+  Remote; Joining until its first answer, Gone with reason Lost after three missed polls, a poll
+  bounded at 4 s); `GET /api/state` and the job events carry its jobs with `node` set and an id
+  below 0. The cluster page shows the node's card and jobs; its job list is ordered by queue
+  time.
+- Same-path mirrors: with `SLOT_REMOTE_SAME_PATH=1` the client syncs the tree to its own absolute
+  path on the server and the job runs in the same directory as on the client, so absolute paths
+  into the tree and compile-cache keys that include the working directory match. The server
+  admits it only below a `--same-path-root DIR` given to `slot serve` and `slot shell`
+  (`SLOT_SAME_PATH_ROOTS`, `:`-separated); outside them `slot shell` refuses the sync and the
+  daemon the job. `<ws-root>/<id>` links to the tree, so sibling seeding and eviction keep their
+  ids; the sandbox binds the tree writable at its path. Without the variable nothing changes.
+
+- A same-path job runs like a CI runner's: its tree with uncommitted and untracked files, its git
+  directory, its own target directory, at the client's paths. The git directory is synced at its
+  own path (for a linked worktree the repository's common one, which holds the worktree's; one
+  sync of it at a time, without `*.lock` files), so `git` works in the job. Cargo builds into the
+  client's target directory: `CARGO_TARGET_DIR` when the caller sets it, else the one
+  `cargo metadata` names for the command's manifest (`--manifest-path` included), never
+  `<cache-root>/target/<id>`; the paths cargo prints and `CARGO_BIN_EXE_*` hold on both machines,
+  and products come back to the same paths. A working directory under a path the sync leaves out
+  (`target/…`, a git-ignored directory) is synced on its own, with its `.gitignore` files and
+  without its `target/`. A directory outside any git checkout is the tree. The sandbox binds the
+  target directory writable.
+
+- A remote `cargo build`, `test`, `bench` or `rustc` brings its products back into the local
+  target directory, at the same relative paths with modes and mtimes: every executable of the
+  workspace's own packages (binaries, unit and integration test binaries, benches, examples)
+  and the files of `cdylib` and `staticlib` targets; never a dependency's artifacts. The client
+  adds `--message-format=json-render-diagnostics` on the server when the caller named no
+  format, reads cargo's `compiler-artifact` messages and takes those lines out of stdout, so the
+  caller sees cargo's usual output. A build fetches after exit 0, a test or bench run whatever
+  its exit; one rsync copies every path and the client prints
+  `slot: fetched N artifacts, X MB, in T s`. A failed copy turns exit 0 into 1. `slot shell`
+  admits a fetch of several paths, each under the workspace root or the cache's `target/`.
+
+- Fetch once: before a remote cargo job that builds, the server daemon runs
+  `cargo fetch` in the mirror when its `Cargo.lock` digest differs from the one recorded
+  for that mirror (`<ws-root>/.cargo-fetch/<id>`), under a lock per repository, and then runs
+  the job with `CARGO_NET_OFFLINE=true`. Like cargo on the workstation, the fetch updates a
+  `Cargo.lock` that is out of date (a path dependency just added) instead of failing; a job
+  whose own options include `--locked` or `--frozen` gets `cargo fetch --locked`, so it fails
+  as it would locally. Parallel jobs no longer wait on cargo's package-cache
+  lock while one of them downloads. A fetch that fails or runs over 5 minutes sends the job back
+  to the client, which runs it on its own machine's daemon (a new `fallback` frame, sent only to
+  a client whose request sets `fetch_once`).
+- The Claude Code hook lets a task runner (`task`, `make`, `just`, `sh`, `bash`) run with
+  `SLOT_ORCHESTRATOR=1` in front. It is for a gate whose own steps call `slot`: run as one
+  `slot` job, the whole gate was capped at 30 minutes and its steps shared that job; with
+  `SLOT_SHIM_OFF=1` a step that compiled without `slot` ran outside the pool. With the marker each
+  step is its own pool job, the gate has no cap, and the shims stay on. A compiler or test runner
+  behind the marker is still refused.
+
+## 0.33.1 — 2026-11-24
+
+- Remote mode's sync compares every file by content (`rsync --checksum`), not by size and
+  modification time. A file changed at the same size and time was skipped, and through
+  `--copy-dest` a sibling mirror's file of the same size and time was taken as it was: a job then
+  built an older version of a source file and could pass. The cost is reading every file on both
+  sides: on a tree of 10,000 files (99 MB) a sync with nothing to send took 0.33 to 0.68 s instead
+  of 0.13 to 0.36 s with the files in the page cache, and up to 30 s on a heavily loaded machine.
+- The sync line names what was sent: `slot: synced to <host> in … s, … bytes sent, at 1a2b3c4 +
+  3 changed files`, the commit of `HEAD` and the lines of `git status --porcelain` (tracked
+  changes and untracked files git does not ignore). Without git it says the sources are not
+  named.
+
 ## 0.33.0 — 2026-11-24
 
 - `slot serve --sandbox` runs every job under bubblewrap (`bwrap`): the whole filesystem is

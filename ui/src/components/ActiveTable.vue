@@ -1,25 +1,26 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue';
 import { fmtBytes, fmtDur } from '../lib/format.ts';
-import { sessionName } from '../lib/host.ts';
-import { checkoutLabel, cmdText, jobId, runS, waitS } from '../lib/job.ts';
+import { sessionHover, sessionName } from '../lib/host.ts';
+import { checkoutLabel, cmdText, jobId, jobKey, jobName, runS, waitS } from '../lib/job.ts';
 import { shareCell } from '../lib/shares.ts';
 import { phase } from '../lib/units.ts';
-import { jobs, live, select, sessionTitles, sparks, store } from '../store.ts';
+import { jobs, liveOf, select, sessionTitles, sparks, store } from '../store.ts';
 import CoresSpark from './CoresSpark.vue';
+import JobIdCell from './JobIdCell.vue';
 import RepoName from './RepoName.vue';
 import ToolDot from './ToolDot.vue';
 import UnitChips from './UnitChips.vue';
 
 /** Jobs whose unit row the user opened. A row opens and closes only by its toggle, so no tick moves the rows below. */
-const opened = reactive(new Set<number>());
+const opened = reactive(new Set<string>());
 
 const rows = computed(() => {
   const t = store.clock;
   const running = [...jobs.values()].filter((j) => j.state === 'running').sort((a, b) => jobId(a) - jobId(b));
   return running.map((j) => {
-    const id = jobId(j);
-    const l = live.get(id);
+    const id = jobKey(j);
+    const l = liveOf(j);
     const run = runS(j, t);
     return {
       id,
@@ -34,13 +35,13 @@ const rows = computed(() => {
       elapsed: run === null ? '' : fmtDur(run),
       cores: l ? l.cores.toFixed(1) : '',
       rss: l ? fmtBytes(l.rss) : '',
-      spark: [...sparks.get(id)],
+      spark: j.from_node ? [] : [...sparks.get(jobId(j))],
       slots: shareCell(j),
     };
   });
 });
 
-function toggle(id: number, open: boolean): void {
+function toggle(id: string, open: boolean): void {
   if (open) opened.delete(id);
   else opened.add(id);
 }
@@ -61,14 +62,14 @@ function toggle(id: number, open: boolean): void {
         <tr :class="{ sel: store.selected === r.id, lead: r.open }" @click="select(r.id)">
           <td class="c-lead">
             <button type="button" class="tg" :aria-expanded="r.open" :title="r.open ? 'hide units' : 'show units'"
-              :aria-label="`${r.open ? 'hide' : 'show'} units of job ${r.id}`" @click.stop="toggle(r.id, r.open)">
+              :aria-label="`${r.open ? 'hide' : 'show'} units of job ${jobName(r.job)}`" @click.stop="toggle(r.id, r.open)">
               <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden="true" :class="{ open: r.open }"><path d="M3 1.5 7 5 3 8.5" /></svg>
             </button>
           </td>
-          <td><button type="button" class="jobid" :aria-label="`output of job ${r.id}`" @click.stop="select(r.id, $event)">{{ r.id }}</button></td>
+          <JobIdCell :job="r.job" @open="select(r.id, $event)" />
           <td class="c-tool" :title="r.job.toolchain"><ToolDot :name="r.job.toolchain" /></td>
           <td class="repo" :title="`${r.checkout}\n${r.job.cwd}`"><RepoName :job="r.job" /></td>
-          <td class="session h-b" :title="`${r.session}\nsession ${r.job.session}`">{{ r.session }}</td>
+          <td class="session h-b" :title="sessionHover(r.job.session, r.session)">{{ r.session }}</td>
           <td class="cmd" :title="r.cmd">{{ r.cmd }}</td>
           <td class="c-out h-c">
             <button type="button" class="btn live" :class="{ on: store.selected === r.id }" tabindex="-1" title="watch this job's output as it is written"

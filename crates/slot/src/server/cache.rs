@@ -8,8 +8,16 @@
 //! - **Seeding.** A workspace id with no target directory yet (a new
 //!   worktree) starts from a reflink copy of the most recently used target
 //!   directory of the same repository, so dependencies are not compiled
-//!   again. Only a reflink: on ext4 a plain copy of a 4 GB target directory
-//!   took longer than the compile time it saved (`docs/design.md` § 16).
+//!   again. Only a reflink by default: on ext4 a plain copy of a 4 GB target
+//!   directory took longer than the compile time it saved (`docs/design.md`
+//!   § 16); `slot serve --seed-copy copy` takes a byte copy where the
+//!   filesystem has no reflinks. Never hard links: the copy and the sibling
+//!   share no file. cargo decides freshness by modification time, so after
+//!   the copy every source file of the new mirror that is byte for byte the
+//!   sibling's takes the sibling's time, and every other one a time after
+//!   every file of the copy: cargo then rebuilds exactly the crates whose
+//!   sources differ from the sibling's, and nothing it would not rebuild in
+//!   the sibling's tree.
 //! - **Eviction.** Before a remote job, target directories and their source
 //!   mirrors are deleted, least recently used first, while the cache is over
 //!   `--cache-budget` or the filesystem has less than `--min-free-disk` free.
@@ -18,9 +26,32 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
+
+/// How a new workspace's target directory is copied from its sibling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum SeedCopy {
+    /// A reflink copy only; no seed where the filesystem has no reflinks.
+    #[default]
+    Reflink,
+    /// A reflink copy where the filesystem has reflinks, else a byte copy.
+    Copy,
+}
+
+/// What [`Cache::seed`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seeded {
+    /// The workspace id the target directory was copied from.
+    pub from: String,
+    /// Wall time of the copy and of setting the source times.
+    pub took: Duration,
+    /// Source files of the new mirror whose content differs from the
+    /// sibling's (or that it lacks): each is now newer than every file of
+    /// the copy.
+    pub differ: usize,
+}
 
 /// What is recorded per workspace id.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,24 +168,11 @@ impl Cache {
             .collect()
     }
 
-    /// Seeds `id`'s target directory from the most recently used target
-    /// directory of the same repository that no job uses (`busy`), by a
-    /// reflink copy. Returns the source id and how long it took, or the
-    /// reason nothing was seeded. Does nothing when `id` already has one.
-    pub fn seed(
-        &self,
-        id: &str,
-        repo: &str,
-        busy: &HashSet<String>,
-    ) -> Result<(String, Duration), String> {
-        if repo.is_empty() {
-            return Err("no repository name".into());
-        }
-        if self.dir(id).exists() {
-            return Err("target directory exists".into());
-        }
-        let Some(src) = self
-            .entries()
+    /// The target directory [`Cache::seed`] copies for a new workspace `id`
+    /// of `repo`: the most recently used one of the repository that no job
+    /// uses (`busy`).
+    pub fn seed_source(&self, id: &str, repo: &str, busy: &HashSet<String>) -> Option<Entry> {
+        self.entries()
             .into_iter()
             .filter(|e| {
                 e.id != id
@@ -163,14 +181,42 @@ impl Cache {
                     && self.dir(&e.id).is_dir()
             })
             .max_by_key(|e| e.meta.last_used_ms)
-        else {
+    }
+
+    /// Seeds `id`'s target directory from the most recently used target
+    /// directory of the same repository that no job uses (`busy`), by a
+    /// copy of kind `how`, then sets the times of `id`'s source mirror
+    /// ([`align_sources`]) so cargo rebuilds every crate whose sources
+    /// differ from the sibling's. Returns what it did, or the reason nothing
+    /// was seeded. Does nothing when `id` already has one.
+    pub fn seed(
+        &self,
+        id: &str,
+        repo: &str,
+        busy: &HashSet<String>,
+        how: SeedCopy,
+    ) -> Result<Seeded, String> {
+        if repo.is_empty() {
+            return Err("no repository name".into());
+        }
+        if self.dir(id).exists() {
+            return Err("target directory exists".into());
+        }
+        let Some(src) = self.seed_source(id, repo, busy) else {
             return Err(format!("no other target directory of {repo}"));
         };
         let tmp = self.targets.join(format!(".{id}.seed"));
         let _ = std::fs::remove_dir_all(&tmp);
         let t0 = Instant::now();
+        // `-a` keeps hard links among the copied files (rustc links a
+        // crate's `.rmeta` into its incremental directory) inside the copy;
+        // no file of the copy is a link to a file of the sibling.
         let out = Command::new("cp")
-            .args(["-a", "--reflink=always"])
+            .arg("-a")
+            .arg(match how {
+                SeedCopy::Reflink => "--reflink=always",
+                SeedCopy::Copy => "--reflink=auto",
+            })
             .arg(self.dir(&src.id))
             .arg(&tmp)
             .output()
@@ -178,11 +224,13 @@ impl Cache {
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&tmp);
             let msg = String::from_utf8_lossy(&out.stderr);
-            return Err(format!(
-                "no reflink copy ({})",
-                msg.lines().next().unwrap_or("cp failed").trim()
-            ));
+            let first = msg.lines().next().unwrap_or("cp failed").trim();
+            return Err(match how {
+                SeedCopy::Reflink => format!("no reflink copy ({first})"),
+                SeedCopy::Copy => format!("no copy ({first})"),
+            });
         }
+        let differ = align_sources(&self.ws_root.join(id), &self.ws_root.join(&src.id), &tmp);
         std::fs::rename(&tmp, self.dir(id)).map_err(|e| {
             let _ = std::fs::remove_dir_all(&tmp);
             format!("rename: {e}")
@@ -191,7 +239,11 @@ impl Cache {
         mine.repo = repo.to_string();
         mine.bytes = src.meta.bytes;
         self.write_meta(id, &mine);
-        Ok((src.id, t0.elapsed()))
+        Ok(Seeded {
+            from: src.id,
+            took: t0.elapsed(),
+            differ,
+        })
     }
 
     /// Deletes target directories and source mirrors, least recently used
@@ -228,10 +280,103 @@ impl Cache {
             let _ = std::fs::remove_file(self.meta_path(&e.id));
             let _ = std::fs::remove_dir_all(self.ws_root.join(&e.id));
             crate::mirror::forget(&self.ws_root, &e.id);
+            crate::cargo_fetch::forget(&self.ws_root, &e.id);
             total = total.saturating_sub(e.meta.bytes);
             gone.push((e.id, e.meta.bytes));
         }
         gone
+    }
+}
+
+/// Sets the modification times of source mirror `mirror` after its target
+/// directory was seeded into `copy` from the sibling whose mirror is
+/// `sibling`. cargo takes a crate as built when no source file is newer
+/// than its last build, so:
+///
+/// - a regular file that the sibling's mirror holds with the same bytes
+///   takes the sibling's file's time: cargo decides on it here as it would
+///   in the sibling's tree, against the same build times;
+/// - every other regular file takes a time after every entry of `copy`, so
+///   each crate that holds one is built again.
+///
+/// Symbolic links are left alone. Returns the count of the second kind.
+pub fn align_sources(mirror: &Path, sibling: &Path, copy: &Path) -> usize {
+    let now = SystemTime::now();
+    let after = match newest(copy) {
+        Some(n) if n >= now => n + Duration::from_millis(1),
+        _ => now,
+    };
+    let mut differ = 0;
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(mirror.join(&rel)) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let rel = rel.join(e.file_name());
+            let Ok(kind) = e.file_type() else { continue };
+            if kind.is_dir() {
+                stack.push(rel);
+            } else if kind.is_file() {
+                let path = mirror.join(&rel);
+                let t = same_bytes(&path, &sibling.join(&rel)).unwrap_or_else(|| {
+                    differ += 1;
+                    after
+                });
+                let _ = std::fs::File::open(&path).and_then(|f| f.set_modified(t));
+            }
+        }
+    }
+    differ
+}
+
+/// The newest modification time of `dir` and everything under it,
+/// symbolic links not followed.
+fn newest(dir: &Path) -> Option<SystemTime> {
+    let mut max = std::fs::symlink_metadata(dir).ok()?.modified().ok();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            if m.is_dir() {
+                stack.push(e.path());
+            }
+            if let Ok(t) = m.modified() {
+                max = max.max(Some(t));
+            }
+        }
+    }
+    max
+}
+
+/// The modification time of `theirs` when it is a regular file with the
+/// bytes of `mine`.
+fn same_bytes(mine: &Path, theirs: &Path) -> Option<SystemTime> {
+    use std::io::Read as _;
+    let meta = std::fs::symlink_metadata(theirs)
+        .ok()
+        .filter(std::fs::Metadata::is_file)?;
+    if std::fs::metadata(mine).ok()?.len() != meta.len() {
+        return None;
+    }
+    let mut ours = std::fs::File::open(mine).ok()?;
+    let mut sibling = std::fs::File::open(theirs).ok()?;
+    let mut ours_buf = vec![0u8; 64 << 10];
+    let mut sibling_buf = vec![0u8; 64 << 10];
+    loop {
+        let got = ours.read(&mut ours_buf).ok()?;
+        if got == 0 {
+            return (sibling.read(&mut sibling_buf[..1]).ok()? == 0)
+                .then(|| meta.modified().ok())
+                .flatten();
+        }
+        sibling.read_exact(&mut sibling_buf[..got]).ok()?;
+        if ours_buf[..got] != sibling_buf[..got] {
+            return None;
+        }
     }
 }
 
@@ -328,9 +473,9 @@ mod tests {
         make(&c, "busy", "r", 9, 10);
         make(&c, "other", "s", 10, 10);
         let busy: HashSet<String> = ["busy".to_string()].into();
-        match c.seed("fresh", "r", &busy) {
-            Ok((src, _)) => {
-                assert_eq!(src, "new");
+        match c.seed("fresh", "r", &busy, SeedCopy::Reflink) {
+            Ok(s) => {
+                assert_eq!(s.from, "new");
                 assert!(c.dir("fresh").join("debug/x").exists());
                 assert_eq!(c.meta("fresh").repo, "r");
             }
@@ -343,10 +488,102 @@ mod tests {
             }
         }
         assert!(
-            c.seed("new", "r", &busy).is_err(),
+            c.seed("new", "r", &busy, SeedCopy::Copy).is_err(),
             "existing dir is never replaced"
         );
-        assert!(c.seed("x", "nope", &busy).is_err());
+        assert!(c.seed("x", "nope", &busy, SeedCopy::Copy).is_err());
+    }
+
+    fn set_mtime(p: &Path, t: SystemTime) {
+        std::fs::File::open(p).unwrap().set_modified(t).unwrap();
+    }
+
+    fn write_at(p: &Path, body: &str, t: SystemTime) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+        set_mtime(p, t);
+    }
+
+    fn mtime(p: &Path) -> SystemTime {
+        std::fs::metadata(p).unwrap().modified().unwrap()
+    }
+
+    /// (device, inode) and modification time of every regular file under
+    /// `dir`.
+    fn files(dir: &Path) -> Vec<((u64, u64), SystemTime)> {
+        use std::os::unix::fs::MetadataExt;
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let m = e.path().symlink_metadata().unwrap();
+                if m.is_dir() {
+                    stack.push(e.path());
+                } else if m.is_file() {
+                    out.push(((m.dev(), m.ino()), m.modified().unwrap()));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_seeded_target_is_a_copy_that_shares_no_file_with_its_sibling() {
+        let (_d, c) = cache();
+        make(&c, "old", "r", 1, 10);
+        // rustc links a crate's `.rmeta` into its incremental directory.
+        std::fs::hard_link(
+            c.dir("old").join("debug/x"),
+            c.dir("old").join("debug/x.rmeta"),
+        )
+        .unwrap();
+        let s = c.seed("new", "r", &HashSet::new(), SeedCopy::Copy).unwrap();
+        assert_eq!(s.from, "old");
+        let theirs: Vec<(u64, u64)> = files(&c.dir("old")).into_iter().map(|f| f.0).collect();
+        let mine = files(&c.dir("new"));
+        assert_eq!(mine.len(), 2, "{mine:?}");
+        assert!(
+            mine.iter().all(|(i, _)| !theirs.contains(i)),
+            "a file of the copy is a hard link into the sibling's"
+        );
+        assert_eq!(
+            std::fs::read(c.dir("new").join("debug/x.rmeta")).unwrap(),
+            b"x"
+        );
+    }
+
+    #[test]
+    fn after_a_seed_only_sources_that_differ_from_the_siblings_are_newer_than_the_copy() {
+        let (_d, c) = cache();
+        make(&c, "old", "r", 1, 10);
+        let now = SystemTime::now();
+        let h = Duration::from_secs(3600);
+        let (theirs, mine) = (c.ws_root.join("old/src"), c.ws_root.join("new/src"));
+        // The sibling's sources, then its build.
+        write_at(&theirs.join("same.rs"), "same", now - 3 * h);
+        write_at(&theirs.join("changed.rs"), "v1", now - 3 * h);
+        write_at(&theirs.join("sub/deep.rs"), "deep", now - 3 * h);
+        set_mtime(&c.dir("old").join("debug/x"), now - 2 * h);
+        // The new mirror, with older times than the sibling's build.
+        write_at(&mine.join("same.rs"), "same", now - 4 * h);
+        write_at(&mine.join("changed.rs"), "v2", now - 4 * h);
+        write_at(&mine.join("sub/deep.rs"), "deep", now - 4 * h);
+        write_at(&mine.join("added.rs"), "new", now - 4 * h);
+        std::os::unix::fs::symlink("same.rs", mine.join("link.rs")).unwrap();
+
+        let s = c.seed("new", "r", &HashSet::new(), SeedCopy::Copy).unwrap();
+        assert_eq!(s.differ, 2, "{s:?}");
+        for f in ["same.rs", "sub/deep.rs"] {
+            assert_eq!(mtime(&mine.join(f)), mtime(&theirs.join(f)), "{f}");
+        }
+        let copy = files(&c.dir("new"));
+        for f in ["changed.rs", "added.rs"] {
+            let t = mtime(&mine.join(f));
+            assert!(
+                copy.iter().all(|(_, m)| *m < t),
+                "{f} at {t:?} is not newer than the copy: {copy:?}"
+            );
+        }
     }
 
     #[test]

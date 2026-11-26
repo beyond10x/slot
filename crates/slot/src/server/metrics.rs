@@ -297,6 +297,7 @@ mod tests {
             compile_server_cpu_s: 1.0,
             peak_rss: 0,
             wait_reason: String::new(),
+            local_reason: String::new(),
             target_dir: String::new(),
             priority: crate::types::Priority::Normal,
             promoted: false,
@@ -313,6 +314,17 @@ mod tests {
             lent_s: 0.0,
             admission: crate::shares::Mode::Slots,
             node: String::new(),
+            from_node: false,
+            sync_ms: None,
+            sync_bytes: None,
+            back_ms: None,
+            compile_ms: None,
+            test_ms: None,
+            node_target_dir: None,
+            seeded_from: None,
+            width: None,
+            warm: false,
+            cancel_reason: String::new(),
         }
     }
 

@@ -18,9 +18,24 @@ fn main() -> ExitCode {
         Cmd::Gate(args) => gate(&args),
         Cmd::Hold(args) => Ok(slot::gate::hold(&args.fifo)),
         Cmd::Siblings(args) => Ok(siblings(&args.ws_root, &args.id, &args.key)),
+        Cmd::CargoGit(args) => Ok(slot::git_deps::parse_words(&args.wanted).map_or_else(
+            || {
+                eprintln!("slot: __cargo-git takes `<entry>:<rev>` words");
+                2
+            },
+            |w| cargo_git(&w),
+        )),
         Cmd::Exec(args) => Ok(args
             .nofile
             .exec(&args.arg0, &args.command[0], &args.command[1..])),
+        Cmd::Run(args) if args.warm => {
+            let mut s = Settings::from_env();
+            s.warm = true;
+            s.priority = Some(slot::types::Priority::Low);
+            s.timeout = args.timeout.or(cli.timeout);
+            Ok(client::run(&args.command, &s))
+        }
+        Cmd::Warm(args) => warm(args.dir.as_deref(), cli.timeout),
         Cmd::Run(args) => Ok(build(
             &args.command,
             cli.local,
@@ -28,6 +43,7 @@ fn main() -> ExitCode {
             args.tokens.or(cli.tokens),
             args.priority.or(cli.priority),
             args.timeout.or(cli.timeout),
+            cli.here,
         )),
         Cmd::Status(args) => slot::status::fetch(&args.http).map(|s| {
             print!("{}", slot::status::render(&s));
@@ -79,6 +95,7 @@ fn main() -> ExitCode {
             Ok(0)
         }
         Cmd::Usage(args) => usage(&args),
+        Cmd::Cache(slot::cli::CacheCmd::Refused(args)) => cache_refused(&args),
         Cmd::Hook(slot::cli::HookCmd::ClaudePreToolUse) => return slot::hook::run(),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
@@ -92,6 +109,7 @@ fn main() -> ExitCode {
                 cli.tokens,
                 cli.priority,
                 cli.timeout,
+                cli.here,
             ))
         }
     };
@@ -111,16 +129,29 @@ fn build(
     tokens: Option<u32>,
     priority: Option<slot::types::Priority>,
     timeout: Option<u64>,
+    here: bool,
 ) -> i32 {
     if local {
         return client::run_local(argv);
     }
     let mut s = Settings::from_env();
+    s.here = here;
     s.fetch = fetch.to_vec();
     s.tokens = tokens;
     s.priority = priority;
     s.timeout = timeout;
     client::run(argv, &s)
+}
+
+/// `slot warm [DIR]`: the warm-up of the checkout at `dir`, else of the
+/// working directory's.
+fn warm(dir: Option<&std::path::Path>, timeout: Option<u64>) -> Result<i32> {
+    if let Some(d) = dir {
+        std::env::set_current_dir(d).with_context(|| d.display().to_string())?;
+    }
+    let mut s = Settings::from_env();
+    s.timeout = timeout;
+    Ok(client::warm(&s))
 }
 
 /// `slot gate`: serves the gate directories until killed.
@@ -168,9 +199,22 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
         .cache_root
         .clone()
         .unwrap_or_else(|| args.state_dir.join("cache"));
-    match slot::shell::plan(&line, &home, &ws, &cache) {
+    // The account's own database, never the session's `CARGO_HOME`.
+    let git_db = slot::git_deps::node_db(&home);
+    let roots = slot::shell::Roots {
+        ws: &ws,
+        cache: &cache,
+        same_path: &args.same_path_root,
+        cargo_git_db: &git_db,
+    };
+    match slot::shell::plan(&line, &home, &roots) {
         Ok(Plan::Rsync(rsync_args)) => {
-            let e = std::process::Command::new("rsync").args(rsync_args).exec();
+            // A relative path is the account home's, as the shell checked it
+            // and as sshd starts a session there.
+            let e = std::process::Command::new("rsync")
+                .args(rsync_args)
+                .current_dir(&home)
+                .exec();
             eprintln!("slot shell: rsync: {e}");
             127
         }
@@ -184,12 +228,52 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             s.socket.clone_from(&args.socket);
             client::cancel(id, &s)
         }
-        Ok(Plan::Siblings { id, key }) => siblings(&ws, &id, &key),
+        Ok(Plan::State) => match slot::server::nodes::state_step(&args.http) {
+            Ok(s) => {
+                println!("{s}");
+                0
+            }
+            Err(e) => {
+                eprintln!("slot shell: state: {e:#}");
+                1
+            }
+        },
+        Ok(Plan::Output { id, from }) => {
+            match slot::server::nodes::output_step(&args.http, id, from) {
+                Ok(s) => {
+                    println!("{s}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("slot shell: output: {e:#}");
+                    1
+                }
+            }
+        }
+        Ok(Plan::Siblings { id, key, path }) => {
+            if let Some(p) = path
+                && let Err(e) = slot::mirror::link(&ws, &id, &p)
+            {
+                eprintln!("slot: {e}");
+                return 1;
+            }
+            siblings(&ws, &id, &key)
+        }
+        Ok(Plan::CargoGit(wanted)) => cargo_git(&wanted),
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126
         }
     }
+}
+
+/// `slot __cargo-git`: prints the entries of `wanted` that the account's
+/// cargo git database (`~/.cargo/git/db`) lacks, by name.
+fn cargo_git(wanted: &[slot::git_deps::Wanted]) -> i32 {
+    let home = std::env::var_os("HOME").map_or_else(|| std::path::PathBuf::from("/"), Into::into);
+    let db = slot::git_deps::node_db(&home);
+    print!("{}", slot::git_deps::node_answer(&db, wanted));
+    0
 }
 
 /// `slot __siblings`: records mirror `id` of repository `key` and prints
@@ -270,6 +354,26 @@ fn usage(args: &slot::cli::UsageArgs) -> Result<i32> {
         println!("{}", slot::usage::json(&u));
     } else {
         print!("{}", slot::usage::render(&u, args.top));
+    }
+    Ok(0)
+}
+
+fn cache_refused(args: &slot::cli::CacheRefusedArgs) -> Result<i32> {
+    let since = slot::usage::parse_since(&args.since).map_err(anyhow::Error::msg)?;
+    let by: slot::usage::By = args.by.parse().map_err(anyhow::Error::msg)?;
+    if by == slot::usage::By::Session {
+        anyhow::bail!("--by {}: repo or project", args.by);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let from = now - since;
+    let (records, jobs) = slot::refused::read(&args.state_dir, from, now);
+    let r = slot::refused::attribute(&records, &jobs, from, now, by);
+    if args.json {
+        println!("{}", slot::refused::json(&r));
+    } else {
+        print!("{}", slot::refused::render(&r));
     }
     Ok(0)
 }

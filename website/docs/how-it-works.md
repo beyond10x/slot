@@ -344,6 +344,21 @@ request restarts its idle timeout (`SCCACHE_IDLE_TIMEOUT`); a reading each minut
 running for good. A server that does not answer within 5 seconds is skipped and named once in
 the journal. The file is not rotated; a line is about 300 bytes.
 
+`slot cache refused` reads that file and the job log and lists, per repository (`--by project`
+per project), the calls the servers refused to cache by reason, with hits and misses, over a
+window (`--since 24h`, `--json` for the whole answer). The counters belong to a server, not to a
+job, so each minute's calls go to the jobs that ran in it and whose compile server worked for them
+(`compile_server_cpu_s`). When all of them are of one repository, the minute counts for it in the
+`exact` column; otherwise the minute is split across the repositories by each job's
+compile-server CPU per second of its run times its seconds in the minute, in the `shared` column.
+A `no job` line counts the minutes with calls and no such job. Under the table each reason has
+one line with what a repository can do about it: for `incremental`, `CARGO_INCREMENTAL=0` in jobs
+that do not edit and rebuild, as a CI runner does; `crate-type` (bin, proc-macro, dylib and
+cdylib crates) has no remedy in the repository; `multiple input files` and `missing input` say
+what sccache saw (more than one input file in one call; an input file that is not where sccache
+looks, as with generated sources); any other reason is named as sccache prints it, with no remedy
+known.
+
 `slot serve --sccache-watch false` turns the watchdog and the counter log off.
 
 ## Waiting for disk and memory
@@ -353,7 +368,11 @@ short:
 
 - **Disk.** The filesystem of the job's directory, and of `CARGO_TARGET_DIR` when the job sets
   it, must have 25 GB free (`slot serve --min-free-disk`, in GB; 0 turns it off). A job that
-  waits for disk waits until space is freed.
+  waits for disk waits until space is freed. A job whose last 5 runs of the same command in the
+  same repository used no compile server and built into no target directory waits at a lower
+  floor, `--min-free-disk-light` (in GB, at most `--min-free-disk`; by default the same value).
+  A first run waits at `--min-free-disk`. The wait reason names the floor: `builds need 25.0 GB`
+  or `this job needs 10.0 GB (no compile in its last 5 runs)`.
 - **Memory.** Available memory (`MemAvailable`), less what jobs that started in the last 30
   seconds are still expected to take, must cover the job's expected peak plus 4 GB
   (`--min-free-memory`, in GB; 0 turns it off). The expected peak is the 90th percentile of the
@@ -595,10 +614,15 @@ forget it).
 in `limits.json` like the mark, and is `evict_idle_s` (seconds) in the same `PUT` body; a field
 left out stays as it is, `null` forgets it. Eviction never deletes:
 
-- a target directory a queued or running job builds into, or one in the checkout a queued or
-  running job runs in (the directory above the target directory, or below it); another worktree
-  or clone of the same repository may go;
-- one built in the last 2 hours, or the idle keep set with `--idle`;
+- a target directory a queued or running job builds into, or one equal to, inside or holding the
+  one its `CARGO_TARGET_DIR` names;
+- one in the tree of a queued or running job: git's top level of its working directory, else the
+  working directory, with nested ones such as `target/ignite-test/rt` or `driver/target`; another
+  worktree or clone of the same repository may go;
+- one in the tree of any job that ran in the last hour, so the jobs of one long task keep their
+  target directories between them;
+- one built in the last 2 hours, or the idle keep set with `--idle` (never less than an hour);
+- one with a `.cargo-lock` anywhere in it that a process holds locked;
 - one whose deletion failed in the last hour, for example a managed worktree with a live session
   lease: the next look deletes the next candidates instead (the journal says
   `slot: disk: eviction leaves <path> out for 1h: its removal failed` once);
@@ -659,6 +683,12 @@ A rust job's record also has `cache_env`, the variables that decide what the com
 do, and `warnings` when they switch the cache off or name an sccache server of its own: see
 [Environment variables](reference/environment.md#recorded-for-a-rust-job).
 
+The record says where a job's time went: a cargo `test`, `nextest` or `bench` job's compile and
+test time (`compile_ms`, `test_ms`), a remote job's sync of its tree (`sync_ms`, `sync_bytes`)
+and copy of its products and fetches back (`back_ms`), and a remote cargo job's target directory
+on the node and what that held when the job queued (`node_target_dir`, `seeded_from`): see
+[Environment variables](reference/environment.md#recorded-phases-of-a-job).
+
 The daemon reads the log back at start, so the web UI shows recent jobs across restarts.
 
 `project` is the namespace of the repository's git remote: every path segment of the origin URL
@@ -707,33 +737,41 @@ during periods covered by the one-second live samples.
 The daemon serves a web UI on `127.0.0.1:7411` (`--http <address>`, `--http off` to disable). Its
 start page is the cluster view: the headline numbers (running and queued jobs, the slot wait of 9
 in 10 jobs, CPUs in use of those available, the compile cache's share of the last 24 hours, and
-the cost of remote machines once one runs), the queue, a card per node (slots by toolchain, CPU
-over 60 s, memory, free disk, the checkouts with jobs on it, the time left of a remote node's
-lease) with each job moving from the queue to its node, and the newest jobs with the node each
-runs on. Selecting a node card, or Enter on it, shows only that node's jobs; Escape shows all
-again. The page reads `GET /api/nodes`, one row per node (today the local machine). **Jobs and
+the cost of remote machines once one runs, from each machine's boot to now), the queue (when it
+is empty: each node's running jobs and busy slots), a card per node (slots by toolchain, CPU over
+60 s of the whole machine with its load, the jobs it finished in the last 60 minutes and today as
+the node counts them, failures by cause, memory, free disk, the checkouts with jobs on it, the time
+left of a remote node's lease: to the poweroff the node has scheduled, the card red when that lies
+more than 5 minutes from the deadline of the cluster file) with each job moving from the queue to
+its node, and the newest jobs with the node each runs on and its session. Selecting a node card, or
+Enter on it, shows only that node's jobs; Escape shows all again. Below 1100 px the page stacks:
+the queue above the node cards, the job list below them. The page reads `GET /api/nodes`, one row
+per node (today the local machine). **Jobs and
 charts** (`#jobs`) opens the view of the job tables, which shows:
 
-- slots in use out of the pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
+- slots in use on this host out of its pool, and the **headroom for you** slider with buttons for 0, 20 and 40 %
   ([Headroom](headroom.md)); on the machine base, the line with the CPUs busy on the host, the
   target, the pool's quota and the busiest owners outside the pool; when a job failed in the last
-  60 minutes, a **failed** count that opens the output of the newest one,
+  60 minutes, a **failed** count over every node, split by cause (test; timeout, exit 124;
+  infra: a lost connection, exit 3, or a command that could not run or was not found, 125 or 127),
+  that opens the output of the newest one,
 - in the row of line charts, **Compile cache**: for each minute, the share of the compiler calls
   that sccache answered from its cache, of all calls and of the cacheable ones (hits and misses),
   read from `GET /api/cache-history`; the legend gives the newest minute's share and, after
   `24 h:`, the share of the last 24 hours, read from `GET /api/cache-day`; the daemon computes
   both from the lines of `cache.jsonl` ([sccache watchdog](#sccache-watchdog)),
 - directly under the header, queued and running jobs: repository, command, state, wait, elapsed
-  time, cores, memory, session, and for a queued job its level; a running job's row opens on what
-  it compiles now,
-- finished jobs: result (`ok`, `failed (101)` with the exit code, `cancelled`), wait, duration,
+  time, cores, memory, session (its title, else the first 8 characters of its id), and for a queued
+  job its level; a job of a build node names the node under its job number; a running job's row
+  opens on what it compiles now; cores and memory are measured only for jobs on this host,
+- the finished jobs that ended last, a build node's among them: result (`ok`, `failed (101)` with the exit code, `cancelled`), wait, duration,
   CPU seconds, average cores, peak memory,
 - build cores on the whole host by tool family and by agent session, run by slot or **not on
   slot**,
 - a timeline with one bar per job, coloured by toolchain; the pale part of a bar is the wait for
   a slot,
 - cores in use by slot jobs per toolchain, and by the whole host,
-- the share of the pool per project, repository or session for today, the last 24 hours or the
+- the share of this host's pool per project, repository or session for today, the last 24 hours or the
   last 7 days ([Usage](#usage)),
 - the live output of a job, opened by clicking its bar or its job number in a table; the job number
   is a button, so the keyboard reaches it with Tab. Opened by the keyboard, the output takes the
@@ -745,7 +783,11 @@ of server-sent events from `/api/events`, and per job from `/api/jobs/<id>/outpu
 answers an array with one row per node: `node_id` (`local` for the daemon's machine), `kind`,
 `state`, `cpus`, `slots`, `slots_in_use`, `running_jobs`, `queued_jobs`, `memory_gib`,
 `memory_used_mib`, `disk_gib`, `disk_free_gib`, `cpu_busy_milli` (the CPUs of the pool and the
-compile cache over the last 10 s, in thousandths) and `joined_at`; a remote node adds
+compile cache over the last 10 s, in thousandths), `host_cpu_milli` and `load1` (the whole
+machine, every program counted), `booted_at`, `poweroff_at` (the poweroff systemd has scheduled,
+from `/run/systemd/shutdown/scheduled`), `ended_hour` and `ended_hours` (the jobs the node ended in
+the last 60 minutes and per clock hour of the last 25, as `ok`, `test`, `timeout`, `infra` and
+`cancelled`, from its own job log) and `joined_at`; a remote node adds
 `machine_type`, `location`, `price_per_hour_cents` and `deadline`. Every job in `/api/state` names
 its `node`. `/api/limits`
 reads and sets the headroom, `/api/priority` the [priority rules](#priority).

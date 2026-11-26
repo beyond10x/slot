@@ -122,10 +122,19 @@ export function sessionCells(s: CensusSession): { name: string; untitled: boolea
   return { name: s.title || (s.session ? 'no title' : '(no session)'), untitled: !s.title, id: s.session.slice(0, 8) };
 }
 
-/** A job's session as the job tables name it: the title the census gave for that id, else the first 8 characters of the id. */
+/** Words of a job that no agent session started. */
+export const NO_SESSION = 'no session';
+
+/**
+ * A job's session as the job tables name it: the title the daemon gave for that id (census or usage), else the first 8 characters
+ * of the id, else "no session".
+ */
 export function sessionName(id: string, titles: ReadonlyMap<string, string>): string {
-  return titles.get(id) || id.slice(0, 8);
+  return titles.get(id) || id.slice(0, 8) || NO_SESSION;
 }
+
+/** Hover text of a job's session cell: the name, and the full id when there is one. */
+export const sessionHover = (id: string, name: string): string => (id ? `${name}\nsession ${id}` : `${NO_SESSION}: the job was started outside an agent session`);
 
 /** Sessions by cores, then unmanaged cores, then label. */
 export function orderSessions(list: readonly CensusSession[]): CensusSession[] {

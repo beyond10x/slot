@@ -54,7 +54,7 @@ const cacheNote = computed(() => describeMinute(cacheChart.value.latest));
 <template>
   <section class="trend" aria-label="Machine charts">
     <div>
-      <SectionHead text="Cores: used on the whole machine" />
+      <SectionHead text="Cores: used on this host" />
       <LinesChart :lines="CORES" :points="host" unit="cores" :min-top="store.cores" />
     </div>
     <div>

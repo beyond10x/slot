@@ -63,9 +63,13 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
   After exit 0 the client copies that path from the host's target directory to the same path in
   the local checkout (`client.rs:194`, `:264-298`). A debug binary of 410 MB (design.md § 16)
   takes about 33 s at 100 Mbit/s down; a stripped release binary of 5 to 30 MB under 3 s (§ 5.2).
-- Without `--fetch` the local `target/` is not touched. A binary already there is from the last
-  local build and is stale. Nothing warns about that today (§ 5.1).
-- A fetch runs only after exit 0, so the artifacts of a failed test run stay on the host (§ 5.3).
+- A remote `cargo build`, `test`, `bench` or `rustc` brings the products of the workspace's own
+  packages back into the local target directory (§ 5.2, `artifacts.rs`): binaries and test
+  binaries, never a dependency's artifacts. A build fetches after exit 0, a test run whatever its
+  exit, so the binaries of a failed test run come back too (§ 5.3). Other files of `target/`
+  stay on the host.
+- Before a cargo job the host fetches the crates of the mirror's `Cargo.lock` once and runs the
+  job offline (§ 5.8, `cargo_fetch.rs`).
 - Files a job writes into the tree (`Cargo.lock`, snapshots, formatted sources) stay in the mirror
   and are deleted by the next push. Commands that exist to write the tree stay local (§ 5.5).
 - `cargo run` would run the program on the host. It stays local (§ 5.4).
@@ -88,16 +92,20 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | choose | `SLOT_HOST` in the caller's environment sends the command remote, unless `.slot.toml` lists it as `local` | `client.rs:137`, `:185-189`, `:303-318` |
 | identify | workspace id = first 8 bytes of SHA-256 of `hostname:repo-root`, so each worktree has its own mirror | `client.rs:571-577` |
 | siblings | before the push the client asks the host for mirrors of the same repository (normalized `origin` URL, `mirror.rs`) with `slot __siblings`; up to four go to rsync as `--copy-dest`, so a new mirror receives only what differs from them; a host without the step gets the plain push | `sync.rs`, `mirror.rs`, `shell.rs` |
-| push | `rsync -a --delete --mkpath --filter=':- .gitignore' --exclude=/.git` plus the toolchain's excludes (`/target/` for rust, `/node_modules/` for node tests, none for go) to `<host>:<ws-root>/<id>/` | `sync.rs`, `toolchain.rs:222-224`, `:272-274`, `:375-377` |
+| never sync | before any route is chosen, whatever `SLOT_HOST` says: a job whose working directory, checkout root, git directories or a tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`) lies under a prefix of the never-sync list, or whose tree holds the home directory, stays local with `local_reason` `never sync: …`, which also keeps the daemon from handing it to a node (§ 8.4) | `never_sync.rs`, `client.rs` `run` |
+| pre-flight | `rsync -a --list-only` of the tree with the push's filters, through the same `rsync`: counts symlinks that leave the tree, and refuses the sync when that rsync would send such a link's target in place of the link | `sync.rs` `preflight` |
+| push | `rsync -a --checksum --delete --mkpath --filter=':- .gitignore' --exclude=/.git` plus the toolchain's excludes (`/target/` for rust, `/node_modules/` for node tests, none for go) to `<host>:<ws-root>/<id>/` | `sync.rs`, `toolchain.rs:222-224`, `:272-274`, `:375-377` |
 | ssh | default `ssh -o ControlMaster=auto -o ControlPersist=10m -o ControlPath=… -o ConnectTimeout=3`; `SLOT_SSH` replaces it, split on whitespace | `client.rs:115-135` |
-| environment | names the toolchain admits and that do not look like a credential, plus names in `SLOT_ENV` | `client.rs:635-639`, `toolchain.rs:163-176`, `:212-220` |
+| environment | names the toolchain admits plus names in `SLOT_ENV`, except names that look like a credential, which the client names on stderr | `client.rs` `remote`, `toolchain.rs` `credential`, `remote_env` |
 | run | `ssh <host> slot proxy` bridges to the host daemon's socket; the job starts from the host daemon's environment with the client's admitted names on top | `client.rs:645-662`, `server/mod.rs:1579-1590` |
 | command | the host runs `argv[0]` as the client sent it; a name with a slash is not looked up | `server/mod.rs:2088-2111`, `:4816-4819` |
 | caches | remote rust jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`, go jobs `GOCACHE=<cache-root>/go-build` | `toolchain.rs:203-210`, `:255-257`, `server/mod.rs:2029-2044` |
 | seed, evict | before a remote job queues, a new workspace's target directory is a reflink copy of the most recently used one of the same repository; least recently used ones are deleted over the budget or under the disk floor | `server/cache.rs:144-195`, `:201-205`, `server/mod.rs:1839-1841`, `:2337-2378` |
 | output | streamed line by line; the mirror path is rewritten to the client's repository path | `rewrite.rs:1-2`, `server/mod.rs:1627-1654`, `:1475-1494` |
 | fetch | after exit 0 only, each `--fetch PATH` is copied back with `rsync -a --mkpath`; `target/…` is read from the job's target directory, which the host reports in its `start` frame | `client.rs:194`, `:230-298`, `server/mod.rs:2143-2169` |
-| measure | one stderr line per sync: bytes sent (rsync `--stats`) and seconds | `sync.rs` |
+| products | a cargo `build`/`rustc` (after exit 0) or `test`/`bench` (any exit) runs with `--message-format=json-render-diagnostics` unless the caller named a format; the client strips cargo's JSON lines from stdout, keeps the `compiler-artifact` paths of `path+` packages, and copies them with one `rsync -a --relative` into the local target directory | `artifacts.rs`, `client.rs` (`products_back`) |
+| fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch` (`--locked` when the job passes `--locked` or `--frozen`) when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository, then sets `CARGO_NET_OFFLINE=true`; a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
+| measure | one stderr line per sync: bytes sent (rsync `--stats`), seconds, the checkout's `HEAD` and its count of changed files | `sync.rs` |
 | fallback | when the sync fails, stalls (no byte read or written for `SLOT_SYNC_STALL`, 60 s) or runs past `SLOT_SYNC_LIMIT` (5 min), or ssh cannot be started, the job goes to the local daemon with one stderr line; a stalled rsync is killed with its ssh | `client.rs:200-207`, `sync.rs` |
 | lost connection | `slot: connection to daemon lost`, exit 3, whether or not the job had started; the host cancels the job | `client.rs:190-192`, `:683-686`, design.md § 16 |
 | access | forced command `slot shell` accepts only the sync, the fetch, `slot proxy`, `slot cancel` and `slot __siblings` | `shell.rs:1-40`, `:143-164`, `:207-225` |
@@ -233,6 +241,14 @@ limit order what arrives.
   daemon's version, its clock, whether it admits jobs, and the job-log lines since the last poll,
   which the local daemon appends to `<state-dir>/hosts/<name>/jobs.jsonl`. A reclaimed host then
   loses at most one poll of its log, and no key needs a fetch path for the log.
+- Built first (the minimal slice): the nodes are the `[remote.<name>]` tables of the host
+  configuration file (`slot.hostconfig.RemoteNodeTable`), not a registry; the `state` step
+  (`server/nodes.rs`) prints the node daemon's own `/api/nodes` row and its active and last 30
+  finished jobs, read from its web address; the poll is bounded at 4 s, a node is Joining until
+  its first answer and Gone (Lost) after three misses, and an answer makes it Ready again. Jobs of
+  a node keep the id the node gave them and carry `from_node`; node and id together name one
+  (ids below 0 until 0.34), not yet logged to
+  `<state-dir>/hosts/<name>/jobs.jsonl`; version and clock are not yet checked at join.
 - Three missed polls in a row, or three failed syncs in a row: `gone`; its placements end.
 - Refused at join: a slot version other than the workstation's; a clock more than 1 s from the
   workstation's (§ 4.5).
@@ -325,7 +341,7 @@ of the same worktree runs changes that job's sources under it, as an edit does t
 | gitignored build inputs | the `.gitignore` filter (`client.rs:620`) | in this repository `crates/slot/build.rs:23-36` embeds `ui/dist`, which `.gitignore` excludes, and writes a placeholder page when it is missing: a remote build of slot has no web UI | phase 2: the operator's opt-in names ignored paths to include |
 | rsync reads `.gitignore` by its own rules | `--filter=':- .gitignore'` treats each line as an rsync exclude | a `!keep` line does not re-include a file, so it is missing on the host; files ignored only by `.git/info/exclude` or the user's global ignore file are sent; a tracked file that matches an ignore line is not sent *(unverified: from rsync's filter rules, not run)* | pre-flight: compare `git ls-files --cached --others --exclude-standard` with `rsync --list-only` of the same tree. Phase 0 compared them on a tree of 10,540 files: the filter selected exactly git's list, 115,985,019 bytes both ways, so sending the git list with `--files-from` saves no bytes there and is not built; it stays the fix for a tree where the lists differ |
 | a nested `.git` | `--exclude=/.git` is anchored at the root | a clone inside the worktree crosses with its `.git/config`, which may hold a token in a remote URL | phase 1: `--exclude=.git` at every depth |
-| symlinks that leave the tree | `rsync -a` copies links as links | the link dangles on the host | pre-flight lists them; such repositories stay local |
+| symlinks that leave the tree | `rsync -a` copies links as links; the pre-flight (`sync.rs` `preflight`) counts them on the sync line and refuses a sync whose `rsync` would send their targets (a `PATH` wrapper with `--copy-unsafe-links`) | the link dangles on the host | the count names them; a repository that needs the target on the host stays local |
 | the command's absolute path | the shim sends `$real` (§ 2.3 item 6) | exit 127 on the host | phase 0: type `slot cargo …`. Phase 1: for a placed job the client sends the file name of `argv[0]` |
 | environment values that are workstation paths | every `RUST*` and `CARGO_*` name crosses but three (`toolchain.rs:213-219`): `RUSTC`, `RUSTC_WRAPPER`, `RUSTUP_HOME`, `CARGO_INSTALL_ROOT` when set | the host job looks for a path it does not have | phase 0: check `env` in the session. Phase 1: hold back a value that is a path under the caller's home |
 | the workstation's `~/.cargo/config.toml` (sccache wrapper, `debug = "line-tables-only"`, linker) | not part of any repository | the host builds with other settings | the host image writes the same file (§ 7.3). `target-cpu=native` must not be in it: a fetched binary could use instructions the workstation lacks |
@@ -353,6 +369,12 @@ follow.
   not reproduced; phase 0 step 7 tests it)*. If it reproduces: no seeding until fixed (a cache
   root without reflinks skips it, `server/cache.rs:172-184`); the fix drops the fingerprints
   of the workspace's own packages from a seed, so only dependency artifacts are reused.
+  *Reproduced in a test and fixed otherwise* (`tests/remote_sync/fresh.rs`): the sync keeps
+  the server's times (`--no-times`), and after a seed every source of the new mirror with the
+  sibling's bytes takes the sibling's time, every other one a time after every file of the copy
+  (`cache::align_sources`), so only crates whose sources differ are built again. The same
+  cause hit one tree without a seed: an edit made before a build of the old content on the
+  node, synced after it with the workstation's older time.
 - **Owners and modes.** Files arrive owned by the host's build user and keep their modes; a
   fetched file is owned by the caller. User ids need not match.
 
@@ -387,10 +409,11 @@ scheme, user, port and `.git`), so every clone and worktree of one repository sh
 an `origin` it hashes the workstation's name and the common git directory. The step writes the
 key to `<ws-root>/.repo-keys/<id>` and prints up to four other ids with the same key whose
 mirror exists, the most recently recorded first. rsync gets each as `--copy-dest=../<id>`: for a
-file missing in the new mirror it copies a sibling's file on the host when size and time match,
-and otherwise takes the sibling's file as the delta base. Worktrees checked out at different
-times differ in every file's time, so the second case is the common one; what crosses is the
-file list, block checksums and changed blocks. Measured by the test
+file missing in the new mirror it copies a sibling's file on the host when size and content
+match (`--checksum`; the time is then set from the worktree's file), and otherwise takes the
+sibling's file as the delta base. Before `--checksum` the copy needed size and time to match;
+worktrees checked out at different times differ in every file's time, so every file went the
+delta way. What crosses is the file list, block checksums and changed blocks. Measured by the test
 `a_new_worktree_sends_only_what_differs_from_its_sibling_mirror`: a worktree of a 2 MiB tree at
 the same commit as a synced sibling sent under 5 % of the tree.
 
@@ -404,8 +427,22 @@ the same commit as a synced sibling sent under 5 % of the tree.
   sends the plain push without `--copy-dest` and `--stats`, which that host would refuse too.
 - Eviction removes a mirror's key with the mirror (`server/cache.rs`).
 
+The push compares every file by content (`--checksum`), not by size and modification time.
+With rsync's quick check, a file changed at the same size and time was skipped, and a sibling's
+file of the same size and time was taken through `--copy-dest` as it was: the job built the old
+content and could pass. The tests `a_file_changed_at_the_same_size_and_time_reaches_the_mirror`
+and `a_sibling_file_of_the_same_size_and_time_is_not_taken_for_the_worktrees` hold it. The cost
+is reading every file on both sides. On a tree of 10,000 files (99 MB), a sync with nothing to
+send took 0.13 to 0.36 s by size and time and 0.33 to 0.68 s by content with the files in the
+page cache, and 2.6 to 30 s by content on a workstation at load 75 on 20 cores (local rsync into
+a local directory, 8 runs each); the stall watch below counts the reads, so a long checksum pass
+is not taken for a stall.
+
 Each sync also prints `slot: synced to <host> in <s> s, <n> bytes sent[, <k> sibling mirrors as
-base]`, the bytes from rsync's `--stats`. And a sync is bounded: rsync's read and written bytes
+base], at <commit> + <n> changed files`, the bytes from rsync's `--stats`, the commit from `git
+rev-parse --short HEAD`, the changed files as the lines of `git status --porcelain` (tracked
+changes and untracked files git does not ignore). Without git the line says that the sources
+are not named. And a sync is bounded: rsync's read and written bytes
 (`/proc/<pid>/io`) are sampled every 100 ms; no change for `SLOT_SYNC_STALL` (60 s) or a run past
 `SLOT_SYNC_LIMIT` (5 min) kills rsync and its ssh, and the job goes to the local daemon as for a
 failed sync. A killed rsync never leads to `slot proxy` on the host. Two clients of one worktree on one
@@ -422,10 +459,11 @@ of the same repository name by reflink.
 A remote job returns its stdout, stderr and exit code, and nothing else (`client.rs:190-198`).
 That is right for `cargo check`, `clippy`, `test`, `nextest` and a `build` used as a check.
 
-The trap is a `build` whose product is run next. The local `target/` is unchanged, so
-`./target/debug/mytool` is absent or, worse, the product of an older local build. Phase 1 prints
-the line of § 3.7; phase 2 lets the operator's opt-in name files that every successful `cargo
-build` of the repository fetches.
+The trap was a `build` whose product is run next: the local `target/` stayed unchanged, so
+`./target/debug/mytool` was absent or, worse, the product of an older local build. Every
+repository session declined the node for that reason. Built since: the products of a cargo
+`build`, `rustc`, `test` and `bench` come back on their own (§ 5.2). Other commands still return
+only output and exit code.
 
 ### 5.2 `cargo build` of a binary that runs locally
 
@@ -443,17 +481,47 @@ loop on a large binary, fetching it each time costs more than the build saved: s
 with less debug info (`CARGO_PROFILE_DEV_DEBUG` crosses, `toolchain.rs:216`) or stay local.
 Cloud egress costs about $0.09 per GB after a free allowance (approximate): $0.04 per 410 MB.
 
-Phase 3: `--fetch auto`. The host lists the files in `target/<profile>/` (not `deps/`) that the
-job created or changed and the client fetches those, after checking each name (§ 8.6).
+**Products come back without `--fetch`** (`artifacts.rs`). Two ways to know what to copy were
+weighed:
+
+| way | how | judgement |
+|---|---|---|
+| (a) cargo's JSON | run cargo with `--message-format=json-render-diagnostics`, read the `compiler-artifact` messages of `path+` packages: each `executable`, and the files of `bin`, `test`, `cdylib`, `staticlib` targets | chosen: cargo names exactly the files of this job, fresh ones included, and its package id tells the workspace's own packages from dependencies; no new step on the host |
+| (b) a listing | copy executables in `target/<profile>/` and `target/<profile>/deps/` newer than the job's start | rejected: needs a listing step in `slot shell`; misses a fresh product the local tree lacks (the last fetch failed, `target/` was cleaned); takes dependencies' proc-macro `.so` files, which are executable too |
+
+The JSON is not fragile where it counts: with `json-render-diagnostics` cargo renders diagnostics
+on stderr itself, so the only lines to remove from stdout are whole lines that start with
+`{"reason":` and parse as JSON. A test's own output passes through. A caller who passes a JSON
+format gets the stream unchanged; `short` or `human` turns the return off, because cargo would
+then print no artifact messages.
+
+The paths are mapped from the job's target directory (or `/work/target` of a sandbox with fixed
+paths) to the local one: `CARGO_TARGET_DIR` of the caller, else `target/` beside the nearest
+`Cargo.lock`. One `rsync -a --relative` call names every path (`<target>/./debug/x`), so the
+relative layout, modes and mtimes come along; `slot shell` admits a sender with several paths,
+each checked as before. rsync's quick check skips a file whose size and mtime already match.
+
+Measured for this repository's workspace, 3 packages, debug profile without debug info
+(`debug = false`), 2026-11-24: the sizes of the files cargo reported, which is what the first
+fetch sends; a later fetch sends only files whose size or mtime changed.
+
+| command | products | MB | target directory |
+|---|---|---|---|
+| `cargo build` | 2 (`slot` 23.8 MB, `slot-docs` 5.0 MB) | 28.8 | |
+| `cargo test --no-run` | 10 (the 2 binaries, 8 test binaries; the largest, the `slot` library's unit tests, 32.1 MB) | 72.5, of which 43.7 new after the build | 608 MB after both |
+
+At 100 Mbit/s down the test binaries take about 6 s, a twelfth of the target directory. Debug info
+makes them larger *(not measured here; the 410 MB binary of § 2.2 had it)*.
 
 ### 5.3 `cargo test`
 
-Only the log and the exit code come back. Tests that read files in the repository work, since
-the tree is synced. Tests that need anything outside it (a local service, docker, a socket, a
+The log and the exit code come back, and so do the test binaries, whatever the exit (§ 5.2): a
+failed test can be run again here, under a debugger or with other arguments. Tests that read
+files in the repository work, since the tree is synced. Tests that need anything outside it (a local service, docker, a socket, a
 file in the home directory, a kind cluster) fail remotely and belong in `.slot.toml` `local`.
 
-What a failing run leaves behind stays on the host, because the fetch runs only after exit 0
-(`client.rs:194`): a JUnit report, a coverage file, `*.snap.new`, a `proptest-regressions` file.
+Other files a failing run leaves behind stay on the host, because `--fetch` runs only after exit
+0: a JUnit report, a coverage file, `*.snap.new`, a `proptest-regressions` file.
 Phase 2: the operator's opt-in names `return` patterns, and files a job created under them come
 back whatever the exit code.
 
@@ -514,6 +582,106 @@ Recommendation: (1) through phase 2, since binaries that are fetched and debugge
 case. Evaluate (3) in phase 3 *(unverified: not prototyped)*. (2) is rejected for its cache cost.
 None of the three makes two worktrees share sccache entries: their paths differ on the
 workstation too.
+
+### 5.8 Fetch once per `Cargo.lock`
+
+Parallel cargo jobs on one node waited up to 28 minutes on cargo's package-cache lock: every job
+resolves under that lock, and one that downloads holds it for the whole download. Built
+(`cargo_fetch.rs`):
+
+1. A client whose remote command is a cargo command that builds (`build`, `check`, `clippy`,
+   `test`, `bench`, `doc`, `rustc`, `nextest`, `llvm-cov`) sets `fetch_once` in its request.
+   Commands that need the network themselves (`update`, `add`, `install`, `fetch`) do not.
+2. Before the job is queued, the host daemon finds the nearest `Cargo.lock` from the job's
+   directory up to the mirror root. None: the job runs as before, online.
+3. Its SHA-256 is compared with `<ws-root>/.cargo-fetch/<id>`. Equal: the job runs with
+   `CARGO_NET_OFFLINE=true`.
+4. Different: the daemon takes a `flock` per repository key (`.repo-keys/<id>`, else the
+   workspace id) in the same directory, compares again (another mirror's job may have fetched),
+   runs `<cargo> [+toolchain] fetch` in that directory with the job's environment, and records
+   the digest. Like cargo on the workstation, the fetch updates an out-of-date `Cargo.lock` (a
+   path dependency just added); a job whose own options before `--` include `--locked` or
+   `--frozen` gets `fetch --locked`, so it fails as it would locally. Lock wait and fetch
+   together are bounded at 5 minutes.
+5. A fetch that fails or runs over the bound answers with a `fallback` frame before the job is
+   registered; the client prints `slot: remote build on <host> did not start (cargo fetch
+   failed …); running it on this machine's daemon` and submits the original command
+   locally. Only a client that set `fetch_once` gets the frame, so an older client never sees it.
+6. Eviction of a mirror removes its digest.
+
+The fetch is network work, not compile work, so it takes no slot. Offline, a job still takes the
+package-cache lock while it resolves, but only for the moment it reads the cache. Not covered: a
+crate that cargo's cache cleaner removed after the digest was recorded fails the offline build;
+editing `Cargo.lock` (or a sync of a new one) fetches again.
+
+Git dependencies come from the workstation (`git_deps.rs`). The fetch above runs on the node,
+which may hold no credential for a private forge, and only for a cargo command the client sends;
+a wrapper's inner cargo fetches on the node. So before every remote job, the spilled ones
+included (their process is this client), the client reads each `Cargo.lock` the sync sends and
+maps each `git+` source to its database entry with `cargo metadata --locked --offline` (the path
+component after `/git/checkouts/` of the package's `manifest_path`), so an entry is taken only for
+the exact source URL it was made from. It runs `cargo fetch --locked` on the workstation for a
+lock file whose locked revision is in no such entry (outside the pool, `SLOT_SHIM_OFF=1`); the
+revision is looked up in the entry's pack indexes and loose objects without running git. It asks
+the node with `slot __cargo-git <entry>:<rev>…` which entries lack their revision; the node
+answers `missing <entry>` lines only (no path, no git run, a symbolic-link entry counts as
+missing), and an answer naming an entry not asked for, or any other line, refuses the job. The
+deny lists are read and checked again before each entry is copied. Only the entries named are
+rsynced (`-rt`, no `-l`; filter `/HEAD`, `/packed-refs`, `/objects/***`, `/refs/***`, nothing
+else, so no `config` with a credential or `http.extraHeader` crosses, and
+`objects/info/alternates` and `objects/info/http-alternates`, which name a path or URL of the
+workstation, are excluded) into the node account's `~/.cargo/git/db/<entry>/`, whatever
+`CARGO_HOME` the ssh session sets. `slot shell` admits exactly that path depth and exactly the
+client's options: the short flags `r` and `t`, `--server` and `--mkpath`; every other flag,
+`-a` (links, devices, special files) and `--copy-dest` among them, is refused, and so is a
+symbolic-link entry. A symbolic link already inside a node entry is replaced by the receiver, not
+written through: `-rt` writes a file to a temporary name and renames it, and replaces a link
+where it makes a directory (`sync::tests::a_link_inside_a_node_entry_is_replaced_not_written_through`).
+cargo skips the fetch of a locked revision its database holds.
+
+What runs where. Before the job is placed, on the workstation and outside the pool
+(`SLOT_SHIM_OFF=1`, the rule for network work, like the node's fetch-once step): `git ls-files`
+in the checkout, `git ls-remote --get-url` and `ssh -G` (the deny check, each bounded at 10 s),
+and `cargo metadata --format-version 1 --locked --offline` and, when a revision is missing,
+`cargo fetch --locked` (bounded with the probe and the copies at 5 minutes), in the directory of
+each lock file, with the job's cargo and `+toolchain`. cargo there reads that directory's
+`.cargo/config.toml` files and `rust-toolchain.toml`, so a checkout's `build.rustc-wrapper`
+(cargo asks rustc for its version through it), its credential providers and the toolchain rustup
+installs for it run on the workstation, outside the pool, even for a job that then builds on the
+node. They take no slot; they are not routed through the pool.
+
+`remote-deny` and `remote-deny-origins` may each hold `/abs/path` lines and `origin:<pattern>`
+lines (`origin` in any case, spaces around `:`, ` #` comments); any other line is a problem that
+keeps every job local, naming the file and line. A `git+file` source under a path line, or a
+source one of whose URL forms matches an `origin:` pattern as a shell `case` does, without regard
+to case (`*` crosses `/`, `?`, `[...]`, `[!...]`; e.g. `origin:*git.example.org[:/]team/*`),
+keeps the job on the workstation with `git dependency denied: <source>`, set as `local_reason`
+before submission, so the daemon never spills it. The forms: the fetch URL (without `git+`,
+`?query` and `#rev`) as written and normalised (scheme and host lower case, trailing dot, default
+port and `//` removed, `file` paths percent-decoded, scp form as `ssh://`); its bare forms, host
+and path without user and port and the path without trailing `/` and `.git`, both as
+`scheme://host/path` and as `host/path`, each also with `.git`, `/` and `.git/` appended; git's
+`url.<base>.insteadOf` rewrite (`git ls-remote --get-url -- <url>`, no network) and an ssh
+alias's `HostName` (`ssh -G`), each with its normalised and bare forms. So a URL is denied when
+the pattern matches its full form or its bare form: `*git.example.org[:/]team/*` denies
+`ssh://git@git.example.org:2222/team/x`, `https://git.example.org/team/*` denies
+`https://user@git.example.org/team/x`, and `*/team/dep.git` denies `https://h/team/dep`. A
+pattern that names a user or a port matches only URLs that name them. A URL that cannot be
+normalised, a git or ssh lookup that fails, prints nothing or runs over its 10 s, a lock file
+that does not parse and a `git+` source without a full revision are denied while either list
+names anything; so are, for a checkout with a lock file, a cargo home that is not absolute
+(`CARGO_HOME` relative, or neither it nor `HOME` set) and a cargo configuration that replaces a
+git source: a `[source.<name>]` table with `replace-with` where it or its replacement has a `git`
+key, merged over `.cargo/config.toml` and `.cargo/config` in each lock file's directory and the
+directories above it, in every directory of the checkout the sync sends, and in the cargo home.
+With such a replacement `cargo metadata` names the replacement's checkout for the URL the lock
+file names (`git_deps::tests::a_git_source_replaced_in_cargo_config_keeps_the_job_here`), so the
+entry copied would be another repository's. The matcher is `git_deps::glob_match`; no crate in
+the lock file does `case` matching. Not covered: a git dependency's submodules (cargo keeps them
+as entries of their own names) are not copied; an IP literal or another DNS name for a denied
+host is not caught by matching; a source replacement given as `--config` on the command line or
+in a `CARGO_*` environment variable is not read; the lists can change between the check of an
+entry and the end of its copy.
 
 ## 6. Jobs that stay local
 
@@ -722,13 +890,29 @@ To the host:
   each name it held back. It is best effort. The control that counts is the operator's opt-in
   per repository (§ 3.2 rule 3), given after reading the list of files (§ 9.1 step 1).
 - **The command line**, in full. A secret passed as an argument crosses.
-- **Environment names** the toolchain admits and that do not look like a credential
-  (`client.rs:635-639`). Names with `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`,
-  `_KEY` or `AUTH` stay (`toolchain.rs:163-176`), and so do `HOME`, every `AWS_*` name and
-  `CARGO_HOME`, which no toolchain admits (two tests, `toolchain.rs:740-777`). The value is not
-  inspected: a proxy or registry URL with a password in it crosses under a name such as
-  `CARGO_HTTP_PROXY` or `GOPROXY`. Phase 1 holds back a value that contains `://…:…@`. A name
-  in `SLOT_ENV` crosses whatever it looks like (`client.rs:636`); that is the caller's choice.
+- **Not the trees on the never-sync list.** A file of absolute path prefixes
+  (`never_sync_file` of `cluster.toml`, default `$XDG_CONFIG_HOME/slot/remote-deny`; `#`
+  comments) names trees that never leave the workstation. The client checks the job's working
+  directory, checkout root, git directories (a linked worktree's lie in its main repository)
+  and every tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`), on whole
+  path components, as written and with symlinks resolved; a tree that is `/`, the home
+  directory or above it counts too. A match keeps the job in the local pool with `local_reason`
+  `never sync: <prefix>`, and that reason keeps the daemon from spilling it; a spilled client
+  that meets a match sends the job back. The check is in the binary, so neither a preset
+  `SLOT_HOST`, nor a `--manifest-path` into a listed tree, nor a call that skips a wrapper gets
+  around it. An unreadable list keeps every job local (`never_sync.rs`, tests in
+  `crates/slot-cli/tests/remote_sync/safety.rs`).
+- **Symlinks as links.** A link that leaves the tree crosses as the link, never as its target,
+  and the sync line counts it. The pre-flight lists the tree with the same `rsync` first and
+  refuses the sync when that rsync would send a target in its place (`sync.rs` `preflight`).
+- **Environment names** the toolchain admits, plus names listed in `SLOT_ENV`, except names
+  that look like a credential (`toolchain.rs` `credential`, `remote_env`): a name that contains
+  `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASS`, `CREDENTIAL`, `_KEY`, `AUTH`, `SSH_` or
+  `AWS_SECRET`, or has `PAT`, `DSN` or `KEY` as a word between underscores. Such a name stays
+  even when `SLOT_ENV` lists it, and the client names each one on stderr, never its value.
+  `HOME`, every `AWS_*` name and `CARGO_HOME` stay too: no toolchain admits them. The value is
+  not inspected: a proxy or registry URL with a password in it crosses under a name such as
+  `CARGO_HTTP_PROXY` or `GOPROXY`. Phase 1 holds back a value that contains `://…:…@`.
 - **Identity**: the session id, `hostname:pid` of the caller and the worktree's absolute path
   (`client.rs:170-175`, `:640-644`). They end up in the host's job log.
 

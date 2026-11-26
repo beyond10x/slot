@@ -4,19 +4,19 @@ import type { Chunk } from '../generated/types.ts';
 import { Terminal, lineHtml, lineIsErr } from '../lib/ansi.ts';
 import type { Segment } from '../lib/ansi.ts';
 import { fmtBytes, fmtClock, fmtDur } from '../lib/format.ts';
-import { checkoutLabel, cmdText, resultLong, runS, times, waitS } from '../lib/job.ts';
+import { checkoutLabel, cmdText, jobName, outputUrl, resultLong, runS, times, waitS } from '../lib/job.ts';
 import { levelText, queuePlace, servedQueue, waitReasonText } from '../lib/queue.ts';
 import { atBottom, revealDelta } from '../lib/scroll.ts';
-import { jobs, live, select, sessionTitles, store } from '../store.ts';
+import { jobs, liveOf, select, sessionTitles, store } from '../store.ts';
 
 /** Most lines kept in the pane; older ones are dropped and counted. */
 const MAX_LINES = 5000;
 
-const props = defineProps<{ id: number }>();
+const props = defineProps<{ id: string }>();
 
 const job = computed(() => jobs.get(props.id));
 /** "#42 ledger · worktree tax-rounding: " before the command; the number alone while the job is unknown. */
-const head = computed(() => (job.value ? `#${props.id} ${checkoutLabel(job.value)}: ` : `#${props.id}`));
+const head = computed(() => (job.value ? `#${jobName(job.value)} ${checkoutLabel(job.value)}: ` : `#${props.id}`));
 const cmd = computed(() => (job.value ? cmdText(job.value) : ''));
 
 type Stream = 'connecting' | 'live' | 'ended' | 'unavailable';
@@ -46,7 +46,7 @@ const facts = computed((): Array<[string, string]> => {
   const j = job.value;
   if (!j) return [];
   const t = times(j);
-  const l = live.get(props.id);
+  const l = liveOf(j);
   const end = t.ended ?? store.clock;
   const run = runS(j, end);
   const title = sessionTitles.get(j.session);
@@ -210,7 +210,7 @@ onMounted(() => {
   keepOpenerInSight();
   takeFocus();
   document.addEventListener('keydown', onKey);
-  const src = new EventSource(`api/jobs/${props.id}/output`);
+  const src = new EventSource(outputUrl(props.id));
   es = src;
   src.onopen = () => {
     // The server replays the kept tail on every connection, so a reconnect starts clean.
@@ -258,7 +258,7 @@ onUnmounted(() => {
     <p v-if="queued" class="notyet">
       Not started yet: the output appears here when the job gets its slots.<template v-if="queued.why"> It {{ queued.why }}.</template>
     </p>
-    <pre ref="pre" tabindex="0" role="log" aria-live="off" :aria-label="`output of job ${props.id}`" @scroll.passive="onScroll"><div ref="dropped" class="dropped" :hidden="!dropped">… {{ dropped }} earlier lines dropped</div></pre>
+    <pre ref="pre" tabindex="0" role="log" aria-live="off" :aria-label="`output of job ${job ? jobName(job) : props.id}`" @scroll.passive="onScroll"><div ref="dropped" class="dropped" :hidden="!dropped">… {{ dropped }} earlier lines dropped</div></pre>
   </aside>
 </template>
 

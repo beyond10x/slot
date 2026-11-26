@@ -60,15 +60,18 @@ for every shell, bash or zsh.
 
 What the shim sends through slot:
 
-- `cargo build`, `b`, `check`, `c`, `test`, `t`, `clippy`, `doc`, `d`, `bench`, `nextest`,
-  `install`, `rustc`, `llvm-cov`, `miri`; global flags such as `+nightly` or `--locked` before the
-  subcommand are skipped when finding it.
+- Every `cargo` subcommand that can compile: `build`, `check`, `test`, `clippy`, `nextest`,
+  `run`, aliases such as `cargo xtask` and external subcommands; global flags such as `+nightly`
+  or `--locked` before the subcommand are skipped when finding it. These run directly because
+  they compile nothing: `fmt`, `metadata`, `locate-project`, `pkgid`, `search`, `login`,
+  `logout`, `owner`, `yank`, `version`, `help`, `tree`, `update`, `generate-lockfile`, `fetch`,
+  `vendor`, `new`, `init`, `add`, `remove`, `clean`, `config`, `read-manifest`,
+  `verify-project`, `report`, `info`, and `mutants` (whose own builds start cargo by path).
 - `go build`, `test`, `vet`, `install`.
 - `ignite build`, `test`, `conformance`.
 - `make`, every target, when linked as `make`.
 
-Everything else runs directly: `cargo run`, `cargo fmt`, `cargo metadata`, `go run`, `go mod`,
-`ignite check`, `ignite run`. A
+Everything else runs directly: `go run`, `go mod`, `ignite check`, `ignite run`. A
 command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` does not queue its
 cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
 `PATH` the shim runs the real command.
@@ -149,12 +152,38 @@ share the pool. Wrapping the task is enough; the cargo calls inside it need no p
 A go command inside a wrapper is not capped, because go does not speak the jobserver protocol. If
 a task runs large go builds, call `slot go …` inside the task instead.
 
+## The rustc gate
+
+The PATH shim sees only commands that start as `cargo`. A program that starts cargo by its full
+path (an xtask binary, a script calling a toolchain's cargo) passes it by. Every compile cargo
+makes passes its `rustc-wrapper`, so `contrib/rustc-gate` set there catches those too:
+
+```toml
+[build]
+rustc-wrapper = "/path/to/rustc-gate"
+```
+
+The gate hands the compile to sccache when one of these holds, and refuses it with exit 3
+otherwise:
+
+- the compile runs inside a slot job (`SLOT_JOB` is set);
+- it runs under `slot --local`;
+- `SLOT_SHIM_OFF=1` is set, for one command outside the pool;
+- `SLOT_EDITOR=1` is set: put it in the environment of an editor's rust-analyzer;
+- the call compiles nothing (`-vV`, `--version`, `--print`), so `cargo metadata` and
+  `cargo fmt` keep working.
+
+The refusal names the crate and the replacement, `slot run -- <the cargo command>`.
+`contrib/rustc-gate.test.sh` checks these cases and runs in `task check`. To remove the gate, set
+`rustc-wrapper = "sccache"` again.
+
 ## What not to wrap
 
 - **rust-analyzer and IDE checks.** They run cargo for metadata and `cargo check` on their own
   schedule. Put the shim on `PATH` for agent shells only, never for the editor.
 - **Long-running processes.** A server, a watcher or `cargo run` of a daemon holds its slot for as
-  long as it runs. Start those without `slot`.
+  long as it runs, and the pool ends it at its run-time limit. Build it through the shim
+  (`cargo build`) and start the binary from `target/` without `slot`.
 
 ## Tests that need local services
 
