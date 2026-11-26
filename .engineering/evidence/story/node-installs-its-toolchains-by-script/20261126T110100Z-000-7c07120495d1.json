@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T11:01:00Z",
+  "actor": "human:operator",
+  "artifact": "story:node-installs-its-toolchains-by-script",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check in the release workflow of tag 0.39.1 (job Gate: success); it runs contrib/node/test.sh, the tests of every install step of provision.sh",
+    "reference": "https://github.com/beyond10x/slot/actions/runs/45804144790"
+  }
+}

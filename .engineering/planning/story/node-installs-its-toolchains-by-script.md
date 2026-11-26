@@ -2,12 +2,16 @@
 format: aep.planning-md/3
 id: story:node-installs-its-toolchains-by-script
 kind: story
-status: draft
+status: implemented
 title: A build node starts bare and provision.sh installs everything; nothing is copied to it
 summary: provision.sh installs rust toolchains, cargo tools and home tool copies from pinned archives; push.sh copies /usr and /etc only
 relations:
 - serves: vision:O6
-revision: 3
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T12:18:58Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"health_observation":3}}}
+- {from: "proposed", to: "active", at: "2026-11-26T12:18:59Z", actor: "human:operator", revision: 5, decided_on: {"recorded":{"health_observation":3}}}
+- {from: "active", to: "implemented", at: "2026-11-26T12:19:06Z", actor: "human:operator", revision: 6, decided_on: {"recorded":{"test_result":1,"health_observation":3}}}
 ---
 ## Outcome
 

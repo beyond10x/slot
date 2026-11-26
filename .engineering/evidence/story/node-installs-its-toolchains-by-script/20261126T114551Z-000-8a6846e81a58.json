@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-26T11:45:51Z",
+  "actor": "human:operator",
+  "artifact": "story:node-installs-its-toolchains-by-script",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "health_observation",
+    "source": "push.sh check from the workstation against that node: 0 drift, exit 0; push.sh has no apply mode"
+  }
+}
