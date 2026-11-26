@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T18:20:11Z",
+  "actor": "human:operator",
+  "artifact": "story:a-denied-git-dependency-keeps-the-job-on-this-machine",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check in the gate of pull request 124 (merge 9c2010a): crates/slot-cli/tests/remote_sync/git_deps.rs a_denied_git_dependency_runs_here_when_the_callers_environment_says_spilled (exit 0, one reason line, no ssh call, local_reason is the deny reason), a_handed_job_with_a_denied_git_dependency_goes_back_to_its_daemon, an_allowed_git_dependency_goes_to_the_node_when_the_caller_says_spilled; red before commit 7847a78 with exit 3",
+    "reference": "https://github.com/beyond10x/slot/actions/runs/45844843985"
+  }
+}

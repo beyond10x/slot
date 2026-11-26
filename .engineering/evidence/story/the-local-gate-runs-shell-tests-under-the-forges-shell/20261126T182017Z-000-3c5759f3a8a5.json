@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T18:20:17Z",
+  "actor": "human:operator",
+  "artifact": "story:the-local-gate-runs-shell-tests-under-the-forges-shell",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate of pull request 124 on the forge (task check, contrib/shell-tests.sh): the log's line 'shell tests: under dash (/usr/bin/dash), which is sh for the tests', then 'ok - shell tests: each test ran once, in order'; Taskfile.yml runs the three shell tests through it (commit 91de9c9)",
+    "reference": "https://github.com/beyond10x/slot/actions/runs/45844843985"
+  }
+}
