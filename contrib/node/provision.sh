@@ -2,13 +2,16 @@
 # provision.sh: brings a build node (Amazon Linux 2023 with NVMe instance storage) to the state a
 # slot node needs, and reports where a node differs from it. Runs as root on the node.
 #
-#   provision.sh check CONF           print one `drift: <part>: <what>` line per difference,
-#                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise
+#   provision.sh check CONF [--canary]
+#                                     print one `drift: <part>: <what>` line per difference,
+#                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise.
+#                                     --canary also starts one container that tries the node's
+#                                     role (role-canary.sh); an allowed call is drift
 #   provision.sh apply CONF [--open]  change every part that drifts, print `changed: ...` per
 #                                     change; --open also lets SETUP_KEY in (a setup login)
 #   provision.sh storage CONF         the boot step of slot-storage.service: instance store
 #                                     array, its mount, the job tmp filesystem and the binds
-#   provision.sh bundle CONF MODE [--open]
+#   provision.sh bundle CONF MODE [--open | --canary]
 #                                     print one self-contained script (this script, conf.sh,
 #                                     toolchains.sh and CONF) that runs MODE, for a root channel
 #                                     that takes one script, such as SSM Run Command
@@ -36,12 +39,18 @@ S=$R/.state
 mode=${1:-}
 cf=${2:-}
 open=
-case ${3:-} in --open) open=1 ;; esac
-
+canary=
 usage() {
-  sed -n '2,17p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,20p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
+# An option a mode does not know is refused: a misspelled --canary would be a check without it.
+case $mode:${3:-} in
+  apply:--open) open=1 ;;
+  check:--canary) canary=1 ;;
+  bundle:* | *:) ;;
+  *) usage ;;
+esac
 
 # Tools the node installs at a pinned release into the store's cargo bin, the release its
 # consumers' CI installs: a node job then runs the release its CI runs. One line each: name,
@@ -150,8 +159,8 @@ LIBEXEC=/usr/local/libexec
 if [ "$mode" = bundle ]; then
   conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
   m=${3:-}
-  case $m in check | apply) ;; *) usage ;; esac
   o=${4:-}
+  case $m:$o in check: | apply: | apply:--open | check:--canary) ;; *) usage ;; esac
   b=$(mktemp -d "${TMPDIR:-/tmp}/slot-node-bundle.XXXXXX") || exit 1
   cp "$here/provision.sh" "$here/conf.sh" "$here/toolchains.sh" "$b/" && cp "$cf" "$b/node.conf" || exit 1
   blob=$(cd "$b" && tar -czf - provision.sh conf.sh toolchains.sh node.conf | base64 -w0)
@@ -169,6 +178,14 @@ fi
 conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
 H=$BUILD_HOME
 U=$BUILD_USER
+# The instance profile of this node: INSTANCE_PROFILE, else the one role.sh makes for NODE_NAME.
+WANT_PROFILE=$INSTANCE_PROFILE
+if [ -z "$WANT_PROFILE" ]; then
+  case $NODE_NAME in
+    *[!A-Za-z0-9_.-]*) ;;
+    *) WANT_PROFILE=slot-node-$NODE_NAME ;;
+  esac
+fi
 
 ndrift=0
 nchanged=0
@@ -227,6 +244,69 @@ q_imds_containers() {
   else
     iptables -w -C DOCKER-USER -d 169.254.169.254/32 -j REJECT 2>/dev/null &&
       ip6tables -w -C DOCKER-USER -d fd00:ec2::254/128 -j REJECT 2>/dev/null
+  fi
+}
+# The instance profile the metadata service names: its name, `none` when the instance has none,
+# nothing when the service gives no answer. Asked as root, which the rule of
+# slot-imds-root-only.service lets through.
+#
+# The four below read the metadata service; under NODE_TEST its answers are files: iam-info (the
+# body) with iam-info-code, instance-role, imds-v1-code, not-ec2. No file is an instance without
+# a profile whose service refuses a request without a token.
+#
+# (none) cannot be the name of a profile: a name has no parenthesis.
+iam_info_profile() {
+  case $1 in
+    200) sed -n 's/.*"InstanceProfileArn"[^"]*"[^"]*\/\([^"/]*\)".*/\1/p' "$2" 2>/dev/null | head -n 1 ;;
+    404) echo '(none)' ;;
+  esac
+}
+q_instance_profile() {
+  if [ -n "$T" ]; then
+    if [ -f "$S/iam-info" ]; then
+      iam_info_profile "$(cat "$S/iam-info-code" 2>/dev/null || echo 200)" "$S/iam-info"
+    else
+      iam_info_profile "$(cat "$S/iam-info-code" 2>/dev/null || echo 404)" /dev/null
+    fi
+  else
+    qi_t=$(curl -sf -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null) || return 0
+    qi_f=$(mktemp) || return 0
+    qi_c=$(curl -s -m 3 -o "$qi_f" -w '%{http_code}' -H "X-aws-ec2-metadata-token: $qi_t" http://169.254.169.254/latest/meta-data/iam/info 2>/dev/null)
+    iam_info_profile "$qi_c" "$qi_f"
+    rm -f "$qi_f"
+  fi
+}
+# The role whose credentials the metadata service gives out; nothing when it names none.
+q_instance_role() {
+  if [ -n "$T" ]; then
+    cat "$S/instance-role" 2>/dev/null
+  else
+    qr_t=$(curl -sf -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null) || return 0
+    curl -sf -m 3 -H "X-aws-ec2-metadata-token: $qr_t" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null | head -n 1
+  fi
+}
+# What the metadata service does with a request that carries no token: `on` when it answers
+# (IMDSv1), `off` when it refuses (401 with tokens required, 403 with the service off), nothing
+# when neither is known (no answer, another status).
+imds_v1_state() {
+  case $1 in
+    200) echo on ;;
+    401 | 403) echo off ;;
+  esac
+}
+q_imds_v1() {
+  if [ -n "$T" ]; then
+    imds_v1_state "$(cat "$S/imds-v1-code" 2>/dev/null || echo 401)"
+  else
+    imds_v1_state "$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://169.254.169.254/latest/meta-data/ 2>/dev/null)"
+  fi
+}
+# This machine is an EC2 instance.
+q_ec2() {
+  if [ -n "$T" ]; then
+    [ ! -f "$S/not-ec2" ]
+  else
+    grep -q '^Amazon EC2' /sys/class/dmi/id/sys_vendor 2>/dev/null || grep -qi '^ec2' /sys/hypervisor/uuid 2>/dev/null
   fi
 }
 # The groups the main process of unit $1 started with, names on one line; nothing when the unit
@@ -760,6 +840,88 @@ fi
 exit 1
 EOF
 }
+# role-canary.sh: run by `check --canary` and by hand.
+gen_role_canary() {
+  cat <<'EOF'
+#!/bin/sh
+# role-canary.sh: what a job can do with the node's role. A member of group docker can start a
+# container as root on the host network, and the metadata service answers root there. This
+# starts that container, takes the role's credentials from the metadata service inside it and
+# asks Systems Manager for a parameter with them.
+#
+# Exit 0 only when Systems Manager refuses the call (AccessDenied), or when the instance has no
+# role and so no credentials to give. Every other answer is exit 1 with one line on stderr: the
+# call was allowed, the container did not run, or nothing could be tested.
+#
+# A refusal says that this one call is not allowed. What else the role allows is read by
+# `role.sh check`, where the owner's identity is.
+#
+# Run as root or as a member of group docker. The image is the curl project's, named by digest;
+# the first run pulls it, and the run ends after 5 minutes at the latest. The role's credentials
+# reach curl through its standard input, not its arguments, and no line this prints carries
+# them. The token of the metadata session (valid 60 s) is an argument of curl in the container.
+IMAGE=docker.io/curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+out=$(
+  timeout 300 docker run --rm -i --network host --user 0:0 --entrypoint /bin/sh "$IMAGE" -s 2>&1 <<'IN'
+m=http://169.254.169.254/latest
+t=$(curl -sf -m 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "$m/api/token") || {
+  echo 'canary: no-token'
+  exit 0
+}
+g() { curl -s -m 5 -H "X-aws-ec2-metadata-token: $t" "$m/meta-data/$1"; }
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "X-aws-ec2-metadata-token: $t" "$m/meta-data/iam/security-credentials/")
+if [ "$code" = 404 ]; then
+  echo 'canary: no-role'
+  exit 0
+fi
+role=$(g iam/security-credentials/ | head -n 1)
+region=$(g placement/region)
+c=$(g "iam/security-credentials/$role")
+f() { printf '%s\n' "$c" | sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p" | head -n 1; }
+if [ -z "$(f AccessKeyId)" ] || [ -z "$region" ]; then
+  echo "canary: no-credentials $code"
+  exit 0
+fi
+echo "canary: role $role"
+printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' "$(f AccessKeyId)" "$(f SecretAccessKey)" "$(f Token)" |
+  curl -s -m 20 -K - --aws-sigv4 "aws:amz:$region:ssm" \
+    -H 'Content-Type: application/x-amz-json-1.1' -H 'X-Amz-Target: AmazonSSM.GetParameter' \
+    -d '{"Name":"slot-node-role-canary"}' "https://ssm.$region.amazonaws.com/" |
+  sed -n 's/.*"__type" *: *"\([A-Za-z.#]*\)".*/canary: answer \1/p; t; s/.*"Parameter" *:.*/canary: answer Parameter/p'
+echo
+echo 'canary: end'
+IN
+) || {
+  echo "role canary: the container did not run: $(echo "$out" | tail -n 2 | tr '\n' ' ')" >&2
+  exit 1
+}
+role=$(echo "$out" | sed -n 's/^canary: role //p')
+case $out in
+  *'canary: no-role'*)
+    echo "ok: the instance has no role: the metadata service has no credentials to give"
+    exit 0
+    ;;
+  *'canary: no-token'*)
+    echo "role canary: the metadata service gave the container no token: nothing was tested" >&2
+    exit 1
+    ;;
+  *'canary: no-credentials'*)
+    echo "role canary: the metadata service named no credentials or no region: nothing was tested" >&2
+    exit 1
+    ;;
+  *'canary: answer AccessDeniedException'*)
+    echo "ok: role $role: a root container on the host network got the role's credentials, and Systems Manager refused ssm:GetParameter (AccessDenied). One call: role.sh check reads the role"
+    exit 0
+    ;;
+  *'canary: answer ParameterNotFound'* | *'canary: answer Parameter'*)
+    echo "role canary: role $role may read parameters: Systems Manager allowed ssm:GetParameter to a container" >&2
+    exit 1
+    ;;
+esac
+echo "role canary: role ${role:-unknown}: no answer the canary knows: $(echo "$out" | grep '^canary: answer' | head -n 1 | cut -c1-200)" >&2
+exit 1
+EOF
+}
 gen_no_credentials() {
   cat <<EOF
 #!/bin/sh
@@ -1125,6 +1287,7 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
   want_file libexec "$LIBEXEC/slot-node/docker-prune.sh" 755 root:root gen_docker_prune
+  want_file libexec "$LIBEXEC/slot-node/role-canary.sh" 755 root:root gen_role_canary
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
 }
 
@@ -1945,7 +2108,76 @@ p_imds() {
 # the build user's own processes and against bridge containers, not against a job that starts
 # such a container. slot-node gets the group when it starts: stale_reason names a process that
 # started before.
+#
+# The metadata service gives the instance role's credentials to root, so a job gets docker only
+# where those are worth nothing to it: the instance profile is the node's own (role.sh makes
+# slot-node-<name>: one policy, the channels of the Systems Manager agent) or the instance has
+# none, and the service wants a token (IMDSv2: a URL fetch of the docker daemon cannot send
+# one). p_role reads both from the metadata service. It calls no AWS API and changes nothing:
+# role.sh does, where the owner's identity is. Until then the build user gets no group docker,
+# and a build user that has it is a failed line.
+role_why=
+p_role() {
+  # A machine outside EC2 has no metadata service to ask.
+  if [ "$WANT_PROFILE" = none ] && ! q_ec2; then return 0; fi
+  pr_p=$(q_instance_profile)
+  case $pr_p in
+    '(none)') ;;
+    '') role_why="the metadata service does not name the instance profile" ;;
+    *)
+      if [ "$WANT_PROFILE" = none ]; then
+        role_why="the instance profile is '$pr_p', and the config says INSTANCE_PROFILE=none"
+      elif [ -z "$WANT_PROFILE" ]; then
+        role_why="the instance profile is '$pr_p' and the config names none (NODE_NAME or INSTANCE_PROFILE)"
+      elif [ "$pr_p" != "$WANT_PROFILE" ]; then
+        role_why="the instance profile is '$pr_p', not $WANT_PROFILE (role.sh apply makes it)"
+      elif [ -z "$INSTANCE_PROFILE" ]; then
+        # role.sh gives the profile a role of the same name. A profile the config names itself
+        # (INSTANCE_PROFILE) is the owner's word: its role is not compared.
+        pr_r=$(q_instance_role)
+        [ "$pr_r" = "$WANT_PROFILE" ] || role_why="the instance profile $WANT_PROFILE gives out the role '${pr_r:-unknown}', not the role of its name (role.sh check names the difference)"
+      fi
+      ;;
+  esac
+  if [ -z "$role_why" ]; then
+    case $(q_imds_v1) in
+      off) ;;
+      on) role_why="the metadata service answers without a token (role.sh apply sets tokens required)" ;;
+      *) role_why="the metadata service neither refused nor answered a request without a token" ;;
+    esac
+  fi
+  [ -n "$role_why" ] || return 0
+  drift role "$role_why"
+  fixing || return 0
+  case " $(q_groups "$U") " in
+    *" docker "*) failed role "$role_why: $U is in group docker, and a container of a job reaches the credentials of this role (gpasswd -d $U docker and a restart of slot-node.service take the group away)" ;;
+    *) failed role "$role_why: $U gets no group docker" ;;
+  esac
+}
+
+# check --canary: one container tries the role (role-canary.sh). An answer other than a refusal
+# is drift.
+p_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  if ! q_active docker.service; then
+    drift role "canary: docker.service is not active: nothing was tested"
+    return 0
+  fi
+  pc_f=$(mktemp) || {
+    drift role "canary: no temporary file: nothing was tested"
+    return 0
+  }
+  gen_role_canary >"$pc_f"
+  if pc_o=$(sh "$pc_f" 2>&1); then
+    echo "canary: $pc_o"
+  else
+    drift role "canary: ${pc_o#role canary: }"
+  fi
+  rm -f "$pc_f"
+}
+
 p_docker() {
+  [ -z "$role_why" ] || return 0
   case " $(q_groups "$U") " in *" docker "*) return 0 ;; esac
   drift docker "$U is not in group docker"
   fixing || return 0
@@ -2011,8 +2243,10 @@ stale_reason() {
       echo "it runs '$sr_v', the config says slot $SLOT_VERSION"
       return 0
     fi
-    # A job is a child of this process and has its groups.
+    # A job is a child of this process and has its groups. Under a role that is not the node's
+    # own (p_role) a restart for the group would hand docker to the jobs: it waits.
     sr_g=$(q_proc_groups "$1")
+    [ -z "$role_why" ] || sr_g=docker
     case " $(echo $sr_g) " in
       "  " | *" docker "*) ;;
       *)
@@ -2083,6 +2317,7 @@ case $mode in
     p_files
     p_units
     p_imds
+    p_role
     p_docker
     p_slot
     [ -n "$imds_open" ] || p_rust
@@ -2094,6 +2329,7 @@ case $mode in
     [ -n "$imds_open" ] || p_keys
     p_services
     p_docker_rule
+    p_canary
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"

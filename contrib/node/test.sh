@@ -1402,6 +1402,512 @@ st=$?
 dkreset
 grep -q 'system prune\|docker kill\|docker stop\|rm -rf' "$prune" && bad "the prune script has a removal beside rm of the listed containers and the prunes" || ok "the prune script removes through docker rm of the listed containers and the prunes only"
 
+# 6p. role.sh: a node's own IAM role and instance profile with one policy that allows the Systems
+# Manager agent its channels and nothing a job could use. `aws` is replaced: it logs its call and
+# keeps the account in files under $W/aws (policy, role, attached, inline, profile, assoc).
+RS=$here/role.sh
+A=$W/aws
+mkdir -p "$A/bin"
+cat >"$A/bin/aws" <<EOF
+#!/bin/sh
+A=$A
+EOF
+cat >>"$A/bin/aws" <<'EOF'
+echo "$*" >>"$A/calls"
+arg() {
+  want=$1
+  shift
+  while [ $# -gt 1 ]; do
+    [ "$1" = "$want" ] && {
+      echo "$2"
+      return 0
+    }
+    shift
+  done
+}
+[ "$1 $2" = "$(cat "$A/failon" 2>/dev/null)" ] && {
+  echo "An error occurred (Stub) when calling $2" >&2
+  exit 254
+}
+case "$1 $2" in
+  'sts get-caller-identity') echo arn:aws:iam::111122223333:user/operator ;;
+  'iam get-policy') [ -f "$A/policy" ] && echo v3 || exit 254 ;;
+  'iam get-policy-version') cat "$A/policy" ;;
+  'iam create-policy' | 'iam create-policy-version') arg --policy-document "$@" >"$A/policy" ;;
+  'iam get-role') [ -f "$A/role" ] && cat "$A/role" || exit 254 ;;
+  'iam create-role') arg --assume-role-policy-document "$@" >"$A/role" ;;
+  'iam update-assume-role-policy') arg --policy-document "$@" >"$A/role" ;;
+  'iam list-attached-role-policies') [ -f "$A/role" ] || exit 254; tr '\n' '\t' <"$A/attached" 2>/dev/null ;;
+  'iam attach-role-policy') arg --policy-arn "$@" >>"$A/attached" ;;
+  'iam detach-role-policy')
+    grep -vx "$(arg --policy-arn "$@")" "$A/attached" >"$A/attached.new"
+    mv "$A/attached.new" "$A/attached"
+    ;;
+  'iam list-role-policies') [ -f "$A/role" ] || exit 254; cat "$A/inline" 2>/dev/null || echo None ;;
+  'iam get-instance-profile')
+    [ -f "$A/profile" ] || exit 254
+    case "$*" in *Roles*) cat "$A/profile" ;; *) arg --instance-profile-name "$@" ;; esac
+    ;;
+  'iam create-instance-profile') : >"$A/profile" ;;
+  'iam add-role-to-instance-profile') arg --role-name "$@" >"$A/profile" ;;
+  'ec2 describe-iam-instance-profile-associations') cat "$A/assoc" 2>/dev/null ;;
+  'ec2 associate-iam-instance-profile' | 'ec2 replace-iam-instance-profile-association')
+    if [ -f "$A/not-yet" ]; then
+      rm -f "$A/not-yet"
+      echo 'An error occurred (InvalidParameterValue): Invalid IAM Instance Profile name' >&2
+      exit 254
+    fi
+    p=$(arg --iam-instance-profile "$@")
+    printf 'iip-assoc-new\tarn:aws:iam::111122223333:instance-profile/%s\n' "${p#Name=}" >"$A/assoc"
+    ;;
+  'ec2 describe-instances') cat "$A/metadata" 2>/dev/null || printf 'required\t1\n' ;;
+  'ec2 modify-instance-metadata-options') printf '%s\t%s\n' "$(arg --http-tokens "$@")" "$(arg --http-put-response-hop-limit "$@")" >"$A/metadata" ;;
+  *)
+    echo "aws stub: no answer for $*" >&2
+    exit 2
+    ;;
+esac
+EOF
+chmod 755 "$A/bin/aws"
+role() {
+  : >"$A/calls"
+  AWS=$A/bin/aws ROLE_WAIT=0 ROLE_TRIES=3 sh "$RS" "$@" >"$W/out" 2>"$W/err"
+}
+# The policy: the agent's heartbeat and its two message services, and no action that reads data.
+sh "$RS" policy >"$W/policy.json"
+grep -o '"[a-z0-9]*:[A-Za-z]*"' "$W/policy.json" | tr -d '"' | LC_ALL=C sort >"$W/actions"
+printf '%s\n' ec2messages:AcknowledgeMessage ec2messages:DeleteMessage ec2messages:FailMessage ec2messages:GetEndpoint ec2messages:GetMessages ec2messages:SendReply ssm:UpdateInstanceInformation ssmmessages:CreateControlChannel ssmmessages:CreateDataChannel ssmmessages:OpenControlChannel ssmmessages:OpenDataChannel >"$W/actions.want"
+cmp -s "$W/actions" "$W/actions.want" && ok "the node policy allows the agent's 11 actions and no other" || bad "policy actions: $(tr '\n' ' ' <"$W/actions")"
+grep -qi 'GetParameter\|GetDocument\|"\*"[^}]*Action\|Action[^]]*\*"' "$W/policy.json" && bad "the node policy reads parameters or documents, or has a wildcard action" || ok "the node policy has no GetParameter, no GetDocument and no wildcard action"
+grep -q '"Effect": "Deny"\|NotAction\|NotResource' "$W/policy.json" && bad "the node policy has a Deny or a Not element" || ok "the node policy is a plain allow list"
+sh "$RS" trust | tr -d ' \n' | grep -q '"Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"' && ok "the role is assumed by ec2 only" || bad "trust: $(sh "$RS" trust | tr -d '\n')"
+# plan prints the commands of a first setup and calls nothing.
+role plan node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 0 ] && [ ! -s "$A/calls" ] && ok "plan calls no aws command" || bad "plan: exit $st calls $(cat "$A/calls")"
+for line in "aws iam create-policy --policy-name slot-node-agent " "aws iam create-role --role-name slot-node-node-1 " 'aws iam attach-role-policy --role-name slot-node-node-1 --policy-arn "arn:aws:iam::$ACCOUNT:policy/slot-node-agent"' "aws iam create-instance-profile --instance-profile-name slot-node-node-1" "aws iam add-role-to-instance-profile --instance-profile-name slot-node-node-1 --role-name slot-node-node-1" 'aws ec2 replace-iam-instance-profile-association --association-id "$ASSOCIATION" --iam-instance-profile Name=slot-node-node-1' 'aws ec2 modify-instance-metadata-options --instance-id i-0123456789abcdef0 --http-tokens required --http-put-response-hop-limit 1'; do
+  grep -qF -- "$line" "$W/out" || bad "plan lacks: $line"
+done
+[ "$(grep -c '^aws \|^[A-Z]*=\$(aws ' "$W/out")" -eq 9 ] && ok "plan prints 9 commands: policy, role, attach, profile, role into profile, association, metadata options" || bad "plan: $(cat "$W/out")"
+grep -F -- "--policy-document '$(tr -d ' \n' <"$W/policy.json")'" "$W/out" >/dev/null && ok "plan carries the policy document on one line" || bad "plan policy document: $(grep create-policy "$W/out")"
+for badarg in 'no/de i-0123456789abcdef0' 'node-1 0123' 'node-1 i-012z' '-n i-0123456789abcdef0'; do
+  role plan $badarg
+  [ $? -eq 2 ] && ok "plan refuses the arguments '$badarg'" || bad "plan accepts '$badarg': $(cat "$W/out" | head -2)"
+done
+# An account with nothing of it, and the instance on a shared profile.
+rm -f "$A/policy" "$A/role" "$A/attached" "$A/inline" "$A/profile" "$A/failon" "$A/not-yet"
+printf 'iip-assoc-old\tarn:aws:iam::111122223333:instance-profile/SharedManagedRole\n' >"$A/assoc"
+role check node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && [ "$(grep -c '^drift: role: ' "$W/out")" -eq 6 ] && ok "check on a bare account: 6 drift lines, exit 1" || bad "bare account: exit $st $(cat "$W/out" "$W/err")"
+grep -qx "drift: role: instance i-0123456789abcdef0 uses the instance profile 'SharedManagedRole', not slot-node-node-1" "$W/out" && ok "check names the profile the instance uses" || bad "profile drift: $(grep instance "$W/out")"
+grep -q 'create-\|attach-\|add-role\|replace-\|associate-\|detach-\|update-\|delete-\|put-\|modify-' "$A/calls" && bad "check changes the account: $(grep 'create-\|attach-\|add-role\|replace-\|associate-' "$A/calls")" || ok "check only reads"
+: >"$A/not-yet"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 0 ] && grep -qx '0 drift' "$W/out" && ok "apply on a bare account ends with 0 drift" || bad "apply: exit $st $(cat "$W/out" "$W/err")"
+[ "$(tr -d ' \n' <"$A/policy")" = "$(tr -d ' \n' <"$W/policy.json")" ] && ok "apply creates the policy with the document of role.sh policy" || bad "created policy: $(cat "$A/policy")"
+[ "$(cat "$A/attached")" = arn:aws:iam::111122223333:policy/slot-node-agent ] && [ "$(cat "$A/profile")" = slot-node-node-1 ] && ok "apply attaches the one policy and puts the role into its profile" || bad "attached: $(cat "$A/attached") profile: $(cat "$A/profile")"
+grep -q 'instance-profile/slot-node-node-1$' "$A/assoc" && grep -q '^ec2 replace-iam-instance-profile-association --association-id iip-assoc-old --iam-instance-profile Name=slot-node-node-1$' "$A/calls" && ok "apply replaces the instance's profile association" || bad "association: $(cat "$A/assoc") $(grep ec2 "$A/calls")"
+[ "$(grep -c '^ec2 replace-iam-instance-profile-association' "$A/calls")" -eq 2 ] && ok "apply tries again while EC2 does not know the new profile yet" || bad "retries: $(grep -c '^ec2 replace' "$A/calls")"
+grep -q '^note: credentials the old role gave out stay valid until they expire' "$W/out" && ok "apply says that the old role's credentials outlive the change" || bad "no note: $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 0 ] && ! grep -q '^changed' "$W/out" && ! grep -q 'create-\|attach-\|add-role\|replace-\|associate-' "$A/calls" && ok "a second apply changes nothing" || bad "second apply: exit $st $(cat "$W/out")"
+# Each difference is named and closed.
+echo arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >>"$A/attached"
+role check node-1 i-0123456789abcdef0
+grep -qx 'drift: role: role slot-node-node-1 has another policy attached: arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore' "$W/out" && ok "check names a second policy on the role" || bad "second policy: $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+[ "$(cat "$A/attached")" = arn:aws:iam::111122223333:policy/slot-node-agent ] && ok "apply detaches the second policy" || bad "after detach: $(cat "$A/attached")"
+sed 's/ssm:UpdateInstanceInformation/ssm:GetParameter/' "$W/policy.json" >"$A/policy"
+role check node-1 i-0123456789abcdef0
+grep -q '^drift: role: policy slot-node-agent version v3 is not the document' "$W/out" && ok "check names a policy whose document changed" || bad "changed policy: $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+grep -q '^iam create-policy-version .* --set-as-default$' "$A/calls" && ! grep -q GetParameter "$A/policy" && ok "apply writes a new default version of the policy" || bad "policy version: $(grep policy-version "$A/calls")"
+echo extra >"$A/inline"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: role: inline policy extra of role slot-node-node-1 stays' "$W/err" && ! grep -q delete-role-policy "$A/calls" && ok "an inline policy is named and not deleted: failed line, exit 1" || bad "inline policy: exit $st $(cat "$W/err")"
+rm -f "$A/inline"
+: >"$A/assoc"
+role check node-1 i-0123456789abcdef0
+grep -qx "drift: role: instance i-0123456789abcdef0 uses the instance profile 'none', not slot-node-node-1" "$W/out" && ok "check names an instance without a profile" || bad "no profile: $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+grep -q '^ec2 associate-iam-instance-profile --instance-id i-0123456789abcdef0 --iam-instance-profile Name=slot-node-node-1$' "$A/calls" && ok "apply associates the profile with an instance that has none" || bad "associate: $(grep ec2 "$A/calls")"
+# The metadata service answers a plain GET (IMDSv1) or lets its answer travel 2 hops.
+printf 'optional\t2\n' >"$A/metadata"
+role check node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: role: instance i-0123456789abcdef0: the metadata service has tokens and hop limit 'optional 2', not 'required 1'" "$W/out" && ok "check names a metadata service that answers without a token" || bad "metadata options: exit $st $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 0 ] && grep -q '^ec2 modify-instance-metadata-options --instance-id i-0123456789abcdef0 --http-tokens required --http-put-response-hop-limit 1$' "$A/calls" && [ "$(cat "$A/metadata")" = "$(printf 'required\t1')" ] && ok "apply sets tokens required and hop limit 1" || bad "metadata apply: exit $st $(grep modify "$A/calls") $(cat "$W/out" "$W/err")"
+printf 'required\t2\n' >"$A/metadata"
+role check node-1 i-0123456789abcdef0
+grep -q "tokens and hop limit 'required 2'" "$W/out" && ok "check names a hop limit of 2" || bad "hop limit 2: $(cat "$W/out")"
+rm -f "$A/metadata"
+# A failed step keeps the instance on the profile it has.
+rm -f "$A/policy" "$A/role" "$A/attached" "$A/profile"
+printf 'iip-assoc-old\tarn:aws:iam::111122223333:instance-profile/SharedManagedRole\n' >"$A/assoc"
+echo 'iam create-role' >"$A/failon"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: role: aws iam create-role' "$W/err" && grep -q SharedManagedRole "$A/assoc" && ! grep -q '^ec2 replace\|^ec2 associate' "$A/calls" && ok "a failed step: exit 1, and the instance keeps its profile" || bad "failed step: exit $st $(cat "$W/err") $(cat "$A/assoc")"
+rm -f "$A/failon"
+# The whole document is compared: an action with a wildcard or another Resource is a difference.
+[ "$(tr -d ' \n' <"$W/policy.json")" = '{"Version":"2012-10-17","Statement":[{"Sid":"AgentHeartbeat","Effect":"Allow","Action":"ssm:UpdateInstanceInformation","Resource":"*"},{"Sid":"AgentChannels","Effect":"Allow","Action":["ssmmessages:CreateControlChannel","ssmmessages:CreateDataChannel","ssmmessages:OpenControlChannel","ssmmessages:OpenDataChannel"],"Resource":"*"},{"Sid":"AgentChannelsOlderAgent","Effect":"Allow","Action":["ec2messages:AcknowledgeMessage","ec2messages:DeleteMessage","ec2messages:FailMessage","ec2messages:GetEndpoint","ec2messages:GetMessages","ec2messages:SendReply"],"Resource":"*"}]}' ] && ok "the node policy is the reviewed document, byte for byte without blanks" || bad "policy document: $(tr -d ' \n' <"$W/policy.json")"
+n54=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+role plan $n54 i-0123456789abcdef0
+[ $? -eq 0 ] && ok "a NAME of 54 characters is accepted (a role name of 64)" || bad "54 characters: $(cat "$W/err")"
+role plan ${n54}a i-0123456789abcdef0
+[ $? -eq 2 ] && ok "a NAME of 55 characters is refused" || bad "55 characters accepted"
+role plan node-1 i-0123456789abcdef0
+grep -q '^# An instance without a profile .*aws ec2 associate-iam-instance-profile --instance-id i-0123456789abcdef0 --iam-instance-profile Name=slot-node-node-1$' "$W/out" && ok "plan names the command for an instance without a profile" || bad "plan without a profile: $(grep associate "$W/out")"
+# A whole account again.
+rm -f "$A/policy" "$A/role" "$A/attached" "$A/inline" "$A/profile" "$A/failon" "$A/not-yet" "$A/metadata"
+printf 'iip-assoc-old\tarn:aws:iam::111122223333:instance-profile/SharedManagedRole\n' >"$A/assoc"
+role apply node-1 i-0123456789abcdef0
+[ $? -eq 0 ] || bad "apply before the next cases: $(cat "$W/out" "$W/err")"
+role check node-1 i-0123456789abcdef0
+grep -q '^ec2 describe-iam-instance-profile-associations .*Name=state,Values=associating,associated ' "$A/calls" && ok "an association that is still associating counts" || bad "association filter: $(grep describe-iam "$A/calls")"
+# The instance is read first: another region or account stops before anything is made.
+rm -f "$A/policy"
+echo 'ec2 describe-instances' >"$A/failon"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 2 ] && grep -q 'describe-instances does not show i-0123456789abcdef0' "$W/err" && ! grep -q 'create-\|attach-\|replace-\|associate-\|modify-' "$A/calls" && ok "an instance that cannot be read: exit 2 before any change" || bad "unreadable instance: exit $st $(cat "$W/err") $(cat "$A/calls")"
+rm -f "$A/failon"
+role apply node-1 i-0123456789abcdef0
+# A role that others may assume.
+echo '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}' >"$A/role"
+role check node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: role: role slot-node-node-1 is not assumed by ec2.amazonaws.com alone' "$W/out" && ok "check names a role with another trust document" || bad "trust: exit $st $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+grep -q '^iam update-assume-role-policy --role-name slot-node-node-1 ' "$A/calls" && grep -q '"Service":"ec2.amazonaws.com"' "$A/role" && ok "apply writes the trust document back" || bad "trust apply: $(cat "$A/calls" | grep assume)"
+# An inline policy, and a list of them that cannot be read.
+echo extra >"$A/inline"
+role check node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: role: role slot-node-node-1 has an inline policy: extra' "$W/out" && ok "check names an inline policy, exit 1" || bad "inline in check: exit $st $(cat "$W/out")"
+echo 'iam list-role-policies' >"$A/failon"
+role check node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: role: the inline policies of role slot-node-node-1 could not be read' "$W/out" && ok "inline policies that cannot be read are drift, not an empty list" || bad "unreadable inline policies: exit $st $(cat "$W/out")"
+rm -f "$A/failon" "$A/inline"
+# A role that carries only another policy: the node's policy goes on before the other comes off.
+echo arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >"$A/attached"
+role apply node-1 i-0123456789abcdef0
+st=$?
+at=$(grep -n '^iam attach-role-policy ' "$A/calls" | head -n 1 | cut -d: -f1)
+dt=$(grep -n '^iam detach-role-policy ' "$A/calls" | head -n 1 | cut -d: -f1)
+[ $st -eq 0 ] && [ -n "$at" ] && [ -n "$dt" ] && [ "$at" -lt "$dt" ] && ok "apply attaches the node's policy before it detaches another" || bad "attach before detach: exit $st attach at ${at:-none}, detach at ${dt:-none}"
+rm -f "$A/policy"
+echo arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore >"$A/attached"
+echo 'iam create-policy' >"$A/failon"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && ! grep -q '^iam detach-role-policy' "$A/calls" && grep -q AmazonSSMManagedInstanceCore "$A/attached" && grep -q '^failed: role: policy arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore stays on role slot-node-node-1' "$W/err" && ok "when the node's policy cannot be made the role keeps the policy it has" || bad "detach after a failure: exit $st $(grep detach "$A/calls") $(cat "$W/err")"
+rm -f "$A/failon"
+role apply node-1 i-0123456789abcdef0
+# The profile holds another role.
+echo other-role >"$A/profile"
+role check node-1 i-0123456789abcdef0
+grep -qx 'drift: role: instance profile slot-node-node-1 holds the role other-role' "$W/out" && ok "check names a profile that holds another role" || bad "other role: $(cat "$W/out")"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: role: instance profile slot-node-node-1 holds another role: aws iam remove-role-from-instance-profile ' "$W/err" && [ "$(cat "$A/profile")" = other-role ] && ok "apply leaves another role in the profile: failed line with the command, exit 1" || bad "other role apply: exit $st $(cat "$W/err")"
+echo slot-node-node-1 >"$A/profile"
+# EC2 never takes the profile.
+printf 'iip-assoc-old\tarn:aws:iam::111122223333:instance-profile/SharedManagedRole\n' >"$A/assoc"
+echo 'ec2 replace-iam-instance-profile-association' >"$A/failon"
+role apply node-1 i-0123456789abcdef0
+st=$?
+[ $st -eq 1 ] && [ "$(grep -c '^ec2 replace-iam-instance-profile-association' "$A/calls")" -eq 3 ] && grep -q '^failed: role: instance i-0123456789abcdef0 did not take the instance profile slot-node-node-1: ' "$W/err" && ! grep -q '^changed: role: instance' "$W/out" && ok "an association that fails every time: the tries end, failed line, exit 1" || bad "tries used up: exit $st $(grep -c '^ec2 replace' "$A/calls") $(cat "$W/out" "$W/err")"
+rm -f "$A/failon"
+
+# 6q. Jobs get docker only on an instance that carries the node's own profile (or none) and whose
+# metadata service refuses a request without a token. provision.sh reads both from the metadata
+# service and calls no AWS API. `check --canary` starts one container that tries the role.
+conf
+RR=$W/r12
+mkdir -p "$RR/.state"
+echo 0 >"$RR/.state/jobs"
+# prof <profile | - | code:<status>> [<role>]: what the metadata service says about the instance
+# profile of the root $RR: its iam/info document and the role it gives out, no profile, or a
+# status without a document.
+prof() {
+  rm -f "$RR/.state/iam-info" "$RR/.state/iam-info-code" "$RR/.state/instance-role"
+  case $1 in
+    -) ;;
+    code:*) echo "${1#code:}" >"$RR/.state/iam-info-code" ;;
+    *)
+      printf '{\n  "Code" : "Success",\n  "LastUpdated" : "2026-01-01T00:00:00Z",\n  "InstanceProfileArn" : "arn:aws:iam::111122223333:instance-profile/%s",\n  "InstanceProfileId" : "AIPAEXAMPLEEXAMPLE"\n}\n' "$1" >"$RR/.state/iam-info"
+      echo "${2-$1}" >"$RR/.state/instance-role"
+      ;;
+  esac
+}
+# norole: check ran to its end and has no line of the role part.
+norole() { grep -q ' drift$' "$W/out" && ! grep -q '^drift: role:' "$W/out"; }
+prof SharedManagedRole
+run "$RR" check
+grep -qx "drift: role: the instance profile is 'SharedManagedRole', not slot-node-node-1 (role.sh apply makes it)" "$W/out" && ok "check names an instance profile that is not the node's own" || bad "role drift: $(grep 'role' "$W/out")"
+grep -q '^drift: docker: ' "$W/out" && bad "with another profile the missing group is a second line: $(grep '^drift: docker' "$W/out")" || ok "with another profile the missing group is no line of its own"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -q "^failed: role: the instance profile is 'SharedManagedRole', not slot-node-node-1 (role.sh apply makes it): $me gets no group docker$" "$W/err" && ok "apply with another profile: failed line, exit 1" || bad "apply with another profile: exit $st $(grep role "$W/err")"
+grep -q docker "$RR/.state/groups" 2>/dev/null && bad "the build user got group docker under another profile" || ok "apply with another profile leaves the build user out of group docker"
+grep -qw docker "$RR/.state/procgroups/slot-node.service" 2>/dev/null && bad "slot-node has group docker under another profile" || ok "slot-node starts without group docker"
+grep -qx docker "$RR/.state/packages" && [ -f "$RR/.state/active/slot-node.service" ] && ok "every other part of the node is made all the same" || bad "other parts: $(ls "$RR/.state/active" | tr '\n' ' ')"
+prof slot-node-node-1
+run "$RR" check
+grep -qx "drift: docker: $me is not in group docker" "$W/out" && norole && ok "with the node's own profile the missing group is the drift" || bad "own profile: $(cat "$W/out")"
+run "$RR" apply
+grep -qx "changed: docker: $me added to group docker" "$W/out" && ok "with the node's own profile apply adds the group" || bad "own profile apply: $(cat "$W/out" "$W/err" | cut -c1-300)"
+run "$RR" apply
+run "$RR" check
+st=$?
+[ $st -eq 0 ] && ok "the node's own profile: 0 drift" || bad "own profile: exit $st $(cat "$W/out")"
+# The instance goes back to a shared profile while the build user has the group and slot-node
+# runs without it (it started before the group): apply does not restart it into docker.
+echo "wheel adm" >"$RR/.state/procgroups/slot-node.service"
+prof SharedManagedRole
+run "$RR" check
+st=$?
+[ $st -eq 1 ] && [ "$(grep -c '^drift: ' "$W/out")" -eq 1 ] && grep -q "^drift: role: the instance profile is 'SharedManagedRole'" "$W/out" && ok "a profile changed afterwards is one drift line, and no restart for the group is asked" || bad "profile changed: exit $st $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -q "^failed: role: .*: $me is in group docker, and a container of a job reaches the credentials of this role (gpasswd -d $me docker and a restart of slot-node.service take the group away)$" "$W/err" && ok "apply names a build user that has docker under another profile, with the command, exit 1" || bad "docker under another profile: exit $st $(cat "$W/err")"
+grep -q 'systemctl restart slot-node.service' "$RR/.calls" && bad "apply restarted slot-node into group docker under another profile" || ok "under another profile slot-node is not restarted for the group"
+[ "$(cat "$RR/.state/procgroups/slot-node.service")" = "wheel adm" ] && ok "the jobs of that slot-node stay without docker" || bad "slot-node groups: $(cat "$RR/.state/procgroups/slot-node.service")"
+prof slot-node-node-1
+: >"$RR/.calls"
+run "$RR" apply
+grep -qx 'systemctl restart slot-node.service' "$RR/.calls" && grep -qw docker "$RR/.state/procgroups/slot-node.service" && ok "back under the node's own profile slot-node restarts and gets the group" || bad "restart under the own profile: $(cat "$RR/.calls" "$W/out" "$W/err" | cut -c1-300)"
+# What the metadata service answers.
+prof -
+run "$RR" check
+[ $? -eq 0 ] && ok "an instance without a profile has no credentials to give: no drift" || bad "no profile: $(cat "$W/out")"
+prof code:500
+run "$RR" check
+grep -qx 'drift: role: the metadata service does not name the instance profile' "$W/out" && ok "no answer about the profile is drift" || bad "no answer: $(cat "$W/out")"
+prof slot-node-node-1
+echo '<html><body>200</body></html>' >"$RR/.state/iam-info"
+run "$RR" check
+grep -qx 'drift: role: the metadata service does not name the instance profile' "$W/out" && ok "an answer without a profile name is drift" || bad "html answer: $(cat "$W/out")"
+echo '{"Code":"Success","InstanceProfileArn":"arn:aws:iam::111122223333:instance-profile/slot-node-node-1","InstanceProfileId":"AIPAEXAMPLEEXAMPLE"}' >"$RR/.state/iam-info"
+run "$RR" check
+[ $? -eq 0 ] && ok "the profile name is read from a document on one line" || bad "one line: $(cat "$W/out")"
+prof team/build/slot-node-node-1 slot-node-node-1
+run "$RR" check
+[ $? -eq 0 ] && ok "the profile name is read from an ARN with a path" || bad "path: $(cat "$W/out")"
+prof slot-node-node-1 other-role
+run "$RR" check
+grep -qx "drift: role: the instance profile slot-node-node-1 gives out the role 'other-role', not the role of its name (role.sh check names the difference)" "$W/out" && ok "the node's profile with another role in it is drift" || bad "other role: $(cat "$W/out")"
+prof slot-node-node-1 ''
+run "$RR" check
+grep -q "^drift: role: the instance profile slot-node-node-1 gives out the role 'unknown'" "$W/out" && ok "the node's profile whose role is not named is drift" || bad "no role name: $(cat "$W/out")"
+prof none none
+run "$RR" check
+grep -qx "drift: role: the instance profile is 'none', not slot-node-node-1 (role.sh apply makes it)" "$W/out" && ok "a profile with the name none is a profile" || bad "profile named none: $(cat "$W/out")"
+# INSTANCE_PROFILE: another profile as the node's own, and none for a machine outside EC2.
+echo 'INSTANCE_PROFILE=none' >>"$W/node.conf"
+run "$RR" check
+grep -qx "drift: role: the instance profile is 'none', and the config says INSTANCE_PROFILE=none" "$W/out" && ok "INSTANCE_PROFILE=none does not accept a profile with the name none" || bad "none and a profile named none: $(cat "$W/out")"
+prof SharedManagedRole
+run "$RR" check
+grep -qx "drift: role: the instance profile is 'SharedManagedRole', and the config says INSTANCE_PROFILE=none" "$W/out" && ok "INSTANCE_PROFILE=none on an instance that has a profile is drift" || bad "none with a profile: $(grep role "$W/out")"
+prof code:000
+run "$RR" check
+grep -qx 'drift: role: the metadata service does not name the instance profile' "$W/out" && ok "INSTANCE_PROFILE=none on an EC2 instance: no answer is still drift" || bad "none on EC2, no answer: $(cat "$W/out")"
+: >"$RR/.state/not-ec2"
+echo 000 >"$RR/.state/imds-v1-code"
+run "$RR" check
+norole && ok "INSTANCE_PROFILE=none on a machine outside EC2: nothing is asked" || bad "outside EC2: $(cat "$W/out" "$W/err")"
+rm -f "$RR/.state/not-ec2" "$RR/.state/imds-v1-code"
+conf
+echo 'INSTANCE_PROFILE=build-nodes' >>"$W/node.conf"
+prof build-nodes some-role
+run "$RR" check
+norole && ok "INSTANCE_PROFILE names another profile as the node's own; its role is not compared" || bad "INSTANCE_PROFILE names the profile: $(cat "$W/out" "$W/err")"
+prof slot-node-node-1
+run "$RR" check
+grep -qx "drift: role: the instance profile is 'slot-node-node-1', not build-nodes (role.sh apply makes it)" "$W/out" && ok "with INSTANCE_PROFILE set the name from NODE_NAME is not accepted" || bad "INSTANCE_PROFILE wins: $(grep role "$W/out")"
+conf
+grep -v '^NODE_NAME=' "$W/node.conf" >"$W/c2" && mv "$W/c2" "$W/node.conf"
+prof SharedManagedRole
+run "$RR" check
+grep -qx "drift: role: the instance profile is 'SharedManagedRole' and the config names none (NODE_NAME or INSTANCE_PROFILE)" "$W/out" && ok "a config without NODE_NAME and INSTANCE_PROFILE accepts no profile" || bad "no name: $(grep role "$W/out")"
+for bad_prof in 'INSTANCE_PROFILE=a b' 'INSTANCE_PROFILE=x;id' 'INSTANCE_PROFILE=$(id)'; do
+  conf
+  echo "$bad_prof" >>"$W/node.conf"
+  run "$RR" check
+  [ $? -eq 2 ] && grep -q 'INSTANCE_PROFILE must be the name of an instance profile' "$W/err" && ok "$bad_prof is refused" || bad "$bad_prof is accepted ($(cat "$W/err"))"
+done
+# A request without a token: answered, refused, or neither. On a root whose build user has no
+# group yet, every reason keeps the group away.
+conf
+RR=$W/r13
+mkdir -p "$RR/.state"
+echo 0 >"$RR/.state/jobs"
+prof slot-node-node-1
+echo 200 >"$RR/.state/imds-v1-code"
+run "$RR" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: role: the metadata service answers without a token (role.sh apply sets tokens required)' "$W/out" && ok "check names a metadata service that answers without a token" || bad "IMDSv1: exit $st $(grep role "$W/out")"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -q "^failed: role: the metadata service answers without a token .*: $me gets no group docker$" "$W/err" && ! grep -q docker "$RR/.state/groups" 2>/dev/null && ok "an answer without a token: failed line, exit 1, no group docker" || bad "IMDSv1 apply: exit $st $(cat "$W/err") groups $(cat "$RR/.state/groups" 2>&1)"
+echo 000 >"$RR/.state/imds-v1-code"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: role: the metadata service neither refused nor answered a request without a token: ' "$W/err" && ! grep -q docker "$RR/.state/groups" 2>/dev/null && ok "no answer to a request without a token: failed line, no group docker" || bad "no answer without a token: exit $st $(cat "$W/err")"
+echo 401 >"$RR/.state/imds-v1-code"
+prof code:000
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: role: the metadata service does not name the instance profile: ' "$W/err" && ! grep -q docker "$RR/.state/groups" 2>/dev/null && ok "no answer about the profile: failed line, no group docker" || bad "no profile answer apply: exit $st $(cat "$W/err")"
+prof slot-node-node-1 other-role
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -q "^failed: role: the instance profile slot-node-node-1 gives out the role 'other-role'" "$W/err" && ! grep -q docker "$RR/.state/groups" 2>/dev/null && ok "another role in the node's profile: failed line, no group docker" || bad "other role apply: exit $st $(cat "$W/err")"
+prof slot-node-node-1
+echo 403 >"$RR/.state/imds-v1-code"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "$me:docker" "$RR/.state/groups" && ok "a metadata service that is off for requests without a token (403) lets the group in" || bad "403: exit $st $(cat "$W/out" "$W/err" | cut -c1-300)"
+rm -f "$RR/.state/imds-v1-code"
+grep -v '^ *#' "$P" | grep -q 'aws \(iam\|ec2\|sts\|ssm\) ' && bad "provision.sh calls the aws command" || ok "provision.sh calls no aws command"
+# An option a mode does not know is refused.
+NODE_TEST=1 NODE_ROOT=$RR sh "$P" check "$W/node.conf" --Canary >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "check with a misspelled --canary is refused" || bad "check --Canary ran: $(cat "$W/out")"
+NODE_TEST=1 NODE_ROOT=$RR sh "$P" apply "$W/node.conf" --canary >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "apply --canary is refused" || bad "apply --canary ran: $(cat "$W/out")"
+sh "$P" bundle "$W/node.conf" check --open >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "a check bundle with --open is refused" || bad "bundle check --open: $(head -2 "$W/out")"
+# The canary: a root container on the host network, the role's credentials, one GetParameter.
+cn=$RR/usr/local/libexec/slot-node/role-canary.sh
+grep -q 'timeout 300 docker run --rm -i --network host --user 0:0 ' "$cn" && grep -q '^IMAGE=docker.io/curlimages/curl:[0-9.]*@sha256:[0-9a-f]\{64\}$' "$cn" && ok "the canary starts a root container on the host network from an image named by digest, with a time bound" || bad "canary container: $(grep 'docker run\|^IMAGE' "$cn" 2>&1)"
+grep -q 'X-Amz-Target: AmazonSSM.GetParameter' "$cn" && grep -q -- ' -K - ' "$cn" && ok "the canary asks for a parameter and gives curl the credentials on standard input" || bad "canary request: $(grep 'GetParameter\|-K' "$cn" 2>&1)"
+# What runs inside the container, with curl replaced: ci <status of the credentials list>
+# <answer of Systems Manager>.
+CI=$W/ci
+mkdir -p "$CI/bin"
+sed -n "/<<'IN'\$/,/^IN\$/p" "$cn" | sed '1d;$d' >"$CI/inner.sh"
+cat >"$CI/bin/curl" <<EOF
+#!/bin/sh
+CI=$CI
+EOF
+cat >>"$CI/bin/curl" <<'EOF'
+printf '%s\n' "$*" >>"$CI/argv"
+for u; do :; done
+case " $* " in *" -w "*) w=1 ;; *) w= ;; esac
+case $u in
+  */api/token)
+    [ -f "$CI/no-token" ] && exit 22
+    printf SESSIONTOKEN
+    ;;
+  */meta-data/iam/security-credentials/) if [ -n "$w" ]; then cat "$CI/code"; else echo slot-node-node-1; fi ;;
+  */meta-data/placement/region) printf eu-test-1 ;;
+  */meta-data/iam/security-credentials/*) cat "$CI/creds" ;;
+  https://ssm.eu-test-1.amazonaws.com/)
+    cat >"$CI/stdin"
+    cat "$CI/ssm"
+    ;;
+esac
+EOF
+chmod 755 "$CI/bin/curl"
+ci() {
+  rm -f "$CI/argv" "$CI/stdin"
+  printf '%s' "$1" >"$CI/code"
+  printf '%s' "$2" >"$CI/ssm"
+  printf '{\n  "Code" : "Success",\n  "AccessKeyId" : "ASIAKEYIDVALUE",\n  "SecretAccessKey" : "SECRET/KEY+VALUE",\n  "Token" : "ROLE/TOKEN+VALUE==",\n  "Expiration" : "2026-01-01T06:00:00Z"\n}\n' >"$CI/creds"
+  [ -z "${3:-}" ] || : >"$CI/creds"
+  PATH=$CI/bin:$PATH sh "$CI/inner.sh" >"$W/out" 2>"$W/err"
+}
+[ -s "$CI/inner.sh" ] || bad "the canary has no script for the container"
+rm -f "$CI/no-token"
+ci 200 '{"__type":"AccessDeniedException","Message":"not authorized to perform: ssm:GetParameter"}'
+grep -qx 'canary: role slot-node-node-1' "$W/out" && grep -qx 'canary: answer AccessDeniedException' "$W/out" && grep -qx 'canary: end' "$W/out" && ok "in the container: the role is named and a refusal is read from an answer without a newline" || bad "inner refused: $(cat "$W/out" "$W/err")"
+grep -q 'ASIAKEY\|SECRET\|ROLE/TOKEN' "$W/out" "$W/err" "$CI/argv" && bad "the role's credentials are in the output or in curl's arguments" || ok "in the container: the role's credentials are in no output line and in no argument of curl"
+grep -qx 'user = "ASIAKEYIDVALUE:SECRET/KEY+VALUE"' "$CI/stdin" && grep -qx 'header = "x-amz-security-token: ROLE/TOKEN+VALUE=="' "$CI/stdin" && ok "in the container: curl reads the credentials from its standard input" || bad "inner stdin: $(cat "$CI/stdin" 2>&1)"
+grep -q -- '--aws-sigv4 aws:amz:eu-test-1:ssm .*https://ssm.eu-test-1.amazonaws.com/$' "$CI/argv" && ok "in the container: the call is signed for Systems Manager of the instance's region" || bad "inner call: $(grep ssm "$CI/argv")"
+ci 200 '{"Parameter":{"Name":"slot-node-role-canary","Value":"v"}}'
+grep -qx 'canary: answer Parameter' "$W/out" && ok "in the container: a parameter that comes back is read as allowed" || bad "inner allowed: $(cat "$W/out")"
+ci 200 '{"__type":"ParameterNotFound"}'
+grep -qx 'canary: answer ParameterNotFound' "$W/out" && ok "in the container: ParameterNotFound is read as its own answer" || bad "inner not found: $(cat "$W/out")"
+ci 404 ''
+[ "$(cat "$W/out")" = 'canary: no-role' ] && ok "in the container: 404 for the credentials list is an instance without a role" || bad "inner 404: $(cat "$W/out")"
+ci 500 '' empty
+[ "$(cat "$W/out")" = 'canary: no-credentials 500' ] && ok "in the container: another status without credentials is not an instance without a role" || bad "inner 500: $(cat "$W/out")"
+: >"$CI/no-token"
+ci 200 ''
+[ "$(cat "$W/out")" = 'canary: no-token' ] && ok "in the container: no token is not an instance without a role" || bad "inner no token: $(cat "$W/out")"
+rm -f "$CI/no-token"
+mkdir -p "$W/cn/bin"
+cat >"$W/cn/bin/docker" <<EOF
+#!/bin/sh
+cat >/dev/null
+echo "\$*" >>"$W/cn/calls"
+cat "$W/cn/answer"
+exit \$(cat "$W/cn/exit")
+EOF
+chmod 755 "$W/cn/bin/docker"
+# cnr <what the container prints> [<exit status of docker run>]
+cnr() {
+  printf '%b\n' "$1" >"$W/cn/answer"
+  echo "${2:-0}" >"$W/cn/exit"
+  PATH=$W/cn/bin:$PATH sh "$cn" >"$W/out" 2>"$W/err"
+}
+cnr 'canary: role slot-node-node-1\ncanary: answer AccessDeniedException\ncanary: end'
+st=$?
+[ $st -eq 0 ] && grep -q '^ok: role slot-node-node-1: .*refused ssm:GetParameter (AccessDenied)\. One call: role.sh check reads the role$' "$W/out" && [ ! -s "$W/err" ] && ok "canary: a refused call is exit 0, names the role and says that it is one call" || bad "canary refused: exit $st $(cat "$W/out" "$W/err")"
+for allowed in ParameterNotFound Parameter; do
+  cnr "canary: role SharedManagedRole\ncanary: answer $allowed\ncanary: end"
+  st=$?
+  [ $st -eq 1 ] && grep -qx 'role canary: role SharedManagedRole may read parameters: Systems Manager allowed ssm:GetParameter to a container' "$W/err" && ok "canary: an allowed call ($allowed) is exit 1" || bad "canary $allowed: exit $st $(cat "$W/out" "$W/err")"
+done
+cnr 'canary: no-role'
+st=$?
+[ $st -eq 0 ] && grep -q '^ok: the instance has no role' "$W/out" && ok "canary: an instance without a role is exit 0" || bad "canary no role: exit $st $(cat "$W/out" "$W/err")"
+cnr 'canary: no-token'
+st=$?
+[ $st -eq 1 ] && grep -q 'no token: nothing was tested$' "$W/err" && ok "canary: no token from the metadata service is exit 1, nothing tested" || bad "canary no token: exit $st $(cat "$W/out" "$W/err")"
+cnr 'canary: no-credentials 200'
+[ $? -eq 1 ] && grep -q 'nothing was tested$' "$W/err" && ok "canary: no credentials or no region is exit 1" || bad "canary no credentials: $(cat "$W/out" "$W/err")"
+cnr 'canary: role r1\ncanary: answer ThrottlingException\ncanary: end'
+st=$?
+[ $st -eq 1 ] && grep -qx 'role canary: role r1: no answer the canary knows: canary: answer ThrottlingException' "$W/err" && ok "canary: another answer is exit 1 and is named" || bad "canary other answer: exit $st $(cat "$W/err")"
+cnr 'canary: role r1\ncanary: end'
+[ $? -eq 1 ] && ok "canary: no answer from Systems Manager is exit 1" || bad "canary no answer: $(cat "$W/out" "$W/err")"
+cnr 'docker: Cannot connect to the Docker daemon' 125
+st=$?
+[ $st -eq 1 ] && grep -q '^role canary: the container did not run: docker: Cannot connect' "$W/err" && ok "canary: a container that does not run is exit 1" || bad "canary no container: exit $st $(cat "$W/err")"
+# check --canary runs it; check alone starts no container.
+crun() { PATH=$W/cn/bin:$PATH NODE_TEST=1 NODE_ROOT=$RR sh "$P" check "$W/node.conf" "$@" >"$W/out" 2>"$W/err"; }
+printf 'canary: role slot-node-node-1\ncanary: answer AccessDeniedException\ncanary: end\n' >"$W/cn/answer"
+echo 0 >"$W/cn/exit"
+: >"$W/cn/calls"
+crun
+st=$?
+[ $st -eq 0 ] && [ ! -s "$W/cn/calls" ] && ok "check without --canary starts no container" || bad "check started a container: exit $st $(cat "$W/cn/calls" "$W/out")"
+crun --canary
+st=$?
+[ $st -eq 0 ] && grep -q '^canary: ok: role slot-node-node-1: ' "$W/out" && grep -q '^0 drift$' "$W/out" && [ "$(wc -l <"$W/cn/calls")" -eq 1 ] && ok "check --canary with a refused call: one container, one canary line, 0 drift" || bad "check --canary: exit $st $(cat "$W/out" "$W/err")"
+printf 'canary: role slot-node-node-1\ncanary: answer ParameterNotFound\ncanary: end\n' >"$W/cn/answer"
+crun --canary
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: role: canary: role slot-node-node-1 may read parameters: Systems Manager allowed ssm:GetParameter to a container' "$W/out" && ok "check --canary with an allowed call: drift, exit 1" || bad "check --canary allowed: exit $st $(cat "$W/out" "$W/err")"
+rm -f "$RR/.state/active/docker.service"
+: >"$W/cn/calls"
+crun --canary
+grep -qx 'drift: role: canary: docker.service is not active: nothing was tested' "$W/out" && [ ! -s "$W/cn/calls" ] && ok "check --canary without a running docker says that nothing was tested" || bad "canary without docker: $(cat "$W/out")"
+: >"$RR/.state/active/docker.service"
+sh "$P" bundle "$W/node.conf" check --canary >"$W/bundle-canary.sh"
+grep -qx 'sh "$d/provision.sh" check "$d/node.conf" --canary' "$W/bundle-canary.sh" && ok "a check bundle carries --canary" || bad "bundle --canary: $(tail -4 "$W/bundle-canary.sh" | head -1)"
+
 # 6h. The example config carries what consumers build with: the rust toolchains and the wasm
 # target, the dnf packages that exist on the node's repositories. Go and node come from the
 # archive pins, so neither a golang nor a nodejs package is listed.

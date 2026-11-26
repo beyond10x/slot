@@ -8,7 +8,8 @@
 
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
-NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS'
+NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
+INSTANCE_PROFILE'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -75,6 +76,7 @@ conf_read() {
   RUST_TOOLCHAINS=${CONF_RUST_TOOLCHAINS:-}
   RUST_COMPONENTS=${CONF_RUST_COMPONENTS-clippy rustfmt}
   RUST_TARGETS=${CONF_RUST_TARGETS:-}
+  INSTANCE_PROFILE=${CONF_INSTANCE_PROFILE:-}
   conf_check_forms "$cf"
 }
 
@@ -94,6 +96,12 @@ conf_check_forms() {
     *[1-9]*) ;;
     *)
       conf_fail "$1: DOCKER_GB must be at least 1, not '$DOCKER_GB'"
+      return 2
+      ;;
+  esac
+  case $INSTANCE_PROFILE in
+    *[!A-Za-z0-9_+=,.@-]*)
+      conf_fail "$1: INSTANCE_PROFILE must be the name of an instance profile, or none"
       return 2
       ;;
   esac

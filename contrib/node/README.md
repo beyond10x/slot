@@ -11,6 +11,7 @@ is copied from the workstation to a node ahead of jobs.
 |---|---|---|
 | `provision.sh` | on the node, as root | storage, packages, build user, units, keys, slot release, rustup and rust toolchains, pinned tools and archives (go, node); `check` and `apply` |
 | `push.sh` | on the workstation, as the build user | `check`: compares the workstation's rust, go and node versions and the pinned tools' releases with the node's; copies nothing |
+| `role.sh` | where the node's owner has the AWS CLI | the node's own IAM role and instance profile, and the instance's metadata options; `plan`, `check` and `apply` |
 | `conf.sh` | sourced by both | reads the config file |
 | `toolchains.sh` | on both sides | one line per rust toolchain, the go and node versions and the version of each C tool of the machine it runs on |
 | `test.sh` | in `task check` | tests of `provision.sh`, `push.sh` and `toolchains.sh` under a temporary root |
@@ -32,7 +33,8 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
 | `MIN_FREE_DISK`, `SCCACHE_GB`, `TMP_GB` | provision | disk floor, compile cache size, job tmp size (GB) |
 | `DOCKER_GB` | provision | what docker may store on the root disk before the prune timer removes what no job uses (GB, default 10, at least 1) |
-| `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages |
+| `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
+| `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
@@ -43,16 +45,20 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 
 The instance store is empty after every stop and start; the root volume keeps the rest.
 
-1. Launch the image: Amazon Linux 2023 on an instance type with instance storage.
+1. Launch the image: Amazon Linux 2023 on an instance type with instance storage. Where the AWS
+   CLI has an identity that may write IAM: `role.sh apply NAME INSTANCE` gives the instance a
+   role of its own (The node's role, below). Under another role the build user gets no docker.
 2. As root: `provision.sh apply CONF`. It installs the packages, the build user, the units, the
    slot release, rustup (release 1.29.3, checked against its SHA-256) with every toolchain of
    `RUST_TOOLCHAINS`, and the pinned tools, and starts `sccache-node` and `slot-node`. On a node
    that ran it before, `slot-storage.service` has already rebuilt the array, the job tmp
    filesystem and the binds at boot, and `apply` installs again what lived on the instance store.
-3. `provision.sh check CONF` (root) and `push.sh check CONF` (workstation) both print `0 drift`.
+3. `provision.sh check CONF --canary` (root; outside EC2 without `--canary`) and `push.sh check
+   CONF` (workstation) both print `0 drift`.
 
 A root channel that takes one script, such as SSM Run Command, gets it from
-`provision.sh bundle CONF apply` (or `check`): one script with the config inside.
+`provision.sh bundle CONF apply` (or `check`, or `check --canary`): one script with the config
+inside.
 
 `apply --open` also lets `SETUP_KEY` into `authorized_keys`. Removing the setup key does not end
 an ssh connection that is already logged in, and a control connection (`ControlMaster`,
@@ -88,6 +94,81 @@ CPUs. The node's slots follow the CPUs found, so the config file does not change
    provider's price list, and `systemctl --user reload slot`.
 9. Schedule the poweroff at the lease end again, if the node has one: logind `ScheduleShutdown`
    with `poweroff` and the time in microseconds, which is the call `shutdown -P` makes.
+
+## The node's role
+
+The metadata service gives the credentials of the instance's role to root on the node, and a job
+that may use docker can be root there (a container on the host network). So a node has a role of
+its own that is worth nothing to a job, and jobs get docker only under it.
+
+`role.sh` makes it, where the AWS CLI has an identity that may write IAM and change an instance.
+Nothing of it runs on the node, and `provision.sh` calls no AWS API.
+
+| command | does |
+|---|---|
+| `role.sh policy`, `role.sh trust` | print the policy document and the role's trust document |
+| `role.sh plan NAME INSTANCE` | prints the `aws` commands of a first setup and calls nothing |
+| `role.sh check NAME INSTANCE` | reads the account: one `drift: role:` line per difference, exit 1 |
+| `role.sh apply NAME INSTANCE` | makes what `check` names, then checks again; two differences it names and leaves (below) |
+
+`NAME` is the config's `NODE_NAME`, `INSTANCE` the instance id. What `apply` leaves:
+
+- The customer-managed policy `slot-node-agent`, shared by every node: 11 actions with which the
+  Systems Manager agent stays a managed node and takes Run Command and Session Manager.
+  `ssm:UpdateInstanceInformation` is its heartbeat. The four `ssmmessages:*Channel` actions carry
+  commands and sessions (agent release 3.3.40 and later). The six `ec2messages` actions carry
+  them for an older agent.
+- The role and the instance profile `slot-node-<NAME>`, with that one policy. A second attached
+  policy comes off after the node's policy is on. An inline policy of the role and another role
+  in the profile stay: `apply` prints a `failed: role:` line with the command and exits 1.
+- The instance uses that profile. Credentials the former role gave out stay valid until they
+  expire; the agent takes the new role at its next refresh or at
+  `systemctl restart amazon-ssm-agent`.
+- The instance's metadata service wants a token and answers over one hop (`HttpTokens=required`,
+  hop limit 1).
+
+Left out of what the managed policy `AmazonSSMManagedInstanceCore` allows: `ssm:GetParameter`
+and `ssm:GetParameters` (they read every parameter of the account), `ssm:GetDocument` and
+`ssm:DescribeDocument`, and the State Manager, inventory, patch and distributor actions. A node
+has no association; the agent logs a refused `ListInstanceAssociations`.
+
+Not in the policy either: `kms:Decrypt` for Session Manager sessions encrypted with a KMS key,
+and the S3 and CloudWatch Logs writes for session logs or Run Command output sent there. An
+account whose Session Manager preferences set those adds them to the document in `role.sh`.
+
+Who holds the role's credentials can act as this instance's agent until they expire: read the
+commands sent to it and answer them. A job with docker is root on the node and can do that
+without them.
+
+On the node, `provision.sh` asks the metadata service three things: which instance profile the
+instance has, which role it gives out, and what it does with a request that carries no token.
+
+- The build user gets group `docker` when the profile is `slot-node-<NODE_NAME>` and gives out
+  the role of that name, or when the instance has no profile; and the service refuses a request
+  without a token (status 401 or 403).
+- `INSTANCE_PROFILE=<name>` names another profile as the node's own. That is the owner's word:
+  the role in it is not compared, and nothing on the node reads what the role allows.
+- `INSTANCE_PROFILE=none` is for a machine outside EC2 (its DMI system vendor is not
+  `Amazon EC2`): the metadata service is not asked. On an EC2 instance it accepts no profile.
+- Anything else is `drift: role: ...` in `check`; `apply` prints `failed: role: ...`, exits 1
+  and adds no group: another profile, another role in the node's profile, a service that
+  answers without a token, and every question left without an answer. Every other part of the
+  node is made all the same.
+- `apply` does not take the group away from a build user that has it. The failed line says so
+  and names the command. A `slot-node` that started before the group is not restarted for it
+  while the role part fails.
+
+What the node cannot see: a second policy attached to the role `slot-node-<NAME>`. `role.sh
+check` reads that, where the owner's identity is.
+
+`provision.sh check CONF --canary` also runs `role-canary.sh` (installed under
+`/usr/local/libexec/slot-node/`): one container as root on the host network, from the curl
+project's image named by digest, takes the role's credentials from the metadata service and
+asks Systems Manager for a parameter. A refusal (`AccessDenied`) is the line `canary: ok: ...`,
+and so is an instance without a role. An allowed call, a container that does not run and a run
+that could test nothing (no token, no credentials, no running docker) are
+`drift: role: canary: ...`. The first run pulls the image. A refusal is about that one call:
+a role that reads parameters under one path only, or reads another service, passes it.
 
 ## What check compares
 
@@ -143,8 +224,8 @@ the firewall. What this does not close:
 - dockerd fetches as root on the host: `ADD http://169.254.169.254/...` in a Dockerfile and
   `docker import <url>` pass both rules.
 
-So the instance must require IMDSv2 (`HttpTokens=required`: a plain GET gets no credential), and
-its role carries nothing a job may not use.
+So the instance requires IMDSv2 (a plain GET gets no credential), and its role carries nothing a
+job may not use: The node's role, above.
 
 docker stores on the root disk (`/var/lib/docker`). `slot-docker-prune.timer` runs
 `docker-prune.sh` every 10 minutes:
