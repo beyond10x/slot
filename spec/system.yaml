@@ -6,6 +6,7 @@ domains:
   - slot.cluster
   - slot.hostconfig
   - slot.provisioning
+  - slot.pool
 
 preconditions:
   - command: slot.cluster.OpenCluster

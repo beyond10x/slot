@@ -3,6 +3,7 @@
 //! The one integration-test binary of this crate: further checks are modules.
 
 mod ci;
+mod ui_pages;
 
 #[test]
 fn getting_started_installs_this_version() {

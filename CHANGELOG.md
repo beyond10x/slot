@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `GET /api/jobs` answers every job the daemon holds as one array, running and queued first,
+  then the ended ones newest first; `GET /api/jobs/{id}` answers one job, or 404.
+
+- The web view has a job list (`#/jobs`: running, queued and ended jobs, a search and a state
+  filter) and a job detail (`#/jobs/<id>`, with the job's live output). Both pages are generated
+  from the UI spec `spec/ui/slot.ui.yaml` by `b10x-slot-docs ui-pages` into
+  `ui/src/generated/`; `task check` regenerates and compares them, and checks the spec with
+  `ess ui check`. Their column widths, one-line cells, badges and the colour per value come from
+  two theme files of the uxui repository (`ui/src/uxui/dense.css`, `slot-jobs.css`, copied at a
+  named commit): the pages write the uxui class hooks (`uxui-dense`, `uxui-field-<field>`,
+  `uxui-as-<as>`, `uxui-badge`, `data-uxui-value`). The theme draws the toolchain's colour mark,
+  so the three toolchain host slots are gone; a toolchain other than rust and go shows grey.
+
 - Node aep for runbook's driver: `provision.sh` installs the aep 0.80.0 release binary at
   `~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep` (`HOME_PINS`, the archive SHA-256 of
   the driver's `aep-pin.json`), where its tests look; the driver compares the file's digest with

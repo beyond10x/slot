@@ -47,6 +47,9 @@ jobs:
         if: steps.scope.outputs.scope != 'none'
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install the ess release spec/ess-inputs.yaml requires, for the UI-spec check
+        if: steps.scope.outputs.scope == 'code'
+        run: sh .github/scripts/install-ess.sh "$RUNNER_TEMP/ess" >> "$GITHUB_PATH"
       - name: Install the browser for the UX gates
         if: steps.scope.outputs.scope != 'none'
         working-directory: ui
