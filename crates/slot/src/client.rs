@@ -338,10 +338,33 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         // A same-path job outside any git checkout mirrors its working
         // directory as the tree.
         let top = top.or_else(|| keeps_path(s, &cwd).then(|| cwd.clone()));
+        // What a go command builds into the tree comes back like a cargo
+        // job's products, and `SLOT_NO_PRODUCTS` turns it off the same way.
+        let go = top
+            .as_deref()
+            .filter(|_| !s.warm)
+            .and_then(|top| artifacts::go_output(argv)?.product(&cwd, top, keeps_path(s, top)));
+        let (go, go_skipped) = if s.no_products {
+            (None, go)
+        } else {
+            (go, None)
+        };
+        let mut go_before = None;
         // The tree is synced once; the request is sent until the server's
         // daemon answers, each time with a collector of its own.
         let mut collector = None;
         let sent = remote(host, top.as_deref(), &cwd, &mut req, s).and_then(|()| {
+            // After the sync, which may delete below the path, and before
+            // the job: what the path holds on the node without this job.
+            if let (Some(g), Some(top)) = (&go, top.as_deref()) {
+                let tree = mirror_path(top, &req, s);
+                let src = artifacts::Source {
+                    host,
+                    ssh: &s.ssh,
+                    target: &tree,
+                };
+                go_before = Some(artifacts::list(&src, &g.rel, &s.sync));
+            }
             send_waiting(
                 host,
                 s.node_wait,
@@ -367,19 +390,33 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                     came_back = true;
                     code = products_back(host, top, &cwd, s, col, code);
                 }
-                if let Some(p) = &skipped
+                if let (Some(g), Some(before), Some(top)) = (&go, &go_before, top.as_deref())
                     && ran
-                    && (code == 0 || p.when == artifacts::When::AnyExit)
+                    && code == 0
                 {
+                    came_back = true;
+                    let tree = mirror_path(top, &req, s);
+                    let src = artifacts::Source {
+                        host,
+                        ssh: &s.ssh,
+                        target: &tree,
+                    };
+                    code = go_back(&src, top, s, g, before);
+                }
+                let skipped = skipped
+                    .as_ref()
+                    .is_some_and(|p| code == 0 || p.when == artifacts::When::AnyExit)
+                    || (go_skipped.is_some() && code == 0);
+                if skipped && ran {
                     eprintln!(
                         "slot: artifacts not fetched: {} is set",
                         artifacts::NO_PRODUCTS_ENV
                     );
                 }
-                code = match (&req.workspace, top.as_deref()) {
-                    (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
+                code = match top.as_deref() {
+                    Some(top) if req.workspace.is_some() && code == 0 && !s.fetch.is_empty() => {
                         came_back = true;
-                        fetch(host, top, &ws.id, s)
+                        fetch(host, top, &mirror_path(top, &req, s), s)
                     }
                     _ => code,
                 };
@@ -558,18 +595,25 @@ fn same_path_root() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Copies every `--fetch` path back from `host` into the repository at
-/// `top`. Returns 0, or 1 after printing which path failed.
-fn fetch(host: &str, top: &Path, id: &str, s: &Settings) -> i32 {
-    let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
-    let mirror = if keeps_path(s, top) {
+/// The tree of job `req` on the server: `top` itself for a tree that keeps
+/// its path there, else its mirror under the workspace root.
+fn mirror_path(top: &Path, req: &Request, s: &Settings) -> String {
+    if keeps_path(s, top) {
         top.to_string_lossy().into_owned()
     } else {
+        let id = req.workspace.as_ref().map_or("", |w| w.id.as_str());
         format!("{}/{id}", s.ws_root)
-    };
+    }
+}
+
+/// Copies every `--fetch` path back from `host`, where the job's tree is
+/// `mirror`, into the repository at `top`. Returns 0, or 1 after printing
+/// which path failed.
+fn fetch(host: &str, top: &Path, mirror: &str, s: &Settings) -> i32 {
+    let target_dir = JOB_TARGET.lock().map(|t| t.clone()).unwrap_or_default();
     let mut code = 0;
     for path in &s.fetch {
-        let src = match fetch_source(path, &mirror, &target_dir) {
+        let src = match fetch_source(path, mirror, &target_dir) {
             Ok(src) => src,
             Err(e) => {
                 eprintln!("slot: fetch {e}");
@@ -650,6 +694,53 @@ fn products_back(
             eprintln!("slot: artifacts not fetched: {e:#}");
             if code == 0 { 1 } else { code }
         }
+    }
+}
+
+/// Copies what a go job that exited 0 built at `g` from its tree on the
+/// server (`src`) to the same path in the tree at `top`, with the transfer
+/// of a cargo job's products ([`artifacts::fetch`]), and prints its line.
+/// A path that was a directory `before` the job, or that `-o` names as one,
+/// is listed again and only the files the job wrote come back
+/// ([`artifacts::written`]); any other path is the one file. Returns 0, or
+/// 1 when a listing or the copy failed: the caller would run a stale binary.
+fn go_back(
+    src: &artifacts::Source<'_>,
+    top: &Path,
+    s: &Settings,
+    g: &artifacts::GoProduct,
+    before: &artifacts::Listing,
+) -> i32 {
+    use artifacts::Listing;
+    let failed = |why: &str| {
+        eprintln!("slot: artifacts not fetched: {}: {why}", g.rel);
+        1
+    };
+    let had = match before {
+        Listing::Failed(why) => return failed(why),
+        Listing::Dir(had) => Some(had.as_slice()),
+        Listing::Absent => g.dir.then_some(&[][..]),
+    };
+    let rels = match had {
+        None => vec![g.rel.clone()],
+        Some(had) => match artifacts::list(src, &g.rel, &s.sync) {
+            Listing::Failed(why) => return failed(&why),
+            Listing::Absent => Vec::new(),
+            Listing::Dir(now) => artifacts::written(had, &now)
+                .iter()
+                .map(|name| format!("{}/{name}", g.rel.trim_end_matches('/')))
+                .collect(),
+        },
+    };
+    if rels.is_empty() {
+        return 0;
+    }
+    match artifacts::fetch(src, &rels, top, &s.sync) {
+        Ok(f) => {
+            eprintln!("{}", f.line());
+            0
+        }
+        Err(e) => failed(&format!("{e:#}")),
     }
 }
 
@@ -1152,7 +1243,10 @@ fn remote(
     let t0 = Instant::now();
     let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
     eprintln!("{}", synced.line(host));
-    let target_dir = if same_path {
+    // Where the job builds, for the record, eviction and the products; and
+    // whether cargo finds that directory by itself, so the server need not
+    // export it.
+    let job_target = if same_path {
         same_path_extras(top, cwd, tc.sync_excludes(), &target, s)?;
         same_path::target_dir(
             &req.argv,
@@ -1160,11 +1254,13 @@ fn remote(
             top,
             std::env::var("CARGO_TARGET_DIR").ok().as_deref(),
         )
-        .map(|t| t.to_string_lossy().into_owned())
-        .unwrap_or_default()
     } else {
-        String::new()
+        None
     };
+    let target_default = job_target.as_ref().is_some_and(|t| t.default);
+    let target_dir = job_target
+        .map(|t| t.dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
     req.sync_ms = Some(millis(t0.elapsed()));
     req.sync_bytes = synced.bytes;
     // The git dependencies the lock files name, from this machine's cargo
@@ -1198,6 +1294,7 @@ fn remote(
         client_root: top.to_string_lossy().into_owned(),
         same_path,
         target_dir,
+        target_default,
     });
     Ok(())
 }

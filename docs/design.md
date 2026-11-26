@@ -138,9 +138,27 @@ the job ends with exit 3 and nothing is synced. A folder of several repositories
 whole, with every git-ignored file in it. The request carries
 `workspace.target_dir`: `CARGO_TARGET_DIR` of the client, else `cargo metadata`'s
 `target_directory` for the command's manifest, else `target` beside the nearest lock file; empty
-for a command that is not cargo. The daemon admits it only below a `--same-path-root`, sets
-`CARGO_TARGET_DIR` to it (or unsets it, keeping cargo's default in the tree), binds it writable
-in the sandbox and names it in the `start` frame, so products are fetched to the same path.
+for a command that is not cargo. The daemon admits it only below a `--same-path-root`, binds it
+writable in the sandbox, records it as the job's target directory (which eviction reads) and
+names it in the `start` frame, so products are fetched to the same path.
+
+What the job's environment carries of it is a second question, because a compile cache keys
+every `CARGO_*` variable of the compiler's environment (sccache: all but `CARGO_MAKEFLAGS`,
+`CARGO_BUILD_JOBS`, `CARGO_REGISTRIES_*`, `CARGO_ENCODED_RUSTFLAGS`). The request carries
+`workspace.target_default`: true when the directory is the one cargo resolves by itself, that
+is `target` in `cargo metadata`'s `workspace_root` with no `CARGO_TARGET_DIR` of the caller
+(`same_path::target_dir`, the one place that decides the directory). The daemon then exports no
+`CARGO_TARGET_DIR` and removes its own; cargo finds the same directory in the tree. Otherwise
+(the caller's variable, a `build.target-dir` of a cargo configuration, `CARGO_BUILD_TARGET_DIR`,
+or a client older than the field) it sets `CARGO_TARGET_DIR` to the directory, as before: a
+configuration in the caller's home does not exist on the server. So a cargo job, cargo inside a
+generic job (which never got the variable) and the jobs of a second tree of the repository
+carry the same `CARGO_*` variables. For the same reason a cargo job gets no `CARGO_NET_OFFLINE`
+after its fetch (`cargo_fetch.rs`). Not changed: a mirror below the workspace root gets
+`CARGO_TARGET_DIR=<cache-root>/target/<id>`, one value per tree, and a sandbox with fixed paths
+its own `/work/target`. A server whose own cargo configuration or environment
+(`build.target-dir`, `CARGO_BUILD_TARGET_DIR`) names a target directory would move a default
+build away from the recorded directory.
 
 ### 3.3 Transport and access
 

@@ -20,7 +20,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `SLOT_NODE_WAIT` | `35m` | how long a remote job waits for a server whose daemon does not answer (it restarts, or lets its jobs end before it does); the job is sent again every 5 s, and after this long it did not start (see `SLOT_REMOTE_FALLBACK`). Same format; `0`: no wait, the call ends at once with exit 3. A job the daemon handed to a node does not wait, whatever the value: it is queued here again. See [Remote builds](../remote-builds.md#when-the-servers-daemon-does-not-answer). |
 | `SLOT_REMOTE_SAME_PATH` | unset | `1`: mirror the repository at its own absolute path on the remote host and run the job there; the server needs `--same-path-root` (see [Remote builds](../remote-builds.md#mirror-at-the-same-path)) |
 | `SLOT_REMOTE_SAME_PATH_ROOT` | `$HOME` | with `SLOT_REMOTE_SAME_PATH`, only a repository below this directory keeps its own path on the remote host; any other goes to the remote workspace root (`SLOT_WSROOT`) |
-| `SLOT_NO_PRODUCTS` | unset | `1`: a remote `cargo build`, `test`, `bench` or `rustc` copies nothing back into the local target directory; the command runs on the remote host unchanged, and the client prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` where it would have copied. Unset or `0`: the products come back. See [Remote builds](../remote-builds.md#binaries-and-test-binaries-come-back). |
+| `SLOT_NO_PRODUCTS` | unset | `1`: a remote `cargo build`, `test`, `bench` or `rustc` copies nothing back into the local target directory, and a remote `go build -o` or `go test -c -o` leaves nothing at the path `-o` names; the command runs on the remote host unchanged, and the client prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` where it would have copied. Unset or `0`: the products come back. See [Remote builds](../remote-builds.md#binaries-and-test-binaries-come-back). |
 | `SLOT_SOCKET` | `slot.sock` in `$XDG_RUNTIME_DIR`, else in `/run/user/<uid>` | the local daemon's socket |
 | `SLOT_PHASES_FILE` | unset | in remote mode, after the job: the file the client writes the job's sync, back time, node target directory and seed to, as JSON. The daemon sets it for a job it hands to a node; a caller has no need to. See [Recorded phases of a job](#recorded-phases-of-a-job). |
 | `SLOT_SPILLED` | unset | set by the daemon in the client of a job it hands to a node: a remote start that fails ends with exit 3 whatever `SLOT_REMOTE_FALLBACK` says, without the wait of `SLOT_NODE_WAIT`, and the daemon queues the job here again. In a caller's environment it does the same to a failed start, with no daemon to queue the job again. A job a deny list keeps on this machine ends with exit 3 only in the daemon's own client (`SLOT_SPILLED` with `SLOT_PHASES_FILE`); with `SLOT_SPILLED` alone it runs in this machine's pool. See [Remote builds](../remote-builds.md#trees-that-never-leave-this-machine). |
@@ -55,8 +55,7 @@ description: Variables slot reads, variables it sets in a job, and variables it 
 | `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS` | `slot serve --test-threads` (default a quarter of the pool, at least 2) for local rust and other jobs, unless the caller set them; the width for a remote job, and a lower count the caller set is raised to it |
 | `GOMAXPROCS` | slots held for local go jobs; `--test-threads` for local other jobs; unless the caller set it. For a remote job the width (go jobs: or the slots held if more), and a lower count the caller set is raised to it |
 | `GOFLAGS` | the caller's value plus `-p=<slots held>`; go jobs; for a remote go job `-p=<width>`, or the slots held if more |
-| `CARGO_TARGET_DIR` | `<cache-root>/target/<workspace-id>`; remote rust and other jobs |
-| `CARGO_NET_OFFLINE` | `true`, for a remote cargo job that builds, once the server fetched the crates of the mirror's `Cargo.lock`; not set for a mirror without a `Cargo.lock`. See [Remote builds](../remote-builds.md#crates-are-fetched-once-per-cargolock). |
+| `CARGO_TARGET_DIR` | for remote rust and other jobs. A tree mirrored below the workspace root: `<cache-root>/target/<workspace-id>`. A tree [mirrored at the same path](../remote-builds.md#mirror-at-the-same-path): not set, and removed from the server daemon's own environment, when the job builds into the directory cargo resolves by itself (`target` beside the workspace's root manifest); the caller's directory as an absolute path when the caller set `CARGO_TARGET_DIR`, or when `CARGO_BUILD_TARGET_DIR` or a `build.target-dir` of a cargo configuration on the caller's machine names another directory. With [`--sandbox-fixed-paths`](../remote-builds.md#run-every-job-in-a-sandbox): `/work/target`. Never set for a local job |
 | `GOCACHE` | `<cache-root>/go-build`; remote go and other jobs |
 | `SLOT_PHASES_FILE` | `<state-dir>/phases-<id>.json`, for a job the daemon hands to a node: the remote-mode client that runs it writes what it measured there, and the daemon adds that to the job's record when the job ends (see [below](#recorded-phases-of-a-job)) |
 
@@ -70,6 +69,34 @@ A local job otherwise gets the caller's full environment. A remote job starts fr
 daemon's environment, plus the variables its [toolchain](../toolchains.md) admits and the names
 in `SLOT_ENV`. A name that looks like a credential (it contains `TOKEN`, `SECRET`, `PASSWORD`,
 `PASSWD`, `CREDENTIAL`, `_KEY` or `AUTH`) crosses only when `SLOT_ENV` names it.
+
+## Cargo variables and the compile cache
+
+A compile cache such as sccache puts every `CARGO_*` variable of the compiler's environment into
+the key of a Rust unit, except `CARGO_MAKEFLAGS`, `CARGO_BUILD_JOBS`, `CARGO_REGISTRIES_*` and
+`CARGO_ENCODED_RUSTFLAGS`. So each `CARGO_*` variable in a job is part of the cache key: two jobs
+that differ in one of them, in its name or in its value, share no entry, and each compiles the
+crate again.
+
+What slot sets of them, from the table above:
+
+| variable | part of the key | what follows |
+|---|---|---|
+| `CARGO_MAKEFLAGS`, `CARGO_BUILD_JOBS` | no | none |
+| `CARGO_TARGET_DIR`, a tree mirrored at the same path, cargo's own directory | not set | a cargo job, cargo inside a generic job (`slot sh -c 'cargo build'`, `slot task check`) and the jobs of another tree of the repository carry the same `CARGO_*` variables and share entries |
+| `CARGO_TARGET_DIR`, a tree mirrored below the workspace root | yes, one value per tree | two trees share no entry; the jobs of one tree do |
+| `CARGO_TARGET_DIR`, set by the caller or moved by a cargo configuration | yes, the caller's value | jobs with the same value share entries |
+
+slot sets no other `CARGO_*` variable. It sets no `CARGO_NET_OFFLINE`: a cargo job would carry
+it and cargo inside a generic job would not, and the two would share nothing. A `CARGO_*`
+variable of your own that reaches the job is part of the key like any other: `CARGO_NET_OFFLINE`,
+a `CARGO_PROFILE_*` setting, a runner (`CARGO_TARGET_<TRIPLE>_RUNNER`). A job with one shares no
+entry with a job without it. Put a setting that every job of a repository should have into the
+repository's `.cargo/config.toml` instead of one job's environment.
+
+Not covered by the variables: a crate that includes a file from its build script's output
+directory carries that absolute path, and every crate that depends on it is compiled again in
+another tree.
 
 ## Open-file limit
 
