@@ -3,8 +3,8 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
-#   tool <tsc|prettier|esbuild|pnpm|ess|aep|yq|cargo-about|make|helm> <version>: no line when the machine has none,
-#        `missing` as the version when the file is there and prints none
+#   tool <tsc|prettier|esbuild|pnpm|yarn|ess|aep|yq|cargo-about|make|helm> <version>: no line when
+#        the machine has none, `missing` as the version when the file is there and prints none
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   tool groovy-all-<version> <16 hex digits of the SHA-256 of
 #        ~/.sdkman/candidates/groovy/<version>/embeddable/groovy-all-<version>.jar>
@@ -44,7 +44,7 @@ done
 # the workstation.
 # The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
 # runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
-for n in tsc prettier esbuild pnpm ess aep yq cargo-about make; do
+for n in tsc prettier esbuild pnpm yarn ess aep yq cargo-about make; do
   for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.cargo/bin/$n" "$HOME/go/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
     tv=$(cd / && env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')

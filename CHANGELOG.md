@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- `contrib/node/toolchains-refresh.sh NODE [SECONDS]` and the user unit
+  `contrib/slot-toolchains-refresh@.service`: on the workstation, every 60 s, write the
+  toolchain manifest of this host (`toolchains.sh`) and fetch the node's into
+  `~/.local/state/slot`, each through a temporary file and a rename. A failed run, a node that
+  does not answer and an empty file keep the manifest that is there. The script ran as a loop
+  started by hand, which a restart of the machine ended.
+
+- Node CPU limit: `provision.sh` sets the CPU limit of the node's pool once `slot-node.service`
+  runs, `slot cpu-limit <CPUs> --pressure <percent>` as the build user, so the daemon holds a
+  queued job while the host is busy. On a node of 32 CPUs and 32 slots, 14 jobs ran about 76
+  threads at a load of 68 to 97, and no limit was set. New config keys: `CPU_LIMIT` (busy CPUs
+  from 1, one decimal; default 80 % of the CPUs found, 25.6 on 32; `off`) and `CPU_PRESSURE`
+  (percent over 0, at most 100; default 40; `off`). `check` reads the marks from the daemon's
+  `limits.json` and compares them as numbers (`drift: cpu-limit:`); `apply` with `slot-node`
+  not active prints `failed: cpu-limit:`. `check --canary` reads the 5-minute load average: over
+  2.5 per CPU (80 on 32 CPUs) is drift, else a `canary: ok: cpu-limit:` line; a test step that
+  ran 12 to 19 s at a load of 48 to 72 ran 182 s and 258 s at 85 to 97.
+
+- Node credential tools: `glab` and `gh` on a node are scripts in the store's `nodebin`, first
+  on a job's PATH, that print one line on stderr and exit 255: the tool works with a credential,
+  no credential goes to the node, and the step runs on the workstation (`slot --here <command>`
+  or `.slot.toml` `local = [...]`). A consumer's task that called `glab api` on the node went on
+  with an empty answer and ended in the stack trace of its next command.
+
+- Node core dumps: `provision.sh` writes `/etc/sysctl.d/60-slot-core.conf`
+  (`kernel.core_pattern=core`) and loads it when the pattern is a pipe, and `slot-node.service`
+  and `sccache-node.service` get `LimitCORE=0` (a process in a container a job starts keeps
+  docker's core limit). A bare node pipes every core to `systemd-coredump`, and the kernel runs a
+  pipe handler whatever the core limit is: an aborted process was reaped 142 to 256 ms later on
+  an idle node and up to 3.5 s later with 24 at once, and a consumer's tests timed out under
+  load. A pattern that is neither a pipe nor `core` stays. `check --canary` times an aborted
+  process under core limit 0, the quickest of 5: over 50 ms is drift, else a `canary: ok: core:`
+  line.
+
+- Node yarn: `provision.sh` installs yarn 1.22.22, the release the workstation has in
+  `/usr/bin`, as an archive pin (the npm tarball, SHA-256 pinned), with `bin/yarn.js` linked as
+  `/usr/local/bin/yarn` and `yarnpkg`. A consumer's `task install` found no `yarn` on the node.
+  `toolchains.sh` prints `tool yarn <version>`, so `push.sh check` compares it.
+
 - Node role: `contrib/node/role.sh` gives a node an IAM role and an instance profile of its own
   (`slot-node-<name>`) with one customer-managed policy, `slot-node-agent`: the 11 actions the
   Systems Manager agent needs for its heartbeat, Run Command and Session Manager, without

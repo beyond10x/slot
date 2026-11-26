@@ -5,8 +5,8 @@
 #   provision.sh check CONF [--canary]
 #                                     print one `drift: <part>: <what>` line per difference,
 #                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise.
-#                                     --canary also starts one container that tries the node's
-#                                     role (role-canary.sh); an allowed call is drift
+#                                     --canary also tries the node: one container against its
+#                                     role (role-canary.sh), an aborted process, the load
 #   provision.sh apply CONF [--open]  change every part that drifts, print `changed: ...` per
 #                                     change; --open also lets SETUP_KEY in (a setup login)
 #   provision.sh storage CONF         the boot step of slot-storage.service: instance store
@@ -79,7 +79,9 @@ cargo-about 0.9.1 c0e7dc6f5d74b0beec5c0053d39ab24514c717d19acd91886907a22457ea9e
 # (GOTOOLCHAIN=auto). typescript, prettier and esbuild are the npm tarballs of those releases
 # (esbuild's is the native binary of its linux-x64 package), the releases the test lanes of the
 # consumers read (`tsc`, `prettier` and `esbuild` on PATH). pnpm is the npm tarball of the release
-# the workstation runs (its dist/ is bundled; it needs node 22.13 or later). yq is the Go one of mikefarah at the
+# the workstation runs (its dist/ is bundled; it needs node 22.13 or later). yarn is the npm tarball
+# of yarn 1.22.22, the release the workstation has in /usr/bin: one script, bin/yarn.js, linked as
+# yarn and as yarnpkg, which needs node on PATH. yq is the Go one of mikefarah at the
 # release the workstation runs; its tarball names the binary yq_linux_amd64. helm is the static
 # binary of get.helm.sh at the release the workstation runs (its SHA-256 is the one that site
 # publishes beside the archive); it has no `--version`, so its check reads
@@ -90,6 +92,7 @@ typescript 6.0.3 33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22
 prettier 3.8.1 5531dc6006ad06b642d5342438909f85dc53e87c50556753c908229b213fb4f4 https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz 1 bin/prettier.cjs:prettier
 esbuild 0.28.2 9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6 https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz 1 bin/esbuild
 pnpm 11.9.0 2b567aa66026238078ac2e0a33bec3febd60e962987aac697456f3180819b287 https://registry.npmjs.org/pnpm/-/pnpm-11.9.0.tgz 1 bin/pnpm.mjs:pnpm bin/pnpx.mjs:pnpx
+yarn 1.22.22 c17d3797fb9a9115bf375e31bfd30058cac6bc9c3b8807a3d8cb2094794b51ca https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz 1 bin/yarn.js:yarn bin/yarn.js:yarnpkg
 yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq
 helm v3.8.1 d643f48fe28eeb47ff68a1a7a26fc5142f348d02c8bc38d699674016716f61cd https://get.helm.sh/helm-v3.8.1-linux-amd64.tar.gz 1 helm'
 RUSTUP_VERSION=1.29.3
@@ -155,6 +158,11 @@ ClientAliveCountMax 3'
 UNITS='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-imds-containers.service slot-docker-prune.service slot-docker-prune.timer slot-toolchains-manifest.service slot-toolchains-manifest.timer'
 ENABLED='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-imds-containers.service docker.service slot-docker-prune.timer slot-toolchains-manifest.timer'
 LIBEXEC=/usr/local/libexec
+# Tools that work only with a credential. No credential goes to a node, so none of them can work
+# there: each is a script in the store's nodebin that says so (gen_no_tool).
+NO_CREDENTIAL_TOOLS='glab gh'
+# The node's kernel.core_pattern, in a file that sorts after systemd's 50-coredump.conf.
+CORE_SYSCTL=/etc/sysctl.d/60-slot-core.conf
 
 if [ "$mode" = bundle ]; then
   conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
@@ -397,6 +405,56 @@ q_nproc() {
   if [ -n "$T" ]; then cat "$R/.state-nproc" 2>/dev/null || echo 2; else nproc; fi
 }
 q_owner() { stat -c %U "$R$1" 2>/dev/null; }
+# kernel.core_pattern as the kernel has it. NODE_TEST=1: the file core-pattern, and without it
+# the pipe of a bare node.
+q_core_pattern() {
+  if [ -n "$T" ]; then
+    cat "$S/core-pattern" 2>/dev/null || echo '|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h'
+  else
+    cat /proc/sys/kernel/core_pattern 2>/dev/null
+  fi
+}
+# The time until an aborted process is reaped, under core limit 0: the quickest of 5 runs, in
+# whole milliseconds. The shell's own line about the abort goes nowhere. NODE_TEST=1: the file
+# abort-ms, and without it 2.
+q_abort_ms() {
+  if [ -n "$T" ]; then
+    cat "$S/abort-ms" 2>/dev/null || echo 2
+  else
+    (
+      ulimit -c 0
+      qa_m=
+      for qa_i in 1 2 3 4 5; do
+        qa_0=$(date +%s%N)
+        sh -c 'kill -ABRT $$'
+        qa_1=$(date +%s%N)
+        qa_d=$(((qa_1 - qa_0) / 1000000))
+        if [ -z "$qa_m" ] || [ "$qa_d" -lt "$qa_m" ]; then qa_m=$qa_d; fi
+      done
+      echo "$qa_m"
+    ) 2>/dev/null
+  fi
+}
+# The marks of the pool's CPU limit as the daemon keeps them in limits.json of its state
+# directory (one JSON object; a mark that is off has no key): busy CPUs, and percent of CPU
+# pressure. Nothing printed: that mark is off. NODE_TEST=1: the files cpu-limit and cpu-pressure.
+limits_key() {
+  sed -n "s/.*\"$1\" *: *\([0-9.eE+-]*\).*/\1/p" "$H/.local/state/slot/limits.json" 2>/dev/null | head -n 1
+}
+q_cpu_limit() {
+  if [ -n "$T" ]; then cat "$S/cpu-limit" 2>/dev/null; else limits_key cpu_busy_max; fi
+}
+q_cpu_pressure() {
+  if [ -n "$T" ]; then cat "$S/cpu-pressure" 2>/dev/null; else limits_key cpu_pressure_max; fi
+}
+# The 5-minute load average. NODE_TEST=1: the file load5, and without it 1.00.
+q_load5() {
+  if [ -n "$T" ]; then
+    cat "$S/load5" 2>/dev/null || echo 1.00
+  else
+    cut -d' ' -f2 /proc/loadavg 2>/dev/null
+  fi
+}
 
 # ---- system actions ----
 
@@ -418,6 +476,8 @@ a_enable() {
 }
 a_start() {
   if [ -n "$T" ]; then
+    # $R/.state-start-fails-<unit>: that unit does not start.
+    [ -e "$R/.state-start-fails-$1" ] && return 1
     st_touch active "$1"
     [ "$1" = slot-imds-containers.service ] && : >"$S/imds-containers"
     # A unit of a package (docker.service) has no file under /etc/systemd/system.
@@ -454,6 +514,36 @@ a_chattr() {
 a_chown() {
   [ -n "$T" ] && return 0
   chown -h "$@"
+}
+# Loads the sysctl file $1. NODE_TEST=1: the pattern becomes `core`, unless
+# $R/.state-core-stays exists.
+a_sysctl_load() {
+  if [ -n "$T" ]; then
+    calls "sysctl -q -p $1"
+    [ -e "$R/.state-core-stays" ] || { mkdir -p "$S" && echo core >"$S/core-pattern"; }
+  else
+    sysctl -q -p "$1"
+  fi
+}
+# Sets the pool's CPU limit: `slot cpu-limit $1 --pressure $2`, or `slot cpu-limit off` (which
+# takes the pressure mark away too), run as the build user against the running daemon. A daemon
+# that started a moment ago may not answer yet: 5 tries, 1 s apart. NODE_TEST=1: the marks go to
+# the files q_cpu_limit and q_cpu_pressure read, unless $R/.state-cpu-limit-stays exists.
+a_cpu_limit() {
+  if [ "$1" = off ]; then set -- off; else set -- "$1" --pressure "$2"; fi
+  if [ -n "$T" ]; then
+    calls "slot cpu-limit $*"
+    [ -e "$R/.state-cpu-limit-stays" ] && return 0
+    mkdir -p "$S" && rm -f "$S/cpu-limit" "$S/cpu-pressure"
+    [ "$1" = off ] || echo "$1" >"$S/cpu-limit"
+    [ "$1" = off ] || [ "$3" = off ] || echo "$3" >"$S/cpu-pressure"
+    return 0
+  fi
+  for ac_i in 1 2 3 4 5; do
+    as_user "$STORE/bin/slot" cpu-limit "$@" </dev/null && return 0
+    [ "$ac_i" = 5 ] || sleep 1
+  done
+  return 1
 }
 # The ssh logins of this boot with the key of fingerprint $1 that still run, one line each:
 # `session <id> <leader pid>` or, without a logind session, `pid <pid>`.
@@ -598,6 +688,7 @@ ExecStart=$(serve_args)
 ExecReload=/bin/kill -HUP \$MAINPID
 KillMode=control-group
 LimitNOFILE=65536
+LimitCORE=0
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -617,6 +708,7 @@ Environment=HOME=$H XDG_RUNTIME_DIR=/run/user/$BUILD_UID SCCACHE_NO_DAEMON=1 SCC
 Environment=PATH=$STORE/nodebin:$H/.cargo/bin:/usr/local/bin:/usr/bin:/bin TMPDIR=$STORE/tmp
 ExecStart=$H/.cargo/bin/sccache
 LimitNOFILE=65536
+LimitCORE=0
 Restart=always
 [Install]
 WantedBy=multi-user.target
@@ -929,6 +1021,16 @@ echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node)
 exit 255
 EOF
 }
+# A tool of NO_CREDENTIAL_TOOLS: one line on stderr and exit 255, so a task that calls it ends
+# there and not in what its next command makes of an empty answer.
+gen_no_tool() {
+  cat <<EOF
+#!/bin/sh
+echo "slot: $NODE_NAME has no $1: it works with a credential, and no credential goes to the node. Run the step that calls it on the workstation: slot --here <command>, or name the command in .slot.toml local = [...] of its repository." >&2
+exit 255
+EOF
+}
+gen_core_sysctl() { echo 'kernel.core_pattern=core'; }
 gen_ssh_shim() {
   cat <<EOF
 #!/bin/sh
@@ -1282,6 +1384,9 @@ p_files() {
   want_file sccache-config "$H/.config/sccache/config" 644 "$U:$U" gen_sccache_config
   want_file nodebin "$STORE/nodebin/no-credentials" 755 "$U:$U" gen_no_credentials
   want_file nodebin "$STORE/nodebin/ssh" 755 "$U:$U" gen_ssh_shim
+  for nt in $NO_CREDENTIAL_TOOLS; do
+    want_file nodebin "$STORE/nodebin/$nt" 755 "$U:$U" gen_no_tool "$nt"
+  done
   want_file sudoers /etc/sudoers.d/slot-node 440 root:root gen_sudoers
   want_file libexec "$LIBEXEC/slot-toolchains.sh" 755 root:root cat "$here/toolchains.sh"
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
@@ -2100,6 +2205,46 @@ p_imds() {
   fi
 }
 
+# Core dumps. A bare node has kernel.core_pattern as a pipe to systemd-coredump, and the kernel
+# runs a pipe handler whatever the core limit of the process is: a process killed by SIGABRT was
+# reaped only after the handler, 142 to 256 ms later on an idle node and up to 3.5 s with 24 at
+# once, and a consumer's tests that wait a few seconds for an aborted child timed out. The node's
+# pattern is the file name `core`: no handler runs, and under core limit 0 (LimitCORE=0 of
+# slot-node.service) nothing is written. A pattern that is neither a pipe nor `core` is the
+# owner's choice and stays.
+p_core() {
+  want_file core "$CORE_SYSCTL" 644 root:root gen_core_sysctl
+  co_v=$(q_core_pattern)
+  case $co_v in
+    "|"*) ;;
+    *) return 0 ;;
+  esac
+  drift core "kernel.core_pattern is '$co_v', a pipe: an aborted process waits for the handler"
+  fixing || return 0
+  a_sysctl_load "$CORE_SYSCTL"
+  co_v=$(q_core_pattern)
+  case $co_v in
+    "|"*) failed core "kernel.core_pattern is still '$co_v' after sysctl -p $CORE_SYSCTL" ;;
+    *) changed core "kernel.core_pattern is '$co_v' (sysctl -p $CORE_SYSCTL)" ;;
+  esac
+}
+
+# check --canary: an aborted process under core limit 0 is reaped within 50 ms (q_abort_ms).
+p_core_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  co_ms=$(q_abort_ms)
+  case $co_ms in
+    '' | *[!0-9]*) drift core "canary: no time was measured for an aborted process: nothing was tested" ;;
+    *)
+      if [ "$co_ms" -gt 50 ]; then
+        drift core "canary: an aborted process is reaped after $co_ms ms (the quickest of 5), over 50"
+      else
+        echo "canary: ok: core: an aborted process is reaped in $co_ms ms (the quickest of 5)"
+      fi
+      ;;
+  esac
+}
+
 # docker for the jobs that start containers (a consumer's OCI lane). The package is one of
 # BASE_PACKAGES, docker.service one of ENABLED, and p_services starts it behind
 # slot-imds-containers.service. Here: the build user is in group docker, which is what lets a job
@@ -2304,6 +2449,81 @@ p_services() {
   done
 }
 
+# The CPU limit of the node's pool. Slots bound how many jobs run, not what they use: on a node
+# of 32 CPUs and 32 slots, 14 jobs ran about 76 threads at a load of 68 to 97, and `slot
+# cpu-limit` said `no CPU limit`. With a limit the daemon holds a queued job while the pool's
+# jobs and the compile cache use more CPUs than the mark, or while the host's CPU pressure
+# (`some avg10`) is at the pressure mark or over it. The marks: CPU_LIMIT, or 80 % of the CPUs
+# found with one decimal (32 CPUs: 25.6, never under 1); CPU_PRESSURE, or 40. CPU_LIMIT=off is no
+# limit, and then no pressure mark either: the daemon keeps one only beside a CPU mark.
+cpu_limit_want() {
+  case $CPU_LIMIT in
+    '') q_nproc | awk '{ v = $1 * 0.8; if (v < 1) v = 1; printf "%.1f\n", v }' ;;
+    *) echo "$CPU_LIMIT" ;;
+  esac
+}
+cpu_pressure_want() {
+  if [ "$CPU_LIMIT" = off ]; then echo off; else echo "${CPU_PRESSURE:-40}"; fi
+}
+# $1 and $2 are the same mark: both off, or the same number (25.6 and 25.60, 40 and 40.0).
+same_mark() {
+  if [ "$1" = off ] || [ "$2" = off ]; then
+    [ "$1" = "$2" ]
+  else
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 == b + 0) }'
+  fi
+}
+# The daemon must run: this part comes after p_services. The marks are in limits.json on the
+# instance store, so a node that was stopped and started gets them again here.
+p_cpu_limit() {
+  cl_w=$(cpu_limit_want)
+  cl_wp=$(cpu_pressure_want)
+  cl_g=$(q_cpu_limit)
+  cl_gp=$(q_cpu_pressure)
+  same_mark "${cl_g:-off}" "$cl_w" && same_mark "${cl_gp:-off}" "$cl_wp" && return 0
+  drift cpu-limit "the pool holds a queued job from '${cl_g:-off}' busy CPUs and '${cl_gp:-off}' % CPU pressure, want '$cl_w' and '$cl_wp'"
+  fixing || return 0
+  if ! q_active slot-node.service; then
+    failed cpu-limit "slot-node.service is not active: the limit was not set"
+    return 0
+  fi
+  if [ "$cl_w" = off ]; then cl_a=off; else cl_a="$cl_w --pressure $cl_wp"; fi
+  cl_o=$(a_cpu_limit "$cl_w" "$cl_wp" 2>&1)
+  cl_g=$(q_cpu_limit)
+  cl_gp=$(q_cpu_pressure)
+  if ! { same_mark "${cl_g:-off}" "$cl_w" && same_mark "${cl_gp:-off}" "$cl_wp"; }; then
+    cl_o=$(echo "$cl_o" | tail -n 1)
+    failed cpu-limit "after slot cpu-limit $cl_a the pool holds a queued job from '${cl_g:-off}' busy CPUs and '${cl_gp:-off}' % CPU pressure${cl_o:+: $cl_o}"
+  elif [ "$cl_w" = off ]; then
+    changed cpu-limit "no CPU limit (slot cpu-limit off)"
+  else
+    changed cpu-limit "a queued job is held from $cl_w busy CPUs and $cl_wp % CPU pressure (slot cpu-limit $cl_a)"
+  fi
+}
+
+# check --canary: the limit holds the node below the load at which its jobs stop getting done. A
+# consumer's test step ran 12 to 19 s at a load of 48 to 72 on 32 CPUs, and 182 s and 258 s at 85
+# to 97. The bound is a 5-minute load average of 2.5 per CPU (32 CPUs: 80). With CPU_LIMIT=off
+# there is no limit to try.
+p_cpu_limit_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  [ "$(cpu_limit_want)" != off ] || return 0
+  cl_l=$(q_load5)
+  case $cl_l in
+    '' | *[!0-9.]* | *.*.*)
+      drift cpu-limit "canary: the 5-minute load average could not be read: nothing was tested"
+      return 0
+      ;;
+  esac
+  cl_n=$(q_nproc)
+  cl_b=$(awk -v n="$cl_n" 'BEGIN { printf "%g\n", n * 2.5 }')
+  if awk -v l="$cl_l" -v b="$cl_b" 'BEGIN { exit !(l + 0 > b + 0) }'; then
+    drift cpu-limit "canary: the 5-minute load average is $cl_l on $cl_n CPUs, over $cl_b (2.5 per CPU): the limit does not hold the node"
+  else
+    echo "canary: ok: cpu-limit: the 5-minute load average is $cl_l on $cl_n CPUs (bound $cl_b)"
+  fi
+}
+
 case $mode in
   check | apply)
     p_packages
@@ -2317,6 +2537,7 @@ case $mode in
     p_files
     p_units
     p_imds
+    p_core
     p_role
     p_docker
     p_slot
@@ -2328,8 +2549,11 @@ case $mode in
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
     p_services
+    p_cpu_limit
     p_docker_rule
     p_canary
+    p_core_canary
+    p_cpu_limit_canary
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"

@@ -9,7 +9,7 @@
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
-INSTANCE_PROFILE'
+INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -77,6 +77,8 @@ conf_read() {
   RUST_COMPONENTS=${CONF_RUST_COMPONENTS-clippy rustfmt}
   RUST_TARGETS=${CONF_RUST_TARGETS:-}
   INSTANCE_PROFILE=${CONF_INSTANCE_PROFILE:-}
+  CPU_LIMIT=${CONF_CPU_LIMIT:-}
+  CPU_PRESSURE=${CONF_CPU_PRESSURE:-}
   conf_check_forms "$cf"
 }
 
@@ -96,6 +98,38 @@ conf_check_forms() {
     *[1-9]*) ;;
     *)
       conf_fail "$1: DOCKER_GB must be at least 1, not '$DOCKER_GB'"
+      return 2
+      ;;
+  esac
+  # The marks of the pool's CPU limit: digits with at most one decimal, or off. Empty is the
+  # default, which provision.sh has (CPU_LIMIT follows the CPUs found). The daemon takes busy
+  # CPUs from 1 and a pressure over 0 and at most 100, and keeps a pressure mark only beside a
+  # CPU mark.
+  for k in CPU_LIMIT CPU_PRESSURE; do
+    eval "v=\${$k}"
+    case $v in
+      '' | off) continue ;;
+      *[!0-9.]* | .* | *. | *.*.* | *.??*) v=\* ;;
+    esac
+    case $k in
+      CPU_LIMIT)
+        [ "$v" != \* ] && awk -v v="$v" 'BEGIN { exit !(v >= 1) }' || {
+          conf_fail "$1: CPU_LIMIT must be busy CPUs from 1 with at most one decimal, or off, not '$CPU_LIMIT'"
+          return 2
+        }
+        ;;
+      *)
+        [ "$v" != \* ] && awk -v v="$v" 'BEGIN { exit !(v > 0 && v <= 100) }' || {
+          conf_fail "$1: CPU_PRESSURE must be a percent over 0 and at most 100 with at most one decimal, or off, not '$CPU_PRESSURE'"
+          return 2
+        }
+        ;;
+    esac
+  done
+  case $CPU_LIMIT:$CPU_PRESSURE in
+    off: | off:off) ;;
+    off:*)
+      conf_fail "$1: CPU_PRESSURE must be off or empty when CPU_LIMIT is off, not '$CPU_PRESSURE'"
       return 2
       ;;
   esac
