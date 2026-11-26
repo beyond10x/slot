@@ -395,6 +395,35 @@ slot cargo test --no-run
 - **Off.** `SLOT_NO_PRODUCTS=1` in your environment copies nothing back and runs your command
   unchanged; slot prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` instead.
 
+### What a go build wrote
+
+A remote `go build -o <path>` or `go test -c -o <path>` that exits 0 leaves the file it built at
+the same path in your checkout, with its mode and modification time, also when the path lies
+under `target/` or another directory the sync leaves out:
+
+```console
+slot go build -o target/tools/mytool ./cmd/mytool
+./target/tools/mytool --version
+slot go test -c -o target/tools/pkg.test ./pkg
+```
+
+- **Which path.** The value of `-o`, written as `-o <path>` or `-o=<path>`; a relative path is
+  read against the directory you called from (after `-C <dir>`). A path outside the checkout
+  brings nothing back and prints nothing. An absolute path counts as inside the checkout only
+  for a tree [mirrored at the same path](#mirror-at-the-same-path).
+- **A directory.** When the path is a directory on the server before the job, or `-o` ends in
+  `/`, slot lists it on the server before the job and after it and copies the files the job
+  wrote: those that are new, or whose size or modification time changed. Any other file of that
+  directory stays on the server. Both listings are the server's, so no clock of this machine is
+  compared with the server's. The times are compared to the second: a file written again with
+  the same size within the second of its earlier time counts as not written.
+- **When.** After exit 0 only. The line is the same, for example
+  `slot: fetched 1 artifact, 2.1 MB, in 0.2 s`. A listing or a copy that fails prints
+  `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1.
+- **Not touched.** `go run`, `go vet`, `go install`, a `go build` without `-o` and a `go test`
+  without `-c` run as before: no listing, no copy.
+- **Off.** `SLOT_NO_PRODUCTS=1`, as for cargo.
+
 ## Crates are fetched once per Cargo.lock
 
 Parallel cargo jobs on one server wait in turn on cargo's package-cache lock while one of them

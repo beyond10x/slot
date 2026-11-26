@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Remote mode: a `go build -o <path>` or `go test -c -o <path>` that exits 0 leaves what it built
+  at the same path in the caller's checkout, with mode and modification time. Before, the file
+  stayed on the server whenever the path lay in a directory the sync leaves out (`target/`,
+  anything in `.gitignore`), and the job still ended with exit 0. `-o <path>` and `-o=<path>` are
+  read against the directory of the call (after `-C`). For a directory, slot lists it on the
+  server before the job and after it and copies the files that are new or whose size or
+  modification time changed, and no other file of that directory. A path outside the checkout, a
+  job that did not exit 0, `go run`, `go vet`, a `go build` without `-o` and a `go test` without
+  `-c` copy nothing and print nothing. `SLOT_NO_PRODUCTS=1` turns it off, as for cargo. A listing
+  or a copy that fails prints `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1.
+
 ## 0.39.1 — 2026-11-26
 
 - The release workflow installs `ess` before it runs `task check`, as the pull-request gate

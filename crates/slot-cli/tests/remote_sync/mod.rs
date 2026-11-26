@@ -11,6 +11,7 @@ use super::{Daemon, SLOT};
 
 mod fresh;
 mod git_deps;
+mod go_products;
 mod node_view;
 mod node_wait;
 mod phases;

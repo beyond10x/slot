@@ -104,6 +104,7 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | output | streamed line by line; the mirror path is rewritten to the client's repository path | `rewrite.rs:1-2`, `server/mod.rs:1627-1654`, `:1475-1494` |
 | fetch | after exit 0 only, each `--fetch PATH` is copied back with `rsync -a --mkpath`; `target/…` is read from the job's target directory, which the host reports in its `start` frame | `client.rs:194`, `:230-298`, `server/mod.rs:2143-2169` |
 | products | a cargo `build`/`rustc` (after exit 0) or `test`/`bench` (any exit) runs with `--message-format=json-render-diagnostics` unless the caller named a format; the client strips cargo's JSON lines from stdout, keeps the `compiler-artifact` paths of `path+` packages, and copies them with one `rsync -a --relative` into the local target directory | `artifacts.rs`, `client.rs` (`products_back`) |
+| go products | a `go build -o PATH` or `go test -c -o PATH` whose path lies in the tree: after exit 0 the client copies the file with the same `rsync -a --relative` call, from the mirror to the same relative path; for a directory it lists the directory on the host before the job and after it (`rsync -d`, a sender without a destination) and copies the regular files that are new or whose size or mtime changed | `artifacts.rs` (`go_output`, `list`, `written`), `client.rs` (`go_back`) |
 | fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch` (`--locked` when the job passes `--locked` or `--frozen`) when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository, then sets `CARGO_NET_OFFLINE=true`; a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
 | measure | one stderr line per sync: bytes sent (rsync `--stats`), seconds, the checkout's `HEAD` and its count of changed files | `sync.rs` |
 | fallback | when the sync fails, stalls (no byte read or written for `SLOT_SYNC_STALL`, 60 s) or runs past `SLOT_SYNC_LIMIT` (5 min), or ssh cannot be started, the job goes to the local daemon with one stderr line; a stalled rsync is killed with its ssh | `client.rs:200-207`, `sync.rs` |
@@ -512,6 +513,25 @@ fetch sends; a later fetch sends only files whose size or mtime changed.
 
 At 100 Mbit/s down the test binaries take about 6 s, a twelfth of the target directory. Debug info
 makes them larger *(not measured here; the 410 MB binary of § 2.2 had it)*.
+
+**What a go build wrote** (`artifacts.rs`: `go_output`, `list`, `written`). go prints no list of
+what it built, so the command line names it: the last `-o` of a `go build` or of a `go test`
+with `-c`, read against the job's working directory (after `-C`). The path is normalized without
+reading the disk and must lie below the repository's top; an absolute one counts only for a
+mirror at the same path, where both sides share it. The copy is the cargo products' transfer
+(`artifacts::fetch`), from the mirror instead of the target directory. `--fetch` was not reused:
+it reads `target/…` from the job's cargo target directory, which in a mirror below the workspace
+root is not where go wrote.
+
+`-o` may name a directory, and other files may lie in it. What the build wrote is known from two
+listings of that directory on the host, one after the sync and before the job, one after the
+job: a regular file that the first listing lacks, or has with another size or mtime, was
+written. The listing is an rsync sender without a destination (`rsync -d host:<dir>/`), which
+`slot shell` admits as it admits a fetch, so the host needs no new command. Way (b) above was
+rejected for cargo because cargo names its files; go does not. Both listings come from one
+machine, so no clock is compared across machines. rsync lists times to the second: a file
+written again with the same size in the second of its earlier mtime reads as not written. A
+build without `-o`, and every other go command, makes no listing and no copy.
 
 ### 5.3 `cargo test`
 
