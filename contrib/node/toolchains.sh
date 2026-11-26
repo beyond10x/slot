@@ -6,6 +6,8 @@
 #   tool <tsc|prettier|esbuild|pnpm|ess|aep|yq|cargo-about|make|helm> <version>: no line when the machine has none,
 #        `missing` as the version when the file is there and prints none
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
+#   tool groovy-all-<version> <16 hex digits of the SHA-256 of
+#        ~/.sdkman/candidates/groovy/<version>/embeddable/groovy-all-<version>.jar>
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
 # push.sh check compares the rust, go, node and tool lines; the C tools are for reading.
@@ -68,6 +70,16 @@ done
 for f in "$HOME"/.cache/sdc/aep/*/x86_64-unknown-linux-gnu/aep; do
   [ -f "$f" ] || continue
   echo "tool sdc-aep-$(basename "$(dirname "$(dirname "$f")")") $(sha256sum "$f" | cut -c1-16)"
+done
+# The Groovy distributions under the path sdkman uses (~/.sdkman/candidates/groovy/<version>) that
+# carry a groovy-all jar: `tool groovy-all-<version> <the first 16 hex digits of the jar's
+# SHA-256>`. A symbolic link (sdkman's `current`) is left out, and a release without that jar
+# (Groovy 3 and later) too.
+for d in "$HOME"/.sdkman/candidates/groovy/*; do
+  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  f=$d/embeddable/groovy-all-$(basename "$d").jar
+  [ -f "$f" ] || continue
+  echo "tool groovy-all-$(basename "$d") $(sha256sum "$f" | cut -c1-16)"
 done
 # C side: the compilers and cross compilers a job resolves through /usr/bin, and the compile cache
 # (a node has it in the build user's cargo bin) with the server that runs it (the process

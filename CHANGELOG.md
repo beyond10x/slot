@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Node Groovy: `provision.sh` installs the Groovy 2.4.10 binary distribution (Maven Central,
+  SHA-256 pinned) at `~/.sdkman/candidates/groovy/2.4.10` (`HOME_PINS`, new strip kind `zip1`),
+  where a consumer's tasks read `embeddable/groovy-all-2.4.10.jar` and `bin/groovyc`; those tasks
+  ran on the workstation because the node had no Groovy. `toolchains.sh` prints
+  `tool groovy-all-<version> <digest of the jar>`, so `push.sh check` compares it.
+
 - Node helm: `provision.sh` installs helm v3.8.1, the release the workstation runs, as an archive
   pin (the static binary of `get.helm.sh`, SHA-256 pinned) linked as `/usr/local/bin/helm`. A
   consumer's chart check (`helm lint`, `helm template`) had no helm on the node. `toolchains.sh`

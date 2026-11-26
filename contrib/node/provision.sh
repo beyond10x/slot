@@ -112,7 +112,12 @@ SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5ede
 # `binary_sha256` (17cf105e...), which the driver compares. The release binary asks for
 # GLIBC_2.39 (two weak symbols, pidfd_spawnp and pidfd_getpid); on a node with glibc 2.34 the loader
 # prints one warning on stderr and `--version` still answers `aep 0.80.0`, which is all the driver
-# reads.
+# reads. The groovy line is the Groovy 2.4.10 binary distribution of Maven Central (the SHA-256 is
+# the one a consumer's CI script pins) at the path sdkman uses, which a consumer's tasks read as
+# `${GROOVY_HOME:-~/.sdkman/candidates/groovy/2.4.10}` for `embeddable/groovy-all-2.4.10.jar` and
+# `bin/groovyc`. Its strip field is `zip1`: a zip with one top directory, which is stripped. Its
+# check is a path ending in `.jar`: the file exists (a jar prints no version; the marker file ties
+# the tree to the archive).
 HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
 ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
 ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
@@ -121,7 +126,8 @@ ess 0.99.4 3902d0f8a6dffe5255bd0a9c8f56608fabf52faf14b97d90b6e7f7ed3da7032d http
 undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json
 chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb53b0fde4bdfc4bd075d6 https://cdn.playwright.dev/builds/cft/158.0.8127.18/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1254 chrome-headless-shell-linux64/chrome-headless-shell
 chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell
-aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep'
+aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep
+groovy 2.4.10 1c4dff3b6edf9a8ced3bca658ee1857cee90cfed1ee3474a2790045033c317a9 https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-binary/2.4.10/groovy-binary-2.4.10.zip zip1 .sdkman/candidates/groovy/2.4.10 embeddable/groovy-all-2.4.10.jar'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -1616,12 +1622,18 @@ home_fetch() {
     case $hc in
       package.json) printf '{\n  "name": "stub",\n  "version": "%s"\n}\n' "$hv" >"$hd/tree/package.json" ;;
       *chrome-headless-shell) mkdir -p "$hd/tree/${hc%/*}" && printf '#!/bin/sh\necho "Google Chrome for Testing %s"\n' "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
+      *.jar) mkdir -p "$hd/tree/$(dirname "$hc")" && echo stub >"$hd/tree/$hc" ;;
       *) printf '#!/bin/sh\necho "%s %s"\n' "$hc" "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
     esac
     calls "fetch $hu"
   elif [ "$hk" = zip ]; then
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && unzip -q archive -d tree) || return 0
+  elif [ "$hk" = zip1 ]; then
+    # A zip with one top directory: that directory becomes the tree.
+    (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir x && unzip -q archive -d x && [ "$(ls -A x | wc -l)" = 1 ] && top=$(ls -A x) &&
+      [ -d "x/$top" ] && [ ! -L "x/$top" ] && mv "x/$top" tree) || return 0
   else
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xzf archive -C tree --strip-components="$hk" --no-same-owner) || return 0
@@ -1633,9 +1645,10 @@ home_fetch() {
 }
 # What the check of a HOME_PINS line reads in directory $1: `<binary> <version>` for a binary, the
 # `version` of package.json for package.json, the last word of the first line of `--version` for a
-# chrome-headless-shell.
+# chrome-headless-shell, the version $3 for a `.jar` that exists as a regular file.
 home_got() {
   case $2 in
+    *.jar) if [ -f "$R$1/$2" ] && [ ! -L "$R$1/$2" ]; then echo "$3"; fi ;;
     package.json) sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$R$1/package.json" 2>/dev/null | head -n 1 ;;
     *chrome-headless-shell) (cd / && as_user "$R$1/$2" --version 2>/dev/null </dev/null | head -n 1 | awk '{print $NF}') ;;
     *) tool_version "$R$1/$2" ;;
@@ -1645,8 +1658,8 @@ p_home_pins() {
   while read -r hn hv hs hu hk hd hc; do
     [ -n "$hn" ] || continue
     p=$H/$hd
-    case $hc in package.json | *chrome-headless-shell) want=$hv ;; *) want="$hc $hv" ;; esac
-    got=$(home_got "$p" "$hc")
+    case $hc in package.json | *chrome-headless-shell | *.jar) want=$hv ;; *) want="$hc $hv" ;; esac
+    got=$(home_got "$p" "$hc" "$hv")
     mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
     [ "$got" = "$want" ] && [ "$mark" = "$hs" ] && continue
     drift "home:$hn@$hv" "$p is '${got:-missing}', want $want$([ "$got" = "$want" ] && echo " from the archive $hs")"
@@ -1664,7 +1677,7 @@ p_home_pins() {
     if [ -z "$src" ]; then
       failed "home:$hn@$hv" "download or checksum of $hn $hv"
     elif as_user sh -c 'set -e; mkdir -p "$(dirname "$2")"; rm -rf "$2.slot-new" "$2.slot-old"; mkdir "$2.slot-new"; cp -a "$1/." "$2.slot-new/"; printf "%s\n" "$3" >"$2.slot-new/.slot-sha256"; if [ -e "$2" ]; then mv "$2" "$2.slot-old"; fi; mv "$2.slot-new" "$2"; rm -rf "$2.slot-old"' sh "$src" "$R$p" "$hs" </dev/null; then
-      got=$(home_got "$p" "$hc")
+      got=$(home_got "$p" "$hc" "$hv")
       mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
       if [ "$got" = "$want" ] && [ "$mark" = "$hs" ]; then
         changed "home:$hn@$hv" "$hn $hv installed in $p"

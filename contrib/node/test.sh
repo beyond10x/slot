@@ -471,6 +471,18 @@ grep -q "^drift: home:chrome-headless-shell@151.0.7922.34: .*chromium_headless_s
 run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && ok "the browsers have 0 drift after apply" || bad "browsers after apply: $(cat "$W/out")"
+GJ=$R5/var/lib/builder/.sdkman/candidates/groovy/2.4.10/embeddable/groovy-all-2.4.10.jar
+[ -f "$GJ" ] && ok "groovy 2.4.10 (stub download) is at ~/.sdkman/candidates/groovy/2.4.10 with embeddable/groovy-all-2.4.10.jar" || bad "groovy jar: $(ls -R "$R5/var/lib/builder/.sdkman" 2>&1 | head -5)"
+rm -f "$GJ"
+run "$R5" check
+grep -q "^drift: home:groovy@2.4.10: .*groovy/2.4.10 is 'missing', want 2.4.10" "$W/out" && ok "check names a groovy tree without its jar" || bad "groovy drift: $(grep home "$W/out")"
+rm -f "$GJ"
+ln -s /dev/null "$GJ"
+run "$R5" check
+grep -q "^drift: home:groovy@2.4.10: " "$W/out" && ok "a jar that is a symbolic link is drift" || bad "groovy link: $(grep home "$W/out")"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ -f "$GJ" ] && [ ! -L "$GJ" ] && ok "groovy has 0 drift after apply" || bad "groovy after apply: $(cat "$W/out")"
 
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
@@ -648,6 +660,15 @@ SD=$(sha256sum "$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep" | c
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool sdc-aep' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool sdc-aep-0.80.0 $SD" ] && ok "toolchains.sh: the pinned aep of the driver's cache is a tool line with its digest, other targets are left out" || bad "sdc-aep line: '$(cat "$W/out2")'"
 rm -rf "$TC/home/.cache"
+# Groovy under the sdkman path: a line per version directory with its groovy-all jar; the `current`
+# link and a release without the jar print none.
+mkdir -p "$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable" "$TC/home/.sdkman/candidates/groovy/3.0.13/lib"
+printf 'jar\n' >"$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable/groovy-all-2.4.10.jar"
+ln -s 2.4.10 "$TC/home/.sdkman/candidates/groovy/current"
+GD=$(sha256sum "$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable/groovy-all-2.4.10.jar" | cut -c1-16)
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool groovy' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool groovy-all-2.4.10 $GD" ] && ok "toolchains.sh: the groovy-all jar of a version directory is a tool line with its digest; the current link and a release without the jar print none" || bad "groovy line: '$(cat "$W/out2")'"
+rm -rf "$TC/home/.sdkman"
 # ess, aep, yq and cargo-about: the user's cargo bin and ~/go/bin are searched too. The command runs
 # in / and without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires (an
 # ess-inputs.yaml in the working directory, ESS_TOOLCHAIN in the environment), not its own.
@@ -885,7 +906,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq archive:helm make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq archive:helm make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0 home:groovy@2.4.10; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"
@@ -985,6 +1006,50 @@ EOF
   [ "$(stat -c %a "$ZT/chrome-headless-shell-linux64/chrome-headless-shell" 2>/dev/null)" = 755 ] && ok "zip pin: the binary is mode 755" || bad "zip binary mode: $(stat -c %a "$ZT/chrome-headless-shell-linux64/chrome-headless-shell" 2>&1)"
   homerun check
   grep -q 'home:chrome' "$W/out" && bad "zip pin: drift after a matching install: $(cat "$W/out")" || ok "zip pin: check reports no drift after the install"
+  # A zip1 pin (one top directory, stripped) through the real branch: the tree is the content of
+  # the top directory, no Playwright marker, a script keeps its exec bit, the check is the jar.
+  mkdir -p "$W/gsrc/groovy-9.9/embeddable" "$W/gsrc/groovy-9.9/bin"
+  echo jar >"$W/gsrc/groovy-9.9/embeddable/groovy-all-9.9.jar"
+  printf '#!/bin/sh\necho groovyc\n' >"$W/gsrc/groovy-9.9/bin/groovyc"
+  chmod 4777 "$W/gsrc/groovy-9.9/bin/groovyc"
+  (cd "$W/gsrc" && zip -qr "$W/groovy.zip" groovy-9.9)
+  GSHA=$(sha256sum "$W/groovy.zip" | cut -d' ' -f1)
+  mkdir -p "$W/g2src/a" "$W/g2src/b/embeddable"
+  echo jar >"$W/g2src/b/embeddable/groovy-all-9.9.jar"
+  (cd "$W/g2src" && zip -qr "$W/groovy2.zip" a b)
+  G2SHA=$(sha256sum "$W/groovy2.zip" | cut -d' ' -f1)
+  cat >"$W/stubbin2/curl" <<EOF
+#!/bin/sh
+out=
+url=
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -fsSLo) out=\$2; shift ;;
+    -*) ;;
+    *) url=\$1 ;;
+  esac
+  shift
+done
+case \$url in
+  https://home.test/groovy.zip) cp "$W/groovy.zip" "\$out" ;;
+  https://home.test/groovy2.zip) cp "$W/groovy2.zip" "\$out" ;;
+  *) printf 'junk\n' >"\$out" ;;
+esac
+EOF
+  HLINE="groovy 9.9 $GSHA https://home.test/groovy.zip zip1 .sdkman/candidates/groovy/9.9 embeddable/groovy-all-9.9.jar"
+  RZ=$W/rg
+  mkdir -p "$RZ"
+  homerun apply
+  GT=$RZ/var/lib/builder/.sdkman/candidates/groovy/9.9
+  grep -q 'changed: home:groovy@9.9' "$W/out" && [ -f "$GT/embeddable/groovy-all-9.9.jar" ] && [ ! -e "$GT/groovy-9.9" ] && ok "zip1 pin, real branch: apply installs the tree without the top directory" || bad "zip1 real branch: $(cat "$W/out" "$W/err"; ls -a "$GT" 2>&1)"
+  [ ! -e "$GT/INSTALLATION_COMPLETE" ] && [ ! -e "$GT/DEPENDENCIES_VALIDATED" ] && ok "zip1 pin: no Playwright marker" || bad "zip1 markers: $(ls -a "$GT")"
+  [ "$(stat -c %a "$GT/bin/groovyc" 2>/dev/null)" = 755 ] && ok "zip1 pin: bin/groovyc is mode 755" || bad "zip1 groovyc mode: $(stat -c %a "$GT/bin/groovyc" 2>&1)"
+  homerun check
+  grep -q 'home:groovy' "$W/out" && bad "zip1 pin: drift after a matching install: $(cat "$W/out")" || ok "zip1 pin: check reports no drift after the install"
+  HLINE="groovy 9.8 $G2SHA https://home.test/groovy2.zip zip1 .sdkman/candidates/groovy/9.8 embeddable/groovy-all-9.9.jar"
+  homerun apply
+  st=$?
+  [ $st -eq 1 ] && grep -qx 'failed: home:groovy@9.8: download or checksum of groovy 9.8' "$W/err" && [ ! -e "$RZ/var/lib/builder/.sdkman/candidates/groovy/9.8" ] && ok "zip1 pin: a zip with two top entries is refused, no tree" || bad "zip1 two tops: exit $st $(cat "$W/out" "$W/err")"
 else
   ok "zip pin: skipped, zip or unzip missing on this host"
 fi
