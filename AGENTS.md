@@ -242,10 +242,16 @@ Bare SemVer tags (`0.1.0`).
    `website/product.json`. `task check` green on that commit.
 2. Annotated tag on `main`, created and pushed as the bot.
 3. The tag push runs `.github/workflows/release.yml` (contents: read): `task check`; tag,
-   `Cargo.toml` and `CHANGELOG.md` agree; two Linux targets built and smoke-tested (x86_64 and
-   aarch64 gnu; slot reads `/proc` and has no macOS port). It uploads the artifact
-   `slot-<version>-release`: `slot-<version>-<target>.tar.gz` for both targets, `SHA256SUMS`
-   and `notes.md` (the changelog section).
+   `Cargo.toml` and `CHANGELOG.md` agree; four Linux targets built and smoke-tested, each
+   architecture on a runner of its own kind (`x86_64-unknown-linux-gnu`,
+   `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`; slot
+   reads `/proc` and has no macOS port). A musl binary is also proven static
+   (`.github/scripts/static-binary.sh`: no `NEEDED` entry, no program interpreter) and answers
+   `--version` in an Alpine container whose image the workflow names by digest. It uploads the
+   artifact `slot-<version>-release`: `slot-<version>-<target>.tar.gz` for the four targets,
+   `SHA256SUMS` and `notes.md` (the changelog section). `crates/slot-docs/tests/ci/mod.rs` reads
+   the workflow: a target added to the matrix is added to the bundle's list, to
+   `RELEASE_TARGETS` there and to `website/docs/getting-started.md`.
 4. `gh run download <run> -n slot-<version>-release -D target/release-assets` (read-only), then
    `sha256sum -c SHA256SUMS` there.
 5. From the checkout, with paths relative to it (Gates refuses a home-directory path):
