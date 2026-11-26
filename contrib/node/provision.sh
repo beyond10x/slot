@@ -491,6 +491,18 @@ q_core_limit() {
     awk '/^Max core file size/ { print $5 }' "/proc/$qm/limits" 2>/dev/null
   fi
 }
+# The soft core limit that the next main process of unit $1 gets: systemd's LimitCORESoft of the
+# unit as it is loaded (`0`, `infinity` or a number of bytes). The step before a start of
+# slot-node.service asks it: no process of the unit runs then. Nothing printed: no answer.
+# NODE_TEST=1: the soft part of the unit file's LimitCORE, as a_start gives it to the process.
+q_core_limit_next() {
+  if [ -n "$T" ]; then
+    qn=$(sed -n 's/^LimitCORE=\([^:]*\).*/\1/p' "$R/etc/systemd/system/$1" 2>/dev/null | head -n 1)
+    echo "${qn:-unlimited}"
+  else
+    systemctl show -p LimitCORESoft --value "$1" 2>/dev/null
+  fi
+}
 # The time until an aborted process is reaped, under the soft core limit 0 (what a job of
 # slot-node runs with), whatever limit this run has: the quickest of 5 runs, in whole
 # milliseconds. The shell's own line about the abort goes nowhere. NODE_TEST=1: the file
@@ -2863,7 +2875,11 @@ p_core_load() {
     q_active "$co_u" || continue
     co_l=$(q_core_limit "$co_u")
     [ "$co_l" = 0 ] && continue
-    echo "pending: core: kernel.core_pattern stays '$co_v' while $co_u runs with the core limit ${co_l:-unknown} (under the pattern core its processes write core files): the apply that restarts it loads $CORE_SYSCTL" >&2
+    # During a drain no apply is needed for it: the start that ends the drain loads the file
+    # (gap_core_load).
+    co_t="the apply that restarts it loads $CORE_SYSCTL"
+    [ ! -f "$R$DRAIN_DIR/drain" ] || co_t="the start of slot-node.service at the end of its drain loads $CORE_SYSCTL"
+    echo "pending: core: kernel.core_pattern stays '$co_v' while $co_u runs with the core limit ${co_l:-unknown} (under the pattern core its processes write core files): $co_t" >&2
     return 0
   done
   a_sysctl_load "$CORE_SYSCTL"
@@ -3179,8 +3195,41 @@ gap_step() {
     rm -f "$R$DRAIN_DIR/drain"
     a_drain_disarm
     echo "slot-node: the drain is over: slot-node.service starts"
+    gap_core_load
   fi
   return 0
+}
+# The end of a drain, in the step before the start: the pattern of the running kernel, which
+# p_core_load leaves a pipe while a unit runs with another core limit than 0. `apply --drain` ends
+# before the units restart, so without this the pipe stayed until a second apply. The condition
+# is p_core_load's: the pattern is a pipe, the sysctl file is there, sccache-node (restarted above
+# when its restart waited) runs with the soft limit 0, and slot-node, of which no process runs
+# now, gets the soft limit 0 at this start. A start that ends no drain loads nothing.
+gap_core_load() {
+  gc_v=$(q_core_pattern)
+  case $gc_v in
+    "|"*) ;;
+    *) return 0 ;;
+  esac
+  [ -e "$R$CORE_SYSCTL" ] || return 0
+  if q_active sccache-node.service; then
+    gc_l=$(q_core_limit sccache-node.service)
+    if [ "$gc_l" != 0 ]; then
+      echo "slot-node: kernel.core_pattern stays '$gc_v' while sccache-node.service runs with the core limit ${gc_l:-unknown}: the next apply loads $CORE_SYSCTL"
+      return 0
+    fi
+  fi
+  gc_l=$(q_core_limit_next slot-node.service)
+  if [ "$gc_l" != 0 ]; then
+    echo "slot-node: kernel.core_pattern stays '$gc_v' while slot-node.service starts with the core limit ${gc_l:-unknown}: the next apply loads $CORE_SYSCTL"
+    return 0
+  fi
+  a_sysctl_load "$CORE_SYSCTL"
+  gc_v=$(q_core_pattern)
+  case $gc_v in
+    "|"*) echo "slot-node: kernel.core_pattern is still '$gc_v' after sysctl -p $CORE_SYSCTL" ;;
+    *) echo "slot-node: kernel.core_pattern is '$gc_v' (sysctl -p $CORE_SYSCTL)" ;;
+  esac
 }
 # The bound of a drain (mode drain-bound, run by the timer of a_drain_arm). The daemon process of
 # the mark still runs: the unit restarts the hard way, which ends the jobs that still run. Another

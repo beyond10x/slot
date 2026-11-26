@@ -285,6 +285,12 @@ does, and without `--drain` nothing changes.
   happens there, with no daemon of the pool running (`pending: running: sccache-node restarts
   when slot-node does, at the end of its drain: ...` until then), and the marks of the drain go.
   A pending restart of `sccache-node` alone drains `slot-node` too: the gap is its only moment.
+  At the end of a drain the step also loads the core pattern (`sysctl -p
+  /etc/sysctl.d/60-slot-core.conf`) when `apply` would: the pattern is a pipe, the file is there,
+  `sccache-node` runs with the soft core limit 0 and `slot-node.service` starts with it
+  (`systemctl show -p LimitCORESoft`). So one `apply --drain` is enough; the journal of
+  `slot-node.service` has the line `slot-node: kernel.core_pattern is 'core' (sysctl -p ...)`,
+  or one that says which unit keeps the pipe. A start that ends no drain loads nothing.
 - The bound: `DRAIN_MAX` after the signal, a transient timer (`slot-node-drain.timer`) runs
   `provision.sh drain-bound`. If the daemon process that got the signal still runs (same main PID
   and start time), the unit restarts the hard way, which ends the jobs that still run, and the
@@ -314,7 +320,9 @@ Under the pattern `core` a process whose limit is not 0 writes such a file, so `
 pattern only when both units run with the soft limit 0. A unit that runs with another limit
 restarts when no job runs, and the same `apply` then loads the pattern. With a job running,
 `apply` writes the unit files and the sysctl file, prints `pending: running: ...` for each unit
-and `pending: core: ...`, and the pipe stays until an `apply` finds no job. `check` names a
+and `pending: core: ...`, and the pipe stays until an `apply` finds no job, or, after `apply
+--drain`, until the start of `slot-node.service` that ends the drain, which loads the pattern
+under the same condition (Draining, the gap). `check` names a
 pattern that is a pipe and a running unit whose soft core limit is not 0. A pattern that is
 neither a pipe nor `core` is the owner's choice and stays: with no `60-slot-core.conf` there,
 `apply` writes none, and `check` and `apply` say so in a `kept: core: ...` line; a

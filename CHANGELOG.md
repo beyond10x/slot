@@ -9,6 +9,12 @@
   builds dash 0.5.12, the release of the forge's runner image, from its source tarball with a
   pinned SHA-256 and links it as `/usr/local/bin/dash` (never as `sh`); `toolchains.sh` prints
   `tool dash <release>`.
+- Node: one `apply --drain` is enough for the core pattern. The pattern was loaded only inside
+  an `apply`, and after `apply --drain` the units restart later by themselves, so
+  `kernel.core_pattern` stayed a pipe (`drift: core: ...`) until a second `apply`. The step
+  before the start of `slot-node.service` now loads `/etc/sysctl.d/60-slot-core.conf` at the end
+  of a drain, under the condition `apply` checks: `sccache-node` runs with the soft core limit 0
+  and `slot-node.service` starts with it.
 
 ## 0.39.1 — 2026-11-26
 

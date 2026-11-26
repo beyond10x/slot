@@ -3109,6 +3109,117 @@ jl=$(
 0
 end" ] && [ "$(cat "$W/jl-cmd")" = 'curl -s -m 5 --max-filesize 1048576 http://127.0.0.1:7411/metrics' ] && ok "the jobs left during a drain: running and queued jobs of the daemon's /metrics, asked as the build user, 5 s at most; no answer is no number" || bad "q_jobs_left: $jl $(cat "$W/jl-cmd")"
 
+# 6x. One `apply --drain` is enough for the core pattern. The pattern is loaded only once
+# sccache-node and slot-node run with the soft core limit 0 (6s), and after `apply --drain` both
+# restart later, by themselves, when no apply runs: the step before the start of slot-node.service
+# (start-pre) loads /etc/sysctl.d/60-slot-core.conf at the end of a drain, under the condition
+# an apply checks. A root of its own: a node provisioned before the core limit, with 1 job.
+conf
+RX=$W/r6x
+mkdir -p "$RX"
+echo 8 >"$RX/.state-nproc"
+xpipe='|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h'
+xsys=/etc/sysctl.d/60-slot-core.conf
+xrun() { NODE_TEST=1 NODE_ROOT=$RX sh "$P" "$@" >"$W/out" 2>"$W/err"; }
+xcalls() { grep 'systemctl restart\|sysctl' "$RX/.calls" | tr '\n' ','; }
+# xold [UNIT...]: the node as it was before the core limit, with the pipe as its pattern: no
+# limit in the unit files named (default: both), every process with the limit unlimited, 1 job.
+xold() {
+  [ $# -gt 0 ] || set -- slot-node sccache-node
+  rm -f "$RX/.state-core-stays" "$RX/.state-start-fails-sccache-node.service"
+  mkdir -p "$RX/.state"
+  echo 0 >"$RX/.state/jobs"
+  xrun apply "$W/node.conf"
+  echo "$xpipe" >"$RX/.state/core-pattern"
+  for xu in "$@"; do sed -i '/^LimitCORE=/d' "$RX/etc/systemd/system/$xu.service"; done
+  for xu in slot-node sccache-node; do echo unlimited >"$RX/.state/core-limit/$xu.service"; done
+  echo 1 >"$RX/.state/jobs"
+  echo 1700000000 >"$RX/.state/now"
+  : >"$RX/.state/journal"
+  : >"$RX/.calls"
+}
+xold
+xrun apply "$W/node.conf" --drain
+st=$?
+[ $st -eq 0 ] && grep -q '^draining: slot-node: 1 job(s), restart by ' "$W/out" && [ -z "$(xcalls)" ] && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && ok "apply --drain with a job running: the drain starts, no unit restarts, the pattern is not loaded" || bad "6x apply --drain: exit $st $(xcalls) $(cat "$W/out" "$W/err")"
+grep -qx "pending: core: kernel.core_pattern stays '$xpipe' while sccache-node.service runs with the core limit unlimited (under the pattern core its processes write core files): the start of slot-node.service at the end of its drain loads $xsys" "$W/err" && ok "apply --drain: the pending line names the start after the drain, not a second apply" || bad "6x pending line: $(grep 'pending: core' "$W/err")"
+echo 0 >"$RX/.state/jobs"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+[ "$(xcalls)" = "systemctl restart sccache-node.service,sysctl -q -p $xsys," ] && [ "$(cat "$RX/.state/core-pattern")" = core ] && ok "the start after the drain: sccache-node restarts, then the sysctl file is loaded and the pattern is core" || bad "6x start-pre: $(xcalls) pattern '$(cat "$RX/.state/core-pattern")' $(cat "$W/out" "$W/err")"
+grep -qx "slot-node: kernel.core_pattern is 'core' (sysctl -p $xsys)" "$W/out" && ok "the start after the drain says in the journal that it loaded the pattern" || bad "6x journal: $(cat "$W/out")"
+: >"$RX/.calls"
+xrun check "$W/node.conf"
+st=$?
+[ $st -eq 0 ] && grep -qx '0 drift' "$W/out" && ok "after one apply --drain and the restart it started: 0 drift, the pattern is no pipe" || bad "6x check after the drain: exit $st $(grep '^drift' "$W/out" | tr '\n' ' ')"
+xrun apply "$W/node.conf"
+grep -qx '0 changed' "$W/out" && [ -z "$(xcalls)" ] && ok "a second apply has nothing left to do" || bad "6x second apply: $(xcalls) $(cat "$W/out" "$W/err")"
+# The bound of the drain restarts the unit the hard way: the same step, the same load.
+xold
+xrun apply "$W/node.conf" --drain
+: >"$RX/.calls"
+xrun drain-bound "$W/node.conf"
+[ "$(xcalls)" = "systemctl restart slot-node.service,systemctl restart sccache-node.service,sysctl -q -p $xsys," ] && [ "$(cat "$RX/.state/core-pattern")" = core ] && grep -qx "slot-node: kernel.core_pattern is 'core' (sysctl -p $xsys)" "$RX/.state/journal" && ok "the bound of a drain: the restart runs the same step, and the pattern is loaded" || bad "6x bound: $(xcalls) pattern '$(cat "$RX/.state/core-pattern")' $(cat "$RX/.state/journal" 2>&1)"
+# sccache-node does not restart: its process keeps the limit unlimited, and the pattern stays.
+xold
+xrun apply "$W/node.conf" --drain
+: >"$RX/.state-start-fails-sccache-node.service"
+echo 0 >"$RX/.state/jobs"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && grep -qx "slot-node: kernel.core_pattern stays '$xpipe' while sccache-node.service runs with the core limit unlimited: the next apply loads $xsys" "$W/out" && ok "sccache-node did not restart: the pattern stays a pipe, and one line says why" || bad "6x sccache stays: $(xcalls) $(cat "$W/out" "$W/err")"
+rm -f "$RX/.state-start-fails-sccache-node.service"
+xrun apply "$W/node.conf"
+[ "$(cat "$RX/.state/core-pattern")" = core ] && grep -q '^changed: core: kernel.core_pattern is .core. ' "$W/out" && ok "the next apply restarts sccache-node and loads the pattern, as before" || bad "6x apply after a failed restart: $(cat "$W/out" "$W/err")"
+# The unit file of slot-node.service has no core limit at the start (taken out after the apply):
+# its next process would write core files under the pattern core, so the pattern stays.
+xold
+xrun apply "$W/node.conf" --drain
+sed -i '/^LimitCORE=/d' "$RX/etc/systemd/system/slot-node.service"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && grep -qx "slot-node: kernel.core_pattern stays '$xpipe' while slot-node.service starts with the core limit unlimited: the next apply loads $xsys" "$W/out" && ok "slot-node would start with another core limit than 0: the pattern stays a pipe" || bad "6x unit without a limit: $(xcalls) $(cat "$W/out" "$W/err")"
+# A load that does not change the pattern is named.
+xold
+xrun apply "$W/node.conf" --drain
+: >"$RX/.state-core-stays"
+xrun start-pre "$W/node.conf"
+grep -qx "slot-node: kernel.core_pattern is still '$xpipe' after sysctl -p $xsys" "$W/out" && ok "a sysctl load that leaves the pipe is named in the journal" || bad "6x pattern stays after the load: $(cat "$W/out" "$W/err")"
+rm -f "$RX/.state-core-stays"
+# No sysctl file (the owner's pattern was kept, then became a pipe): nothing is loaded.
+xold
+xrun apply "$W/node.conf" --drain
+rm -f "$RX$xsys"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && ! grep -q 'core_pattern' "$W/out" && ok "no sysctl file: the start after a drain loads nothing" || bad "6x no sysctl file: $(xcalls) $(cat "$W/out")"
+# A pattern that is no pipe is left alone, and a start that ends no drain loads nothing.
+xold
+xrun apply "$W/node.conf" --drain
+echo '/var/crash/core.%e.%p' >"$RX/.state/core-pattern"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = '/var/crash/core.%e.%p' ] && ok "a pattern that is no pipe: the start after a drain leaves it alone" || bad "6x owner's pattern: $(xcalls) $(cat "$RX/.state/core-pattern")"
+echo "$xpipe" >"$RX/.state/core-pattern"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && ok "a start of the unit that ends no drain loads nothing: the pattern is an apply's, or a drain's end" || bad "6x start without a drain: $(xcalls) $(cat "$W/out")"
+# What the next process of a unit gets is asked from systemd: the unit's LimitCORESoft.
+nl=$(
+  eval "$(sed -n '/^q_core_limit_next() {$/,/^}$/p' "$P")"
+  T=
+  systemctl() { echo "$*" >"$W/nl-cmd"; echo 0; }
+  q_core_limit_next slot-node.service
+  systemctl() { echo infinity; }
+  q_core_limit_next slot-node.service
+  systemctl() { return 1; }
+  q_core_limit_next slot-node.service
+  echo end
+)
+[ "$nl" = "0
+infinity
+end" ] && [ "$(cat "$W/nl-cmd" 2>/dev/null)" = 'show -p LimitCORESoft --value slot-node.service' ] && ok "the limit of a unit's next process is systemd's LimitCORESoft of the unit; no answer is no 0" || bad "q_core_limit_next: $nl / $(cat "$W/nl-cmd" 2>&1)"
+
 # 6w. The run-time limit of the node's pool: `slot run-limit` with RUN_LIMIT (10m) and
 # RUN_LIMIT_MAX (30m, the most a job names with `slot --timeout`), set once slot-node runs
 # (section 2). check asks the daemon (GET /api/run-limit as the build user, 5 s at most), which
