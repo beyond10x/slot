@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.40.0 — 2026-11-26
 
 - Releases carry static binaries: `slot-<version>-x86_64-unknown-linux-musl.tar.gz` and
   `slot-<version>-aarch64-unknown-linux-musl.tar.gz` beside the two gnu archives, all four in

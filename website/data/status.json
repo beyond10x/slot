@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.39.1 and docs/design.md sections 10 to 26",
+  "asOf": "2026-11-26",
+  "source": "CHANGELOG.md 0.1.0 to 0.40.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -345,6 +345,27 @@
       "status": "shipped",
       "detail": "A daemon that runs remote jobs evicts their target directories under the rules of a local one, and slot status names free space only when a look measured it (0.39.1).",
       "href": "/docs/how-it-works#freeing-disk-space"
+    },
+    {
+      "area": "Remote",
+      "label": "A go build's output comes back",
+      "status": "shipped",
+      "detail": "A remote go build -o or go test -c -o that exits 0 brings the file or the directory's new files back into the tree, also -o at the top of the tree (0.40.0).",
+      "href": "/docs/remote-builds#what-a-go-build-wrote"
+    },
+    {
+      "area": "Remote",
+      "label": "A denied git dependency keeps the job here",
+      "status": "shipped",
+      "detail": "A job whose Cargo.lock names a git source on a deny list runs in this machine's pool, also when it was sent with SLOT_HOST set, and its record names the reason (0.40.0).",
+      "href": "/docs/remote-builds#trees-that-never-leave-this-machine"
+    },
+    {
+      "area": "Configuration",
+      "label": "Static binaries for any Linux",
+      "status": "shipped",
+      "detail": "Every release has musl archives for x86_64 and aarch64 beside the gnu ones; they load no library and run on an older glibc or on Alpine (0.40.0).",
+      "href": "/docs/getting-started#which-archive-a-host-takes"
     }
   ]
 }
