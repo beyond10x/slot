@@ -2,11 +2,15 @@
 format: aep.planning-md/3
 id: story:a-denied-git-dependency-keeps-the-job-on-this-machine
 kind: story
-status: draft
+status: implemented
 title: A job with a denied git dependency runs on this machine, whichever way it reached slot
 relations:
 - serves: vision:O2
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-26T18:20:11Z", actor: "human:operator", revision: 2, decided_on: {"recorded":{"test_result":2}}}
+- {from: "proposed", to: "active", at: "2026-11-26T18:20:11Z", actor: "human:operator", revision: 3, decided_on: {"recorded":{"test_result":2}}}
+- {from: "active", to: "implemented", at: "2026-11-26T18:20:11Z", actor: "human:operator", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 ## Outcome
 

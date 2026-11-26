@@ -1,0 +1,13 @@
+{
+  "at": "2026-11-26T18:20:11Z",
+  "actor": "human:operator",
+  "artifact": "story:a-denied-git-dependency-keeps-the-job-on-this-machine",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check in the Gate job of the release workflow of tag 0.40.0 (success), which runs the same tests on c34b354",
+    "reference": "https://github.com/beyond10x/slot/actions/runs/45870125974"
+  }
+}
