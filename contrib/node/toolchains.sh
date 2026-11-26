@@ -77,10 +77,11 @@ for f in "$HOME"/.cache/sdc/aep/*/x86_64-unknown-linux-gnu/aep; do
 done
 # The Groovy distributions under the path sdkman uses (~/.sdkman/candidates/groovy/<version>) that
 # carry a groovy-all jar: `tool groovy-all-<version> <the first 16 hex digits of the jar's
-# SHA-256>`. A symbolic link (sdkman's `current`) is left out, and a release without that jar
-# (Groovy 3 and later) too.
+# SHA-256>`. A version directory that is a symbolic link counts (sdkman's local install makes one).
+# A directory without a jar of its own name prints no line: sdkman's `current` link, and a release
+# that ships no groovy-all jar.
 for d in "$HOME"/.sdkman/candidates/groovy/*; do
-  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  [ -d "$d" ] || continue
   f=$d/embeddable/groovy-all-$(basename "$d").jar
   [ -f "$f" ] || continue
   echo "tool groovy-all-$(basename "$d") $(sha256sum "$f" | cut -c1-16)"

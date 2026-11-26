@@ -239,10 +239,11 @@ The same list holds Groovy 2.4.10, the binary distribution of Maven Central, at 
 uses (`~/.sdkman/candidates/groovy/2.4.10`): a consumer's tasks read
 `embeddable/groovy-all-2.4.10.jar` and `bin/groovyc` there unless `GROOVY_HOME` names another
 directory. Its line has the strip field `zip1` (a zip with one top directory, which is stripped;
-an archive with more than one top entry is refused) and a check that ends in `.jar`: the file
+an archive with anything else at the top is refused) and a check that ends in `.jar`: the file
 exists and is no symbolic link. `toolchains.sh` prints
-`tool groovy-all-<version> <16 hex digits of the jar's SHA-256>` for it. The JDK comes from
-`EXTRA_PACKAGES`.
+`tool groovy-all-<version> <16 hex digits of the jar's SHA-256>` for each version directory under
+that path that has the jar, so `push.sh check` reports a workstation without that candidate, or
+with another 2.4 release, as drift. The JDK comes from `EXTRA_PACKAGES`.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

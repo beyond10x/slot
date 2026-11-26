@@ -478,9 +478,10 @@ rm -f "$GJ"
 run "$R5" check
 grep -q "^drift: home:groovy@2.4.10: .*groovy/2.4.10 is 'missing', want 2.4.10" "$W/out" && ok "check names a groovy tree without its jar" || bad "groovy drift: $(grep home "$W/out")"
 rm -f "$GJ"
-ln -s /dev/null "$GJ"
+echo jar >"$W/other.jar"
+ln -s "$W/other.jar" "$GJ"
 run "$R5" check
-grep -q "^drift: home:groovy@2.4.10: " "$W/out" && ok "a jar that is a symbolic link is drift" || bad "groovy link: $(grep home "$W/out")"
+grep -q "^drift: home:groovy@2.4.10: .*groovy/2.4.10 is 'missing', want 2.4.10" "$W/out" && ok "a jar that is a symbolic link to a regular file is drift" || bad "groovy link: $(grep home "$W/out")"
 run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && [ -f "$GJ" ] && [ ! -L "$GJ" ] && ok "groovy has 0 drift after apply" || bad "groovy after apply: $(cat "$W/out")"
@@ -665,14 +666,19 @@ SD=$(sha256sum "$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep" | c
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool sdc-aep' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool sdc-aep-0.80.0 $SD" ] && ok "toolchains.sh: the pinned aep of the driver's cache is a tool line with its digest, other targets are left out" || bad "sdc-aep line: '$(cat "$W/out2")'"
 rm -rf "$TC/home/.cache"
-# Groovy under the sdkman path: a line per version directory with its groovy-all jar; the `current`
-# link and a release without the jar print none.
-mkdir -p "$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable" "$TC/home/.sdkman/candidates/groovy/3.0.13/lib"
+# Groovy under the sdkman path: a line per version directory with its groovy-all jar, a version
+# directory that is a symbolic link included (sdkman's local install); the `current` link and a
+# release without the jar print none.
+mkdir -p "$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable" "$TC/home/.sdkman/candidates/groovy/3.0.13/lib" "$TC/local-groovy/embeddable"
 printf 'jar\n' >"$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable/groovy-all-2.4.10.jar"
+printf 'local jar\n' >"$TC/local-groovy/embeddable/groovy-all-2.4.9.jar"
+ln -s "$TC/local-groovy" "$TC/home/.sdkman/candidates/groovy/2.4.9"
 ln -s 2.4.10 "$TC/home/.sdkman/candidates/groovy/current"
 GD=$(sha256sum "$TC/home/.sdkman/candidates/groovy/2.4.10/embeddable/groovy-all-2.4.10.jar" | cut -c1-16)
+GL=$(sha256sum "$TC/local-groovy/embeddable/groovy-all-2.4.9.jar" | cut -c1-16)
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool groovy' >"$W/out2"
-[ "$(cat "$W/out2")" = "tool groovy-all-2.4.10 $GD" ] && ok "toolchains.sh: the groovy-all jar of a version directory is a tool line with its digest; the current link and a release without the jar print none" || bad "groovy line: '$(cat "$W/out2")'"
+[ "$(cat "$W/out2")" = "tool groovy-all-2.4.10 $GD
+tool groovy-all-2.4.9 $GL" ] && ok "toolchains.sh: the groovy-all jar of a version directory is a tool line with its digest, a linked version directory too; the current link and a release without the jar print none" || bad "groovy line: '$(cat "$W/out2")'"
 rm -rf "$TC/home/.sdkman"
 # ess, aep, yq and cargo-about: the user's cargo bin and ~/go/bin are searched too. The command runs
 # in / and without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires (an
@@ -1023,6 +1029,10 @@ EOF
   echo jar >"$W/g2src/b/embeddable/groovy-all-9.9.jar"
   (cd "$W/g2src" && zip -qr "$W/groovy2.zip" a b)
   G2SHA=$(sha256sum "$W/groovy2.zip" | cut -d' ' -f1)
+  mkdir -p "$W/g3src"
+  echo jar >"$W/g3src/groovy-all-9.9.jar"
+  (cd "$W/g3src" && zip -qr "$W/groovy3.zip" groovy-all-9.9.jar)
+  G3SHA=$(sha256sum "$W/groovy3.zip" | cut -d' ' -f1)
   cat >"$W/stubbin2/curl" <<EOF
 #!/bin/sh
 out=
@@ -1038,6 +1048,7 @@ done
 case \$url in
   https://home.test/groovy.zip) cp "$W/groovy.zip" "\$out" ;;
   https://home.test/groovy2.zip) cp "$W/groovy2.zip" "\$out" ;;
+  https://home.test/groovy3.zip) cp "$W/groovy3.zip" "\$out" ;;
   *) printf 'junk\n' >"\$out" ;;
 esac
 EOF
@@ -1055,6 +1066,16 @@ EOF
   homerun apply
   st=$?
   [ $st -eq 1 ] && grep -qx 'failed: home:groovy@9.8: download or checksum of groovy 9.8' "$W/err" && [ ! -e "$RZ/var/lib/builder/.sdkman/candidates/groovy/9.8" ] && ok "zip1 pin: a zip with two top entries is refused, no tree" || bad "zip1 two tops: exit $st $(cat "$W/out" "$W/err")"
+  # The same well-formed zip that installed above, under another SHA-256: only the checksum refuses it.
+  HLINE="groovy 9.7 $G2SHA https://home.test/groovy.zip zip1 .sdkman/candidates/groovy/9.7 embeddable/groovy-all-9.9.jar"
+  homerun apply
+  st=$?
+  [ $st -eq 1 ] && grep -qx 'failed: home:groovy@9.7: download or checksum of groovy 9.7' "$W/err" && [ ! -e "$RZ/var/lib/builder/.sdkman/candidates/groovy/9.7" ] && ok "zip1 pin: a well-formed zip with another SHA-256 is refused, no tree" || bad "zip1 wrong sha: exit $st $(cat "$W/out" "$W/err")"
+  # One top entry that is a file, not a directory.
+  HLINE="groovy 9.6 $G3SHA https://home.test/groovy3.zip zip1 .sdkman/candidates/groovy/9.6 embeddable/groovy-all-9.9.jar"
+  homerun apply
+  st=$?
+  [ $st -eq 1 ] && grep -qx 'failed: home:groovy@9.6: download or checksum of groovy 9.6' "$W/err" && [ ! -e "$RZ/var/lib/builder/.sdkman/candidates/groovy/9.6" ] && ok "zip1 pin: a zip whose one top entry is a file is refused, no tree" || bad "zip1 top file: exit $st $(cat "$W/out" "$W/err")"
 else
   ok "zip pin: skipped, zip or unzip missing on this host"
 fi

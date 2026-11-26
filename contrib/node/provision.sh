@@ -116,8 +116,8 @@ SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5ede
 # the one a consumer's CI script pins) at the path sdkman uses, which a consumer's tasks read as
 # `${GROOVY_HOME:-~/.sdkman/candidates/groovy/2.4.10}` for `embeddable/groovy-all-2.4.10.jar` and
 # `bin/groovyc`. Its strip field is `zip1`: a zip with one top directory, which is stripped. Its
-# check is a path ending in `.jar`: the file exists (a jar prints no version; the marker file ties
-# the tree to the archive).
+# check is a path ending in `.jar`: the file exists and is no symbolic link (a jar prints no
+# version; the marker file ties the tree to the archive).
 HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
 ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
 ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
@@ -1633,9 +1633,11 @@ home_fetch() {
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && unzip -q archive -d tree) || return 0
   elif [ "$hk" = zip1 ]; then
-    # A zip with one top directory: that directory becomes the tree.
+    # A zip with one top directory: that directory becomes the tree. Anything else at the top (no
+    # entry, more than one, a file, a symbolic link) is refused. `ls` prints the name as it is,
+    # whatever QUOTING_STYLE the caller exports.
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
-      mkdir x && unzip -q archive -d x && [ "$(ls -A x | wc -l)" = 1 ] && top=$(ls -A x) &&
+      mkdir x && unzip -q archive -d x && [ "$(QUOTING_STYLE=literal ls -A x | wc -l)" = 1 ] && top=$(QUOTING_STYLE=literal ls -A x) &&
       [ -d "x/$top" ] && [ ! -L "x/$top" ] && mv "x/$top" tree) || return 0
   else
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
