@@ -43,7 +43,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
 | `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
-| `CLANG_VERSION` | provision | the major release of the `clang` on a job's PATH (`22`): the packages `clang<major>` and `clang<major>-libs`, and `clang`, `clang++` and `clang-cpp` in `/usr/local/bin` as links to `/usr/bin/clang-<major>` and the like; digits only; empty: the distribution's `clang` is left alone. Taken out of the config, the links stay as they are |
+| `CLANG_VERSION` | provision | the major release of the `clang` on a job's PATH (`20`): the packages `clang<major>` and `clang<major>-libs`, and `clang`, `clang++` and `clang-cpp` in `/usr/local/bin` as links to `/usr/bin/clang-<major>` and the like; digits only; empty: the distribution's `clang` is left alone. Taken out of the config, the links stay as they are |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
 | `NODE_SSH`, `NODE_HOST`, `NODE_RUN_DIR` | push | the ssh command, the node's name for `SLOT_HOST` and a checkout to run the check job from |
@@ -696,7 +696,7 @@ installed beside the base package `clang` (clang 15). Their `clang<major>-libs` 
 `clang<major>-resource-filesystem`, which conflicts with `clang-resource-filesystem < 21.99`
 (`< 22.99`), and clang 15's `clang-libs`, `compiler-rt` and `libomp-devel` require that package
 (and `clang`, `clang-devel` and `clang-tools-extra` require `clang-libs`). `clang20` installs
-beside clang 15. `apply` installs the clang packages in a dnf transaction of their own, so such a
+beside clang 15, and a consumer's C reader tests that failed with clang 15's syntax tree passed with clang 20.1.8 (166 passed, 0 failed), so the example config names `20`. `apply` installs the clang packages in a dnf transaction of their own, so such a
 conflict fails them alone, names dnf's conflict line (`failed: packages: dnf install clang22
 clang22-libs (CLANG_VERSION): package clang22-resource-filesystem-... conflicts with
 clang-resource-filesystem < 22.99 ...`), and leaves the other packages installed; no link is set

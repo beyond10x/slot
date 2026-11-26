@@ -4275,7 +4275,7 @@ st=$?
 run "$CR" check
 st2=$?
 [ $st -eq 0 ] && [ $st2 -eq 0 ] && ! grep -q clang "$W/out" && [ "$(readlink "$CR/usr/local/bin/clang")" = /usr/bin/clang-21 ] && [ "$(readlink "$CR/usr/local/bin/clang++")" = /usr/bin/clang++-21 ] && ok "a config without CLANG_VERSION leaves the links as they are and checks none" || bad "clang key removed: apply $st check $st2 $(cllines) '$(readlink "$CR/usr/local/bin/clang")'"
-grep -qx 'CLANG_VERSION=22' "$here/node.conf.example" && ok "example: CLANG_VERSION=22" || bad "example: $(grep CLANG "$here/node.conf.example")"
+grep -qx 'CLANG_VERSION=20' "$here/node.conf.example" && ok "example: CLANG_VERSION=20" || bad "example: $(grep CLANG "$here/node.conf.example")"
 grep '^| `CLANG_VERSION` |' "$here/README.md" | grep -q 'links stay' && ok "README: a CLANG_VERSION row that says the links stay when the key is taken out" || bad "README CLANG_VERSION row: $(grep '^| `CLANG_VERSION`' "$here/README.md")"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
