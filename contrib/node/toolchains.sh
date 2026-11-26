@@ -7,6 +7,7 @@
 #   tool <tsc|prettier|esbuild|pnpm|yarn|ess|aep|yq|cargo-about|make|musl|helm> <version>: no line
 #        when the machine has none, `missing` as the version when the file is there and prints none
 #   tool dash <release>: of the tree a node builds, else of the machine's package `dash`
+#   tool firefox <release>: the last word of `firefox --version`
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   tool groovy-all-<version> <16 hex digits of the SHA-256 of
 #        ~/.sdkman/candidates/groovy/<version>/embeddable/groovy-all-<version>.jar>
@@ -97,6 +98,18 @@ for b in "$P/usr/local/bin/dash" "$P/usr/bin/dash"; do
       ;;
   esac
   echo "tool dash ${dv:-missing}"
+  break
+done
+# firefox: the browser a consumer's tests start by name, headless. A node has it in /usr/local/bin
+# when its config asks for the archive (EXTRA_ARCHIVES of provision.sh), the workstation in
+# /usr/bin. `firefox --version` prints `Mozilla Firefox <release>` and opens no window. The node's
+# link names /usr/local/firefox-<release>/firefox, read under the prefix.
+for b in "$P/usr/local/bin/firefox" "$P/usr/bin/firefox"; do
+  fl=$(readlink "$b" 2>/dev/null)
+  case $fl in /usr/local/firefox-*/firefox) b=$P$fl ;; esac
+  [ -x "$b" ] || continue
+  fv=$(cd / && MOZ_HEADLESS=1 "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
+  echo "tool firefox ${fv:-missing}"
   break
 done
 # helm has no `--version`: `helm version --template {{.Version}}` prints `v3.8.1`. A node has it in

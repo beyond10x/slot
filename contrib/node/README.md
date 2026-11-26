@@ -42,6 +42,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
+| `EXTRA_ARCHIVES` | provision | archives the node installs besides `ARCHIVE_PINS`, by name, from `EXTRA_ARCHIVE_PINS` of `provision.sh` (now: `firefox`), with the packages each loads; a name with no archive there is refused; empty: none |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
 | `NODE_SSH`, `NODE_HOST`, `NODE_RUN_DIR` | push | the ssh command, the node's name for `SLOT_HOST` and a checkout to run the check job from |
@@ -175,8 +176,9 @@ and so is an instance without a role. An allowed call, a container that does not
 that could test nothing (no token, no credentials, no running docker) are
 `drift: role: canary: ...`. The first run pulls the image. A refusal is about that one call:
 a role that reads parameters under one path only, or reads another service, passes it.
-`--canary` also times an aborted process, reads the load average and compiles one C file with
-`musl-gcc -static` (What check compares, below).
+`--canary` also times an aborted process, reads the load average, compiles one C file with
+`musl-gcc -static` and, with `EXTRA_ARCHIVES=firefox`, starts Firefox headless (What check
+compares, below).
 
 ## What check compares
 
@@ -423,6 +425,23 @@ for each tool it finds (the list is below), and `push.sh check` compares those l
 `zstd` and `python3` are base packages. An older directory of a former pin stays until someone
 removes it. Other releases are not installed: a consumer fetches its own (`GOTOOLCHAIN=auto`).
 The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
+
+Firefox is an archive a node installs only when its config asks for it: `EXTRA_ARCHIVES=firefox`
+selects its line of `EXTRA_ARCHIVE_PINS` (the same form as `ARCHIVE_PINS`), and a name that has
+no line there is refused before anything runs. A consumer's browser tests start `firefox` by
+name, headless. The pin is Firefox 159.0, the release the workstation runs: Mozilla's archive
+`linux-x86_64/en-US/firefox-159.0.tar.xz` from `archive.mozilla.org`, its SHA-256 the line of
+that file in the release's `SHA256SUMS`. `apply` unpacks it into `/usr/local/firefox-159.0`
+and links `/usr/local/bin/firefox`; `check` reads `firefox --version` (`Mozilla Firefox 159.0`)
+with `MOZ_HEADLESS=1`. The libraries the browser loads beside its own come from the packages
+`gtk3`, `alsa-lib`, `libX11-xcb` and `dbus-libs` (and what `gtk3` requires), and `xz` unpacks
+the archive: `EXTRA_ARCHIVE_PACKAGES` adds them to the packages of a node that names firefox.
+`check --canary` starts it as the build user in a new directory of `STORE/tmp` (its `HOME`,
+`TMPDIR` and profile), `--headless --no-remote --remote-debugging-port 0`, waits up to 30 s for
+`WebDriver BiDi listening on ws://...` on standard error, ends it and removes the directory:
+`canary: ok: firefox: ...`, or `drift: firefox: canary: ...` with the first line Firefox printed
+when it ended before that line or did not print it. On a node, from a job, the start reached
+that line after 406 ms. `toolchains.sh` prints `tool firefox <release>`.
 
 `GO_ROOT`: go takes its GOROOT from the real path of its binary, so on a node `go env GOROOT`
 answers `/usr/local/go-<version>`, and on a workstation with a distribution's go `/usr/lib/go`.

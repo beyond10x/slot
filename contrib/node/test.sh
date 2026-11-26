@@ -3664,6 +3664,125 @@ PATH=$ST/bin sh "$SS" >"$W/out" 2>"$W/err"
 tf=$here/../../Taskfile.yml
 grep -qx '      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh' "$tf" && [ "$(grep -c 'contrib/node/test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/slot-shim\.test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/rustc-gate\.test\.sh' "$tf")" -eq 1 ] && ok "the gate runs the three shell tests through shell-tests.sh, each once" || bad "Taskfile: $(grep -n 'contrib/' "$tf" | tr '\n' ' ')"
 
+# 6z. Firefox on a node: an archive the node installs only when its config names it
+# (EXTRA_ARCHIVES, the lines of EXTRA_ARCHIVE_PINS), with the packages it loads. A consumer's
+# browser tests start `firefox` by name, headless. The release archive of Mozilla is unpacked into
+# /usr/local/firefox-<release> and linked as /usr/local/bin/firefox; `check --canary` starts it
+# headless as the build user until it listens for WebDriver BiDi.
+FZ=/usr/local/firefox-159.0
+mkdir -p "$W/r0"
+fzpin=$(sed -n "s/^EXTRA_ARCHIVE_PINS='\(firefox .*\)'$/\1/p" "$P")
+[ "$fzpin" = 'firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox' ] && ok "the firefox pin: release 159.0, the SHA-256 of Mozilla's SHA256SUMS, one leading directory stripped, the binary firefox" || bad "firefox pin: '$fzpin'"
+for fz_bad in 'EXTRA_ARCHIVES=fire;fox' 'EXTRA_ARCHIVES=$(id)' 'EXTRA_ARCHIVES=firefox -x' 'EXTRA_ARCHIVES=a*'; do
+  conf
+  echo "$fz_bad" >>"$W/node.conf"
+  run "$W/r0" check
+  [ $? -eq 2 ] && grep -q "EXTRA_ARCHIVES must be names" "$W/err" && ok "'$fz_bad' is refused by the config's form" || bad "'$fz_bad' is accepted ($(cat "$W/err"))"
+done
+conf
+echo 'EXTRA_ARCHIVES=firefox chrome' >>"$W/node.conf"
+run "$W/r0" check
+[ $? -eq 2 ] && grep -qx "node config: $W/node.conf: EXTRA_ARCHIVES names 'chrome', which is no archive of provision.sh (firefox)" "$W/err" && ok "EXTRA_ARCHIVES with a name provision.sh has no archive for is refused, and the names it has are listed" || bad "unknown extra archive: $(cat "$W/out" "$W/err" | tail -3)"
+sh "$P" bundle "$W/node.conf" check >/dev/null 2>"$W/err"
+[ $? -eq 2 ] && grep -q "EXTRA_ARCHIVES names 'chrome'" "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with an unknown extra archive: $(cat "$W/err")"
+FXR=$W/rfx
+mkdir -p "$FXR"
+echo 8 >"$FXR/.state-nproc"
+conf
+run "$FXR" apply
+run "$FXR" check
+[ $? -eq 0 ] && [ ! -e "$FXR$FZ" ] && [ ! -L "$FXR/usr/local/bin/firefox" ] && ! grep -q firefox "$W/out" && ok "without EXTRA_ARCHIVES a node has no firefox and check names none" || bad "firefox without the key: $(grep -i firefox "$W/out") $(ls "$FXR/usr/local" 2>&1 | tr '\n' ' ')"
+grep -qx 'gtk3' "$FXR/.state/packages" && bad "without EXTRA_ARCHIVES the packages of firefox are installed" || ok "without EXTRA_ARCHIVES the packages of firefox are not installed"
+echo 'EXTRA_ARCHIVES=firefox' >>"$W/node.conf"
+run "$FXR" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: archive:firefox: /usr/local/bin/firefox is 'missing', want a link to $FZ/firefox" "$W/out" && grep -qx 'drift: packages: not installed: gtk3 alsa-lib libX11-xcb dbus-libs xz' "$W/out" && ok "EXTRA_ARCHIVES=firefox: check names the link and the packages firefox loads" || bad "firefox drift: exit $st $(grep -i 'firefox\|packages' "$W/out")"
+: >"$FXR/.calls"
+run "$FXR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz' "$FXR/.calls" && [ "$(readlink "$FXR/usr/local/bin/firefox")" = "$FZ/firefox" ] && ok "apply fetches the archive of Firefox 159.0 and links /usr/local/bin/firefox to $FZ/firefox" || bad "firefox apply: exit $st $(grep firefox "$FXR/.calls") '$(readlink "$FXR/usr/local/bin/firefox")' $(grep firefox "$W/err")"
+for p in gtk3 alsa-lib libX11-xcb dbus-libs xz; do grep -qx "$p" "$FXR/.state/packages" || bad "apply did not install $p"; done
+[ "$("$FXR$FZ/firefox" --version 2>&1)" = 'Mozilla Firefox 159.0' ] && ok "the stand-in answers as Firefox does: Mozilla Firefox 159.0" || bad "firefox stand-in: $("$FXR$FZ/firefox" --version 2>&1)"
+run "$FXR" check
+[ $? -eq 0 ] && ok "after apply: firefox and its packages, 0 drift" || bad "firefox after apply: $(cat "$W/out")"
+sh "$here/toolchains.sh" "$FXR" "$W/norust" 2>/dev/null | grep '^tool firefox' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool firefox 159.0" ] && ok "toolchains.sh: one line, tool firefox 159.0" || bad "tool firefox line: '$(cat "$W/out2")'"
+mkdir -p "$W/fzp/usr/bin"
+printf '#!/bin/sh\n[ "$1" = --version ] && [ "${MOZ_HEADLESS:-}" = 1 ] && echo "Mozilla Firefox 158.0.1"\n' >"$W/fzp/usr/bin/firefox"
+chmod 755 "$W/fzp/usr/bin/firefox"
+[ "$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')" = "tool firefox 158.0.1" ] && ok "toolchains.sh: a workstation's firefox in /usr/bin, read headless" || bad "tool firefox of /usr/bin: '$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')'"
+printf '#!/bin/sh\nexit 1\n' >"$W/fzp/usr/bin/firefox"
+[ "$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')" = "tool firefox missing" ] && ok "toolchains.sh: a firefox that prints nothing is missing" || bad "tool firefox silent: '$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')'"
+cp "$FXR$FZ/firefox" "$W/firefox.keep"
+printf '#!/bin/sh\necho "Mozilla Firefox 158.0"\n' >"$FXR$FZ/firefox"
+run "$FXR" check
+grep -qx "drift: archive:firefox: $FZ/firefox says 'Mozilla Firefox 158.0', want 159.0" "$W/out" && ok "check names a firefox of another release" || bad "firefox version drift: $(grep firefox "$W/out")"
+run "$FXR" apply
+run "$FXR" check
+[ $? -eq 0 ] && cmp -s "$W/firefox.keep" "$FXR$FZ/firefox" && ok "apply installs the pinned release again" || bad "firefox restore: $(cat "$W/out")"
+# The real branch of archive_fetch with an archive of the shape of Mozilla's: a .tar.xz with one
+# top directory, firefox/, which is stripped. curl is a stand-in that serves it.
+if command -v xz >/dev/null 2>&1; then
+  mkdir -p "$W/fzsrc/firefox" "$W/fzfetch"
+  printf '#!/bin/sh\necho "Mozilla Firefox 159.0"\n' >"$W/fzsrc/firefox/firefox"
+  chmod 755 "$W/fzsrc/firefox/firefox"
+  tar -cJf "$W/fzsrc.tar.xz" -C "$W/fzsrc" firefox
+  fztree=$(
+    eval "$(sed -n '/^archive_src() /p; /^archive_fetch() {$/,/^}$/p' "$P")"
+    fake_fetch() { false; }
+    curl() { cp "$W/fzsrc.tar.xz" "$2"; }
+    # shellcheck disable=SC2086
+    set -- $fzpin
+    fzsum=$(sha256sum "$W/fzsrc.tar.xz" | cut -d' ' -f1)
+    archive_fetch "$W/fzfetch" "$1" "$2" "$fzsum" "$4" "$5" "$6" 2>&1
+  )
+  [ "$fztree" = "$W/fzfetch/tree" ] && [ "$("$W/fzfetch/tree/firefox" --version 2>&1)" = 'Mozilla Firefox 159.0' ] && ok "the firefox pin through the real unpack: a .tar.xz, firefox/ is stripped" || bad "firefox unpack: '$fztree' $(find "$W/fzfetch" 2>&1 | head -5)"
+else
+  ok "the firefox pin through the real unpack: not run, no xz on this machine"
+fi
+# The canary: check --canary starts firefox as the build user in a new directory of the store's
+# tmp (its HOME, TMPDIR and profile), headless with a WebDriver BiDi port, waits for the line
+# `WebDriver BiDi listening on ws://...` on stderr, ends it and removes the directory. The
+# stand-in of apply prints that line and waits; the failures are stand-ins of this test.
+fzc() { NODE_TEST_FIREFOX_WAIT=2 NODE_TEST=1 NODE_ROOT=$FXR sh "$P" check "$W/node.conf" "$@" >"$W/out" 2>"$W/err"; }
+fzc
+! grep -q 'firefox' "$W/out" && ok "check without --canary starts no firefox" || bad "check alone: $(grep firefox "$W/out")"
+fzc --canary
+grep -qx 'canary: ok: firefox: firefox 159.0 started headless as the build user and listened for WebDriver BiDi (ws://127.0.0.1:9222)' "$W/out" && ! grep -q '^drift: firefox' "$W/out" && ok "check --canary: firefox starts headless and listens for WebDriver BiDi, one ok line" || bad "firefox canary: $(grep firefox "$W/out" "$W/err")"
+[ -z "$(ls -A "$FXR/srv/slot/tmp" 2>/dev/null | grep firefox)" ] && ok "the firefox canary leaves no directory in the store's tmp" || bad "firefox canary left: $(ls -A "$FXR/srv/slot/tmp")"
+cat >"$FXR$FZ/firefox" <<EOF
+#!/bin/sh
+[ "\$1" != --version ] || { echo "Mozilla Firefox 159.0"; exit 0; }
+echo "\$*" >"$W/fz-args"
+echo "\$HOME|\$TMPDIR|\${MOZ_HEADLESS:-}" >"$W/fz-env"
+pwd >"$W/fz-pwd"
+echo "*** You are running in headless mode." >&2
+echo "XPCOMGlueLoad error for file $FZ/libxul.so:" >&2
+exit 1
+EOF
+fzc --canary
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: firefox: canary: firefox exited with status 1 before it listened for WebDriver BiDi: XPCOMGlueLoad error for file /usr/local/firefox-159.0/libxul.so:' "$W/out" && ! grep -q '^canary: ok: firefox' "$W/out" && ok "check --canary: a firefox that exits before the BiDi line is drift with its first line that is no headless notice" || bad "firefox canary exit: exit $st $(grep firefox "$W/out" "$W/err")"
+case $(cat "$W/fz-args" 2>&1) in
+  "--headless --no-remote --remote-debugging-port 0 --profile $FXR/srv/slot/tmp/slot-firefox-canary."*/profile' about:blank') ok "the canary starts firefox headless, without remote, with a BiDi port and its own profile" ;;
+  *) bad "firefox canary arguments: $(cat "$W/fz-args" 2>&1)" ;;
+esac
+fzd=$(cat "$W/fz-pwd" 2>&1)
+case $fzd in
+  "$FXR"/srv/slot/tmp/slot-firefox-canary.*) [ ! -e "$fzd" ] && [ "$(cat "$W/fz-env")" = "$fzd/home|$fzd/tmp|1" ] && ok "the canary runs in a directory of the store's tmp with its HOME and TMPDIR there, and removes it" || bad "firefox canary directory: $fzd $(cat "$W/fz-env")" ;;
+  *) bad "firefox canary directory: $fzd" ;;
+esac
+printf '#!/bin/sh\n[ "$1" != --version ] || { echo "Mozilla Firefox 159.0"; exit 0; }\necho "*** You are running in headless mode." >&2\nexec sleep 30\n' >"$FXR$FZ/firefox"
+fzc --canary
+st=$?
+[ $st -eq 1 ] && grep -qxF 'drift: firefox: canary: no WebDriver BiDi line from firefox within 2 s: *** You are running in headless mode.' "$W/out" && ok "check --canary: a firefox that does not listen within the wait is drift" || bad "firefox canary wait: exit $st $(grep firefox "$W/out" "$W/err")"
+cp "$W/firefox.keep" "$FXR$FZ/firefox"
+conf
+fzc --canary
+! grep -q 'firefox' "$W/out" && ok "check --canary without EXTRA_ARCHIVES=firefox starts no firefox" || bad "canary without the key: $(grep firefox "$W/out")"
+grep -qx 'EXTRA_ARCHIVES=firefox' "$here/node.conf.example" && ok "example: EXTRA_ARCHIVES=firefox" || bad "example EXTRA_ARCHIVES: $(grep EXTRA_ARCHIVES "$here/node.conf.example")"
+grep -q 'EXTRA_ARCHIVES' "$here/README.md" && grep -q 'firefox' "$here/README.md" && ok "README names EXTRA_ARCHIVES and firefox" || bad "README lacks EXTRA_ARCHIVES or firefox"
+
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
 leaks=$(grep -nE '/home/[a-z]|\b(i|vol|subnet|sg|vpc|ami)-0?[0-9a-f]{8,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \

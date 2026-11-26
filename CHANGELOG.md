@@ -21,6 +21,14 @@
   `SHA256SUMS`. Both builds print the same version, so `check` and `apply` read the build from
   the binary at each path and from the running daemon, and a change of the key at one version
   installs the other archive and restarts the daemon.
+- Node: Firefox. The config key `EXTRA_ARCHIVES` names archives a node installs besides the
+  pinned ones (`EXTRA_ARCHIVE_PINS` of `contrib/node/provision.sh`); a name with no archive there
+  is refused. `EXTRA_ARCHIVES=firefox` installs Mozilla's archive of Firefox 159.0, checked
+  against the SHA-256 of the release's `SHA256SUMS`, into `/usr/local/firefox-159.0`, links
+  `/usr/local/bin/firefox`, and installs the packages it loads (`gtk3`, `alsa-lib`, `libX11-xcb`,
+  `dbus-libs`, and `xz` for the archive). A consumer's browser tests start `firefox` by name and
+  failed on a node, which had none. `check --canary` starts it headless as the build user until
+  it listens for WebDriver BiDi; `toolchains.sh` prints `tool firefox <release>`.
 
 ## 0.39.1 — 2026-11-26
 

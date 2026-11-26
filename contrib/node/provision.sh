@@ -112,6 +112,16 @@ pnpm 11.9.0 2b567aa66026238078ac2e0a33bec3febd60e962987aac697456f3180819b287 htt
 yarn 1.22.22 c17d3797fb9a9115bf375e31bfd30058cac6bc9c3b8807a3d8cb2094794b51ca https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz 1 bin/yarn.js:yarn bin/yarn.js:yarnpkg
 yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq
 helm v3.8.1 d643f48fe28eeb47ff68a1a7a26fc5142f348d02c8bc38d699674016716f61cd https://get.helm.sh/helm-v3.8.1-linux-amd64.tar.gz 1 helm'
+# Archives in the form of ARCHIVE_PINS that a node installs only when its config names them
+# (EXTRA_ARCHIVES), and the packages each loads (EXTRA_ARCHIVE_PACKAGES: the name, then the
+# packages, installed with the base packages). firefox is the release archive of Mozilla for
+# linux-x86_64, en-US, at the release the workstation runs; its SHA-256 is the line of that file in
+# the release's SHA256SUMS on archive.mozilla.org. A consumer's browser tests start `firefox` by
+# name, headless. The archive is a .tar.xz (xz unpacks it); the libraries its binaries need beside
+# their own come from gtk3, alsa-lib, libX11-xcb and dbus-libs (and what gtk3 requires); the newest
+# symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19.
+EXTRA_ARCHIVE_PINS='firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox'
+EXTRA_ARCHIVE_PACKAGES='firefox gtk3 alsa-lib libX11-xcb dbus-libs xz'
 RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
@@ -205,12 +215,37 @@ METRICS_URL=http://127.0.0.1:7411/metrics
 # after a boot, and the name of the transient timer that is its bound.
 DRAIN_DIR=/run/slot-node
 DRAIN_UNIT=slot-node-drain
+# The archives this node installs: ARCHIVE_PINS, then the lines of EXTRA_ARCHIVE_PINS that
+# EXTRA_ARCHIVES names.
+archive_pins() {
+  echo "$ARCHIVE_PINS"
+  echo "$EXTRA_ARCHIVE_PINS" | while read -r ap_n ap_r; do
+    case " $EXTRA_ARCHIVES " in *" $ap_n "*) echo "$ap_n $ap_r" ;; esac
+  done
+}
+# The packages of the extra archives that EXTRA_ARCHIVES names.
+extra_archive_packages() {
+  echo "$EXTRA_ARCHIVE_PACKAGES" | while read -r ep_n ep_p; do
+    case " $EXTRA_ARCHIVES " in *" $ep_n "*) echo "$ep_p" ;; esac
+  done
+}
+# EXTRA_ARCHIVES names archives of EXTRA_ARCHIVE_PINS only. conf.sh, which does not know the pins,
+# checks the form of the names.
+extra_archives_known() {
+  ek_all=$(echo "$EXTRA_ARCHIVE_PINS" | awk '{ print $1 }' | tr '\n' ' ' | sed 's/ $//')
+  for ek_n in $EXTRA_ARCHIVES; do
+    case " $ek_all " in *" $ek_n "*) continue ;; esac
+    conf_fail "$cf: EXTRA_ARCHIVES names '$ek_n', which is no archive of provision.sh ($ek_all)"
+    return 2
+  done
+  return 0
+}
 # GO_ROOT may not be the directory of a pinned archive or of the make this script builds, nor lie
 # in one: each of those is replaced whole at a release change. conf.sh, which does not know the
 # pins, refuses the other directories of the provisioning.
 go_root_pins() {
   [ -n "$GO_ROOT" ] || return 0
-  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)" "/usr/local/dash-$(echo "$DASH_PIN" | cut -d' ' -f2)"; do
+  for gp_d in $(archive_pins | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)" "/usr/local/dash-$(echo "$DASH_PIN" | cut -d' ' -f2)"; do
     case $GO_ROOT/ in
       "$gp_d"/*)
         conf_fail "$cf: GO_ROOT '$GO_ROOT' is the directory of a pinned archive, or lies in one ($gp_d)"
@@ -224,6 +259,7 @@ go_root_pins() {
 if [ "$mode" = bundle ]; then
   conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
   go_root_pins || exit 2
+  extra_archives_known || exit 2
   m=${3:-}
   o=${4:-}
   [ $# -le 5 ] || usage
@@ -248,6 +284,7 @@ fi
 
 conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
 go_root_pins || exit 2
+extra_archives_known || exit 2
 H=$BUILD_HOME
 U=$BUILD_USER
 # The instance profile of this node: INSTANCE_PROFILE, else the one role.sh makes for NODE_NAME.
@@ -1359,7 +1396,7 @@ want_file() {
 
 p_packages() {
   missing=
-  for p in $BASE_PACKAGES $EXTRA_PACKAGES; do q_pkg "$p" || missing="$missing $p"; done
+  for p in $BASE_PACKAGES $EXTRA_PACKAGES $(extra_archive_packages); do q_pkg "$p" || missing="$missing $p"; done
   [ -z "$missing" ] && return 0
   drift packages "not installed:$missing"
   if fixing; then
@@ -2183,6 +2220,10 @@ archive_fetch() {
         # Like yarn 1 under a `yarn-path` of a .yarnrc: its own release only with
         # YARN_IGNORE_PATH=1, else what that path prints.
         printf '#!/bin/sh\n[ "${YARN_IGNORE_PATH:-}" = 1 ] || { echo 9.9.9-from-yarn-path; exit 0; }\necho %s\n' "$fv" >"$fd/tree/$b"
+      elif [ "$fn" = firefox ]; then
+        # Like firefox: `--version` prints `Mozilla Firefox <release>`; a start prints the line of
+        # WebDriver BiDi on standard error and runs until it is ended.
+        printf '#!/bin/sh\n[ "$1" != --version ] || { echo "Mozilla Firefox %s"; exit 0; }\necho "WebDriver BiDi listening on ws://127.0.0.1:9222" >&2\nexec sleep 30\n' "$fv" >"$fd/tree/$b"
       else
         printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
       fi
@@ -2205,12 +2246,13 @@ archive_fetch() {
 }
 # The first line of the version of binary $2 of archive $1, run as the build user. yarn 1 runs
 # the script a `yarn-path` of the build user's .yarnrc names and prints that one's version:
-# YARN_IGNORE_PATH=1 makes it answer for itself.
+# YARN_IGNORE_PATH=1 makes it answer for itself. firefox reads MOZ_HEADLESS=1 and opens no window.
 archive_version() {
   case $1 in
     go) as_user "$2" version ;;
     helm) as_user "$2" version --template '{{.Version}}' ;;
     yarn) as_user env YARN_IGNORE_PATH=1 "$2" --version ;;
+    firefox) as_user env MOZ_HEADLESS=1 "$2" --version ;;
     *) as_user "$2" --version ;;
   esac 2>/dev/null </dev/null | head -n 1
 }
@@ -2377,7 +2419,7 @@ p_archives() {
     changed "archive:$an" "$an $av installed in $dir, linked in /usr/local/bin"
     [ -z "$old" ] || go_old_dir "$old" "$dir" </dev/null
   done <<EOF
-$ARCHIVE_PINS
+$(archive_pins)
 EOF
 }
 
@@ -2735,6 +2777,57 @@ rm -rf "$d"' sh "$R/usr/local/$un-$uv/bin/musl-gcc" "$R$STORE/tmp" "$mc_w" </dev
   done <<EOF
 $MUSL_PIN
 EOF
+}
+# check --canary with EXTRA_ARCHIVES=firefox: what a consumer's browser tests do with firefox. The
+# build user starts it from its tree in a new directory of the store's tmp (the directory holds its
+# HOME, TMPDIR and profile), headless with a WebDriver BiDi port, waits up to 30 s for the line
+# `WebDriver BiDi listening on ws://...` on standard error, ends it and removes the directory. The
+# script answers one line: `bidi <that line>`, `exit <status> <line>` when firefox ended before it,
+# `none <line>` when it runs without it, or `tmp` without a directory. <line> is the first line of
+# standard error that is not the notice of headless mode, else that notice.
+p_firefox_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  fc_v=$(archive_pins | awk '$1 == "firefox" { print $2 }')
+  [ -n "$fc_v" ] || return 0
+  fc_t=30
+  [ -z "$T" ] || fc_t=${NODE_TEST_FIREFOX_WAIT:-$fc_t}
+  fc_o=$(as_user timeout $((fc_t + 30)) sh -c 'd=$(mktemp -d "$2/slot-firefox-canary.XXXXXX" 2>/dev/null) || { echo tmp; exit 0; }
+first() { l=$(grep -v -m 1 "^\*\*\* You are running in headless mode" "$d/err"); [ -n "$l" ] || l=$(head -n 1 "$d/err"); echo "${l:-no line on standard error}"; }
+if cd "$d" && mkdir home tmp profile; then
+  HOME=$d/home TMPDIR=$d/tmp MOZ_HEADLESS=1 "$1" --headless --no-remote --remote-debugging-port 0 --profile "$d/profile" about:blank >"$d/out" 2>"$d/err" </dev/null &
+  p=$!
+  i=0
+  l=
+  while [ "$i" -lt $(($3 * 5)) ]; do
+    l=$(grep -m 1 "^WebDriver BiDi listening on ws://" "$d/err") && break
+    kill -0 "$p" 2>/dev/null || break
+    sleep 0.2
+    i=$((i + 1))
+  done
+  [ -n "$l" ] || l=$(grep -m 1 "^WebDriver BiDi listening on ws://" "$d/err")
+  if [ -n "$l" ]; then
+    echo "bidi $l"
+  elif kill -0 "$p" 2>/dev/null; then
+    echo "none $(first)"
+  else
+    wait "$p"
+    echo "exit $? $(first)"
+  fi
+  kill "$p" 2>/dev/null
+  wait "$p" 2>/dev/null
+fi
+cd /
+rm -rf "$d"' sh "$R/usr/local/firefox-$fc_v/firefox" "$R$STORE/tmp" "$fc_t" </dev/null 2>&1)
+  case $fc_o in
+    "bidi WebDriver BiDi listening on "*) echo "canary: ok: firefox: firefox $fc_v started headless as the build user and listened for WebDriver BiDi (${fc_o#bidi WebDriver BiDi listening on })" ;;
+    "exit "*)
+      fc_r=${fc_o#exit }
+      drift firefox "canary: firefox exited with status ${fc_r%% *} before it listened for WebDriver BiDi: ${fc_r#* }"
+      ;;
+    "none "*) drift firefox "canary: no WebDriver BiDi line from firefox within $fc_t s: ${fc_o#none }" ;;
+    tmp*) drift firefox "canary: the build user got no directory in $STORE/tmp: nothing was started" ;;
+    *) drift firefox "canary: no answer from the start within $((fc_t + 30)) s: nothing was tested" ;;
+  esac
 }
 
 # The trees of HOME_PINS. Downloads the archive into directory $1, checks its SHA-256, unpacks it
@@ -3635,6 +3728,7 @@ case $mode in
     p_core_canary
     p_cpu_limit_canary
     p_musl_canary
+    p_firefox_canary
     p_drain_canary
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
