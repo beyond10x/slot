@@ -4152,6 +4152,132 @@ fzc --canary
 grep '^EXTRA_TOOLS=' "$here/node.conf.example" | grep -qw firefox && ! grep -q '^EXTRA_ARCHIVES' "$here/node.conf.example" && ok "example: EXTRA_TOOLS names firefox, and no other key does" || bad "example firefox: $(grep 'EXTRA_TOOLS\|EXTRA_ARCHIVES' "$here/node.conf.example")"
 grep '^| `EXTRA_TOOLS` |' "$here/README.md" | grep -q '`firefox`' && ! grep -q 'EXTRA_ARCHIVES' "$here/README.md" && ok "README: the EXTRA_TOOLS row names firefox, and no EXTRA_ARCHIVES key is left" || bad "README: $(grep -n 'EXTRA_ARCHIVES\|^| `EXTRA_TOOLS`' "$here/README.md" | cut -c1-120)"
 
+# 6za. CLANG_VERSION: the `clang` a job finds on PATH can be a newer packaged major than the
+# distribution's default (Amazon Linux 2023: clang 15 in /usr/bin, and the packages clang20 to
+# clang22 beside it). With CLANG_VERSION=<major> the node gets the packages clang<major> and
+# clang<major>-libs, and /usr/local/bin (first on a job's PATH) gets clang, clang++ and clang-cpp
+# as links to /usr/bin/clang-<major>, clang++-<major> and clang-cpp-<major>. Without the key the
+# distribution's clang is left alone; a key taken out leaves the links as they are.
+CR=$W/rcl
+mkdir -p "$CR"
+echo 8 >"$CR/.state-nproc"
+cllines() { cat "$W/out" "$W/err" | grep 'clang' | head -8; }
+# clstand MAJOR VERSION: the binaries the package clang<MAJOR> installs, as stand-ins that answer
+# `--version` only as the build user does (HOME is the build user's).
+clstand() {
+  mkdir -p "$CR/usr/bin"
+  for b in clang clang++ clang-cpp; do
+    printf '#!/bin/sh\n[ "$HOME" = /var/lib/builder ] && [ "$1" = --version ] || exit 1\necho "clang version %s (Amazon Linux 2023 %s-1.amzn2023)"\necho "Target: x86_64-amazon-linux-gnu"\n' "$2" "$2" >"$CR/usr/bin/$b-$1"
+    chmod 755 "$CR/usr/bin/$b-$1"
+  done
+}
+for cl_bad in 22.1 clang22 '22 x' '$(id)' -1 0x16 022 ' 22'; do
+  conf
+  echo "CLANG_VERSION=$cl_bad" >>"$W/node.conf"
+  run "$W/r0" check
+  [ $? -eq 2 ] && grep -qxF "node config: $W/node.conf: CLANG_VERSION must be the major release of a clang package such as 22 (digits, no leading zero), or empty, not '$cl_bad'" "$W/err" && ok "CLANG_VERSION='$cl_bad' is refused by conf.sh" || bad "CLANG_VERSION='$cl_bad': $(cat "$W/out" "$W/err" | tail -2)"
+done
+sh "$P" bundle "$W/node.conf" check >/dev/null 2>"$W/err"
+[ $? -eq 2 ] && grep -q 'CLANG_VERSION must be' "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with CLANG_VERSION=' 22': $(cat "$W/err")"
+# Without the key: no clang package, no link, nothing checked.
+conf
+echo 'CLANG_VERSION=' >>"$W/node.conf"
+run "$CR" apply
+st=$?
+cp "$W/out" "$W/cl-apply.out"
+run "$CR" check
+st2=$?
+[ $st -eq 0 ] && [ $st2 -eq 0 ] && ! grep -q 'clang[0-9]\|: clang: \|/usr/local/bin/clang' "$W/cl-apply.out" "$W/out" && ! grep -q '^clang[0-9]' "$CR/.state/packages" && ok "an empty CLANG_VERSION: apply installs no clang package and check has 0 drift and no clang line" || bad "no CLANG_VERSION: apply exit $st, check exit $st2 $(cllines) $(grep '^clang[0-9]' "$CR/.state/packages")"
+cln=
+for l in clang clang++ clang-cpp; do
+  if [ -e "$CR/usr/local/bin/$l" ] || [ -L "$CR/usr/local/bin/$l" ]; then cln="$cln $l"; fi
+done
+[ -z "$cln" ] && ok "an empty CLANG_VERSION links no clang in /usr/local/bin" || bad "links without CLANG_VERSION:$cln"
+# With the key on a node that lacks the package: check names the packages, the three links and
+# the answer of `clang --version`.
+conf
+echo 'CLANG_VERSION=22' >>"$W/node.conf"
+run "$CR" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: packages: not installed: clang22 clang22-libs' "$W/out" && ok "CLANG_VERSION=22: check names the packages clang22 and clang22-libs" || bad "clang packages drift: exit $st $(grep '^drift: packages' "$W/out")"
+clm=
+for l in clang clang++ clang-cpp; do
+  grep -qx "drift: clang: /usr/local/bin/$l is 'missing', want a link to /usr/bin/$l-22" "$W/out" || clm="$clm $l"
+done
+[ -z "$clm" ] && ok "check names the missing clang, clang++ and clang-cpp links" || bad "clang link drift, no line for$clm: $(cllines)"
+grep -qx "drift: clang: clang --version as the build user (/usr/local/bin/clang) says '', want clang 22" "$W/out" && ok "check names a clang on PATH that does not answer clang 22" || bad "clang version drift: $(cllines)"
+# On Amazon Linux 2023 clang22 conflicts with the base clang's clang-resource-filesystem: the
+# clang packages go in a transaction of their own, so the conflict leaves every other package
+# installed and names itself.
+echo 'EXTRA_PACKAGES=jq' >>"$W/node.conf"
+echo clang22 >"$CR/.state-pkg-conflicts"
+run "$CR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'jq' "$CR/.state/packages" && ! grep -q '^clang22' "$CR/.state/packages" && grep -qx 'changed: packages: installed jq' "$W/out" && grep -qx 'failed: packages: dnf install clang22 clang22-libs (CLANG_VERSION): package clang22-1.0 from stand-in conflicts with stand-in < 99 provided by stand-in-1.0 from @System' "$W/err" && ok "a conflict of the clang packages fails them alone, names dnf's conflict line, and the other missing packages go in" || bad "clang package conflict: exit $st $(grep 'packages' "$W/out" "$W/err") $(grep '^jq\|^clang' "$CR/.state/packages")"
+rm -f "$CR/.state-pkg-conflicts"
+conf
+echo 'CLANG_VERSION=22' >>"$W/node.conf"
+# apply installs the packages; a package that brings no /usr/bin/clang-22 gets no link.
+run "$CR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'clang22' "$CR/.state/packages" && grep -qx 'clang22-libs' "$CR/.state/packages" && grep -qx 'failed: clang: /usr/bin/clang-22 is missing (package clang22): not linked' "$W/err" && [ ! -L "$CR/usr/local/bin/clang" ] && ok "apply installs clang22 and clang22-libs, and links nothing to a binary that is not there (failed, exit 1)" || bad "clang apply without binaries: exit $st $(cllines) '$(readlink "$CR/usr/local/bin/clang")'"
+# The package's binaries are there: apply links them, check has 0 drift.
+clstand 22 22.1.8
+: >"$CR/.calls"
+run "$CR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'changed: clang: linked clang clang++ clang-cpp in /usr/local/bin to /usr/bin/<name>-22' "$W/out" && ok "apply links clang, clang++ and clang-cpp" || bad "clang apply: exit $st $(cllines)"
+for l in clang clang++ clang-cpp; do
+  [ "$(readlink "$CR/usr/local/bin/$l")" = "/usr/bin/$l-22" ] && ok "/usr/local/bin/$l links to /usr/bin/$l-22" || bad "link $l: '$(readlink "$CR/usr/local/bin/$l")'"
+done
+run "$CR" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after apply: clang 22 on PATH, 0 drift" || bad "clang after apply: $(cat "$W/out")"
+run "$CR" apply
+[ $? -eq 0 ] && ! grep -q '^changed: ' "$W/out" && ok "a second apply changes nothing" || bad "second clang apply: $(grep '^changed' "$W/out")"
+# A link to another binary is drift and set again; a real file at a link's name stays.
+ln -sfn /usr/bin/clang "$CR/usr/local/bin/clang++"
+rm -f "$CR/usr/local/bin/clang-cpp"
+printf '#!/bin/sh\necho real\n' >"$CR/usr/local/bin/clang-cpp"
+run "$CR" check
+[ $? -eq 1 ] && grep -qx "drift: clang: /usr/local/bin/clang++ is '/usr/bin/clang', want a link to /usr/bin/clang++-22" "$W/out" && grep -qx 'drift: clang: /usr/local/bin/clang-cpp is a real file, want a link to /usr/bin/clang-cpp-22' "$W/out" && ! grep -q 'drift: clang: clang --version' "$W/out" && ok "check names a link to another binary and a real file at a link's name" || bad "clang wrong link: $(cllines)"
+run "$CR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: clang: /usr/local/bin/clang-cpp is a real file; not replaced' "$W/err" && [ "$(cat "$CR/usr/local/bin/clang-cpp")" = '#!/bin/sh
+echo real' ] && [ "$(readlink "$CR/usr/local/bin/clang++")" = /usr/bin/clang++-22 ] && grep -qx 'changed: clang: linked clang++ in /usr/local/bin to /usr/bin/<name>-22' "$W/out" && ok "apply sets the wrong link again, leaves the real file and reports it failed (exit 1)" || bad "clang real file: exit $st $(cllines) $(cat "$CR/usr/local/bin/clang-cpp")"
+rm -f "$CR/usr/local/bin/clang-cpp"
+run "$CR" apply
+run "$CR" check
+[ $? -eq 0 ] && [ "$(readlink "$CR/usr/local/bin/clang-cpp")" = /usr/bin/clang-cpp-22 ] && ok "once the file is gone, apply links clang-cpp and check has 0 drift" || bad "clang-cpp relink: $(cllines)"
+# A clang that answers another major (a package of another release under that name) is drift;
+# apply cannot make it good by a link and says so.
+clstand 22 21.1.0
+run "$CR" check
+[ $? -eq 1 ] && grep -qx "drift: clang: clang --version as the build user (/usr/local/bin/clang) says 'clang version 21.1.0 (Amazon Linux 2023 21.1.0-1.amzn2023)', want clang 22" "$W/out" && ! grep -q '^drift: clang: /usr/local/bin' "$W/out" && ok "check names a clang on PATH that answers another major" || bad "clang 21 behind the 22 link: $(cllines)"
+run "$CR" apply
+[ $? -eq 1 ] && grep -qx "failed: clang: clang --version as the build user (/usr/local/bin/clang) says 'clang version 21.1.0 (Amazon Linux 2023 21.1.0-1.amzn2023)', want clang 22" "$W/err" && ok "apply reports a clang of another major as failed (exit 1)" || bad "clang 21 apply: $(cllines)"
+clstand 22 220.0.1
+run "$CR" check
+grep -q "^drift: clang: clang --version .* says 'clang version 220.0.1 " "$W/out" && ok "major 220 is not major 22" || bad "clang 220: $(cllines)"
+clstand 22 22.1.8
+# Another major: the links move to it.
+clstand 21 21.1.8
+conf
+echo 'CLANG_VERSION=21' >>"$W/node.conf"
+run "$CR" check
+[ $? -eq 1 ] && grep -qx "drift: clang: /usr/local/bin/clang is '/usr/bin/clang-22', want a link to /usr/bin/clang-21" "$W/out" && grep -qx 'drift: packages: not installed: clang21 clang21-libs' "$W/out" && ok "CLANG_VERSION=21 after 22: check names the packages and the links of 21" || bad "clang 22 to 21: $(cllines)"
+run "$CR" apply
+run "$CR" check
+[ $? -eq 0 ] && [ "$(readlink "$CR/usr/local/bin/clang")" = /usr/bin/clang-21 ] && ok "apply moves the links to clang 21, 0 drift" || bad "clang 21 apply: $(cllines)"
+# The key taken out: the links stay as they are and nothing is checked.
+conf
+run "$CR" apply
+st=$?
+run "$CR" check
+st2=$?
+[ $st -eq 0 ] && [ $st2 -eq 0 ] && ! grep -q clang "$W/out" && [ "$(readlink "$CR/usr/local/bin/clang")" = /usr/bin/clang-21 ] && [ "$(readlink "$CR/usr/local/bin/clang++")" = /usr/bin/clang++-21 ] && ok "a config without CLANG_VERSION leaves the links as they are and checks none" || bad "clang key removed: apply $st check $st2 $(cllines) '$(readlink "$CR/usr/local/bin/clang")'"
+grep -qx 'CLANG_VERSION=22' "$here/node.conf.example" && ok "example: CLANG_VERSION=22" || bad "example: $(grep CLANG "$here/node.conf.example")"
+grep '^| `CLANG_VERSION` |' "$here/README.md" | grep -q 'links stay' && ok "README: a CLANG_VERSION row that says the links stay when the key is taken out" || bad "README CLANG_VERSION row: $(grep '^| `CLANG_VERSION`' "$here/README.md")"
+
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
 leaks=$(grep -nE '/home/[a-z]|\b(i|vol|subnet|sg|vpc|ami)-0?[0-9a-f]{8,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \

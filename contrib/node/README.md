@@ -43,6 +43,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
 | `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
+| `CLANG_VERSION` | provision | the major release of the `clang` on a job's PATH (`22`): the packages `clang<major>` and `clang<major>-libs`, and `clang`, `clang++` and `clang-cpp` in `/usr/local/bin` as links to `/usr/bin/clang-<major>` and the like; digits only; empty: the distribution's `clang` is left alone. Taken out of the config, the links stay as they are |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
 | `NODE_SSH`, `NODE_HOST`, `NODE_RUN_DIR` | push | the ssh command, the node's name for `SLOT_HOST` and a checkout to run the check job from |
@@ -651,8 +652,9 @@ is a link in `/usr/local/bin`, which is on the PATH of every job:
 - `odin`: Odin dev-2026-09, the release archive for linux-amd64 with its `core`, `base` and
   `vendor` libraries beside the binary, in `/usr/local/odin-dev-2026-09`. The release publishes
   no checksum file: the SHA-256 is the digest of the archive as downloaded from the release on
-  two machines, equal to the digest in the release's asset list. `odin` links with the node's
-  `clang`, a base package. Its check reads the release from `odin version`
+  two machines, equal to the digest in the release's asset list. `odin` links with the `clang`
+  on PATH: the base package's, or the major `CLANG_VERSION` names (below). Its check reads the
+  release from `odin version`
   (`dev-2026-09-nightly:<commit>`).
 - `firefox`: Firefox 159.0 in `/usr/local/firefox-159.0`, with the packages it loads, and the
   start that `check --canary` makes (above).
@@ -667,6 +669,38 @@ between the workstation and the node, and a tool only one side has. Like the `he
 four depend on the caller's PATH on a workstation, where the one PATH names first is read:
 compare them from a shell with the PATH a job gets. The `elixir` line is `missing` where no
 `erl` is on PATH.
+
+`CLANG_VERSION` sets the major release of the `clang` a job finds on PATH. Amazon Linux 2023's
+`clang` package is clang 15 (`/usr/bin/clang`, a base package); the distribution also packages
+newer majors as `clang20`, `clang21` and `clang22`, each installing `/usr/bin/clang-<major>`,
+`/usr/bin/clang++-<major>` and `/usr/bin/clang-cpp-<major>` and requiring
+`clang<major>-libs`. A consumer that reads clang's JSON syntax tree
+(`clang -Xclang -ast-dump=json -fsyntax-only`) from PATH fails with clang 15's. With
+`CLANG_VERSION=22` the node gets the packages `clang22` and `clang22-libs` with the other
+packages, and `clang`, `clang++` and `clang-cpp` in `/usr/local/bin`, which a job's PATH has
+before `/usr/bin`, are links to `/usr/bin/clang-22`, `/usr/bin/clang++-22` and
+`/usr/bin/clang-cpp-22`. `/usr/bin/clang` stays the distribution's. `check` names a missing link
+or one to another binary (`drift: clang: /usr/local/bin/clang++ is '/usr/bin/clang', want a link
+to /usr/bin/clang++-22`) and a `clang --version`, run as the build user from `/usr/local/bin`,
+whose first line does not name `clang version 22.` (`drift: clang: clang --version as the build
+user (/usr/local/bin/clang) says '...', want clang 22`). `apply` sets the links that drift, only
+to a binary that is there (`failed: clang: /usr/bin/clang-22 is missing (package clang22): not
+linked` otherwise), leaves a real file at a link's name alone and reports it as `failed`, and
+reports a `clang` of another major after the links as `failed`. Another value moves the links to
+that major; the packages of the major before stay. Taken out of the config (or left empty), the
+key changes nothing: the links stay as they are, nothing of them is checked, and removing them
+is a step by hand.
+
+Read from a node's package repositories on 2026-11-26: `clang21` and `clang22` cannot be
+installed beside the base package `clang` (clang 15). Their `clang<major>-libs` require
+`clang<major>-resource-filesystem`, which conflicts with `clang-resource-filesystem < 21.99`
+(`< 22.99`), and clang 15's `clang-libs`, `compiler-rt` and `libomp-devel` require that package
+(and `clang`, `clang-devel` and `clang-tools-extra` require `clang-libs`). `clang20` installs
+beside clang 15. `apply` installs the clang packages in a dnf transaction of their own, so such a
+conflict fails them alone, names dnf's conflict line (`failed: packages: dnf install clang22
+clang22-libs (CLANG_VERSION): package clang22-resource-filesystem-... conflicts with
+clang-resource-filesystem < 22.99 ...`), and leaves the other packages installed; no link is set
+to a binary that is not there. `provision.sh` does not remove the base clang.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

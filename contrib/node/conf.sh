@@ -11,7 +11,7 @@ GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
 EXTRA_TOOLS
 INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT
-SLOT_TARGET'
+SLOT_TARGET CLANG_VERSION'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -112,6 +112,7 @@ conf_read() {
   RUN_LIMIT_MAX=${CONF_RUN_LIMIT_MAX:-30m}
   GO_ROOT=${CONF_GO_ROOT:-}
   SLOT_TARGET=${CONF_SLOT_TARGET:-x86_64-unknown-linux-gnu}
+  CLANG_VERSION=${CONF_CLANG_VERSION:-}
   conf_check_forms "$cf"
 }
 
@@ -269,6 +270,15 @@ conf_check_forms() {
     conf_fail "$1: BUILD_USER '$BUILD_USER' is not a user name"
     return 2
     ;;
+  esac
+  # CLANG_VERSION: the major release of a clang package (clang22), which goes into package names
+  # and paths; empty leaves the distribution's clang alone.
+  case $CLANG_VERSION in
+    '') ;;
+    0* | *[!0-9]*)
+      conf_fail "$1: CLANG_VERSION must be the major release of a clang package such as 22 (digits, no leading zero), or empty, not '$CLANG_VERSION'"
+      return 2
+      ;;
   esac
   # EXTRA_TOOLS: names of tools that provision.sh has a pin for; provision.sh, which knows the
   # pins, refuses a name it has none for.

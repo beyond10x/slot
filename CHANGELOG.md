@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Node provisioning: the config key `CLANG_VERSION` (a major such as `22`) makes the `clang` on
+  a job's PATH that packaged major instead of the distribution's default (clang 15 on Amazon
+  Linux 2023, whose JSON syntax tree a consumer could not read). `provision.sh` installs the
+  packages `clang<major>` and `clang<major>-libs` and links `clang`, `clang++` and `clang-cpp`
+  in `/usr/local/bin` to `/usr/bin/clang-<major>`, `clang++-<major>` and `clang-cpp-<major>`.
+  `check` names a missing or wrong link and a `clang --version`, run as the build user, that
+  does not name the major; `apply` sets the links, only to a binary that is there, and leaves a
+  real file at a link's name (`failed`). `conf.sh` refuses a value that is not digits. Empty or
+  absent, the distribution's clang is left alone; a key taken out leaves the links as they are
+  (`contrib/node/README.md`). The clang packages go in a dnf transaction of their own: on Amazon
+  Linux 2023 `clang21` and `clang22` conflict with the base clang 15's
+  `clang-resource-filesystem` (`clang20` does not), and the conflict now fails them alone with
+  dnf's conflict line instead of every package missing beside them.
+
 ## 0.40.0 — 2026-11-26
 
 - Releases carry static binaries: `slot-<version>-x86_64-unknown-linux-musl.tar.gz` and
