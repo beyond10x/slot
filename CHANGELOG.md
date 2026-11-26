@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Node helm: `provision.sh` installs helm v3.8.1, the release the workstation runs, as an archive
+  pin (the static binary of `get.helm.sh`, SHA-256 pinned) linked as `/usr/local/bin/helm`. A
+  consumer's chart check (`helm lint`, `helm template`) had no helm on the node. `toolchains.sh`
+  prints `tool helm <version>` and `tool pnpm <version>`, so `push.sh check` compares both.
+
 - Node aep for runbook's driver: `provision.sh` installs the aep 0.80.0 release binary at
   `~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep` (`HOME_PINS`, the archive SHA-256 of
   the driver's `aep-pin.json`), where its tests look; the driver compares the file's digest with

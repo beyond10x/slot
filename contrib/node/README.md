@@ -167,7 +167,14 @@ requires another release it runs that release, which it downloads itself (SHA-25
 the build user's `~/.cache/ess/toolchains`, so a node job needs `github.com` over https and a
 writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin (the tarball names
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
-`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
+`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset, and one for `pnpm`.
+
+`helm` v3.8.1 is an archive pin too: the static binary of `get.helm.sh`, the release the
+workstation runs, linked as `/usr/local/bin/helm` (a consumer's chart check runs `helm lint` and
+`helm template`). helm has no `--version`, so `check` and the `tool helm` line of `toolchains.sh`
+read `helm version --template {{.Version}}`. On the workstation `toolchains.sh` reads the helm its
+PATH names first, the one a job started there runs, before `/usr/local/bin`, `/usr/bin` and
+`~/.local/bin`: a workstation can have a second helm of another release in `/usr/bin`.
 
 `aep` 0.80.0 on the PATH of a job is built on the node (the release binary is installed too, for
 runbook's driver cache path only, see below: it wants glibc 2.39 and the node has 2.34). A

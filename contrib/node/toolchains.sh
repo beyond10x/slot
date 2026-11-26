@@ -3,7 +3,7 @@
 #   rust <name> <rustc commit hash> <installed targets, clippy, rustfmt, rust-src and llvm-tools,
 #        sorted and comma separated; rust-docs and the manifests are left out>
 #   go <version> / node <version>
-#   tool <tsc|prettier|esbuild|ess|aep|yq|cargo-about|make> <version>: no line when the machine has none,
+#   tool <tsc|prettier|esbuild|pnpm|ess|aep|yq|cargo-about|make|helm> <version>: no line when the machine has none,
 #        `missing` as the version when the file is there and prints none
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   c <tool> <first line of its --version>, or `c <tool> missing`
@@ -42,13 +42,23 @@ done
 # the workstation.
 # The version is the last word of the first line (`Version 6.0.3` prints as 6.0.3). The command
 # runs in / without ESS_TOOLCHAIN: the ess dispatcher prints the release a tree requires, not its own.
-for n in tsc prettier esbuild ess aep yq cargo-about make; do
+for n in tsc prettier esbuild pnpm ess aep yq cargo-about make; do
   for b in "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.cargo/bin/$n" "$HOME/go/bin/$n" "$HOME/.local/bin/$n"; do
     [ -x "$b" ] || continue
     tv=$(cd / && env -u ESS_TOOLCHAIN -u ESS_TOOLCHAIN_DELEGATED "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }')
     echo "tool $n ${tv:-missing}"
     break
   done
+done
+# helm has no `--version`: `helm version --template {{.Version}}` prints `v3.8.1`. A node has it in
+# /usr/local/bin (an archive pin). A workstation may have more than one (a package in /usr/bin and
+# another one earlier on PATH), and a job runs the one its PATH names first: with the prefix "" the
+# helm on PATH is read first.
+for b in "$([ -n "$P" ] || command -v helm 2>/dev/null)" "$P/usr/local/bin/helm" "$P/usr/bin/helm" "$HOME/.local/bin/helm"; do
+  [ -n "$b" ] && [ -x "$b" ] || continue
+  hv=$(cd / && "$b" version --template '{{.Version}}' 2>/dev/null </dev/null | head -n 1)
+  echo "tool helm ${hv:-missing}"
+  break
 done
 # The aep binary of runbook's driver pin, one file per version in the user's cache
 # (~/.cache/sdc/aep/<version>/x86_64-unknown-linux-gnu/aep): `tool sdc-aep-<version> <the first 16

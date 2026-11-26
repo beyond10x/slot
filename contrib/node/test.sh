@@ -357,7 +357,7 @@ run "$R5" check
 # typescript, prettier and esbuild are archives of the same kind (the npm tarballs of the releases
 # the consumers' test lanes read): each binary is linked as /usr/local/bin/<name>, prettier's
 # bin/prettier.cjs as `prettier`, and the script is executable.
-for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild pnpm:pnpm-11.9.0/bin/pnpm.mjs pnpx:pnpm-11.9.0/bin/pnpx.mjs; do
+for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild pnpm:pnpm-11.9.0/bin/pnpm.mjs pnpx:pnpm-11.9.0/bin/pnpx.mjs helm:helm-v3.8.1/helm; do
   [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
 done
 [ "$("$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" --version)" = "3.8.1" ] && [ "$("$R5/usr/local/esbuild-0.28.2/bin/esbuild" --version)" = "0.28.2" ] && ok "prettier and esbuild answer their release (run by their tree path: a link names the real /usr/local)" || bad "tool versions: $("$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" --version 2>&1) $("$R5/usr/local/esbuild-0.28.2/bin/esbuild" --version 2>&1)"
@@ -626,6 +626,19 @@ HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^to
 printf '#!/bin/sh\nexit 1\n' >"$TC/home/.local/bin/esbuild"
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool esbuild missing" ] && ok "toolchains.sh: a tool that is there and prints no version is 'missing', not a line with a trailing space" || bad "broken tool line: '$(cat "$W/out2")'"
+# pnpm is a tool of the same loop. helm has no `--version`: its line comes from
+# `helm version --template {{.Version}}`, and a helm on PATH is read only with the prefix "".
+printf '#!/bin/sh\necho 11.9.0\n' >"$TC/home/.local/bin/pnpm"
+printf '#!/bin/sh\n[ "$1" = version ] && [ "$2" = --template ] && [ "$3" = "{{.Version}}" ] && printf v3.8.1 && exit 0\necho "Error: unknown flag" >&2\nexit 1\n' >"$TC/p3/usr/local/bin/helm"
+chmod 755 "$TC/home/.local/bin/pnpm" "$TC/p3/usr/local/bin/helm"
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool pnpm\|^tool helm' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool pnpm 11.9.0,tool helm v3.8.1," ] && ok "toolchains.sh: pnpm and helm lines, helm through \`version --template\`" || bad "pnpm, helm lines: $(cat "$W/out2")"
+mkdir -p "$TC/pathbin"
+printf '#!/bin/sh\nprintf v9.9.9\n' >"$TC/pathbin/helm"
+chmod 755 "$TC/pathbin/helm"
+rm -f "$TC/p3/usr/local/bin/helm"
+HOME=$TC/home PATH=$TC/pathbin:$PATH sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool helm' >"$W/out2"
+[ ! -s "$W/out2" ] && ok "toolchains.sh: with a prefix the helm on PATH is not read" || bad "helm from PATH under a prefix: $(cat "$W/out2")"
 # The aep of runbook's driver pin: a line with the version of the directory and the first 16 hex
 # digits of the file's SHA-256; the file is not run.
 mkdir -p "$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu" "$TC/home/.cache/sdc/aep/0.79.0/aarch64-apple-darwin"
@@ -872,7 +885,7 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq archive:helm make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"
