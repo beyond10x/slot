@@ -442,6 +442,34 @@ q_running_version() {
     [ -n "$qm" ] && [ "$qm" != 0 ] && as_user "/proc/$qm/exe" --version 2>/dev/null </dev/null | head -n 1
   fi
 }
+# Which build of slot the file $1 is, as the target of its release archive (SLOT_TARGET): both
+# builds answer the same `--version`. The build against glibc names a program interpreter (the
+# loader); the static musl build has program headers and none. Read with readelf (binutils, which
+# the base package gcc requires) as the build user. Nothing printed: no such file, no readelf, or
+# no ELF file, and then nothing is compared. NODE_TEST=1: a stand-in that carries the musl target
+# in its text is the musl build, any other file the gnu one.
+q_slot_target() {
+  if [ -n "$T" ]; then
+    [ -f "$1" ] || return 0
+    if grep -q 'x86_64-unknown-linux-musl' "$1" 2>/dev/null; then echo x86_64-unknown-linux-musl; else echo x86_64-unknown-linux-gnu; fi
+  else
+    qt=$(as_user env LC_ALL=C readelf -lW "$1" 2>/dev/null </dev/null) || return 0
+    case $qt in
+      *"Requesting program interpreter"*) echo x86_64-unknown-linux-gnu ;;
+      *"Program Headers:"*) echo x86_64-unknown-linux-musl ;;
+    esac
+  fi
+}
+# The build of the slot binary the running unit executes (not the file at the path now).
+# NODE_TEST=1: the file running-target/<unit>, which a_start writes.
+q_running_target() {
+  if [ -n "$T" ]; then
+    cat "$S/running-target/$1" 2>/dev/null
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    [ -n "$qm" ] && [ "$qm" != 0 ] && q_slot_target "/proc/$qm/exe"
+  fi
+}
 q_jobs() {
   if [ -n "$T" ]; then
     cat "$S/jobs" 2>/dev/null || echo 0
@@ -666,6 +694,7 @@ a_start() {
     unit_defs "$1" >"$S/loaded/$1"
     unit_defs "$1" | grep '^Environment=' >"$S/procenv/$1"
     [ "$1" = slot-node.service ] && "$R$STORE/bin/slot" --version >"$S/running-version/$1" 2>/dev/null
+    [ "$1" = slot-node.service ] && mkdir -p "$S/running-target" && q_slot_target "$R$STORE/bin/slot" >"$S/running-target/$1"
     return 0
   else
     systemctl start "$1"
@@ -1658,12 +1687,20 @@ p_units() {
 slot_paths() { echo "$STORE/bin/slot /usr/local/bin/slot $H/.local/bin/slot"; }
 # Downloads the release into directory $1 and prints the path of its binary. NODE_TEST=1: a stub
 # binary, or nothing when $R/.state-slot-fetch-fails exists.
+# The archive is the one of SLOT_TARGET: the build against glibc (the default), or the static musl
+# build. Both are checked against the line of their own name in the release's SHA256SUMS, so a
+# release that has no such archive installs nothing.
 slot_fetch() {
-  a=slot-$SLOT_VERSION-x86_64-unknown-linux-gnu
+  a=slot-$SLOT_VERSION-$SLOT_TARGET
   if fake_fetch; then
     [ -e "$R/.state-slot-fetch-fails" ] && return 0
-    mkdir -p "$1/$a" && printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
-    calls "fetch slot $SLOT_VERSION"
+    if [ "$SLOT_TARGET" = x86_64-unknown-linux-gnu ]; then
+      mkdir -p "$1/$a" && printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
+      calls "fetch slot $SLOT_VERSION"
+    else
+      mkdir -p "$1/$a" && printf '#!/bin/sh\n# %s\necho slot %s\n' "$SLOT_TARGET" "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
+      calls "fetch slot $SLOT_VERSION $SLOT_TARGET"
+    fi
   else
     u=https://github.com/beyond10x/slot/releases/download/$SLOT_VERSION
     (cd "$1" && curl -fsSLO "$u/$a.tar.gz" && curl -fsSLO "$u/SHA256SUMS" &&
@@ -1703,21 +1740,36 @@ install_slot() {
     if [ "$v" != "slot $SLOT_VERSION" ]; then
       failed slot "$p is '${v:-missing}' after the install"
       rc=1
+      continue
+    fi
+    is_t=$(q_slot_target "$R$p")
+    if [ -n "$is_t" ] && [ "$is_t" != "$SLOT_TARGET" ]; then
+      failed slot "$p is the build for $is_t after the install, config says $SLOT_TARGET"
+      rc=1
     fi
   done
   rm -rf "$d"
   return $rc
 }
+# A path is drift when it does not answer the release, or answers it and is the other build
+# (SLOT_TARGET): a node changes between the gnu and the musl archive at one version.
 p_slot() {
   todo=
   for p in $(slot_paths); do
     v=$(as_user "$R$p" --version 2>/dev/null)
-    [ "$v" = "slot $SLOT_VERSION" ] && continue
-    drift "slot:$p" "is '${v:-missing}', config says slot $SLOT_VERSION"
+    if [ "$v" = "slot $SLOT_VERSION" ]; then
+      ps_t=$(q_slot_target "$R$p")
+      if [ -z "$ps_t" ] || [ "$ps_t" = "$SLOT_TARGET" ]; then continue; fi
+      drift "slot:$p" "is the build for $ps_t, config says $SLOT_TARGET"
+    else
+      drift "slot:$p" "is '${v:-missing}', config says slot $SLOT_VERSION"
+    fi
     todo="$todo $p"
   done
   if fixing && [ -n "$todo" ]; then
-    install_slot $todo && changed slot "slot $SLOT_VERSION installed at$todo" && slot_replaced=1
+    ps_n=
+    [ "$SLOT_TARGET" = x86_64-unknown-linux-gnu ] || ps_n=" ($SLOT_TARGET)"
+    install_slot $todo && changed slot "slot $SLOT_VERSION$ps_n installed at$todo" && slot_replaced=1
   fi
 }
 
@@ -3079,6 +3131,13 @@ stale_reason() {
     sr_v=$(q_running_version "$1")
     if [ -n "$sr_v" ] && [ "$sr_v" != "slot $SLOT_VERSION" ]; then
       echo "it runs '$sr_v', the config says slot $SLOT_VERSION"
+      return 0
+    fi
+    # The same version of the other build: the binary at the path was replaced by an apply whose
+    # restart waited for jobs.
+    sr_t=$(q_running_target "$1")
+    if [ -n "$sr_t" ] && [ "$sr_t" != "$SLOT_TARGET" ]; then
+      echo "it runs the slot build for $sr_t, the config says $SLOT_TARGET"
       return 0
     fi
     # A job is a child of this process and has its groups. Under a role that is not the node's

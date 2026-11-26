@@ -29,6 +29,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `BUILD_KEY` | provision | the workstation's build public key; it may only run `slot shell` |
 | `SETUP_KEY` | provision | a second public key, let in only by `apply --open`, for a login that sets the node up by hand |
 | `SLOT_VERSION` | both | the slot release installed on the node |
+| `SLOT_TARGET` | provision | which archive of that release the node installs: `x86_64-unknown-linux-gnu` (the default, the build against glibc) or `x86_64-unknown-linux-musl` (the static build); `slot --version` is the same for both, so `check` reads the build from the binary at each path and from the running daemon |
 | `MIRROR_DIRS` | provision | directories under `BUILD_HOME` that are bound from the instance store |
 | `GO_PRIVATE` | provision | `GOPRIVATE` and `GONOSUMDB` of jobs |
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
@@ -267,6 +268,22 @@ compilers the cache server runs for them. With a job running `apply` prints
 the unit. `check` names a running unit whose loaded definition or process environment is not the
 unit file's, one whose soft core limit is not 0, and a `slot-node` that runs another slot version
 than `SLOT_VERSION`.
+
+`SLOT_TARGET` names which archive of the release is installed:
+`slot-<SLOT_VERSION>-x86_64-unknown-linux-gnu.tar.gz`, the default and the one a node has
+installed so far, or `slot-<SLOT_VERSION>-x86_64-unknown-linux-musl.tar.gz`, the static build,
+which needs no glibc of the node. Either is checked against the line of its own name in the
+release's `SHA256SUMS`, so a release without the musl archive installs nothing (`failed: slot:
+download or checksum ...`). Both builds print the same `slot --version`, so a change of the key
+at one version is read from the binary: the build against glibc names a program interpreter and
+the static one none (`readelf -l`, from binutils, which the base package `gcc` requires; where
+`readelf` gives no answer, the build is not compared). `check` prints `drift: slot:<path>: is the
+build for <target>, config says <target>` for each of the three paths and `drift: running:
+slot-node.service: it runs the slot build for ...` for a daemon that still runs the other one;
+`apply` installs the archive of the key (`changed: slot: slot <version> (x86_64-unknown-linux-musl)
+installed at ...`) and restarts `slot-node` like after a version change: when no job runs, or
+through `apply --drain`. One node takes the musl build first, by `SLOT_TARGET` in its own config
+file; the default changes only after that node ran it under real jobs.
 
 Draining: a node that always has a job never gets that restart (one node: 10 runs of `apply` in
 29 minutes, 5 to 14 jobs each time). `apply --drain` (also `bundle CONF apply --drain`) starts it

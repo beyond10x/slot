@@ -15,6 +15,12 @@
   before the start of `slot-node.service` now loads `/etc/sysctl.d/60-slot-core.conf` at the end
   of a drain, under the condition `apply` checks: `sccache-node` runs with the soft core limit 0
   and `slot-node.service` starts with it.
+- Node: the config key `SLOT_TARGET` names which archive of the slot release
+  `contrib/node/provision.sh` installs: `x86_64-unknown-linux-gnu` (the default, as before) or
+  `x86_64-unknown-linux-musl`, the static build, checked against its own line of the release's
+  `SHA256SUMS`. Both builds print the same version, so `check` and `apply` read the build from
+  the binary at each path and from the running daemon, and a change of the key at one version
+  installs the other archive and restarts the daemon.
 
 ## 0.39.1 — 2026-11-26
 

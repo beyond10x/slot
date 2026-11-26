@@ -5,6 +5,7 @@ BUILD_HOME=/var/lib/builder
 BUILD_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReplaceWithTheBuildPublicKey build
 SETUP_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIReplaceWithTheSetupPublicKey setup
 SLOT_VERSION=0.36.0
+SLOT_TARGET=x86_64-unknown-linux-gnu
 MIRROR_DIRS=.local/state/worktree .cache src
 GO_PRIVATE=git.example.org
 MIN_FREE_DISK=50

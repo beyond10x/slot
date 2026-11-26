@@ -57,6 +57,12 @@ conf
 printf 'RUST_COMPONENTS=clippy\nRUST_TARGETS=wasm32-unknown-unknown\n' >>"$W/node.conf"
 run "$W/r0" check
 if grep -q 'unknown key' "$W/err"; then bad "RUST_COMPONENTS and RUST_TARGETS are refused ($(cat "$W/err"))"; else ok "RUST_COMPONENTS and RUST_TARGETS are config keys"; fi
+for bad_target in aarch64-unknown-linux-musl musl x86_64-unknown-linux-gnu.tar.gz 'x86_64-unknown-linux-musl x' '../x86_64-unknown-linux-musl'; do
+  conf
+  echo "SLOT_TARGET=$bad_target" >>"$W/node.conf"
+  run "$W/r0" check
+  if [ $? -eq 2 ] && grep -q "SLOT_TARGET must be x86_64-unknown-linux-gnu or x86_64-unknown-linux-musl, not '$bad_target'" "$W/err"; then ok "SLOT_TARGET=$bad_target is refused"; else bad "SLOT_TARGET=$bad_target is accepted ($(cat "$W/err"))"; fi
+done
 for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARGETS=$(id)' 'RUST_TARGETS=1.99.1:-t' 'RUST_TARGETS=1.99.1:a,-b' 'RUST_TOOLCHAINS=1.99.1 -stable' 'EXTRA_PACKAGES=jq;id' 'EXTRA_PACKAGES=git --nogpgcheck' 'EXTRA_PACKAGES=a $(id)' 'EXTRA_PACKAGES=a*'; do
   conf
   echo "$bad_rust" >>"$W/node.conf"
@@ -314,6 +320,74 @@ grep -q '^changed: slot' "$W/out" && bad "a failed install is reported as change
 run "$R" apply
 run "$R" check
 [ $? -eq 0 ] && ok "after the download works: 0 drift" || bad "after the download: $(cat "$W/out")"
+# SLOT_TARGET: which archive of the release a node installs. The default is the build against
+# glibc (x86_64-unknown-linux-gnu), as before the key; x86_64-unknown-linux-musl is the static
+# one. `slot --version` answers the same for both, so check also reads which build a binary is,
+# at each path and for the running daemon. Under NODE_TEST=1 the stand-in of the musl build
+# carries its target in a comment line.
+tlines() { cat "$W/out" "$W/err" | grep 'slot' | tr '\n' ' '; }
+rm -f "$R/usr/local/bin/slot"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'fetch slot 0.36.0' "$R/.calls" && grep -qx 'changed: slot: slot 0.36.0 installed at /usr/local/bin/slot' "$W/out" && ok "without SLOT_TARGET the archive, the call and the line of an install are the ones before the key" || bad "default target: $(grep fetch "$R/.calls") $(tlines)"
+echo 'SLOT_TARGET=x86_64-unknown-linux-gnu' >>"$W/node.conf"
+run "$R" check
+! grep -q '^drift: slot\|^drift: running' "$W/out" && grep -qx '1 drift' "$W/out" && grep -q '^drift: libexec: /etc/slot-node/node.conf' "$W/out" && ok "SLOT_TARGET=x86_64-unknown-linux-gnu is the default by name: no drift of slot (the one line is the node's copy of the config file)" || bad "gnu by name: $(cat "$W/out" "$W/err")"
+conf
+echo 'SLOT_TARGET=x86_64-unknown-linux-musl' >>"$W/node.conf"
+run "$R" check
+st=$?
+n=0
+for p in /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot; do
+  grep -qx "drift: slot:$p: is the build for x86_64-unknown-linux-gnu, config says x86_64-unknown-linux-musl" "$W/out" && n=$((n + 1))
+done
+[ $st -eq 1 ] && [ $n -eq 3 ] && ok "SLOT_TARGET=x86_64-unknown-linux-musl at the same version: check names each path as the other build" || bad "musl check: exit $st, $n of 3 lines: $(tlines)"
+echo 0 >"$R/.state/jobs"
+: >"$R/.calls"
+run "$R" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch slot 0.36.0 x86_64-unknown-linux-musl' "$R/.calls" && grep -qx 'changed: slot: slot 0.36.0 (x86_64-unknown-linux-musl) installed at /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot' "$W/out" && ok "apply fetches the musl archive and installs it at the three paths" || bad "musl apply: exit $st $(grep fetch "$R/.calls") $(tlines)"
+grep -qx 'systemctl restart slot-node.service' "$R/.calls" && [ "$(cat "$R/.state/running-target/slot-node.service" 2>/dev/null)" = x86_64-unknown-linux-musl ] && ok "with no job running the daemon restarts on the other build" || bad "musl restart: $(grep systemctl "$R/.calls" | tr '\n' ' ') running '$(cat "$R/.state/running-target/slot-node.service" 2>&1)'"
+[ "$("$R/srv/slot/bin/slot" --version)" = 'slot 0.36.0' ] && ok "the musl build answers the same version" || bad "musl stand-in: $("$R/srv/slot/bin/slot" --version 2>&1)"
+run "$R" check
+[ $? -eq 0 ] && ok "after the install of the musl build: 0 drift" || bad "musl after apply: $(cat "$W/out")"
+# A daemon that still runs the other build (its restart waited for jobs, and the binary at the
+# path is already the new one): the running process is read, not the file.
+echo x86_64-unknown-linux-gnu >"$R/.state/running-target/slot-node.service"
+run "$R" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: running: slot-node.service: it runs the slot build for x86_64-unknown-linux-gnu, the config says x86_64-unknown-linux-musl' "$W/out" && ok "check names a daemon that still runs the other build" || bad "running target: exit $st $(cat "$W/out")"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'systemctl restart slot-node.service' "$R/.calls" && ! grep -q '^fetch slot' "$R/.calls" && ok "apply restarts that daemon and downloads nothing" || bad "running target apply: $(cat "$R/.calls" | tr '\n' ' ')"
+# Back to the default: the gnu archive again, and nothing of the key is left.
+conf
+run "$R" check
+grep -qx 'drift: slot:/usr/local/bin/slot: is the build for x86_64-unknown-linux-musl, config says x86_64-unknown-linux-gnu' "$W/out" && ok "without the key a musl build is drift" || bad "back to gnu check: $(tlines)"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'fetch slot 0.36.0' "$R/.calls" && grep -qx 'changed: slot: slot 0.36.0 installed at /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot' "$W/out" && ok "apply installs the gnu archive again" || bad "back to gnu apply: $(grep fetch "$R/.calls") $(tlines)"
+run "$R" check
+[ $? -eq 0 ] && ok "back at the default: 0 drift" || bad "back to gnu: $(cat "$W/out")"
+# How a real binary is told apart: the build against glibc names a program interpreter, the
+# static one has program headers and none. A file readelf cannot read gives no answer.
+st_o=$(
+  eval "$(sed -n '/^q_slot_target() {$/,/^}$/p' "$P")"
+  T=
+  as_user() { echo "$*" >>"$W/st-cmd"; cat "$W/st-answer"; }
+  printf 'Program Headers:\n  INTERP 0x318\n      [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]\n  LOAD 0x0\n' >"$W/st-answer"
+  q_slot_target /a/slot
+  printf 'Program Headers:\n  LOAD 0x0\n  DYNAMIC 0x1\n' >"$W/st-answer"
+  q_slot_target /a/slot
+  : >"$W/st-answer"
+  q_slot_target /a/slot
+  as_user() { return 1; }
+  q_slot_target /a/slot
+  echo end
+)
+[ "$st_o" = "x86_64-unknown-linux-gnu
+x86_64-unknown-linux-musl
+end" ] && [ "$(head -n 1 "$W/st-cmd")" = 'env LC_ALL=C readelf -lW /a/slot' ] && ok "a binary with a program interpreter is the gnu build, one with program headers and none the musl build; no answer from readelf is no answer" || bad "q_slot_target: $st_o / $(head -n 1 "$W/st-cmd" 2>&1)"
 
 # 5e. Cargo tools pinned in provision.sh (the release a consumer's CI installs) are installed at
 # that release in the store's cargo bin and read back; check names one of another release.
@@ -1465,6 +1539,24 @@ unset NODE_TEST_MUSL_PIN
 [ "$(grep -c -- '-xf src.tar.gz -C src --strip-components=1 --no-same-owner' "$W/tar.log")" -eq 1 ] && ok "control: a musl source with the SHA-256 of its pin reaches tar, once, with no owner taken from the archive" || bad "control: musl tar: $(cat "$W/tar.log")"
 grep -q 'xzf slot-0.36.0-x86_64-unknown-linux-gnu.tar.gz' "$W/tar.log" && ok "control: a matching SHA-256 reaches tar" || bad "control: tar not reached: $(cat "$W/tar.log")"
 grep -q -- '--no-same-owner' "$W/tar.log" && ok "slot's tar takes no owner from the archive" || bad "slot's tar has no --no-same-owner: $(cat "$W/tar.log")"
+# SLOT_TARGET=x86_64-unknown-linux-musl through the real download branch: the archive of that
+# name is asked for, and its checksum is the line of that name in the release's SHA256SUMS. A
+# release whose SHA256SUMS has no such line (one before the musl archives) installs nothing; with
+# the line that matches the served file, tar is reached with the musl archive.
+RM=$W/r6m
+mkdir -p "$RM" "$W/stubbin-musl"
+echo 'SLOT_TARGET=x86_64-unknown-linux-musl' >>"$W/node.conf"
+: >"$W/curl.log"
+: >"$W/tar.log"
+realrun "$RM"
+grep -q 'releases/download/0.36.0/slot-0.36.0-x86_64-unknown-linux-musl.tar.gz' "$W/curl.log" && ! grep -q 'slot-0.36.0-x86_64-unknown-linux-gnu' "$W/curl.log" && ok "SLOT_TARGET musl: the musl archive is asked for, not the gnu one" || bad "musl download: $(grep 'slot-0.36.0' "$W/curl.log" | tr '\n' ' ')"
+grep -q '^failed: slot: download or checksum of slot 0.36.0' "$W/err" && ! grep -q 'slot-0.36.0' "$W/tar.log" && ok "SLOT_TARGET musl: a SHA256SUMS without the line of the musl archive installs nothing, and tar never runs on it" || bad "musl without a checksum line: $(grep '^failed: slot' "$W/err") $(grep slot "$W/tar.log")"
+sed 's/slot-0\.36\.0-x86_64-unknown-linux-gnu\.tar\.gz/slot-0.36.0-x86_64-unknown-linux-musl.tar.gz/' "$W/stubbin/curl" >"$W/stubbin-musl/curl"
+chmod 755 "$W/stubbin-musl/curl"
+: >"$W/tar.log"
+NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_ROOT=$RM PATH=$W/stubbin-musl:$W/stubbin:$PATH sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -q 'xzf slot-0.36.0-x86_64-unknown-linux-musl.tar.gz --no-same-owner' "$W/tar.log" && ok "SLOT_TARGET musl: with the SHA256SUMS line of the musl archive, tar is reached with it and takes no owner from it" || bad "musl control: $(grep slot "$W/tar.log") $(grep '^failed: slot' "$W/err")"
+conf
 [ "$(grep -c 'no-same-owner' "$here/provision.sh")" -ge 3 ] && ok "every tar of provision.sh that runs as root has --no-same-owner" || bad "--no-same-owner count: $(grep -c 'no-same-owner' "$here/provision.sh")"
 [ "$(grep -c 'u-s,g-s' "$here/provision.sh")" -ge 3 ] && ok "unpacked trees lose setuid and setgid (static check)" || bad "u-s,g-s count: $(grep -c 'u-s,g-s' "$here/provision.sh")"
 
@@ -3535,6 +3627,7 @@ grep -q 'not installed; a job that needs one is held by name' "$here/README.md" 
 sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'musl' && bad "README still lists musl-gcc as not installed" || ok "README no longer lists musl-gcc as not installed"
 sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'dash' && bad "README still lists dash as not installed" || ok "README no longer lists dash as not installed"
 grep -qx 'GO_ROOT=' "$ex" && [ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "[$GO_ROOT]"' sh "$here" 2>&1)" = '[]' ] && ok "example: GO_ROOT is shown empty, the default" || bad "example GO_ROOT: $(grep GO_ROOT "$ex")"
+grep -qx 'SLOT_TARGET=x86_64-unknown-linux-gnu' "$ex" && [ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "[$SLOT_TARGET]"; grep -v "^SLOT_TARGET=" "$1/node.conf.example" >"$2"; conf_read "$2" BUILD_USER && echo "[$SLOT_TARGET]"' sh "$here" "$W/ex-no-target" 2>&1 | tr '\n' ' ')" = '[x86_64-unknown-linux-gnu] [x86_64-unknown-linux-gnu] ' ] && ok "example: SLOT_TARGET is shown with its default, the archive a node installs without the key" || bad "example SLOT_TARGET: $(grep SLOT_TARGET "$ex")"
 
 # 6y. The gate's step for the shell tests (contrib/shell-tests.sh): under dash where dash is on
 # PATH, else under sh; its first line says which; every test runs once; the first failure stops it.
