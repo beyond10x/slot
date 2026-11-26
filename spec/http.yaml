@@ -1,9 +1,21 @@
 type: ess-http/1
-specification: {system: slot, version: v1, source_digest: "sha256:76c1e24593b61ddca0c08bc9f6c15bb0f313e249da74f90f3bfce54ab9671cc8"}
+specification: {system: slot, version: v1, source_digest: "sha256:8bf3d6aaf5c049090917a5549baad1cbe4c9246b10aa5c18fec505ba7fcc8099"}
 servers:
   slot-daemon:
     - {url: /, description: The daemon's own port on the local machine}
 routes:
+  - view: slot.pool.Jobs
+    operation_id: listJobs
+    method: get
+    path: /api/jobs
+    body: array
+  - view: slot.pool.JobDetail
+    operation_id: getJob
+    method: get
+    path: /api/jobs/{id}
+    parameters: {id: param.id}
+    body: single
+    empty: {status: 404}
   - view: slot.cluster.ClusterStatus
     operation_id: clusterStatus
     method: get

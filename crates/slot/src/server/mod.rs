@@ -4839,6 +4839,50 @@ impl Server {
         });
     }
 
+    /// The running and queued jobs, as `GET /api/state` sends them in
+    /// `active`: a queued job carries its marks in the queue.
+    fn active_jobs(g: &Inner) -> Vec<Job> {
+        g.active.values().map(Self::shown).collect()
+    }
+
+    /// A running or queued job as the views show it.
+    fn shown(l: &Live) -> Job {
+        let mut j = l.job.clone();
+        if j.state == JobState::Queued {
+            (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
+        }
+        on_local_node(j)
+    }
+
+    /// The `GET /api/jobs` list (view `slot.pool.Jobs` of `spec/`): every
+    /// job of `GET /api/state`, the running and queued ones first as
+    /// `active` lists them, then the ended ones newest first. The jobs of
+    /// the remote nodes are among them, as in `GET /api/state`.
+    pub fn jobs(&self) -> Vec<Job> {
+        let st = self.state();
+        let mut jobs = st.active;
+        jobs.extend(st.done.into_iter().rev());
+        jobs
+    }
+
+    /// The `GET /api/jobs/{id}` answer (view `slot.pool.JobDetail`): the
+    /// job of that id, as `jobs` lists it, or none. A node numbers its own
+    /// jobs: when the local pool and a node both hold the id, the local
+    /// job is the answer.
+    pub fn job(&self, id: i64) -> Option<Job> {
+        let local = {
+            let g = self.inner.lock().expect("server lock");
+            g.active.get(&id).map(Self::shown).or_else(|| {
+                g.done
+                    .iter()
+                    .rev()
+                    .find(|d| d.job.id == id)
+                    .map(|d| on_local_node(d.job.clone()))
+            })
+        };
+        local.or_else(|| self.jobs().into_iter().find(|j| j.id == id))
+    }
+
     /// The `GET /api/state` snapshot of the local pool.
     fn local_state(&self) -> State {
         let g = self.inner.lock().expect("server lock");
@@ -4877,17 +4921,7 @@ impl Server {
             shares: (self.shares_on() && g.share_view.admission == crate::shares::Mode::Shares)
                 .then_some(g.share_view),
             free: self.pool.free() as u32,
-            active: g
-                .active
-                .values()
-                .map(|l| {
-                    let mut j = l.job.clone();
-                    if j.state == JobState::Queued {
-                        (j.collected, j.ahead, j.queue_class) = Self::queue_marks(l);
-                    }
-                    on_local_node(j)
-                })
-                .collect(),
+            active: Self::active_jobs(&g),
             done: g
                 .done
                 .iter()

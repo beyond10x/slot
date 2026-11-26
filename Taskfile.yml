@@ -49,9 +49,10 @@ tasks:
       - for f in ui-host-census ui-job-output ui-queue-live-units; do pngquant --quality=70-90 --force --output ../website/static/img/$f.png ../target/hero/$f.png; done
 
   generate:
-    desc: Regenerate the CLI reference and the UI types.
+    desc: Regenerate the CLI reference, the UI types and the UI pages of the UI spec.
     cmds:
       - cargo run --locked -q -p b10x-slot-docs -- cli-reference
+      - cargo run --locked -q -p b10x-slot-docs -- ui-pages
       - cargo run --locked -q -p b10x-slot-docs -- ts-types
 
   check:
@@ -66,11 +67,21 @@ tasks:
       - task: ui-ux
       - task: site
       - task: site-ux
+      - task: ui-spec-check
       - cargo fmt --all -- --check
       - cargo clippy --workspace --all-targets --locked -- -D warnings
       - cargo test --workspace --locked
       - cargo run --locked -q -p b10x-slot-docs -- cli-reference --check
       - cargo run --locked -q -p b10x-slot-docs -- ts-types --check
+      - cargo run --locked -q -p b10x-slot-docs -- ui-pages --check
+
+  ui-spec-check:
+    desc: Validate the ESS spec and its HTTP binding, and check the UI spec (spec/ui/slot.ui.yaml) against both and against the host components it declares.
+    dir: spec
+    cmds:
+      - ess specify validate --path .
+      - ess specify http validate --path . --binding http.yaml
+      - ess ui check --path ui/slot.ui.yaml --model . --hosts ui/slot.hosts
 
   install:
     desc: Build the UI and install slot into ~/.local/bin.

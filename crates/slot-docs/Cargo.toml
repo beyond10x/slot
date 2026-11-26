@@ -1,6 +1,6 @@
 [package]
 name = "b10x-slot-docs"
-description = "Generates slot's derived artifacts: CLI reference, UI types and documentation-site provenance"
+description = "Generates slot's derived artifacts: CLI reference, UI types, the UI pages of the UI spec and documentation-site provenance"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,8 +17,13 @@ path = "src/main.rs"
 anyhow.workspace = true
 b10x-slot.workspace = true
 clap.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng.workspace = true
 ts-rs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

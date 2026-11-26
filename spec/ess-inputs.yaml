@@ -1,8 +1,10 @@
-format: ess-inputs/1
+format: ess-inputs/2
+requires: ess 0.98.0
 specification:
   - system.yaml
   - components.yaml
   - domains/cluster.yaml
   - domains/hostconfig.yaml
   - domains/provisioning.yaml
+  - domains/pool.yaml
 scenarios: []

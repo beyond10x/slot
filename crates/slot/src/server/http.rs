@@ -35,6 +35,8 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
         .route("/api/state", get(state))
         .route("/api/nodes", get(nodes))
         .route("/api/events", get(events))
+        .route("/api/jobs", get(jobs))
+        .route("/api/jobs/{id}", get(job))
         .route("/api/jobs/{id}/output", get(output))
         .route("/api/jobs/{id}/output-tail", get(output_tail))
         .route("/metrics", get(metrics))
@@ -65,6 +67,21 @@ pub(super) async fn serve(s: Arc<Server>, addr: SocketAddr) -> Result<()> {
 
 async fn state(State(s): State<Arc<Server>>) -> impl IntoResponse {
     axum::Json(s.state())
+}
+
+/// `GET /api/jobs`: route `listJobs` of `spec/http.yaml`, the rows as a bare
+/// array.
+pub(super) async fn jobs(State(s): State<Arc<Server>>) -> impl IntoResponse {
+    axum::Json(s.jobs())
+}
+
+/// `GET /api/jobs/{id}`: route `getJob` of `spec/http.yaml`, the one job,
+/// or 404 with no body when the daemon holds none of that id.
+pub(super) async fn job(State(s): State<Arc<Server>>, Path(id): Path<i64>) -> Response {
+    match s.job(id) {
+        Some(j) => axum::Json(j).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// `GET /api/nodes`: every machine jobs run on.
