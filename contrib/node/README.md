@@ -11,6 +11,7 @@ is copied from the workstation to a node ahead of jobs.
 |---|---|---|
 | `provision.sh` | on the node, as root | storage, packages, build user, units, keys, slot release, rustup and rust toolchains, pinned tools and archives (go, node); `check` and `apply` |
 | `push.sh` | on the workstation, as the build user | `check`: compares the workstation's rust, go and node versions and the pinned tools' releases with the node's; copies nothing |
+| `role.sh` | where the node's owner has the AWS CLI | the node's own IAM role and instance profile, and the instance's metadata options; `plan`, `check` and `apply` |
 | `conf.sh` | sourced by both | reads the config file |
 | `toolchains.sh` | on both sides | one line per rust toolchain, the go and node versions and the version of each C tool of the machine it runs on |
 | `test.sh` | in `task check` | tests of `provision.sh`, `push.sh` and `toolchains.sh` under a temporary root |
@@ -31,7 +32,9 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `GO_PRIVATE` | provision | `GOPRIVATE` and `GONOSUMDB` of jobs |
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
 | `MIN_FREE_DISK`, `SCCACHE_GB`, `TMP_GB` | provision | disk floor, compile cache size, job tmp size (GB) |
-| `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages |
+| `DOCKER_GB` | provision | what docker may store on the root disk before the prune timer removes what no job uses (GB, default 10, at least 1) |
+| `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
+| `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
@@ -42,16 +45,20 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 
 The instance store is empty after every stop and start; the root volume keeps the rest.
 
-1. Launch the image: Amazon Linux 2023 on an instance type with instance storage.
+1. Launch the image: Amazon Linux 2023 on an instance type with instance storage. Where the AWS
+   CLI has an identity that may write IAM: `role.sh apply NAME INSTANCE` gives the instance a
+   role of its own (The node's role, below). Under another role the build user gets no docker.
 2. As root: `provision.sh apply CONF`. It installs the packages, the build user, the units, the
    slot release, rustup (release 1.29.3, checked against its SHA-256) with every toolchain of
    `RUST_TOOLCHAINS`, and the pinned tools, and starts `sccache-node` and `slot-node`. On a node
    that ran it before, `slot-storage.service` has already rebuilt the array, the job tmp
    filesystem and the binds at boot, and `apply` installs again what lived on the instance store.
-3. `provision.sh check CONF` (root) and `push.sh check CONF` (workstation) both print `0 drift`.
+3. `provision.sh check CONF --canary` (root; outside EC2 without `--canary`) and `push.sh check
+   CONF` (workstation) both print `0 drift`.
 
 A root channel that takes one script, such as SSM Run Command, gets it from
-`provision.sh bundle CONF apply` (or `check`): one script with the config inside.
+`provision.sh bundle CONF apply` (or `check`, or `check --canary`): one script with the config
+inside.
 
 `apply --open` also lets `SETUP_KEY` into `authorized_keys`. Removing the setup key does not end
 an ssh connection that is already logged in, and a control connection (`ControlMaster`,
@@ -87,6 +94,81 @@ CPUs. The node's slots follow the CPUs found, so the config file does not change
    provider's price list, and `systemctl --user reload slot`.
 9. Schedule the poweroff at the lease end again, if the node has one: logind `ScheduleShutdown`
    with `poweroff` and the time in microseconds, which is the call `shutdown -P` makes.
+
+## The node's role
+
+The metadata service gives the credentials of the instance's role to root on the node, and a job
+that may use docker can be root there (a container on the host network). So a node has a role of
+its own that is worth nothing to a job, and jobs get docker only under it.
+
+`role.sh` makes it, where the AWS CLI has an identity that may write IAM and change an instance.
+Nothing of it runs on the node, and `provision.sh` calls no AWS API.
+
+| command | does |
+|---|---|
+| `role.sh policy`, `role.sh trust` | print the policy document and the role's trust document |
+| `role.sh plan NAME INSTANCE` | prints the `aws` commands of a first setup and calls nothing |
+| `role.sh check NAME INSTANCE` | reads the account: one `drift: role:` line per difference, exit 1 |
+| `role.sh apply NAME INSTANCE` | makes what `check` names, then checks again; two differences it names and leaves (below) |
+
+`NAME` is the config's `NODE_NAME`, `INSTANCE` the instance id. What `apply` leaves:
+
+- The customer-managed policy `slot-node-agent`, shared by every node: 11 actions with which the
+  Systems Manager agent stays a managed node and takes Run Command and Session Manager.
+  `ssm:UpdateInstanceInformation` is its heartbeat. The four `ssmmessages:*Channel` actions carry
+  commands and sessions (agent release 3.3.40 and later). The six `ec2messages` actions carry
+  them for an older agent.
+- The role and the instance profile `slot-node-<NAME>`, with that one policy. A second attached
+  policy comes off after the node's policy is on. An inline policy of the role and another role
+  in the profile stay: `apply` prints a `failed: role:` line with the command and exits 1.
+- The instance uses that profile. Credentials the former role gave out stay valid until they
+  expire; the agent takes the new role at its next refresh or at
+  `systemctl restart amazon-ssm-agent`.
+- The instance's metadata service wants a token and answers over one hop (`HttpTokens=required`,
+  hop limit 1).
+
+Left out of what the managed policy `AmazonSSMManagedInstanceCore` allows: `ssm:GetParameter`
+and `ssm:GetParameters` (they read every parameter of the account), `ssm:GetDocument` and
+`ssm:DescribeDocument`, and the State Manager, inventory, patch and distributor actions. A node
+has no association; the agent logs a refused `ListInstanceAssociations`.
+
+Not in the policy either: `kms:Decrypt` for Session Manager sessions encrypted with a KMS key,
+and the S3 and CloudWatch Logs writes for session logs or Run Command output sent there. An
+account whose Session Manager preferences set those adds them to the document in `role.sh`.
+
+Who holds the role's credentials can act as this instance's agent until they expire: read the
+commands sent to it and answer them. A job with docker is root on the node and can do that
+without them.
+
+On the node, `provision.sh` asks the metadata service three things: which instance profile the
+instance has, which role it gives out, and what it does with a request that carries no token.
+
+- The build user gets group `docker` when the profile is `slot-node-<NODE_NAME>` and gives out
+  the role of that name, or when the instance has no profile; and the service refuses a request
+  without a token (status 401 or 403).
+- `INSTANCE_PROFILE=<name>` names another profile as the node's own. That is the owner's word:
+  the role in it is not compared, and nothing on the node reads what the role allows.
+- `INSTANCE_PROFILE=none` is for a machine outside EC2 (its DMI system vendor is not
+  `Amazon EC2`): the metadata service is not asked. On an EC2 instance it accepts no profile.
+- Anything else is `drift: role: ...` in `check`; `apply` prints `failed: role: ...`, exits 1
+  and adds no group: another profile, another role in the node's profile, a service that
+  answers without a token, and every question left without an answer. Every other part of the
+  node is made all the same.
+- `apply` does not take the group away from a build user that has it. The failed line says so
+  and names the command. A `slot-node` that started before the group is not restarted for it
+  while the role part fails.
+
+What the node cannot see: a second policy attached to the role `slot-node-<NAME>`. `role.sh
+check` reads that, where the owner's identity is.
+
+`provision.sh check CONF --canary` also runs `role-canary.sh` (installed under
+`/usr/local/libexec/slot-node/`): one container as root on the host network, from the curl
+project's image named by digest, takes the role's credentials from the metadata service and
+asks Systems Manager for a parameter. A refusal (`AccessDenied`) is the line `canary: ok: ...`,
+and so is an instance without a role. An allowed call, a container that does not run and a run
+that could test nothing (no token, no credentials, no running docker) are
+`drift: role: canary: ...`. The first run pulls the image. A refusal is about that one call:
+a role that reads parameters under one path only, or reads another service, passes it.
 
 ## What check compares
 
@@ -125,6 +207,39 @@ firewall back before it installs a key, rustup, a pinned tool or anything else t
 runs. A start that does not close it is a `failed: imds:` line, and those parts wait for the next
 `apply`. Commands that run as the build user get a clean environment (`HOME`, the units' `PATH`,
 `LANG`, the rust homes for rustup) and, where `setpriv` can, a session of their own.
+
+docker is there for the jobs that start containers (a consumer's OCI lane): the distribution's
+`docker` package (a base package), `docker.service` enabled and started, and the build user in
+group `docker`. `slot-node.service` gets the group when it starts, so on a node that ran before
+it restarts when no job runs (`pending: running: ... started before <user> was in group docker`
+until then).
+
+A container's packets to the metadata service are forwarded and pass the rule of
+`slot-imds-root-only.service`. `slot-imds-containers.service` rejects them in the `DOCKER-USER`
+chain, a drop-in makes `docker.service` require that unit, and `check` reads the rules back from
+the firewall. What this does not close:
+
+- A member of group `docker` is root on the node: a privileged container, a host-network
+  container, an ipvlan or macvlan network.
+- dockerd fetches as root on the host: `ADD http://169.254.169.254/...` in a Dockerfile and
+  `docker import <url>` pass both rules.
+
+So the instance requires IMDSv2 (a plain GET gets no credential), and its role carries nothing a
+job may not use: The node's role, above.
+
+docker stores on the root disk (`/var/lib/docker`). `slot-docker-prune.timer` runs
+`docker-prune.sh` every 10 minutes:
+
+- With no job in the pool, running or queued, it removes every container, running ones too: a
+  job that ended left it. Nothing else on the node may keep a container.
+- While docker holds more than `DOCKER_GB`: containers that do not run and were created over an
+  hour ago, and the unused build cache. With no job in the pool also every image and every volume
+  no container uses.
+- While the pool has a job, images and volumes stay, also one a job pulled, built or loaded and
+  has not started yet. docker may then hold more than the cap; the unit fails with one line that
+  says how much. The cap is checked every 10 minutes and is not a quota.
+
+The node holds no registry credential, so a job pulls public images only.
 
 A running unit follows its file. When `apply` rewrites `sccache-node.service` it restarts that
 unit; `slot-node.service` restarts when its file, its `slot serve` arguments or the slot binary
@@ -167,7 +282,18 @@ requires another release it runs that release, which it downloads itself (SHA-25
 the build user's `~/.cache/ess/toolchains`, so a node job needs `github.com` over https and a
 writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin (the tarball names
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
-`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
+`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset, and one for `pnpm`.
+
+`helm` v3.8.1 is an archive pin too: the static binary of `get.helm.sh`, the release the
+workstation runs, linked as `/usr/local/bin/helm` (a consumer's chart check runs `helm lint` and
+`helm template`). helm has no `--version`, so `check` and the `tool helm` line of `toolchains.sh`
+read `helm version --template {{.Version}}`. Run with the prefix `""` (the workstation and the node
+both), `toolchains.sh` reads the helm its PATH names first, the one a job started there runs, before
+`/usr/local/bin`, `/usr/bin` and `~/.local/bin`: a workstation can have a second helm of another
+release in `/usr/bin`. A helm that a relative PATH entry names is read by its absolute path. This is the one `tool` line that
+depends on the caller's PATH: run `push.sh check` from a shell with the PATH a job gets, or the
+line names the other helm. The `pnpm` line needs `node` 22.13 or later on the caller's PATH;
+without it the line reads `tool pnpm missing`.
 
 `aep` 0.80.0 on the PATH of a job is built on the node (the release binary is installed too, for
 runbook's driver cache path only, see below: it wants glibc 2.39 and the node has 2.34). A
@@ -224,10 +350,21 @@ loads (`nss`, `atk`, `at-spi2-atk`, `mesa-libgbm`, `libxkbcommon`, `gtk3`) come 
 `EXTRA_PACKAGES`; `unzip` is a base package. A new Playwright version is a new line: the revision
 is in the `browsers.json` of `playwright-core`, the version in its `browserVersion`.
 
+The same list holds Groovy 2.4.10, the binary distribution of Maven Central, at the path sdkman
+uses (`~/.sdkman/candidates/groovy/2.4.10`): a consumer's tasks read
+`embeddable/groovy-all-2.4.10.jar` and `bin/groovyc` there unless `GROOVY_HOME` names another
+directory. Its line has the strip field `zip1` (a zip with one top directory, which is stripped;
+an archive with anything else at the top is refused) and a check that ends in `.jar`: the file
+exists and is no symbolic link. `toolchains.sh` prints
+`tool groovy-all-<version> <16 hex digits of the jar's SHA-256>` for each version directory under
+that path that has the jar, so `push.sh check` reports a workstation without that candidate, or
+with another 2.4 release, as drift. The JDK comes from `EXTRA_PACKAGES`.
+
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),
 the `go` line (`go go1.27.1`: the bare version, so the workstation's `go1.27.1-X:nodwarf5` and
-the node's `go1.27.1` are equal) and the `node` line (`node v22.23.3`), and the release of each pinned tool on the node
+the node's `go1.27.1` are equal), the `node` line (`node v22.23.3`) and the `tool` lines (both
+ways: a tool one side has and the other lacks is drift), and the release of each pinned tool on the node
 (`pin <name> <version>`; another release or a missing one is drift). The C tools of
 `toolchains.sh` (`c <tool> <version>`) are printed but not compared: the workstation and the node
 are different distributions. `push.sh check` prints one line saying that nothing is copied.

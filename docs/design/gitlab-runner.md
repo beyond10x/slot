@@ -284,7 +284,8 @@ Ultimate and the job router leaves experiment.
 
 ## 10. Not covered
 
-- Docker-in-CI (`image:`, `services:`): the node runs no container daemon; a CI job that names an
+- Docker-in-CI (`image:`, `services:`): the runner starts no job in a container (a node that
+  `contrib/node` provisions has docker for what a job starts itself); a CI job that names an
   image fails in `config` with one line. Projects whose jobs need an image stay on the shared
   runners.
 - Windows and macOS jobs.

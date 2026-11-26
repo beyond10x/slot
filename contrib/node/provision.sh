@@ -2,13 +2,16 @@
 # provision.sh: brings a build node (Amazon Linux 2023 with NVMe instance storage) to the state a
 # slot node needs, and reports where a node differs from it. Runs as root on the node.
 #
-#   provision.sh check CONF           print one `drift: <part>: <what>` line per difference,
-#                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise
+#   provision.sh check CONF [--canary]
+#                                     print one `drift: <part>: <what>` line per difference,
+#                                     then `<n> drift`; exit 0 with 0 drift, 1 otherwise.
+#                                     --canary also starts one container that tries the node's
+#                                     role (role-canary.sh); an allowed call is drift
 #   provision.sh apply CONF [--open]  change every part that drifts, print `changed: ...` per
 #                                     change; --open also lets SETUP_KEY in (a setup login)
 #   provision.sh storage CONF         the boot step of slot-storage.service: instance store
 #                                     array, its mount, the job tmp filesystem and the binds
-#   provision.sh bundle CONF MODE [--open]
+#   provision.sh bundle CONF MODE [--open | --canary]
 #                                     print one self-contained script (this script, conf.sh,
 #                                     toolchains.sh and CONF) that runs MODE, for a root channel
 #                                     that takes one script, such as SSM Run Command
@@ -36,12 +39,18 @@ S=$R/.state
 mode=${1:-}
 cf=${2:-}
 open=
-case ${3:-} in --open) open=1 ;; esac
-
+canary=
 usage() {
-  sed -n '2,17p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,20p' "$here/provision.sh" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
+# An option a mode does not know is refused: a misspelled --canary would be a check without it.
+case $mode:${3:-} in
+  apply:--open) open=1 ;;
+  check:--canary) canary=1 ;;
+  bundle:* | *:) ;;
+  *) usage ;;
+esac
 
 # Tools the node installs at a pinned release into the store's cargo bin, the release its
 # consumers' CI installs: a node job then runs the release its CI runs. One line each: name,
@@ -71,14 +80,18 @@ cargo-about 0.9.1 c0e7dc6f5d74b0beec5c0053d39ab24514c717d19acd91886907a22457ea9e
 # (esbuild's is the native binary of its linux-x64 package), the releases the test lanes of the
 # consumers read (`tsc`, `prettier` and `esbuild` on PATH). pnpm is the npm tarball of the release
 # the workstation runs (its dist/ is bundled; it needs node 22.13 or later). yq is the Go one of mikefarah at the
-# release the workstation runs; its tarball names the binary yq_linux_amd64.
+# release the workstation runs; its tarball names the binary yq_linux_amd64. helm is the static
+# binary of get.helm.sh at the release the workstation runs (its SHA-256 is the one that site
+# publishes beside the archive); it has no `--version`, so its check reads
+# `helm version --template {{.Version}}`.
 ARCHIVE_PINS='go 1.27.1 63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445 https://go.dev/dl/go1.27.1.linux-amd64.tar.gz 1 bin/go bin/gofmt
 node v22.23.3 1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.gz 1 bin/node bin/npm bin/npx bin/corepack
 typescript 6.0.3 33cd0ee1beaa8c9e9d15a9da836c62ddea4c34a42d7c2d349dbc80d94165d22a https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz 1 bin/tsc bin/tsserver
 prettier 3.8.1 5531dc6006ad06b642d5342438909f85dc53e87c50556753c908229b213fb4f4 https://registry.npmjs.org/prettier/-/prettier-3.8.1.tgz 1 bin/prettier.cjs:prettier
 esbuild 0.28.2 9573bb2233aab0f9ea7647d5cca9726113cc1768de61d66b17267f4db84488f6 https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz 1 bin/esbuild
 pnpm 11.9.0 2b567aa66026238078ac2e0a33bec3febd60e962987aac697456f3180819b287 https://registry.npmjs.org/pnpm/-/pnpm-11.9.0.tgz 1 bin/pnpm.mjs:pnpm bin/pnpx.mjs:pnpx
-yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq'
+yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq
+helm v3.8.1 d643f48fe28eeb47ff68a1a7a26fc5142f348d02c8bc38d699674016716f61cd https://get.helm.sh/helm-v3.8.1-linux-amd64.tar.gz 1 helm'
 RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
@@ -108,7 +121,12 @@ SOURCE_PINS='aep 0.80.0 https://github.com/beyond10x/aep af11af152de1732383a5ede
 # `binary_sha256` (17cf105e...), which the driver compares. The release binary asks for
 # GLIBC_2.39 (two weak symbols, pidfd_spawnp and pidfd_getpid); on a node with glibc 2.34 the loader
 # prints one warning on stderr and `--version` still answers `aep 0.80.0`, which is all the driver
-# reads.
+# reads. The groovy line is the Groovy 2.4.10 binary distribution of Maven Central (the SHA-256 is
+# the one a consumer's CI script pins) at the path sdkman uses, which a consumer's tasks read as
+# `${GROOVY_HOME:-~/.sdkman/candidates/groovy/2.4.10}` for `embeddable/groovy-all-2.4.10.jar` and
+# `bin/groovyc`. Its strip field is `zip1`: a zip with one top directory, which is stripped. Its
+# check is a path ending in `.jar`: the file exists and is no symbolic link (a jar prints no
+# version; the marker file ties the tree to the archive).
 HOME_PINS='ess 0.97.4 235ad6a993c3e81369e3b5439a4ef8d6e2b82df66ad8e4a22809e00557297938 https://github.com/beyond10x/ess/releases/download/0.97.4/ess-0.97.4-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.97.4 ess
 ess 0.98.0 c6c9a3a3d6956ce1a237f0340905dfadc431d31b1a15b104a6d2e64bb5acaa8e https://github.com/beyond10x/ess/releases/download/0.98.0/ess-0.98.0-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.98.0 ess
 ess 0.99.1 f69916ede161ef991fc96895ee2cc18f7e24cabac7e1de88f4bb85440fa6991d https://github.com/beyond10x/ess/releases/download/0.99.1/ess-0.99.1-x86_64-unknown-linux-gnu.tar.gz 1 .local/share/ess-versions/0.99.1 ess
@@ -117,7 +135,8 @@ ess 0.99.4 3902d0f8a6dffe5255bd0a9c8f56608fabf52faf14b97d90b6e7f7ed3da7032d http
 undici-types 8.3.0 07a721cb2cd0dd798c24757de34d14e8b640ff8fddef85d662e00b392562a1f2 https://registry.npmjs.org/undici-types/-/undici-types-8.3.0.tgz 1 .local/share/ess-node/node_modules/undici-types package.json
 chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb53b0fde4bdfc4bd075d6 https://cdn.playwright.dev/builds/cft/158.0.8127.18/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1254 chrome-headless-shell-linux64/chrome-headless-shell
 chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell
-aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep'
+aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep
+groovy 2.4.10 1c4dff3b6edf9a8ced3bca658ee1857cee90cfed1ee3474a2790045033c317a9 https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-binary/2.4.10/groovy-binary-2.4.10.zip zip1 .sdkman/candidates/groovy/2.4.10 embeddable/groovy-all-2.4.10.jar'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -128,20 +147,20 @@ if [ "$mode" = pins ]; then
 fi
 [ -n "$mode" ] && [ -n "$cf" ] || usage
 
-BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan unzip'
+BASE_PACKAGES='mdadm xfsprogs e2fsprogs rsync gcc gcc-c++ make clang lld pkgconf-pkg-config openssl-devel git tar gzip cmake protobuf-compiler perl iptables-nft chrony zstd python3 glibc-static bubblewrap socat libubsan unzip docker'
 SSHD_LINES='MaxSessions 200
 MaxStartups 100:30:200
 ClientAliveInterval 15
 ClientAliveCountMax 3'
-UNITS='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-toolchains-manifest.service slot-toolchains-manifest.timer'
-ENABLED='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-toolchains-manifest.timer'
+UNITS='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-imds-containers.service slot-docker-prune.service slot-docker-prune.timer slot-toolchains-manifest.service slot-toolchains-manifest.timer'
+ENABLED='slot-storage.service slot-node.service sccache-node.service slot-imds-root-only.service slot-imds-containers.service docker.service slot-docker-prune.timer slot-toolchains-manifest.timer'
 LIBEXEC=/usr/local/libexec
 
 if [ "$mode" = bundle ]; then
   conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
   m=${3:-}
-  case $m in check | apply) ;; *) usage ;; esac
   o=${4:-}
+  case $m:$o in check: | apply: | apply:--open | check:--canary) ;; *) usage ;; esac
   b=$(mktemp -d "${TMPDIR:-/tmp}/slot-node-bundle.XXXXXX") || exit 1
   cp "$here/provision.sh" "$here/conf.sh" "$here/toolchains.sh" "$b/" && cp "$cf" "$b/node.conf" || exit 1
   blob=$(cd "$b" && tar -czf - provision.sh conf.sh toolchains.sh node.conf | base64 -w0)
@@ -159,6 +178,14 @@ fi
 conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
 H=$BUILD_HOME
 U=$BUILD_USER
+# The instance profile of this node: INSTANCE_PROFILE, else the one role.sh makes for NODE_NAME.
+WANT_PROFILE=$INSTANCE_PROFILE
+if [ -z "$WANT_PROFILE" ]; then
+  case $NODE_NAME in
+    *[!A-Za-z0-9_.-]*) ;;
+    *) WANT_PROFILE=slot-node-$NODE_NAME ;;
+  esac
+fi
 
 ndrift=0
 nchanged=0
@@ -199,6 +226,100 @@ q_user() {
     awk -F: -v u="$1" '$1 == u { print $3, $6 }' "$S/passwd" 2>/dev/null
   else
     getent passwd "$1" | awk -F: '{ print $3, $6 }'
+  fi
+}
+# The groups that list user $1 as a member, names on one line: what a process of a service gets
+# beside the group of its unit. The user's own group is not among them.
+q_groups() {
+  if [ -n "$T" ]; then
+    awk -F: -v u="$1" '$1 == u { print $2 }' "$S/groups" 2>/dev/null | tr '\n' ' '
+  else
+    getent group | awk -F: -v u="$1" '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == u) print $1 }' | tr '\n' ' '
+  fi
+}
+# The rules of slot-imds-containers.service are in the firewall.
+q_imds_containers() {
+  if [ -n "$T" ]; then
+    [ -f "$S/imds-containers" ]
+  else
+    iptables -w -C DOCKER-USER -d 169.254.169.254/32 -j REJECT 2>/dev/null &&
+      ip6tables -w -C DOCKER-USER -d fd00:ec2::254/128 -j REJECT 2>/dev/null
+  fi
+}
+# The instance profile the metadata service names: its name, `none` when the instance has none,
+# nothing when the service gives no answer. Asked as root, which the rule of
+# slot-imds-root-only.service lets through.
+#
+# The four below read the metadata service; under NODE_TEST its answers are files: iam-info (the
+# body) with iam-info-code, instance-role, imds-v1-code, not-ec2. No file is an instance without
+# a profile whose service refuses a request without a token.
+#
+# (none) cannot be the name of a profile: a name has no parenthesis.
+iam_info_profile() {
+  case $1 in
+    200) sed -n 's/.*"InstanceProfileArn"[^"]*"[^"]*\/\([^"/]*\)".*/\1/p' "$2" 2>/dev/null | head -n 1 ;;
+    404) echo '(none)' ;;
+  esac
+}
+q_instance_profile() {
+  if [ -n "$T" ]; then
+    if [ -f "$S/iam-info" ]; then
+      iam_info_profile "$(cat "$S/iam-info-code" 2>/dev/null || echo 200)" "$S/iam-info"
+    else
+      iam_info_profile "$(cat "$S/iam-info-code" 2>/dev/null || echo 404)" /dev/null
+    fi
+  else
+    qi_t=$(curl -sf -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null) || return 0
+    qi_f=$(mktemp) || return 0
+    qi_c=$(curl -s -m 3 -o "$qi_f" -w '%{http_code}' -H "X-aws-ec2-metadata-token: $qi_t" http://169.254.169.254/latest/meta-data/iam/info 2>/dev/null)
+    iam_info_profile "$qi_c" "$qi_f"
+    rm -f "$qi_f"
+  fi
+}
+# The role whose credentials the metadata service gives out; nothing when it names none.
+q_instance_role() {
+  if [ -n "$T" ]; then
+    cat "$S/instance-role" 2>/dev/null
+  else
+    qr_t=$(curl -sf -m 3 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null) || return 0
+    curl -sf -m 3 -H "X-aws-ec2-metadata-token: $qr_t" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>/dev/null | head -n 1
+  fi
+}
+# What the metadata service does with a request that carries no token: `on` when it answers
+# (IMDSv1), `off` when it refuses (401 with tokens required, 403 with the service off), nothing
+# when neither is known (no answer, another status).
+imds_v1_state() {
+  case $1 in
+    200) echo on ;;
+    401 | 403) echo off ;;
+  esac
+}
+q_imds_v1() {
+  if [ -n "$T" ]; then
+    imds_v1_state "$(cat "$S/imds-v1-code" 2>/dev/null || echo 401)"
+  else
+    imds_v1_state "$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://169.254.169.254/latest/meta-data/ 2>/dev/null)"
+  fi
+}
+# This machine is an EC2 instance.
+q_ec2() {
+  if [ -n "$T" ]; then
+    [ ! -f "$S/not-ec2" ]
+  else
+    grep -q '^Amazon EC2' /sys/class/dmi/id/sys_vendor 2>/dev/null || grep -qi '^ec2' /sys/hypervisor/uuid 2>/dev/null
+  fi
+}
+# The groups the main process of unit $1 started with, names on one line; nothing when the unit
+# has no process.
+q_proc_groups() {
+  if [ -n "$T" ]; then
+    cat "$S/procgroups/$1" 2>/dev/null
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    [ -n "$qm" ] && [ "$qm" != 0 ] || return 0
+    for qg in $(sed -n 's/^Groups:[[:space:]]*//p' "/proc/$qm/status" 2>/dev/null); do
+      getent group "$qg" | cut -d: -f1
+    done | tr '\n' ' '
   fi
 }
 q_enabled() {
@@ -298,7 +419,11 @@ a_enable() {
 a_start() {
   if [ -n "$T" ]; then
     st_touch active "$1"
-    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version"
+    [ "$1" = slot-imds-containers.service ] && : >"$S/imds-containers"
+    # A unit of a package (docker.service) has no file under /etc/systemd/system.
+    [ -f "$R/etc/systemd/system/$1" ] || return 0
+    mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version" "$S/procgroups"
+    q_groups "$U" >"$S/procgroups/$1"
     sed -n 's/^ExecStart=//p' "$R/etc/systemd/system/$1" >"$S/running/$1"
     unit_defs "$1" >"$S/loaded/$1"
     unit_defs "$1" | grep '^Environment=' >"$S/procenv/$1"
@@ -529,6 +654,61 @@ ExecStop=-/usr/sbin/ip6tables -w -X SLOT-IMDS
 WantedBy=multi-user.target
 EOF
       ;;
+    slot-imds-containers.service)
+      # A container's packets to the metadata service are forwarded, so the OUTPUT rule of
+      # slot-imds-root-only.service does not see them. docker runs DOCKER-USER before its own
+      # forward rules and keeps what is in it; docker.service requires this unit (the drop-in of
+      # gen_docker_dropin), so no container starts without the rule. There is no ExecStop: a stop
+      # would take the rule away under containers that still run. The IPv6 rule takes effect only
+      # where dockerd manages ip6tables (it jumps to the IPv6 DOCKER-USER only then); without
+      # that, docker gives a container no routed IPv6 either. p_docker_rule reads the rules back.
+      cat <<'EOF'
+[Unit]
+Description=No container reaches the instance metadata service
+DefaultDependencies=no
+Before=network-pre.target docker.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/usr/sbin/iptables -w -N DOCKER-USER
+ExecStart=/bin/sh -c '/usr/sbin/iptables -w -C DOCKER-USER -d 169.254.169.254/32 -j REJECT 2>/dev/null || /usr/sbin/iptables -w -I DOCKER-USER 1 -d 169.254.169.254/32 -j REJECT'
+ExecStart=-/usr/sbin/ip6tables -w -N DOCKER-USER
+ExecStart=/bin/sh -c '/usr/sbin/ip6tables -w -C DOCKER-USER -d fd00:ec2::254/128 -j REJECT 2>/dev/null || /usr/sbin/ip6tables -w -I DOCKER-USER 1 -d fd00:ec2::254/128 -j REJECT'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+      ;;
+    slot-docker-prune.service)
+      cat <<EOF
+[Unit]
+Description=Keep what docker stores within $DOCKER_GB GB
+After=docker.service
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=300
+ExecStart=/bin/sh $LIBEXEC/slot-node/docker-prune.sh $DOCKER_GB
+EOF
+      ;;
+    slot-docker-prune.timer)
+      cat <<'EOF'
+[Unit]
+Description=Docker prune check every 10 min
+
+[Timer]
+OnBootSec=300
+OnUnitActiveSec=600
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target
+EOF
+      ;;
     slot-toolchains-manifest.service)
       cat <<EOF
 [Unit]
@@ -578,10 +758,174 @@ EOF
 gen_sccache_config() {
   printf '[cache.disk]\ndir = "%s/sccache"\nsize = %s\n' "$STORE" "$((SCCACHE_GB * 1073741824))"
 }
+gen_docker_dropin() {
+  printf '[Unit]\nRequires=slot-imds-containers.service\nAfter=slot-imds-containers.service\n'
+}
+# docker-prune.sh GB: what the timer slot-docker-prune runs as root.
+gen_docker_prune() {
+  cat <<EOF
+#!/bin/sh
+SLOT_USER=$U
+SLOT_UID=$BUILD_UID
+SLOT_BIN=$STORE/bin/slot
+EOF
+  cat <<'EOF'
+# docker-prune.sh GB: no container outlives the jobs, and what docker stores on the root disk
+# (images, containers, volumes and the build cache, under /var/lib/docker and
+# /var/lib/containerd) stays within GB.
+#
+# With no job in the pool (running or queued) every container is removed, running or not: a job
+# that ended left it, and nothing else on the node starts one.
+# Over the cap, at any time: containers that do not run and were created over an hour ago, and
+# the build cache no build uses.
+# Over the cap with no job in the pool: also every image and every volume no container uses.
+# While the pool has a job its images and volumes stay, also one the job pulled, built or loaded
+# and has not started yet. Then, and when slot does not answer, a line on stderr names what is
+# held and the exit status is 1, as it is when a docker call fails.
+cap=$(($1 * 1048576))
+bad=0
+used() { du -skx /var/lib/docker /var/lib/containerd 2>/dev/null | awk '{ s += $1 } END { print s + 0 }'; }
+# Jobs in the pool, running and queued; nothing when slot does not answer.
+pool() {
+  runuser -u "$SLOT_USER" -- env XDG_RUNTIME_DIR="/run/user/$SLOT_UID" "$SLOT_BIN" status 2>/dev/null |
+    head -1 | sed -n 's/.* \([0-9]*\) running, \([0-9]*\) queued.*/\1 \2/p' | awk '{ print $1 + $2 }'
+}
+dk() {
+  docker "$@" >/dev/null && return 0
+  echo "docker $* failed" >&2
+  bad=1
+}
+# The containers are listed before the pool is asked: when the pool then has no job, none of the
+# listed ones belongs to a job that runs.
+left=$(docker ps -aq) || {
+  echo "docker does not answer: nothing is pruned" >&2
+  exit 1
+}
+j=$(pool)
+if [ "$j" = 0 ] && [ -n "$left" ]; then
+  docker rm -fv $left >/dev/null 2>&1
+  now=" $(docker ps -aq | tr '\n' ' ') "
+  n=0
+  for c in $left; do
+    case $now in
+      *" $c "*)
+        echo "container $c could not be removed" >&2
+        bad=1
+        ;;
+      *) n=$((n + 1)) ;;
+    esac
+  done
+  echo "removed containers left by jobs that ended: $n"
+fi
+u=$(used)
+[ "$u" -le "$cap" ] && exit $bad
+dk container prune -f --filter until=1h
+dk builder prune -af
+# Asked again: the calls above take time, and a job that came in between keeps its images.
+if [ "$j" = 0 ] && [ "$(pool)" = 0 ]; then
+  dk image prune -af
+  dk volume prune -af
+else
+  j=${j:-unknown}
+  [ "$j" = 0 ] && j='a new one'
+fi
+u2=$(used)
+echo "docker held $((u / 1024)) MB, cap $1 GB: pruned to $((u2 / 1024)) MB"
+[ "$u2" -le "$cap" ] && exit $bad
+if [ "$j" = 0 ]; then
+  echo "docker holds $((u2 / 1024)) MB with no job in the pool and everything unused removed, cap $1 GB" >&2
+else
+  echo "docker holds $((u2 / 1024)) MB, cap $1 GB: images and volumes stay while the pool has jobs (jobs: $j)" >&2
+fi
+exit 1
+EOF
+}
+# role-canary.sh: run by `check --canary` and by hand.
+gen_role_canary() {
+  cat <<'EOF'
+#!/bin/sh
+# role-canary.sh: what a job can do with the node's role. A member of group docker can start a
+# container as root on the host network, and the metadata service answers root there. This
+# starts that container, takes the role's credentials from the metadata service inside it and
+# asks Systems Manager for a parameter with them.
+#
+# Exit 0 only when Systems Manager refuses the call (AccessDenied), or when the instance has no
+# role and so no credentials to give. Every other answer is exit 1 with one line on stderr: the
+# call was allowed, the container did not run, or nothing could be tested.
+#
+# A refusal says that this one call is not allowed. What else the role allows is read by
+# `role.sh check`, where the owner's identity is.
+#
+# Run as root or as a member of group docker. The image is the curl project's, named by digest;
+# the first run pulls it, and the run ends after 5 minutes at the latest. The role's credentials
+# reach curl through its standard input, not its arguments, and no line this prints carries
+# them. The token of the metadata session (valid 60 s) is an argument of curl in the container.
+IMAGE=docker.io/curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+out=$(
+  timeout 300 docker run --rm -i --network host --user 0:0 --entrypoint /bin/sh "$IMAGE" -s 2>&1 <<'IN'
+m=http://169.254.169.254/latest
+t=$(curl -sf -m 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "$m/api/token") || {
+  echo 'canary: no-token'
+  exit 0
+}
+g() { curl -s -m 5 -H "X-aws-ec2-metadata-token: $t" "$m/meta-data/$1"; }
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "X-aws-ec2-metadata-token: $t" "$m/meta-data/iam/security-credentials/")
+if [ "$code" = 404 ]; then
+  echo 'canary: no-role'
+  exit 0
+fi
+role=$(g iam/security-credentials/ | head -n 1)
+region=$(g placement/region)
+c=$(g "iam/security-credentials/$role")
+f() { printf '%s\n' "$c" | sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p" | head -n 1; }
+if [ -z "$(f AccessKeyId)" ] || [ -z "$region" ]; then
+  echo "canary: no-credentials $code"
+  exit 0
+fi
+echo "canary: role $role"
+printf 'user = "%s:%s"\nheader = "x-amz-security-token: %s"\n' "$(f AccessKeyId)" "$(f SecretAccessKey)" "$(f Token)" |
+  curl -s -m 20 -K - --aws-sigv4 "aws:amz:$region:ssm" \
+    -H 'Content-Type: application/x-amz-json-1.1' -H 'X-Amz-Target: AmazonSSM.GetParameter' \
+    -d '{"Name":"slot-node-role-canary"}' "https://ssm.$region.amazonaws.com/" |
+  sed -n 's/.*"__type" *: *"\([A-Za-z.#]*\)".*/canary: answer \1/p; t; s/.*"Parameter" *:.*/canary: answer Parameter/p'
+echo
+echo 'canary: end'
+IN
+) || {
+  echo "role canary: the container did not run: $(echo "$out" | tail -n 2 | tr '\n' ' ')" >&2
+  exit 1
+}
+role=$(echo "$out" | sed -n 's/^canary: role //p')
+case $out in
+  *'canary: no-role'*)
+    echo "ok: the instance has no role: the metadata service has no credentials to give"
+    exit 0
+    ;;
+  *'canary: no-token'*)
+    echo "role canary: the metadata service gave the container no token: nothing was tested" >&2
+    exit 1
+    ;;
+  *'canary: no-credentials'*)
+    echo "role canary: the metadata service named no credentials or no region: nothing was tested" >&2
+    exit 1
+    ;;
+  *'canary: answer AccessDeniedException'*)
+    echo "ok: role $role: a root container on the host network got the role's credentials, and Systems Manager refused ssm:GetParameter (AccessDenied). One call: role.sh check reads the role"
+    exit 0
+    ;;
+  *'canary: answer ParameterNotFound'* | *'canary: answer Parameter'*)
+    echo "role canary: role $role may read parameters: Systems Manager allowed ssm:GetParameter to a container" >&2
+    exit 1
+    ;;
+esac
+echo "role canary: role ${role:-unknown}: no answer the canary knows: $(echo "$out" | grep '^canary: answer' | head -n 1 | cut -c1-200)" >&2
+exit 1
+EOF
+}
 gen_no_credentials() {
   cat <<EOF
 #!/bin/sh
-echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs docker or a local service goes in .slot.toml local = [...] of its repository." >&2
+echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs a local service this node does not run goes in .slot.toml local = [...] of its repository." >&2
 exit 255
 EOF
 }
@@ -605,7 +949,7 @@ for a in "\$@"; do
     *) break ;;
   esac
 done
-echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs docker or a local service goes in .slot.toml local = [...] of its repository." >&2
+echo "slot: $NODE_NAME has no credentials (rule: no credential goes to the node). Clone or fetch on the workstation before the job. Use slot --here only for the step that reads a credential while it runs (a clone, a fetch, a push), never for a whole task: the rest of the task builds on the node. A step that needs a local service this node does not run goes in .slot.toml local = [...] of its repository." >&2
 exit 255
 EOF
 }
@@ -942,6 +1286,8 @@ p_files() {
   want_file libexec "$LIBEXEC/slot-toolchains.sh" 755 root:root cat "$here/toolchains.sh"
   want_file libexec "$LIBEXEC/slot-node/provision.sh" 755 root:root cat "$here/provision.sh"
   want_file libexec "$LIBEXEC/slot-node/conf.sh" 644 root:root cat "$here/conf.sh"
+  want_file libexec "$LIBEXEC/slot-node/docker-prune.sh" 755 root:root gen_docker_prune
+  want_file libexec "$LIBEXEC/slot-node/role-canary.sh" 755 root:root gen_role_canary
   want_file libexec /etc/slot-node/node.conf 600 root:root cat "$cf"
 }
 
@@ -953,6 +1299,9 @@ p_units() {
       units_changed="$units_changed $u"
     fi
   done
+  if ! want_file unit:docker.service.d /etc/systemd/system/docker.service.d/slot-imds.conf 644 root:root gen_docker_dropin; then
+    units_changed="$units_changed docker.service.d"
+  fi
   if fixing && [ -n "$units_changed" ]; then a_daemon_reload; fi
   for u in $ENABLED; do
     q_enabled "$u" && continue
@@ -1429,6 +1778,9 @@ archive_fetch() {
       mkdir -p "$fd/tree/$(dirname "$b")" || return 0
       if [ "$fn" = go ]; then
         printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
+      elif [ "$fn" = helm ]; then
+        # Like helm: no `--version`, the version without a newline for `version --template`.
+        printf '#!/bin/sh\n[ "$*" = "version --template {{.Version}}" ] || exit 1\nprintf %%s "%s"\n' "$fv" >"$fd/tree/$b"
       else
         printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
       fi
@@ -1451,7 +1803,11 @@ archive_fetch() {
 }
 # The first line of the version of binary $2 of archive $1, run as the build user.
 archive_version() {
-  if [ "$1" = go ]; then as_user "$2" version; else as_user "$2" --version; fi 2>/dev/null </dev/null | head -n 1
+  case $1 in
+    go) as_user "$2" version ;;
+    helm) as_user "$2" version --template '{{.Version}}' ;;
+    *) as_user "$2" --version ;;
+  esac 2>/dev/null </dev/null | head -n 1
 }
 p_archives() {
   while read -r an av as au ak ab; do
@@ -1608,12 +1964,20 @@ home_fetch() {
     case $hc in
       package.json) printf '{\n  "name": "stub",\n  "version": "%s"\n}\n' "$hv" >"$hd/tree/package.json" ;;
       *chrome-headless-shell) mkdir -p "$hd/tree/${hc%/*}" && printf '#!/bin/sh\necho "Google Chrome for Testing %s"\n' "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
+      *.jar) mkdir -p "$hd/tree/$(dirname "$hc")" && echo stub >"$hd/tree/$hc" ;;
       *) printf '#!/bin/sh\necho "%s %s"\n' "$hc" "$hv" >"$hd/tree/$hc" && chmod 755 "$hd/tree/$hc" ;;
     esac
     calls "fetch $hu"
   elif [ "$hk" = zip ]; then
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && unzip -q archive -d tree) || return 0
+  elif [ "$hk" = zip1 ]; then
+    # A zip with one top directory: that directory becomes the tree. Anything else at the top (no
+    # entry, more than one, a file, a symbolic link) is refused. `ls` prints the name as it is,
+    # whatever QUOTING_STYLE the caller exports.
+    (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir x && unzip -q archive -d x && [ "$(QUOTING_STYLE=literal ls -A x | wc -l)" = 1 ] && top=$(QUOTING_STYLE=literal ls -A x) &&
+      [ -d "x/$top" ] && [ ! -L "x/$top" ] && mv "x/$top" tree) || return 0
   else
     (cd "$hd" && curl -fsSLo archive "$hu" && echo "$hs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xzf archive -C tree --strip-components="$hk" --no-same-owner) || return 0
@@ -1625,9 +1989,10 @@ home_fetch() {
 }
 # What the check of a HOME_PINS line reads in directory $1: `<binary> <version>` for a binary, the
 # `version` of package.json for package.json, the last word of the first line of `--version` for a
-# chrome-headless-shell.
+# chrome-headless-shell, the version $3 for a `.jar` that exists as a regular file.
 home_got() {
   case $2 in
+    *.jar) if [ -f "$R$1/$2" ] && [ ! -L "$R$1/$2" ]; then echo "$3"; fi ;;
     package.json) sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$R$1/package.json" 2>/dev/null | head -n 1 ;;
     *chrome-headless-shell) (cd / && as_user "$R$1/$2" --version 2>/dev/null </dev/null | head -n 1 | awk '{print $NF}') ;;
     *) tool_version "$R$1/$2" ;;
@@ -1637,8 +2002,8 @@ p_home_pins() {
   while read -r hn hv hs hu hk hd hc; do
     [ -n "$hn" ] || continue
     p=$H/$hd
-    case $hc in package.json | *chrome-headless-shell) want=$hv ;; *) want="$hc $hv" ;; esac
-    got=$(home_got "$p" "$hc")
+    case $hc in package.json | *chrome-headless-shell | *.jar) want=$hv ;; *) want="$hc $hv" ;; esac
+    got=$(home_got "$p" "$hc" "$hv")
     mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
     [ "$got" = "$want" ] && [ "$mark" = "$hs" ] && continue
     drift "home:$hn@$hv" "$p is '${got:-missing}', want $want$([ "$got" = "$want" ] && echo " from the archive $hs")"
@@ -1656,7 +2021,7 @@ p_home_pins() {
     if [ -z "$src" ]; then
       failed "home:$hn@$hv" "download or checksum of $hn $hv"
     elif as_user sh -c 'set -e; mkdir -p "$(dirname "$2")"; rm -rf "$2.slot-new" "$2.slot-old"; mkdir "$2.slot-new"; cp -a "$1/." "$2.slot-new/"; printf "%s\n" "$3" >"$2.slot-new/.slot-sha256"; if [ -e "$2" ]; then mv "$2" "$2.slot-old"; fi; mv "$2.slot-new" "$2"; rm -rf "$2.slot-old"' sh "$src" "$R$p" "$hs" </dev/null; then
-      got=$(home_got "$p" "$hc")
+      got=$(home_got "$p" "$hc" "$hv")
       mark=$(cat "$R$p/.slot-sha256" 2>/dev/null)
       if [ "$got" = "$want" ] && [ "$mark" = "$hs" ]; then
         changed "home:$hn@$hv" "$hn $hv installed in $p"
@@ -1735,6 +2100,124 @@ p_imds() {
   fi
 }
 
+# docker for the jobs that start containers (a consumer's OCI lane). The package is one of
+# BASE_PACKAGES, docker.service one of ENABLED, and p_services starts it behind
+# slot-imds-containers.service. Here: the build user is in group docker, which is what lets a job
+# reach the daemon's socket. A member of that group is root on the node (a privileged or
+# host-network container), so the rule that only root reaches the metadata service holds against
+# the build user's own processes and against bridge containers, not against a job that starts
+# such a container. slot-node gets the group when it starts: stale_reason names a process that
+# started before.
+#
+# The metadata service gives the instance role's credentials to root, so a job gets docker only
+# where those are worth nothing to it: the instance profile is the node's own (role.sh makes
+# slot-node-<name>: one policy, the channels of the Systems Manager agent) or the instance has
+# none, and the service wants a token (IMDSv2: a URL fetch of the docker daemon cannot send
+# one). p_role reads both from the metadata service. It calls no AWS API and changes nothing:
+# role.sh does, where the owner's identity is. Until then the build user gets no group docker,
+# and a build user that has it is a failed line.
+role_why=
+p_role() {
+  # A machine outside EC2 has no metadata service to ask.
+  if [ "$WANT_PROFILE" = none ] && ! q_ec2; then return 0; fi
+  pr_p=$(q_instance_profile)
+  case $pr_p in
+    '(none)') ;;
+    '') role_why="the metadata service does not name the instance profile" ;;
+    *)
+      if [ "$WANT_PROFILE" = none ]; then
+        role_why="the instance profile is '$pr_p', and the config says INSTANCE_PROFILE=none"
+      elif [ -z "$WANT_PROFILE" ]; then
+        role_why="the instance profile is '$pr_p' and the config names none (NODE_NAME or INSTANCE_PROFILE)"
+      elif [ "$pr_p" != "$WANT_PROFILE" ]; then
+        role_why="the instance profile is '$pr_p', not $WANT_PROFILE (role.sh apply makes it)"
+      elif [ -z "$INSTANCE_PROFILE" ]; then
+        # role.sh gives the profile a role of the same name. A profile the config names itself
+        # (INSTANCE_PROFILE) is the owner's word: its role is not compared.
+        pr_r=$(q_instance_role)
+        [ "$pr_r" = "$WANT_PROFILE" ] || role_why="the instance profile $WANT_PROFILE gives out the role '${pr_r:-unknown}', not the role of its name (role.sh check names the difference)"
+      fi
+      ;;
+  esac
+  if [ -z "$role_why" ]; then
+    case $(q_imds_v1) in
+      off) ;;
+      on) role_why="the metadata service answers without a token (role.sh apply sets tokens required)" ;;
+      *) role_why="the metadata service neither refused nor answered a request without a token" ;;
+    esac
+  fi
+  [ -n "$role_why" ] || return 0
+  drift role "$role_why"
+  fixing || return 0
+  case " $(q_groups "$U") " in
+    *" docker "*) failed role "$role_why: $U is in group docker, and a container of a job reaches the credentials of this role (gpasswd -d $U docker and a restart of slot-node.service take the group away)" ;;
+    *) failed role "$role_why: $U gets no group docker" ;;
+  esac
+}
+
+# check --canary: one container tries the role (role-canary.sh). An answer other than a refusal
+# is drift.
+p_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  if ! q_active docker.service; then
+    drift role "canary: docker.service is not active: nothing was tested"
+    return 0
+  fi
+  pc_f=$(mktemp) || {
+    drift role "canary: no temporary file: nothing was tested"
+    return 0
+  }
+  gen_role_canary >"$pc_f"
+  if pc_o=$(sh "$pc_f" 2>&1); then
+    echo "canary: $pc_o"
+  else
+    drift role "canary: ${pc_o#role canary: }"
+  fi
+  rm -f "$pc_f"
+}
+
+p_docker() {
+  [ -z "$role_why" ] || return 0
+  case " $(q_groups "$U") " in *" docker "*) return 0 ;; esac
+  drift docker "$U is not in group docker"
+  fixing || return 0
+  if [ -n "$T" ]; then
+    st_add groups "$U:docker"
+  else
+    { getent group docker >/dev/null || groupadd -r docker; } && usermod -aG docker "$U" || {
+      failed docker "usermod -aG docker $U"
+      return 0
+    }
+  fi
+  changed docker "$U added to group docker"
+}
+
+# slot-imds-containers.service stays active after its rules are gone (a flushed chain), so the
+# rules are read from the firewall, like the rule of slot-imds-root-only.service. They are put
+# back here and not by a restart of the unit: docker.service requires it and would restart too,
+# which ends every container.
+p_docker_rule() {
+  q_active slot-imds-containers.service || return 0
+  q_imds_containers && return 0
+  drift docker "slot-imds-containers.service is active and its reject rules are not in DOCKER-USER"
+  fixing || return 0
+  if [ -n "$T" ]; then
+    calls "iptables -w -I DOCKER-USER 1 -d 169.254.169.254/32 -j REJECT"
+    [ -e "$R/.state-imds-containers-stay-open" ] || : >"$S/imds-containers"
+  else
+    for pr in 'iptables 169.254.169.254/32' 'ip6tables fd00:ec2::254/128'; do
+      "${pr% *}" -w -N DOCKER-USER 2>/dev/null
+      "${pr% *}" -w -C DOCKER-USER -d "${pr#* }" -j REJECT 2>/dev/null ||
+        "${pr% *}" -w -I DOCKER-USER 1 -d "${pr#* }" -j REJECT
+    done
+  fi
+  if q_imds_containers; then
+    changed docker "reject rules for the metadata service put back into DOCKER-USER"
+  else
+    failed docker "the reject rules for the metadata service are not in DOCKER-USER"
+  fi
+}
+
 # Why the running process of $1 is not what its unit file and the config say; nothing when it is.
 stale_reason() {
   sr_want=$(unit_defs "$1")
@@ -1760,16 +2243,37 @@ stale_reason() {
       echo "it runs '$sr_v', the config says slot $SLOT_VERSION"
       return 0
     fi
+    # A job is a child of this process and has its groups. Under a role that is not the node's
+    # own (p_role) a restart for the group would hand docker to the jobs: it waits.
+    sr_g=$(q_proc_groups "$1")
+    [ -z "$role_why" ] || sr_g=docker
+    case " $(echo $sr_g) " in
+      "  " | *" docker "*) ;;
+      *)
+        case " $(q_groups "$U") " in
+          *" docker "*)
+            echo "the process started before $U was in group docker"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
   fi
   return 0
 }
 
 p_services() {
   started=
-  for u in slot-storage.service slot-imds-root-only.service slot-toolchains-manifest.timer sccache-node.service slot-node.service; do
+  for u in slot-storage.service slot-imds-root-only.service slot-imds-containers.service docker.service slot-docker-prune.timer slot-toolchains-manifest.timer sccache-node.service slot-node.service; do
     q_active "$u" && continue
     drift "unit:$u" "not active"
-    if fixing; then a_start "$u" && changed "unit:$u" "started" && started="$started $u"; fi
+    fixing || continue
+    if a_start "$u"; then
+      changed "unit:$u" "started"
+      started="$started $u"
+    else
+      failed "unit:$u" "systemctl start $u"
+    fi
   done
   # A running unit that is not what its file and the config say restarts: sccache-node at once,
   # slot-node when no job runs (it holds the build user's jobs).
@@ -1813,6 +2317,8 @@ case $mode in
     p_files
     p_units
     p_imds
+    p_role
+    p_docker
     p_slot
     [ -n "$imds_open" ] || p_rust
     [ -n "$imds_open" ] || p_tools
@@ -1822,6 +2328,8 @@ case $mode in
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
     p_services
+    p_docker_rule
+    p_canary
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then
       echo "$ndrift drift"

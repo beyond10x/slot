@@ -10,6 +10,7 @@ GO_PRIVATE=git.example.org
 MIN_FREE_DISK=50
 SCCACHE_GB=200
 TMP_GB=400
+DOCKER_GB=10
 NODE_SSH=ssh -F /var/lib/builder/.config/slot/node/ssh_config
 PUSH_HOST=node-1-setup
 NODE_HOST=node-1

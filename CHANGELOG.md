@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+- Node role: `contrib/node/role.sh` gives a node an IAM role and an instance profile of its own
+  (`slot-node-<name>`) with one customer-managed policy, `slot-node-agent`: the 11 actions the
+  Systems Manager agent needs for its heartbeat, Run Command and Session Manager, without
+  `ssm:GetParameter`, `ssm:GetParameters` and `ssm:GetDocument`, which the managed policy
+  `AmazonSSMManagedInstanceCore` allows. It also sets the instance's metadata service to tokens
+  required and hop limit 1. `plan` prints the `aws` commands, `check` reads the account, `apply`
+  makes what `check` names, except an inline policy of the role and another role in the profile,
+  which it names and leaves. `provision.sh` reads the instance profile, the role it gives out and
+  the answer to a request without a token from the metadata service, and puts the build user in
+  group `docker` only under the node's own profile and role (new config key `INSTANCE_PROFILE`;
+  default `slot-node-<NODE_NAME>`) or on an instance without a profile, and only when the service
+  refuses a request without a token; otherwise `drift: role:` and, in `apply`, `failed: role:`
+  with no group added and no restart of `slot-node` for it.
+  `provision.sh check CONF --canary` starts one container as root on the host network that takes
+  the role's credentials and asks Systems Manager for a parameter: a refusal of that call, or an
+  instance without a role, is `canary: ok`; an allowed call or a run that tested nothing is
+  drift. `provision.sh` refuses an option it does not know.
+
+- Node docker: `provision.sh` installs the distribution's `docker` package, enables and starts
+  `docker.service` and puts the build user in group `docker`, so a job that starts containers (a
+  consumer's OCI lane) runs on the node; `slot-node` restarts when its process started before
+  the group change, at a moment no job runs. `slot-imds-containers.service` puts a reject rule
+  for the instance metadata service into `DOCKER-USER`, a drop-in makes `docker.service` require
+  it, and `check` reads the rule back. `slot-docker-prune.timer` runs every 10 min: with no job
+  in the pool it removes every container (a job that ended left it); while docker stores more
+  than `DOCKER_GB` (new config key, default 10) it removes old stopped containers and the unused
+  build cache, and with no job in the pool every unused image and volume. A member of group
+  `docker` is root on the node, and the instance must require IMDSv2 (README). A unit that does
+  not start is now a `failed: unit:` line.
+
+- Node Groovy: `provision.sh` installs the Groovy 2.4.10 binary distribution (Maven Central,
+  SHA-256 pinned) at `~/.sdkman/candidates/groovy/2.4.10` (`HOME_PINS`, new strip kind `zip1`),
+  where a consumer's tasks read `embeddable/groovy-all-2.4.10.jar` and `bin/groovyc`; those tasks
+  ran on the workstation because the node had no Groovy. `toolchains.sh` prints
+  `tool groovy-all-<version> <digest of the jar>`, so `push.sh check` compares it.
+
+- Node helm: `provision.sh` installs helm v3.8.1, the release the workstation runs, as an archive
+  pin (the static binary of `get.helm.sh`, SHA-256 pinned) linked as `/usr/local/bin/helm`. A
+  consumer's chart check (`helm lint`, `helm template`) had no helm on the node. `toolchains.sh`
+  prints `tool helm <version>` and `tool pnpm <version>`, so `push.sh check` compares both.
+
 - `GET /api/jobs` answers every job the daemon holds as one array, running and queued first,
   then the ended ones newest first; `GET /api/jobs/{id}` answers one job, or 404.
 
