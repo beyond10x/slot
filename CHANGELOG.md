@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- `contrib/cache-key-probe.sh both <package> <tree>`: three new worktrees of the tree's
+  repository, each on a branch of its own with a test that prints that branch's name, build in
+  generic jobs that bind their own `<worktree>/target` at one absolute path
+  (`/mnt/slot-probe-target`, `PROBE_VIEW`) in a mount namespace of the job alone (bwrap, else
+  `unshare`; no root, nothing changed on the machine). Worktree 1 builds alone, worktrees 2 and 3
+  then build and run the test at the same time. Exit 0 when each of the two ran the test binary
+  of its own branch and neither log has a line waiting for a file lock; it prints the package's
+  time for each and how many library units were served. `PROBE_SHARE_TARGET=1` is the negative
+  control (one directory for all three: exit 1). An sccache server outside the view does not see
+  the path in its default mode (`error writing dependencies to …: No such file or directory`),
+  so the builds set `SCCACHE_CLIENT_SIDE=1` (`PROBE_VIEW_ENV`). Measured on a build node:
+  `serde_json` 0.73 s in the first worktree, 0.17 s and 0.17 s in the next two, where two trees
+  without the view took 0.69 s and 0.69 s. Nothing in slot changes; the numbers and the
+  proposal are `docs/design.md` § 28.
+
 ## 0.39.1 — 2026-11-26
 
 - The release workflow installs `ess` before it runs `task check`, as the pull-request gate
