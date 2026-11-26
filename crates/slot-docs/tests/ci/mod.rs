@@ -260,6 +260,49 @@ fn the_gate_prints_rustc_before_it_builds() {
     }
 }
 
+/// What each step of the job that runs `task check` does before it, in order: the action
+/// a step uses or the command it runs.
+fn setup_before_the_gate(rel: &str) -> Vec<String> {
+    let all = steps(rel);
+    let job = all
+        .iter()
+        .find(|s| s.value("run") == Some("task check"))
+        .unwrap_or_else(|| panic!("{rel}: a step runs `task check`"))
+        .job
+        .clone();
+    all.iter()
+        .filter(|s| s.job == job)
+        .take_while(|s| s.value("run") != Some("task check"))
+        .map(|s| {
+            s.value("uses")
+                .or_else(|| s.value("run"))
+                .unwrap_or_else(|| panic!("{rel}, job {job}: a step uses an action or runs"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// The release of a tag runs `task check` on a runner prepared like the pull request's:
+/// a tool one workflow installs and the other lacks fails the release after the merge
+/// (`"ess": executable file not found in $PATH` in the release run of 0.39.0).
+#[test]
+fn the_release_prepares_its_runner_for_the_gate_like_a_pull_request() {
+    let scope = SCOPE_RUN.trim_start_matches("run: ");
+    let pull_request: Vec<String> = setup_before_the_gate(".github/workflows/gate.yml")
+        .into_iter()
+        .filter(|s| s != scope)
+        .collect();
+    assert!(
+        pull_request.iter().any(|s| s.contains("install-ess.sh")),
+        "gate.yml installs ess before `task check`: {pull_request:?}"
+    );
+    assert_eq!(
+        setup_before_the_gate(".github/workflows/release.yml"),
+        pull_request,
+        "release.yml has the steps of gate.yml before `task check`, the scope step left out"
+    );
+}
+
 #[test]
 fn the_path_decision_answers_both_sides_of_its_list() {
     let out = Command::new("sh")

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.39.1 — 2026-11-26
+
+- The release workflow installs `ess` before it runs `task check`, as the pull-request gate
+  does. The release run of the tag 0.39.0 stopped in its gate with `"ess": executable file not
+  found in $PATH` (the UI-spec check), so 0.39.0 has a tag and no release: 0.39.1 is the first
+  release with the changes listed under 0.39.0. A test compares what the two workflows do before
+  `task check`, step by step.
+
 ## 0.39.0 — 2026-11-26
 
 - Remote mode: a job sent to a server whose daemon does not answer waits and is sent again. A
