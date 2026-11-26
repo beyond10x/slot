@@ -1439,6 +1439,9 @@ archive_fetch() {
       mkdir -p "$fd/tree/$(dirname "$b")" || return 0
       if [ "$fn" = go ]; then
         printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
+      elif [ "$fn" = helm ]; then
+        # Like helm: no `--version`, the version without a newline for `version --template`.
+        printf '#!/bin/sh\n[ "$*" = "version --template {{.Version}}" ] || exit 1\nprintf %%s "%s"\n' "$fv" >"$fd/tree/$b"
       else
         printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
       fi

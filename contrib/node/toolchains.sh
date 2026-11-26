@@ -55,8 +55,12 @@ done
 # helm has no `--version`: `helm version --template {{.Version}}` prints `v3.8.1`. A node has it in
 # /usr/local/bin (an archive pin). A workstation may have more than one (a package in /usr/bin and
 # another one earlier on PATH), and a job runs the one its PATH names first: with the prefix "" the
-# helm on PATH is read first.
-for b in "$([ -n "$P" ] || command -v helm 2>/dev/null)" "$P/usr/local/bin/helm" "$P/usr/bin/helm" "$HOME/.local/bin/helm"; do
+# helm on PATH is read first. A helm that a relative PATH entry names (a shell prints `./helm` for it,
+# or the absolute path) is made absolute: the command runs in /. So this line, alone among the tool
+# lines, depends on the caller's PATH: compare it from a shell with the PATH a job gets.
+ph=$([ -n "$P" ] || command -v helm 2>/dev/null)
+case $ph in /* | "") ;; *) ph=$(pwd)/$ph ;; esac
+for b in "$ph" "$P/usr/local/bin/helm" "$P/usr/bin/helm" "$HOME/.local/bin/helm"; do
   [ -n "$b" ] && [ -x "$b" ] || continue
   hv=$(cd / && "$b" version --template '{{.Version}}' 2>/dev/null </dev/null | head -n 1)
   echo "tool helm ${hv:-missing}"

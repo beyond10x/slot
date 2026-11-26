@@ -356,7 +356,8 @@ run "$R5" check
 
 # typescript, prettier and esbuild are archives of the same kind (the npm tarballs of the releases
 # the consumers' test lanes read): each binary is linked as /usr/local/bin/<name>, prettier's
-# bin/prettier.cjs as `prettier`, and the script is executable.
+# bin/prettier.cjs as `prettier`, and the script is executable. pnpm is one more of them; helm is
+# an archive with one binary, linked the same way.
 for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild pnpm:pnpm-11.9.0/bin/pnpm.mjs pnpx:pnpm-11.9.0/bin/pnpx.mjs helm:helm-v3.8.1/helm; do
   [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
 done
@@ -649,8 +650,12 @@ mkdir -p "$TC/pathbin"
 printf '#!/bin/sh\nprintf v9.9.9\n' >"$TC/pathbin/helm"
 chmod 755 "$TC/pathbin/helm"
 rm -f "$TC/p3/usr/local/bin/helm"
-HOME=$TC/home PATH=$TC/pathbin:$PATH sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool helm' >"$W/out2"
-[ ! -s "$W/out2" ] && ok "toolchains.sh: with a prefix the helm on PATH is not read" || bad "helm from PATH under a prefix: $(cat "$W/out2")"
+HOME=$TC/home PATH=$TC/pathbin:$PATH sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool helm\|^tool tsc' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool tsc 6.0.3" ] && ok "toolchains.sh: with a prefix the helm on PATH is not read" || bad "helm from PATH under a prefix: $(cat "$W/out2")"
+HOME=$TC/home PATH=$TC/pathbin:$PATH sh "$here/toolchains.sh" "" "$TC/rh" 2>/dev/null | grep '^tool helm' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool helm v9.9.9" ] && ok "toolchains.sh: with the prefix \"\" the helm PATH names first is the one read" || bad "helm from PATH with the prefix \"\": '$(cat "$W/out2")'"
+(cd "$TC/pathbin" && HOME=$TC/home PATH=.:$PATH sh "$here/toolchains.sh" "" "$TC/rh" 2>/dev/null | grep '^tool helm' >"$W/out2")
+[ "$(cat "$W/out2")" = "tool helm v9.9.9" ] && ok "toolchains.sh: a helm that PATH names by a relative entry is read by its absolute path" || bad "helm from a relative PATH entry: '$(cat "$W/out2")'"
 # The aep of runbook's driver pin: a line with the version of the directory and the first 16 hex
 # digits of the file's SHA-256; the file is not run.
 mkdir -p "$TC/home/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu" "$TC/home/.cache/sdc/aep/0.79.0/aarch64-apple-darwin"

@@ -172,9 +172,13 @@ its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` li
 `helm` v3.8.1 is an archive pin too: the static binary of `get.helm.sh`, the release the
 workstation runs, linked as `/usr/local/bin/helm` (a consumer's chart check runs `helm lint` and
 `helm template`). helm has no `--version`, so `check` and the `tool helm` line of `toolchains.sh`
-read `helm version --template {{.Version}}`. On the workstation `toolchains.sh` reads the helm its
-PATH names first, the one a job started there runs, before `/usr/local/bin`, `/usr/bin` and
-`~/.local/bin`: a workstation can have a second helm of another release in `/usr/bin`.
+read `helm version --template {{.Version}}`. Run with the prefix `""` (the workstation and the node
+both), `toolchains.sh` reads the helm its PATH names first, the one a job started there runs, before
+`/usr/local/bin`, `/usr/bin` and `~/.local/bin`: a workstation can have a second helm of another
+release in `/usr/bin`. A helm that a relative PATH entry names is read by its absolute path. This is the one `tool` line that
+depends on the caller's PATH: run `push.sh check` from a shell with the PATH a job gets, or the
+line names the other helm. The `pnpm` line needs `node` 22.13 or later on the caller's PATH;
+without it the line reads `tool pnpm missing`.
 
 `aep` 0.80.0 on the PATH of a job is built on the node (the release binary is installed too, for
 runbook's driver cache path only, see below: it wants glibc 2.39 and the node has 2.34). A
@@ -243,7 +247,8 @@ exists and is no symbolic link. `toolchains.sh` prints
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),
 the `go` line (`go go1.27.1`: the bare version, so the workstation's `go1.27.1-X:nodwarf5` and
-the node's `go1.27.1` are equal) and the `node` line (`node v22.23.3`), and the release of each pinned tool on the node
+the node's `go1.27.1` are equal), the `node` line (`node v22.23.3`) and the `tool` lines (both
+ways: a tool one side has and the other lacks is drift), and the release of each pinned tool on the node
 (`pin <name> <version>`; another release or a missing one is drift). The C tools of
 `toolchains.sh` (`c <tool> <version>`) are printed but not compared: the workstation and the node
 are different distributions. `push.sh check` prints one line saying that nothing is copied.
