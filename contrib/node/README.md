@@ -190,7 +190,7 @@ The node uses its own `/usr` and `/etc`. Everything a job needs beyond the base 
 from `EXTRA_PACKAGES`, `RUST_TOOLCHAINS` or a pin.
 
 Packages that Amazon Linux 2023 lacks are not installed; a job that needs one is held by name:
-mingw cross compilers, `dash`, `mawk`, `erlang`, `elixir`, `odin` and `gh`. The config file does
+mingw cross compilers, `mawk`, `erlang`, `elixir`, `odin` and `gh`. The config file does
 not list them.
 
 No credential goes to a node. `STORE/nodebin` is the first directory of a job's PATH, and each
@@ -494,6 +494,29 @@ read from the loader beside the wrapper's specs file on both machines, so `push.
 another release; its `c musl-gcc` line reads the wrapper in `/usr/local/bin` too. A change of the
 pin's release builds a new directory and moves the link; the directory of the release before
 stays, like the one of make.
+
+`dash` is built on the node from the source of dash 0.5.12 (`DASH_PIN` in `provision.sh`), the
+release that is `sh` on the forge's runner image (`ubuntu-26.04`, package `dash 0.5.12-12ubuntu3`):
+Amazon Linux 2023 packages none, a node's `sh` is bash, and a shell test that passes under bash can
+fail under dash (a redirection of a command is applied by dash in the shell itself, so `readlink
+/proc/$$/fd/1 >file` reads the file's name there and the name of the shell's output under bash).
+Apply downloads upstream's release tarball, checks its SHA-256 before anything is unpacked (the
+site serves plain http only; the SHA-256 is also the one of the `dash_0.5.12.orig.tar.gz` of
+Ubuntu's and Debian's package pools), and the build user runs `./configure` and `/usr/bin/make`
+under `timeout 600`. Root installs the one binary in `/usr/local/dash-0.5.12/bin`, writes the
+tarball's SHA-256 beside it (`/usr/local/dash-0.5.12/.slot-sha256`) and links it as
+`/usr/local/bin/dash`. It is never linked as `sh`: a node's `sh` stays the distribution's, and a
+job that wants the forge's shell names `dash`. dash prints no version, so `check` reads the link,
+the SHA-256 file and the answer of `dash -c 'echo $((6 * 7))'` (`drift: dash: ...`); a link that
+alone drifts is set again without a download, and a real file at the link's name is left alone
+and reported as `failed`. On a node of 32 CPUs the download took 1.7 s, `configure` 1.8 s and
+`make` with one job 3.2 s. `toolchains.sh` prints `tool dash <release>`: on a node the release of
+the directory the link names (`missing` when that tree has no SHA-256 file), elsewhere the release
+the machine's package manager names for its package `dash` (pacman, dpkg or rpm, without the
+package revision), and no line on a machine without dash. So `push.sh check` names a workstation
+that has no dash, or another release, as drift. The gate of this repository uses it:
+`contrib/shell-tests.sh` runs the shell tests under dash where dash is on PATH (a directory with
+`sh` linked to dash goes first on PATH), under `sh` elsewhere, and its first line says which.
 
 `HOME_PINS` in `provision.sh` lists trees that jobs read by path in the build user's home. The ess
 releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 are in `~/.local/share/ess-versions/<version>/ess`

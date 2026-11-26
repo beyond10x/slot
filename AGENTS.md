@@ -69,6 +69,12 @@ reference and UI types. It prints `rustc --version` first: `rust-toolchain.toml`
 rustc of the local gate and of every workflow, which install the version that file names.
 CI runs it in `.github/workflows/gate.yml`.
 
+Its shell tests (`contrib/slot-shim.test.sh`, `contrib/rustc-gate.test.sh`,
+`contrib/node/test.sh`) run once each through `contrib/shell-tests.sh`: under dash where dash is
+on PATH, as on the forge, whose `sh` is dash, else under `sh`. Its first line says which
+(`shell tests: under dash (…)` or `shell tests: under sh (…): no dash on PATH`). A test that
+fails only under dash is a bashism in the test or in the script it tests.
+
 A pull request whose changed files are all planning or prose files (everything under
 `.engineering/`, `*.md` outside `website/` and `ui/`) passes `gate` and `Build documentation`
 without building (`website/docs/getting-started.md` counts as code: `cargo test` reads it):

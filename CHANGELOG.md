@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- The gate runs its three shell tests through `contrib/shell-tests.sh`: under dash where dash is
+  on PATH, else under `sh`, each test once, and its first line says which shell ran them. The
+  forge's `sh` is dash and a node's or a workstation's may be bash; a test of
+  `toolchains-refresh.sh` passed under bash and failed on the forge. `contrib/node/provision.sh`
+  builds dash 0.5.12, the release of the forge's runner image, from its source tarball with a
+  pinned SHA-256 and links it as `/usr/local/bin/dash` (never as `sh`); `toolchains.sh` prints
+  `tool dash <release>`.
+
 ## 0.39.1 — 2026-11-26
 
 - The release workflow installs `ess` before it runs `task check`, as the pull-request gate

@@ -621,6 +621,96 @@ st=$?
 [ $st -eq 0 ] && ! grep -q '^fetch .*musl' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/musl-gcc")" = "$MU/bin/musl-gcc" ] && ok "back at the pin, the link returns to the tree that is there without a download" || bad "musl pin back: exit $st $(grep musl "$R5/.calls") $(mlines)"
 rm -rf "$R5/usr/local/musl-9.9.9"
 
+# dash 0.5.12 from its source tarball (DASH_PIN): the shell that is `sh` on the forge's runner
+# image, so a shell test of a job can run under it. The binary is in /usr/local/dash-0.5.12/bin,
+# linked as dash and never as sh. dash prints no version: the tree carries the SHA-256 of the
+# tarball it was built from, and the binary must run a command.
+DA=/usr/local/dash-0.5.12
+DS=6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a
+dlines() { cat "$W/out" "$W/err" | grep 'dash' | tr '\n' ' '; }
+[ "$(readlink "$R5/usr/local/bin/dash")" = "$DA/bin/dash" ] && ok "/usr/local/bin/dash links to $DA/bin/dash" || bad "dash link: '$(readlink "$R5/usr/local/bin/dash")'"
+[ "$(cat "$R5$DA/.slot-sha256" 2>/dev/null)" = "$DS" ] && ok "the dash tree names the SHA-256 of its tarball" || bad "dash mark: '$(cat "$R5$DA/.slot-sha256" 2>&1)'"
+[ "$("$R5$DA/bin/dash" -c 'echo $((6 * 7))' 2>&1)" = 42 ] && ok "the installed dash runs a command" || bad "dash -c: $("$R5$DA/bin/dash" -c 'echo $((6 * 7))' 2>&1)"
+[ ! -e "$R5/usr/local/bin/sh" ] && [ ! -L "$R5/usr/local/bin/sh" ] && ok "dash is not linked as sh" || bad "/usr/local/bin/sh exists"
+sh "$here/toolchains.sh" "$R5" "$W/norust" 2>/dev/null | grep '^tool dash' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool dash 0.5.12" ] && ok "toolchains.sh: one line, tool dash 0.5.12" || bad "tool dash line: '$(cat "$W/out2")'"
+rm -f "$R5/usr/local/bin/dash"
+printf 'abc\n' >"$R5$DA/.slot-sha256"
+run "$R5" check
+grep -qx "drift: dash: /usr/local/bin/dash is 'missing', want a link to $DA/bin/dash" "$W/out" && ok "check names a missing dash link" || bad "dash link drift: $(dlines)"
+grep -qx "drift: dash: $DA is of the tarball 'abc', want $DS" "$W/out" && ok "check names a dash tree of another tarball" || bad "dash mark drift: $(dlines)"
+printf '%s\n' "$DS" >"$R5$DA/.slot-sha256"
+printf '#!/bin/sh\nexit 1\n' >"$R5$DA/bin/dash"
+run "$R5" check
+grep -qx "drift: dash: $DA/bin/dash does not run a command (it answers '', want 42)" "$W/out" && ok "check names a dash that runs no command" || bad "dash run drift: $(dlines)"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx 'fetch http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz' "$R5/.calls" && ok "apply fetches the dash source tarball" || bad "dash URL: $(grep fetch "$R5/.calls" | tr '\n' ' ')"
+grep -q '^changed: dash: dash 0.5.12 built, linked as dash in /usr/local/bin$' "$W/out" && ok "apply builds dash 0.5.12" || bad "dash apply: $(dlines)"
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply dash has 0 drift" || bad "dash after apply: $(cat "$W/out")"
+rm -f "$R5/usr/local/bin/dash"
+: >"$R5/.calls"
+run "$R5" apply
+grep -q '^fetch .*dash-' "$R5/.calls" && bad "a missing link fetched the dash tarball again" || ok "a missing dash link alone does not fetch or build"
+grep -q "^changed: dash: linked dash in /usr/local/bin to $DA/bin/dash\$" "$W/out" && ok "a missing dash link alone is relinked" || bad "dash relink: $(dlines)"
+rm -f "$R5/usr/local/bin/dash"
+printf '#!/bin/sh\necho "real file"\n' >"$R5/usr/local/bin/dash"
+run "$R5" apply
+st=$?
+grep -q '^failed: dash: /usr/local/bin/dash is a real file; not replaced$' "$W/err" && [ ! -L "$R5/usr/local/bin/dash" ] && [ "$st" -eq 1 ] && ok "a real file at /usr/local/bin/dash is not replaced, and apply exits 1" || bad "dash real file: exit $st $(dlines)"
+rm -f "$R5/usr/local/bin/dash"
+printf '#!/bin/sh\nexit 1\n' >"$R5$DA/bin/dash"
+printf 'stale\n' >"$R5$DA/bin/dash.slot-new"
+: >"$R5/.state-tool-fetch-fails"
+run "$R5" apply
+st=$?
+rm -f "$R5/.state-tool-fetch-fails"
+grep -q '^failed: dash: download, checksum or build of dash 0.5.12' "$W/err" && [ "$st" -eq 1 ] && ! grep -q '^changed: dash' "$W/out" && ok "a failed dash build is named, exits 1 and is not reported as changed" || bad "dash failure: exit $st $(dlines)"
+[ "$(cat "$R5$DA/bin/dash")" = "$(printf '#!/bin/sh\nexit 1\n')" ] && [ ! -e "$R5/usr/local/bin/dash" ] && ok "a failed dash build leaves the binary as it was and sets no link" || bad "dash binary changed by a failed build"
+run "$R5" apply
+[ ! -e "$R5$DA/bin/dash.slot-new" ] && ok "a leftover dash.slot-new does not survive the next apply" || bad "dash.slot-new left"
+run "$R5" check
+[ $? -eq 0 ] && ok "dash has 0 drift after the repair" || bad "dash after repair: $(cat "$W/out")"
+# A pin of another release: its own directory, and the link goes there.
+DP9="dash 9.9.9 $(printf '%064d' 9) http://gondor.apana.org.au/~herbert/dash/files/dash-9.9.9.tar.gz"
+: >"$R5/.calls"
+NODE_TEST_DASH_PIN=$DP9 NODE_TEST=1 NODE_ROOT=$R5 sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch http://gondor.apana.org.au/~herbert/dash/files/dash-9.9.9.tar.gz' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/dash")" = /usr/local/dash-9.9.9/bin/dash ] && [ -x "$R5$DA/bin/dash" ] && ok "a pin of another release is built into its own directory and the link moves; the tree before stays" || bad "dash 9.9.9: exit $st $(dlines)"
+sh "$here/toolchains.sh" "$R5" "$W/norust" 2>/dev/null | grep '^tool dash' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool dash 9.9.9" ] && ok "toolchains.sh reads the release from the tree the link names" || bad "tool dash line: '$(cat "$W/out2")'"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && ! grep -q '^fetch .*dash' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/dash")" = "$DA/bin/dash" ] && ok "back at the pin, the dash link returns to the tree that is there without a download" || bad "dash pin back: exit $st $(dlines)"
+rm -rf "$R5/usr/local/dash-9.9.9"
+# toolchains.sh for a dash that is no build of the pin: a tree without the tarball's SHA-256
+# prints `missing`; a package's dash prints the release its package manager names, without the
+# package revision; a machine without dash prints no line.
+TD=$W/tcd
+mkdir -p "$TD/a/usr/local/bin" "$TD/a/usr/local/dash-0.5.12/bin" "$TD/b/usr/bin" "$TD/c/usr/bin" "$TD/pm"
+printf '#!/bin/sh\nexit 0\n' >"$TD/a/usr/local/dash-0.5.12/bin/dash"
+printf '#!/bin/sh\nexit 0\n' >"$TD/b/usr/bin/dash"
+chmod 755 "$TD/a/usr/local/dash-0.5.12/bin/dash" "$TD/b/usr/bin/dash"
+ln -s /usr/local/dash-0.5.12/bin/dash "$TD/a/usr/local/bin/dash"
+for pm in pacman dpkg-query rpm; do
+  printf '#!/bin/sh\n[ -s "%s/pm/%s.out" ] || exit 1\ncat "%s/pm/%s.out"\n' "$TD" "$pm" "$TD" "$pm" >"$TD/pm/$pm"
+  chmod 755 "$TD/pm/$pm"
+done
+tcd() { PATH=$TD/pm:$PATH sh "$here/toolchains.sh" "$TD/$1" "$W/norust" 2>/dev/null | grep '^tool dash' | tr '\n' ','; }
+[ "$(tcd a)" = "tool dash missing," ] && ok "toolchains.sh: a dash tree without the tarball's SHA-256 prints missing" || bad "tool dash without mark: '$(tcd a)'"
+[ "$(tcd b)" = "tool dash missing," ] && ok "toolchains.sh: a dash that no package manager knows prints missing" || bad "tool dash unknown: '$(tcd b)'"
+echo 'dash 0.5.12-1' >"$TD/pm/pacman.out"
+[ "$(tcd b)" = "tool dash 0.5.12," ] && ok "toolchains.sh: a package's dash prints the release pacman names" || bad "tool dash pacman: '$(tcd b)'"
+rm -f "$TD/pm/pacman.out"
+echo '0.5.12-12ubuntu3' >"$TD/pm/dpkg-query.out"
+[ "$(tcd b)" = "tool dash 0.5.12," ] && ok "toolchains.sh: a package's dash prints the release dpkg names" || bad "tool dash dpkg: '$(tcd b)'"
+rm -f "$TD/pm/dpkg-query.out"
+echo '0.5.12' >"$TD/pm/rpm.out"
+[ "$(tcd b)" = "tool dash 0.5.12," ] && ok "toolchains.sh: a package's dash prints the release rpm names" || bad "tool dash rpm: '$(tcd b)'"
+[ -z "$(tcd c)" ] && ok "toolchains.sh: no dash line on a machine without dash" || bad "tool dash without dash: '$(tcd c)'"
+
 # The build user's home trees (HOME_PINS): the ess releases a repository pins by path, and the
 # @types/node of ESS_TYPES_NODE with its dependency.
 HP=$R5/var/lib/builder/.local/share
@@ -1360,6 +1450,7 @@ done
 [ ! -e "$W/ran" ] && ok "wrong SHA-256: no downloaded file runs" || bad "a downloaded file ran"
 [ "$(grep -c 'rustup-init\|go1.27.1\|node-v22\|task_linux\|nextest\|geckodriver\|wasm-bindgen\|sccache\|slot-0.36\|ess-0.99.2\|cargo-about-0.9.1\|yq_linux_amd64' "$W/curl.log")" -ge 12 ] && ok "wrong SHA-256: every download was attempted" || bad "curl calls: $(cat "$W/curl.log")"
 grep -q 'musl-1.2.6.tar.gz' "$W/curl.log" && ok "wrong SHA-256: the musl source was asked for" || bad "no musl download in: $(cat "$W/curl.log")"
+grep -q '^failed: dash: download, checksum or build of dash 0.5.12' "$W/err" && grep -q 'dash-0.5.12.tar.gz' "$W/curl.log" && ok "wrong SHA-256: the dash source was asked for, and dash fails" || bad "wrong SHA-256: dash: $(grep '^failed: dash' "$W/err") $(grep dash "$W/curl.log")"
 # Control: with the SHA256SUMS line that matches the served file, tar is reached (so the stand-in
 # tar would record a call if the check had failed open above), with no owner taken from the archive.
 RG=$W/r6b
@@ -3331,7 +3422,43 @@ done
 ok "example: package list checked"
 grep -q 'not installed; a job that needs one is held by name' "$here/README.md" && ok "README names the packages that are not installed" || bad "README has no 'not installed; a job that needs one is held by name'"
 sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'musl' && bad "README still lists musl-gcc as not installed" || ok "README no longer lists musl-gcc as not installed"
+sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'dash' && bad "README still lists dash as not installed" || ok "README no longer lists dash as not installed"
 grep -qx 'GO_ROOT=' "$ex" && [ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "[$GO_ROOT]"' sh "$here" 2>&1)" = '[]' ] && ok "example: GO_ROOT is shown empty, the default" || bad "example GO_ROOT: $(grep GO_ROOT "$ex")"
+
+# 6y. The gate's step for the shell tests (contrib/shell-tests.sh): under dash where dash is on
+# PATH, else under sh; its first line says which; every test runs once; the first failure stops it.
+# `dash` here is a stand-in that writes its arguments down and runs the machine's sh.
+ST=$W/st
+SS=$here/../shell-tests.sh
+mkdir -p "$ST/bin" "$ST/dashbin"
+for t in sh mktemp ln rm readlink; do ln -s "$(command -v "$t")" "$ST/bin/$t"; done
+printf '#!/bin/sh\necho "$*" >>"%s/dash.log"\nexec /bin/sh "$@"\n' "$ST" >"$ST/dashbin/dash"
+chmod 755 "$ST/dashbin/dash"
+for t in t1 t2 t4; do printf 'echo "%s $(command -v sh)" >>"%s/ran.log"\nsh -c "echo nested-%s" >/dev/null\n' "$t" "$ST" "$t" >"$ST/$t.sh"; done
+printf 'exit 1\n' >"$ST/t3.sh"
+: >"$ST/dash.log"
+: >"$ST/ran.log"
+PATH=$ST/dashbin:$ST/bin sh "$SS" "$ST/t1.sh" "$ST/t2.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && [ "$(head -n 1 "$W/out")" = "shell tests: under dash ($ST/dashbin/dash), which is sh for the tests" ] && [ "$(grep -c '^shell tests: ' "$W/out")" -eq 1 ] && ok "shell tests: with dash on PATH one line names dash" || bad "shell tests under dash: exit $st $(cat "$W/out" "$W/err")"
+[ "$(cut -d' ' -f1 "$ST/ran.log" | tr '\n' ' ')" = "t1 t2 " ] && ok "shell tests: each test ran once, in order" || bad "shell tests ran: $(cat "$ST/ran.log")"
+[ "$(grep -c "^$ST/t[12]\.sh\$" "$ST/dash.log")" -eq 2 ] && [ "$(grep -c '^-c echo nested-t[12]$' "$ST/dash.log")" -eq 2 ] && ok "shell tests: dash runs each test, and the sh a test starts by name" || bad "shell tests dash calls: $(tr '\n' '|' <"$ST/dash.log")"
+sd=$(sed -n '1s/^t1 //p' "$ST/ran.log")
+[ -n "$sd" ] && [ "$sd" != "$ST/bin/sh" ] && [ ! -e "$(dirname "$sd")" ] && ok "shell tests: the directory of the sh link is gone at the end" || bad "shell tests: sh was '$sd', directory left: $(ls -d "$(dirname "$sd")" 2>&1)"
+: >"$ST/dash.log"
+: >"$ST/ran.log"
+PATH=$ST/bin sh "$SS" "$ST/t1.sh" "$ST/t2.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$W/out")" = "shell tests: under sh ($(readlink -f "$ST/bin/sh")): no dash on PATH" ] && ok "shell tests: without dash on PATH one line names the machine's sh" || bad "shell tests under sh: exit $st $(cat "$W/out" "$W/err")"
+[ "$(tr '\n' ',' <"$ST/ran.log")" = "t1 $ST/bin/sh,t2 $ST/bin/sh," ] && [ ! -s "$ST/dash.log" ] && ok "shell tests: without dash each test ran once under sh" || bad "shell tests under sh ran: $(cat "$ST/ran.log" "$ST/dash.log")"
+: >"$ST/ran.log"
+PATH=$ST/dashbin:$ST/bin sh "$SS" "$ST/t1.sh" "$ST/t3.sh" "$ST/t4.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 1 ] && [ "$(cut -d' ' -f1 "$ST/ran.log" | tr '\n' ' ')" = "t1 " ] && ok "shell tests: a failing test ends the step with status 1, and the tests after it do not run" || bad "shell tests failure: exit $st $(cat "$ST/ran.log")"
+PATH=$ST/bin sh "$SS" >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "shell tests: no test named is a usage error" || bad "shell tests without arguments: $(cat "$W/out" "$W/err")"
+tf=$here/../../Taskfile.yml
+grep -qx '      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh' "$tf" && [ "$(grep -c 'contrib/node/test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/slot-shim\.test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/rustc-gate\.test\.sh' "$tf")" -eq 1 ] && ok "the gate runs the three shell tests through shell-tests.sh, each once" || bad "Taskfile: $(grep -n 'contrib/' "$tf" | tr '\n' ' ')"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

@@ -6,6 +6,7 @@
 #   goroot <what `go env GOROOT` of that go answers>: no line without go
 #   tool <tsc|prettier|esbuild|pnpm|yarn|ess|aep|yq|cargo-about|make|musl|helm> <version>: no line
 #        when the machine has none, `missing` as the version when the file is there and prints none
+#   tool dash <release>: of the tree a node builds, else of the machine's package `dash`
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   tool groovy-all-<version> <16 hex digits of the SHA-256 of
 #        ~/.sdkman/candidates/groovy/<version>/embeddable/groovy-all-<version>.jar>
@@ -71,6 +72,31 @@ for b in "$P/usr/local/bin/musl-gcc" "$P/usr/bin/musl-gcc"; do
   mv=
   if [ -n "$ml" ] && [ -x "$P$ml/libc.so" ]; then mv=$(cd / && "$P$ml/libc.so" 2>&1 </dev/null | sed -n 's/^Version //p' | head -n 1); fi
   echo "tool musl ${mv:-missing}"
+  break
+done
+# dash prints no version. A node has it as a link in /usr/local/bin to
+# /usr/local/dash-<release>/bin/dash (the dash pin of provision.sh), a tree that carries the
+# SHA-256 of its source tarball: the release is the one of the directory, `missing` without that
+# file. Any other dash is a package's: the release is what the machine's package manager names for
+# the package `dash` (pacman, dpkg or rpm), without the package revision.
+for b in "$P/usr/local/bin/dash" "$P/usr/bin/dash"; do
+  dv=
+  dl=$(readlink "$b" 2>/dev/null)
+  case $dl in /usr/local/dash-*/bin/dash) ;; *) dl= ;; esac
+  if [ -n "$dl" ]; then [ -x "$P$dl" ] || continue; else [ -x "$b" ] || continue; fi
+  case $dl in
+    /usr/local/dash-*/bin/dash)
+      dd=${dl%/bin/dash}
+      [ -s "$P$dd/.slot-sha256" ] && dv=${dd#/usr/local/dash-}
+      ;;
+    *)
+      dv=$(pacman -Q dash 2>/dev/null </dev/null | awk '{ print $2 }')
+      [ -n "$dv" ] || dv=$(dpkg-query -W -f '${Version}\n' dash 2>/dev/null </dev/null)
+      [ -n "$dv" ] || dv=$(rpm -q --qf '%{VERSION}\n' dash 2>/dev/null </dev/null) || dv=
+      dv=$(echo "$dv" | head -n 1 | sed 's/^[0-9]*://; s/-.*//')
+      ;;
+  esac
+  echo "tool dash ${dv:-missing}"
   break
 done
 # helm has no `--version`: `helm version --template {{.Version}}` prints `v3.8.1`. A node has it in

@@ -121,6 +121,15 @@ RUST_TRIPLE=x86_64-unknown-linux-gnu
 # that Arch Linux's package build file of musl 1.2.6-2 carries for the same tarball (`sha256sums`
 # of its PKGBUILD, whose build checks the upstream signature): the two agree.
 MUSL_PIN='musl 1.2.6 d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a https://musl.libc.org/releases/musl-1.2.6.tar.gz'
+# dash, built on the node from its source tarball (p_dash): name, version, SHA-256, URL. The
+# release is the one of the forge's runner image (ubuntu-26.04, whose /bin/sh is the package dash
+# 0.5.12-12ubuntu3), so that a shell test runs under the same shell on a node as on the forge.
+# The SHA-256 is the one of upstream's release tarball as downloaded on 2026-11-26, the one of
+# the `dash_0.5.12.orig.tar.gz` of Ubuntu's and of Debian's package pool, and the one that the
+# `Checksums-Sha256` of Ubuntu's source package description (dash_0.5.12-12ubuntu3.dsc) carries for
+# it: the four agree. Upstream serves the tarball over plain http only; the SHA-256 is what
+# ties the download to the release.
+DASH_PIN='dash 0.5.12 6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz'
 # Tools built on the node from a git revision, as the build user, into the store's cargo bin. One
 # line each: name, version, repository URL, revision (the pin: a git object id; the release tag
 # peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
@@ -201,7 +210,7 @@ DRAIN_UNIT=slot-node-drain
 # pins, refuses the other directories of the provisioning.
 go_root_pins() {
   [ -n "$GO_ROOT" ] || return 0
-  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)"; do
+  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)" "/usr/local/dash-$(echo "$DASH_PIN" | cut -d' ' -f2)"; do
     case $GO_ROOT/ in
       "$gp_d"/*)
         conf_fail "$cf: GO_ROOT '$GO_ROOT' is the directory of a pinned archive, or lies in one ($gp_d)"
@@ -2403,6 +2412,101 @@ $MAKE_PIN
 EOF
 }
 
+# dash built from its source tarball (DASH_PIN): Amazon Linux 2023 packages no dash, and the
+# forge's runner image has dash as its sh, so a shell test that passes under a node's sh (bash) can
+# fail there. Built like make: by the build user in a temporary directory with the package's make
+# and no jobserver; root installs the one binary into /usr/local/dash-<version>/bin and links it
+# as dash in /usr/local/bin (never as sh: a node's sh stays the distribution's). dash prints no
+# version, so the tree carries the SHA-256 of the tarball it was built from (.slot-sha256, written
+# by root), and the check also runs one command with the binary.
+# Prints the path of the built dash; nothing when the download, the checksum or the build failed.
+dash_build() {
+  db_d=$1
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    calls "fetch $5"
+    printf '#!/bin/sh\nexec sh "$@"\n' >"$db_d/dash" && chmod 755 "$db_d/dash" && echo "$db_d/dash"
+    return 0
+  fi
+  source_unpack "$db_d" "$4" "$5" || return 0
+  [ -x /usr/bin/make ] || {
+    echo "error: /usr/bin/make (the package's make, which builds dash) is missing" >&2
+    return 0
+  }
+  as_user timeout 600 sh -c 'cd "$1" && ./configure && /usr/bin/make' sh "$db_d/src" </dev/null >&2 || return 0
+  cp -P "$db_d/src/src/dash" "$db_d/dash" 2>/dev/null && chown root:root "$db_d/dash" &&
+    [ -f "$db_d/dash" ] && [ ! -L "$db_d/dash" ] && [ -x "$db_d/dash" ] && echo "$db_d/dash"
+}
+# dash_answer PATH: what the dash at PATH prints for one arithmetic command, run as the build user.
+dash_answer() { as_user timeout 10 "$1" -c 'echo $((6 * 7))' 2>/dev/null </dev/null | head -n 1; }
+p_dash() {
+  while read -r dn dv ds du; do
+    [ -n "$dn" ] || continue
+    dir=/usr/local/$dn-$dv
+    binok=1
+    linkok=1
+    real=
+    got=$(readlink "$R/usr/local/bin/dash" 2>/dev/null)
+    if [ "$got" != "$dir/bin/dash" ]; then
+      drift "dash" "/usr/local/bin/dash is '${got:-missing}', want a link to $dir/bin/dash"
+      linkok=
+      if [ -e "$R/usr/local/bin/dash" ] && [ ! -L "$R/usr/local/bin/dash" ]; then real=1; fi
+    fi
+    if [ -x "$R$dir/bin/dash" ] && [ ! -L "$R$dir/bin/dash" ]; then
+      mark=$(cat "$R$dir/.slot-sha256" 2>/dev/null)
+      if [ "$mark" != "$ds" ]; then
+        drift "dash" "$dir is of the tarball '${mark:-unknown}', want $ds"
+        binok=
+      else
+        v=$(dash_answer "$R$dir/bin/dash")
+        if [ "$v" != 42 ]; then
+          drift "dash" "$dir/bin/dash does not run a command (it answers '$v', want 42)"
+          binok=
+        fi
+      fi
+    else
+      drift "dash" "$dir/bin/dash is missing, want dash $dv built from its source tarball"
+      binok=
+    fi
+    fixing && { [ -z "$binok" ] || [ -z "$linkok" ]; } || continue
+    if [ -n "$real" ]; then
+      failed "dash" "/usr/local/bin/dash is a real file; not replaced"
+      continue
+    fi
+    if [ -n "$binok" ]; then
+      if ln -sfn "$dir/bin/dash" "$R/usr/local/bin/dash"; then
+        changed "dash" "linked dash in /usr/local/bin to $dir/bin/dash"
+      else
+        failed "dash" "link in /usr/local/bin"
+      fi
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-dash.XXXXXX); fi || {
+      failed "dash" "no temporary directory"
+      continue
+    }
+    dl=$(mktemp)
+    db=$(dash_build "$td" "$dn" "$dv" "$ds" "$du" 2>"$dl")
+    if [ -z "$db" ]; then
+      failed "dash" "download, checksum or build of dash $dv: $({ grep -m 3 -i 'error' "$dl"; tail -n 2 "$dl"; } | tr '\n' ' ')"
+    elif mkdir -p "$R$dir/bin" "$R/usr/local/bin" && install -m 0755 "$db" "$R$dir/bin/dash.slot-new" && mv "$R$dir/bin/dash.slot-new" "$R$dir/bin/dash" &&
+      printf '%s\n' "$ds" >"$R$dir/.slot-sha256" && ln -sfn "$dir/bin/dash" "$R/usr/local/bin/dash"; then
+      v=$(dash_answer "$R$dir/bin/dash")
+      if [ "$v" = 42 ]; then
+        changed "dash" "dash $dv built, linked as dash in /usr/local/bin"
+      else
+        failed "dash" "$dir/bin/dash answers '$v' after the install, want 42"
+      fi
+    else
+      rm -f "$R$dir/bin/dash.slot-new"
+      failed "dash" "$dir not written"
+    fi
+    rm -rf "$td" "$dl"
+  done <<EOF
+$DASH_PIN
+EOF
+}
+
 # musl built from its source tarball (MUSL_PIN): Amazon Linux 2023 packages no musl-gcc, and a
 # build that names it as the C compiler of the musl target (CC_x86_64_unknown_linux_musl=musl-gcc)
 # stopped with `failed to find tool "musl-gcc"`. The build user configures the source for the
@@ -3409,6 +3513,8 @@ case $mode in
     p_make
     [ -z "$T" ] || [ -z "${NODE_TEST_MUSL_PIN:-}" ] || MUSL_PIN=$NODE_TEST_MUSL_PIN
     p_musl
+    [ -z "$T" ] || [ -z "${NODE_TEST_DASH_PIN:-}" ] || DASH_PIN=$NODE_TEST_DASH_PIN
+    p_dash
     [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_keys
