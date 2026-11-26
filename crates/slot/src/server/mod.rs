@@ -332,7 +332,8 @@ struct Live {
     spillable: bool,
     /// The target directory its environment names (`CARGO_TARGET_DIR`,
     /// [`crate::evict::env_target`]), whatever its toolchain: eviction
-    /// keeps it.
+    /// keeps it. For a job that arrived with a workspace, the one the
+    /// daemon gives it ([`Server::job_target`]).
     env_target: Option<PathBuf>,
 }
 
@@ -698,7 +699,7 @@ impl Server {
                 if let Ok(job) = serde_json::from_str::<Job>(&line) {
                     next_id = next_id.max(job.id);
                     memory.record(&job);
-                    record_target(&mut targets, &job);
+                    record_target(&mut targets, &job, &cfg.cache_root);
                     record_ran(&mut ran_in, &job);
                     warm::record_built(&mut built, &job);
                     tally.record(&job, started);
@@ -2090,7 +2091,12 @@ impl Server {
                     share,
                     claimed: false,
                     spillable: false,
-                    env_target: crate::evict::env_target(&req.env, &cwd),
+                    // A job that arrived with a workspace builds where the
+                    // daemon says, whatever its client's environment names.
+                    env_target: match &req.workspace {
+                        Some(ws) => Some(self.job_target(ws)),
+                        None => crate::evict::env_target(&req.env, &cwd),
+                    },
                 },
             );
             (id, share)
@@ -3060,7 +3066,7 @@ impl Server {
             if job.node == LOCAL_NODE {
                 g.memory.record(&job);
             }
-            record_target(&mut g.targets, &job);
+            record_target(&mut g.targets, &job, &self.cfg.cache_root);
             record_ran(&mut g.ran_in, &job);
             warm::record_built(&mut g.built, &job);
             g.tally.record(&job, job.ended_ms);
@@ -4644,6 +4650,7 @@ impl Server {
             r.known = known;
             r.dry_run = s.dry_run;
             r.free = free;
+            r.unmeasured = lowest.is_none();
             r.checked_ms = now_ms();
             if !done.is_empty() || free >= s.floor {
                 r.deleted_bytes += freed;
@@ -5447,14 +5454,30 @@ fn job_file_limit(
     (job != own).then_some(job)
 }
 
-/// Notes that `job` built into its target directory.
-fn record_target(targets: &mut HashMap<PathBuf, (String, i64)>, job: &Job) {
-    if job.target_dir.is_empty() || job.started_ms == 0 {
+/// Notes that `job` built into its target directory: a local Rust job's
+/// `target_dir`, or the one a job that arrived with a workspace built into
+/// on this machine (`node_target_dir`; such a job has no `target_dir`). Not
+/// noted: such a directory under `cache_root`, which is the cache LRU's
+/// alone ([`cache::Cache`] keeps its size in a record and deletes it), and
+/// the one of a job this daemon handed to a node, which names a directory
+/// of that node.
+fn record_target(targets: &mut HashMap<PathBuf, (String, i64)>, job: &Job, cache_root: &Path) {
+    let here = job.remote && matches!(job.node.as_str(), "" | LOCAL_NODE);
+    let dir = match &job.node_target_dir {
+        Some(d) if here && job.target_dir.is_empty() => {
+            if Path::new(d).starts_with(cache_root) {
+                return;
+            }
+            d
+        }
+        _ => &job.target_dir,
+    };
+    if dir.is_empty() || job.started_ms == 0 {
         return;
     }
     let when = job.ended_ms.max(job.started_ms);
     let e = targets
-        .entry(PathBuf::from(&job.target_dir))
+        .entry(PathBuf::from(dir))
         .or_insert_with(|| (job.repo.clone(), when));
     if when >= e.1 {
         *e = (job.repo.clone(), when);

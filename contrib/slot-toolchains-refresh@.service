@@ -1,0 +1,12 @@
+[Unit]
+Description=slot toolchain manifests of this host and of build node %i
+
+[Service]
+EnvironmentFile=-%h/.config/slot/node/toolchains-refresh.env
+ExecStart=/bin/sh %h/.local/share/slot/toolchains-refresh.sh %i 60
+Restart=always
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target

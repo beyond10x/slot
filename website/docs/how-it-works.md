@@ -581,6 +581,16 @@ directories jobs built into. When one has less than 40 GB free (`slot serve --ev
 GB; 0 turns it off), it deletes target directories there, least recently built first, until the
 filesystem would have 50 GB free.
 
+On a build server the same rules apply to the target directories of the jobs sent to it: a
+finished job that arrived with its tree makes the directory it built into known. A target
+directory under the daemon's cache root is left out; the cache keeps to its own size limit.
+When the daemon knows no target directory that exists, it measured nothing, and `slot status`
+says so instead of naming free space:
+
+```text
+disk: no target dir known, nothing measured (eviction below 40.0 GB)
+```
+
 Eviction starts no later than the wait for disk above: its mark is the larger of `--evict-below`
 and `--min-free-disk`. With `--min-free-disk 50` it deletes below 50 GB, until 60 GB would be
 free, and `slot status` says the mark was raised:

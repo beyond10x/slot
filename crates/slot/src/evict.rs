@@ -3,7 +3,10 @@
 //! When the filesystem holding target directories has less free space than
 //! a floor, the daemon deletes the target directories it saw jobs build
 //! into, least recently built first, until free space is above the floor
-//! plus a margin. It never deletes a directory a queued or running job
+//! plus a margin. On a build node these are the directories the jobs that
+//! arrived with a workspace built into (`Job::node_target_dir`), but not
+//! one under the daemon's cache root: that one is the cache LRU's
+//! (`server/cache.rs`). It never deletes a directory a queued or running job
 //! builds into (its own or the one its `CARGO_TARGET_DIR` names, a directory
 //! nested in it or holding it), one in the tree a queued or running job
 //! works in (git's top level of its working directory, else the working
@@ -494,6 +497,11 @@ pub struct Report {
     #[ts(type = "number")]
     #[serde(default)]
     pub free: u64,
+    /// The last look measured nothing: no known target directory exists,
+    /// so no filesystem was asked and `free` is 0. False from a daemon
+    /// older than the field, whose `free` of 0 may be this case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unmeasured: bool,
     /// Time of the last look, Unix milliseconds.
     #[ts(type = "number")]
     #[serde(default)]

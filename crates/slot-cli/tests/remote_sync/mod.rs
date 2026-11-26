@@ -12,6 +12,7 @@ use super::{Daemon, SLOT};
 mod fresh;
 mod git_deps;
 mod node_view;
+mod node_wait;
 mod phases;
 mod safety;
 
@@ -118,9 +119,21 @@ fn remote_call_env(
     argv: &[&str],
     env: &[(&str, &str)],
 ) -> Output {
-    Command::new(SLOT)
-        .args(argv)
+    remote_command(d, ssh, cwd, argv, env).output().unwrap()
+}
+
+/// The command of [`remote_call_env`], not started.
+fn remote_command(
+    d: &Daemon,
+    ssh: &Path,
+    cwd: &Path,
+    argv: &[&str],
+    env: &[(&str, &str)],
+) -> Command {
+    let mut c = Command::new(SLOT);
+    c.args(argv)
         .env_remove("SLOT_REMOTE_SAME_PATH")
+        .env_remove("SLOT_NODE_WAIT")
         .env_remove("CARGO_TARGET_DIR")
         .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
         .env("XDG_CONFIG_HOME", d.dir.path().join("config"))
@@ -135,9 +148,8 @@ fn remote_call_env(
         .env("SLOT_SYNC_STALL", "2s")
         .env("SLOT_SYNC_LIMIT", "30s")
         .env_remove("SLOT_JOB")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
+        .stdin(Stdio::null());
+    c
 }
 
 /// The bytes of the client's `slot: synced to …` line.

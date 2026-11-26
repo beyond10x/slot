@@ -4,7 +4,9 @@
 //! Remote mode (`SLOT_HOST` set) rsyncs the repository to the server and
 //! talks to the daemon through `ssh $SLOT_HOST slot proxy`. When no daemon
 //! answers, the call waits for one and then exits without running the
-//! command, unless `SLOT_LOCAL_FALLBACK` asks it to run here.
+//! command, unless `SLOT_LOCAL_FALLBACK` asks it to run here. A job sent to
+//! a server whose daemon does not answer is sent again until it does, for
+//! up to `SLOT_NODE_WAIT` ([`NodeWait`]).
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -15,7 +17,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
-use std::sync::{Mutex, Once};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use std::fmt::Write as _;
@@ -128,14 +130,56 @@ pub struct Settings {
     /// `SLOT_NO_PRODUCTS` set and not `0`: a remote cargo job's products
     /// do not come back ([`artifacts::NO_PRODUCTS_ENV`]).
     pub no_products: bool,
+    /// `SLOT_NODE_WAIT`: how long a job waits for a server whose daemon
+    /// does not answer, and how often it is sent again. No wait for a job
+    /// this machine's daemon handed to a node (`SLOT_SPILLED`).
+    pub node_wait: NodeWait,
+}
+
+/// Names how long a job sent to a server waits for the server's daemon.
+pub const NODE_WAIT_ENV: &str = "SLOT_NODE_WAIT";
+
+/// The wait without [`NODE_WAIT_ENV`]: longer than the longest time a
+/// daemon that was told to stop lets its jobs run (30 minutes).
+pub const DEFAULT_NODE_WAIT: Duration = Duration::from_secs(35 * 60);
+
+/// How often a job is sent again to a server whose daemon does not answer.
+const NODE_POLL: Duration = Duration::from_secs(5);
+
+/// What a job sent to a server does while the server's daemon does not
+/// answer: a daemon that was told to stop removes its socket and lets its
+/// jobs end before it starts again, and a reloading one drops the jobs it
+/// has not started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeWait {
+    /// How long the job is sent again before the call ends as a remote
+    /// build that did not start; zero = the first lost connection ends
+    /// the call.
+    pub bound: Duration,
+    /// The time between two sends.
+    pub poll: Duration,
+}
+
+impl Default for NodeWait {
+    fn default() -> Self {
+        Self {
+            bound: DEFAULT_NODE_WAIT,
+            poll: NODE_POLL,
+        }
+    }
 }
 
 /// A duration from variable `name`, or `default` with a line on stderr when
 /// it does not parse.
 fn duration_var(name: &str, default: Duration) -> Duration {
-    match std::env::var(name).ok().filter(|v| !v.is_empty()) {
+    duration_of(name, std::env::var(name).ok().as_deref(), default)
+}
+
+/// [`duration_var`] of the variable's value.
+fn duration_of(name: &str, value: Option<&str>, default: Duration) -> Duration {
+    match value.filter(|v| !v.is_empty()) {
         None => default,
-        Some(v) => crate::run_limit::parse_duration(&v).map_or_else(
+        Some(v) => crate::run_limit::parse_duration(v).map_or_else(
             |e| {
                 eprintln!("slot: {name}: {e}; using {} s", default.as_secs());
                 default
@@ -145,10 +189,28 @@ fn duration_var(name: &str, default: Duration) -> Duration {
     }
 }
 
+/// The bound of [`NodeWait`] from the value of [`NODE_WAIT_ENV`]: a
+/// duration as the other settings take it, and `0` for no wait. A job this
+/// machine's daemon handed to a node (`spilled`,
+/// [`crate::server::spill::SPILLED_ENV`]) does not wait, whatever the
+/// value: its client ends with [`crate::server::spill::INFRA_EXIT`] and the
+/// daemon queues the job here again, and a wait would count as the job's
+/// run time here.
+fn node_wait_of(value: Option<&str>, spilled: bool) -> Duration {
+    if spilled {
+        return Duration::ZERO;
+    }
+    match value {
+        Some("0" | "0s" | "0m" | "0h") => Duration::ZERO,
+        v => duration_of(NODE_WAIT_ENV, v, DEFAULT_NODE_WAIT),
+    }
+}
+
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
     /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`,
-    /// `SLOT_SYNC_LIMIT`, `SLOT_REMOTE_SAME_PATH` and `SLOT_NO_PRODUCTS`.
+    /// `SLOT_SYNC_LIMIT`, `SLOT_REMOTE_SAME_PATH`, `SLOT_NO_PRODUCTS` and
+    /// `SLOT_NODE_WAIT`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
@@ -198,6 +260,13 @@ impl Settings {
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
+            },
+            node_wait: NodeWait {
+                bound: node_wait_of(
+                    var(NODE_WAIT_ENV).as_deref(),
+                    var(crate::server::spill::SPILLED_ENV).is_some(),
+                ),
+                poll: NODE_POLL,
             },
         }
     }
@@ -266,44 +335,54 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         // A same-path job outside any git checkout mirrors its working
         // directory as the tree.
         let top = top.or_else(|| keeps_path(s, &cwd).then(|| cwd.clone()));
-        let why = match remote(host, top.as_deref(), &cwd, &mut req, s) {
-            Ok(c) => {
-                let mut collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
-                match talk_with(c, &req, collector.as_mut()) {
-                    Ended::Fallback(msg) => msg,
-                    ended => {
-                        let ran = matches!(ended, Ended::Exit(_));
-                        let mut code = ended.code();
-                        let back = Instant::now();
-                        let mut came_back = false;
-                        if let (Some(p), Some(col), Some(top)) = (&plan, &collector, top.as_deref())
-                            && ran
-                            && (code == 0 || p.when == artifacts::When::AnyExit)
-                        {
-                            came_back = true;
-                            code = products_back(host, top, &cwd, s, col, code);
-                        }
-                        if let Some(p) = &skipped
-                            && ran
-                            && (code == 0 || p.when == artifacts::When::AnyExit)
-                        {
-                            eprintln!(
-                                "slot: artifacts not fetched: {} is set",
-                                artifacts::NO_PRODUCTS_ENV
-                            );
-                        }
-                        code = match (&req.workspace, top.as_deref()) {
-                            (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
-                                came_back = true;
-                                fetch(host, top, &ws.id, s)
-                            }
-                            _ => code,
-                        };
-                        let back_ms = came_back.then(|| millis(back.elapsed()));
-                        record_phases(host, s, &req, argv, back_ms);
-                        return code;
-                    }
+        // The tree is synced once; the request is sent until the server's
+        // daemon answers, each time with a collector of its own.
+        let mut collector = None;
+        let sent = remote(host, top.as_deref(), &cwd, &mut req, s).and_then(|()| {
+            send_waiting(
+                host,
+                s.node_wait,
+                |again| proxy(host, s, again),
+                |c| {
+                    collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
+                    talk_with(c, &req, collector.as_mut())
+                },
+                &mut std::io::stderr(),
+            )
+        });
+        let why = match sent {
+            Ok(Ended::Fallback(msg)) => msg,
+            Ok(ended) => {
+                let ran = matches!(ended, Ended::Exit(_));
+                let mut code = ended.code();
+                let back = Instant::now();
+                let mut came_back = false;
+                if let (Some(p), Some(col), Some(top)) = (&plan, &collector, top.as_deref())
+                    && ran
+                    && (code == 0 || p.when == artifacts::When::AnyExit)
+                {
+                    came_back = true;
+                    code = products_back(host, top, &cwd, s, col, code);
                 }
+                if let Some(p) = &skipped
+                    && ran
+                    && (code == 0 || p.when == artifacts::When::AnyExit)
+                {
+                    eprintln!(
+                        "slot: artifacts not fetched: {} is set",
+                        artifacts::NO_PRODUCTS_ENV
+                    );
+                }
+                code = match (&req.workspace, top.as_deref()) {
+                    (Some(ws), Some(top)) if code == 0 && !s.fetch.is_empty() => {
+                        came_back = true;
+                        fetch(host, top, &ws.id, s)
+                    }
+                    _ => code,
+                };
+                let back_ms = came_back.then(|| millis(back.elapsed()));
+                record_phases(host, s, &req, argv, back_ms);
+                return code;
             }
             Err(e) => format!("{e:#}"),
         };
@@ -617,7 +696,8 @@ fn amend(host: &str, s: &Settings, a: crate::proto::Amend) {
         reader,
         mut writer,
         mut closer,
-    }) = proxy(host, s)
+        ..
+    }) = proxy(host, s, false)
     else {
         return;
     };
@@ -972,7 +1052,21 @@ pub struct Conn {
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
     closer: Box<dyn FnMut() + Send>,
+    /// For a connection an ssh process carries: how that process ended,
+    /// asked after the reader ended. `None` for a socket.
+    status: Option<SshStatus>,
 }
+
+/// The exit status of a connection's ssh, or `None` when a signal ended
+/// it or it did not end.
+type SshStatus = Box<dyn FnOnce() -> Option<i32> + Send>;
+
+/// The exit status ssh keeps for a failure of its own (no connection, no
+/// login); any other is the status of the command it ran on the server.
+const SSH_FAILED: i32 = 255;
+
+/// How long an ssh whose output ended gets to exit before it is killed.
+const SSH_EXIT_WAIT: Duration = Duration::from_secs(2);
 
 fn local(socket: &Path) -> Result<Conn> {
     let c = UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
@@ -985,6 +1079,7 @@ fn local(socket: &Path) -> Result<Conn> {
         closer: Box::new(move || {
             let _ = c.shutdown(std::net::Shutdown::Both);
         }),
+        status: None,
     })
 }
 
@@ -1023,13 +1118,15 @@ fn same_path_extras(
     Ok(())
 }
 
+/// Syncs the tree at `top` to `host` and makes `req` the request of a job
+/// that runs in it there. The connection is the caller's ([`proxy`]).
 fn remote(
     host: &str,
     top: Option<&Path>,
     cwd: &Path,
     req: &mut Request,
     s: &Settings,
-) -> Result<Conn> {
+) -> Result<()> {
     let top = top.ok_or_else(|| anyhow!("remote mode needs a git repository"))?;
     if let Some(why) = same_path::tree_refusal(top, same_path_root().as_deref()) {
         return Err(anyhow!(why));
@@ -1099,7 +1196,7 @@ fn remote(
         same_path,
         target_dir,
     });
-    proxy(host, s)
+    Ok(())
 }
 
 /// Whole milliseconds of `d`.
@@ -1108,7 +1205,9 @@ fn millis(d: Duration) -> u64 {
 }
 
 /// A connection to the daemon on `host` through `ssh host slot proxy`.
-fn proxy(host: &str, s: &Settings) -> Result<Conn> {
+/// With `quiet`, what ssh and the server's step write to stderr is dropped:
+/// a job that is sent again says why once, not every time.
+fn proxy(host: &str, s: &Settings, quiet: bool) -> Result<Conn> {
     let mut child: Child = Command::new(&s.ssh[0])
         .args(&s.ssh[1..])
         .arg(host)
@@ -1116,24 +1215,130 @@ fn proxy(host: &str, s: &Settings) -> Result<Conn> {
         .arg("proxy")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(if quiet {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        })
         .spawn()
         .context("ssh")?;
     let writer = child.stdin.take().ok_or_else(|| anyhow!("ssh stdin"))?;
     let reader = child.stdout.take().ok_or_else(|| anyhow!("ssh stdout"))?;
+    let child = Arc::new(Mutex::new(child));
+    let ended = Arc::clone(&child);
     Ok(Conn {
         reader: Box::new(reader),
         writer: Box::new(writer),
         closer: Box::new(move || {
-            let _ = child.kill();
+            if let Ok(mut c) = child.lock() {
+                let _ = c.kill();
+            }
         }),
+        status: Some(Box::new(move || exit_status(&ended))),
     })
+}
+
+/// The exit status of `ssh`, whose output ended: it gets [`SSH_EXIT_WAIT`]
+/// to exit and is killed after that. The lock is held for one look at a
+/// time: the signal thread takes it to kill the process.
+fn exit_status(ssh: &Mutex<Child>) -> Option<i32> {
+    let deadline = Instant::now() + SSH_EXIT_WAIT;
+    loop {
+        {
+            let mut c = ssh.lock().ok()?;
+            match c.try_wait() {
+                Ok(Some(st)) => return st.code(),
+                Ok(None) if Instant::now() < deadline => {}
+                _ => {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                    return None;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Sends a job to the daemon on `host`: `connect` opens a connection (its
+/// argument says whether the job is being sent again), `talk` holds the
+/// conversation. A conversation the daemon did not answer (the connection
+/// closed before the job's process started, or the request could not be
+/// written) is held again every `w.poll`, with one line on `err`, until
+/// one gets past that point or `w.bound` has passed: then the error names
+/// the wait, and the job did not start. Not sent again: a job whose
+/// process had started, one whose client got a signal, and one whose ssh
+/// failed by itself ([`SSH_FAILED`]): the server was not reached, which is
+/// not a daemon that restarts.
+fn send_waiting(
+    host: &str,
+    w: NodeWait,
+    mut connect: impl FnMut(bool) -> Result<Conn>,
+    mut talk: impl FnMut(Conn) -> Ended,
+    err: &mut dyn Write,
+) -> Result<Ended> {
+    let t0 = Instant::now();
+    let mut again = false;
+    loop {
+        let mut conn = connect(again)?;
+        let status = conn.status.take();
+        let ended = talk(conn);
+        let unanswered = matches!(ended, Ended::Lost { started: false } | Ended::Unsent(_));
+        if !unanswered || w.bound.is_zero() || signalled().is_some() {
+            return Ok(ended);
+        }
+        if status.and_then(|ssh| ssh()) == Some(SSH_FAILED) {
+            if again {
+                let _ = writeln!(err, "slot: ssh to {host} failed while the job waited");
+            }
+            return Ok(ended);
+        }
+        let left = w.bound.saturating_sub(t0.elapsed());
+        if left.is_zero() {
+            return Err(anyhow!(
+                "its daemon did not answer within {}",
+                crate::run_limit::text(w.bound.as_secs())
+            ));
+        }
+        if !again {
+            let _ = writeln!(
+                err,
+                "slot: waiting for {host}: its daemon does not answer (a restart or a drain); the job is sent again when it answers"
+            );
+            let _ = err.flush();
+        }
+        again = true;
+        // A conversation that sent nothing installed no signal thread.
+        handle_signals();
+        if let Some(sig) = pause(w.poll.min(left)) {
+            return Ok(Ended::Signalled(sig));
+        }
+    }
+}
+
+/// Sleeps for `d`, or until this client gets a signal: then the signal.
+fn pause(d: Duration) -> Option<i32> {
+    let until = Instant::now() + d;
+    loop {
+        if let Some(sig) = signalled() {
+            return Some(sig);
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
+    }
 }
 
 /// How a conversation with the daemon ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ended {
-    /// The job's exit code, or 3 when the request could not be sent.
+    /// The job's exit code.
     Exit(i32),
+    /// The request could not be written to the connection, for this
+    /// reason; the daemon did not get it.
+    Unsent(String),
     /// The connection closed without an exit frame. `started` is whether
     /// the job's process had started (a start, output or error frame came).
     Lost { started: bool },
@@ -1144,11 +1349,16 @@ enum Ended {
 }
 
 impl Ended {
-    /// The exit code for the caller; a lost connection is reported here.
+    /// The exit code for the caller; a lost connection and a request that
+    /// was not sent are reported here.
     fn code(self) -> i32 {
         match self {
             Self::Exit(code) => code,
             Self::Signalled(sig) => 128 + sig,
+            Self::Unsent(why) => {
+                eprintln!("slot: send: {why}");
+                3
+            }
             Self::Lost { .. } => {
                 eprintln!("slot: connection to daemon lost");
                 3
@@ -1172,6 +1382,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
         reader,
         mut writer,
         closer,
+        ..
     } = conn;
     let mut line = match serde_json::to_vec(req) {
         Ok(b) => b,
@@ -1182,8 +1393,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
     };
     line.push(b'\n');
     if let Err(e) = writer.write_all(&line).and_then(|()| writer.flush()) {
-        eprintln!("slot: send: {e}");
-        return Ended::Exit(3);
+        return Ended::Unsent(e.to_string());
     }
     // The writer stays open until the job ends: closing it tells the daemon
     // the client is gone, and the daemon cancels the job.
@@ -1756,5 +1966,258 @@ mod tests {
         assert_eq!(req.nofile, Some(crate::proto::FileLimit::of_this_process()));
         let line = serde_json::to_string(&req).unwrap();
         assert!(line.contains(r#""nofile":{"soft":"#), "{line}");
+    }
+
+    /// What one connection of [`Node`] does with the request it gets.
+    enum Answer {
+        /// Takes the request, answers with these frames and closes; its
+        /// ssh ends with this status.
+        Frames(Vec<Frame>, Option<i32>),
+        /// Takes no byte: the write fails.
+        Refuses,
+    }
+
+    /// A writer that keeps what it gets, or fails.
+    struct Taken(Option<Arc<Mutex<Vec<String>>>>);
+
+    impl Write for Taken {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let Some(got) = &self.0 else {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            };
+            got.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(buf).into_owned());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A stand-in for a server reached through ssh: one answer per
+    /// connection, in order, and the last one for every connection after.
+    struct Node {
+        answers: Vec<Answer>,
+        /// The `again` argument of each connection.
+        connects: Vec<bool>,
+        /// What each connection got written.
+        got: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Node {
+        fn new(answers: Vec<Answer>) -> Self {
+            Self {
+                answers,
+                connects: Vec::new(),
+                got: Arc::default(),
+            }
+        }
+
+        fn connect(&mut self, again: bool) -> Conn {
+            let n = self.connects.len().min(self.answers.len() - 1);
+            self.connects.push(again);
+            let (text, writer, status) = match &self.answers[n] {
+                Answer::Frames(frames, status) => {
+                    let mut text = Vec::new();
+                    for f in frames {
+                        text.extend(serde_json::to_vec(f).unwrap());
+                        text.push(b'\n');
+                    }
+                    (text, Taken(Some(self.got.clone())), *status)
+                }
+                Answer::Refuses => (Vec::new(), Taken(None), Some(1)),
+            };
+            Conn {
+                reader: Box::new(std::io::Cursor::new(text)),
+                writer: Box::new(writer),
+                closer: Box::new(|| {}),
+                status: Some(Box::new(move || status)),
+            }
+        }
+
+        /// The requests the connections got, one line each.
+        fn requests(&self) -> Vec<Request> {
+            self.got
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+    }
+
+    /// Sends [`request`] to `node` as a job of host `node-1`; returns how
+    /// it ended and what the caller read on stderr.
+    fn sent_to(node: &mut Node, w: NodeWait) -> (Result<Ended, String>, String) {
+        let mut err = Vec::new();
+        let req = request();
+        let ended = send_waiting(
+            "node-1",
+            w,
+            |again| Ok(node.connect(again)),
+            |c| talk(c, &req),
+            &mut err,
+        );
+        (
+            ended.map_err(|e| format!("{e:#}")),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    /// A wait of `bound_ms` with a send every 20 ms.
+    fn node_wait(bound_ms: u64) -> NodeWait {
+        NodeWait {
+            bound: Duration::from_millis(bound_ms),
+            poll: Duration::from_millis(20),
+        }
+    }
+
+    const WAITING: &str = "slot: waiting for node-1: its daemon does not answer (a restart or a drain); the job is sent again when it answers\n";
+
+    fn started() -> Frame {
+        Frame::Start {
+            id: 1,
+            target_dir: String::new(),
+            seeded_from: None,
+        }
+    }
+
+    #[test]
+    fn a_job_whose_nodes_daemon_does_not_answer_is_sent_again_until_it_does() {
+        let queued = Frame::Info {
+            msg: "slot: job 1 queued".into(),
+        };
+        let mut node = Node::new(vec![
+            // The server's step found no socket: a daemon that drains.
+            Answer::Frames(vec![], Some(3)),
+            // ssh was gone before the request was written.
+            Answer::Refuses,
+            // A reloading daemon dropped the job it had queued.
+            Answer::Frames(vec![queued], Some(0)),
+            Answer::Frames(vec![started(), Frame::Exit { code: 7 }], Some(0)),
+        ]);
+        let t0 = Instant::now();
+        let (ended, err) = sent_to(&mut node, node_wait(10_000));
+        assert_eq!(ended, Ok(Ended::Exit(7)), "{err}");
+        assert_eq!(err, WAITING, "one line, however often the job is sent");
+        assert_eq!(
+            node.connects,
+            [false, true, true, true],
+            "every connection after the first says the job is sent again"
+        );
+        assert_eq!(
+            node.requests(),
+            [request(), request(), request()],
+            "the same request each time"
+        );
+        assert!(
+            t0.elapsed() >= Duration::from_millis(60),
+            "a poll between two sends"
+        );
+    }
+
+    #[test]
+    fn at_the_bound_a_job_whose_nodes_daemon_does_not_answer_did_not_start() {
+        let mut node = Node::new(vec![Answer::Frames(vec![], Some(3))]);
+        let t0 = Instant::now();
+        let (ended, err) = sent_to(&mut node, node_wait(90));
+        let why = ended.unwrap_err();
+        assert!(
+            why.starts_with("its daemon did not answer within "),
+            "{why}"
+        );
+        assert_eq!(err, WAITING);
+        assert!(t0.elapsed() >= Duration::from_millis(90));
+        assert!(
+            node.connects.len() >= 2 && node.connects.len() <= 6,
+            "sent every poll up to the bound: {:?}",
+            node.connects
+        );
+        let secs = NodeWait {
+            bound: Duration::from_secs(1),
+            poll: Duration::from_secs(1),
+        };
+        let (ended, _) = sent_to(&mut node, secs);
+        assert_eq!(
+            ended,
+            Err("its daemon did not answer within 1s".into()),
+            "the bound as the settings write it"
+        );
+    }
+
+    #[test]
+    fn a_job_whose_ssh_failed_is_not_sent_again() {
+        let mut node = Node::new(vec![Answer::Frames(vec![], Some(SSH_FAILED))]);
+        let (ended, err) = sent_to(&mut node, node_wait(10_000));
+        assert_eq!(ended, Ok(Ended::Lost { started: false }));
+        assert_eq!(err, "", "no wait for a server that was not reached");
+        assert_eq!(node.connects, [false]);
+    }
+
+    #[test]
+    fn a_job_that_started_on_a_node_is_not_sent_again() {
+        let mut node = Node::new(vec![Answer::Frames(vec![started()], Some(0))]);
+        let (ended, err) = sent_to(&mut node, node_wait(10_000));
+        assert_eq!(ended, Ok(Ended::Lost { started: true }));
+        assert_eq!(err, "");
+        assert_eq!(node.connects, [false], "its process may have run");
+    }
+
+    #[test]
+    fn with_a_node_wait_of_zero_a_lost_job_ends_at_once() {
+        let mut node = Node::new(vec![Answer::Frames(vec![], Some(3))]);
+        let (ended, err) = sent_to(&mut node, node_wait(0));
+        assert_eq!(ended, Ok(Ended::Lost { started: false }));
+        assert_eq!(err, "");
+        assert_eq!(node.connects, [false]);
+
+        let mut node = Node::new(vec![Answer::Refuses]);
+        let (ended, _) = sent_to(&mut node, node_wait(0));
+        assert_eq!(ended, Ok(Ended::Unsent("broken pipe".into())));
+        assert_eq!(node.connects, [false]);
+    }
+
+    #[test]
+    fn the_node_wait_is_35_minutes_unless_the_variable_names_another() {
+        assert_eq!(node_wait_of(None, false), Duration::from_secs(35 * 60));
+        assert_eq!(Settings::default().node_wait, NodeWait::default());
+        assert_eq!(NodeWait::default().bound, DEFAULT_NODE_WAIT);
+        assert_eq!(NodeWait::default().poll, Duration::from_secs(5));
+        assert_eq!(node_wait_of(Some("90"), false), Duration::from_secs(90));
+        assert_eq!(node_wait_of(Some("10m"), false), Duration::from_secs(600));
+        for zero in ["0", "0s", "0m", "0h"] {
+            assert_eq!(node_wait_of(Some(zero), false), Duration::ZERO, "{zero}");
+        }
+        assert_eq!(
+            node_wait_of(Some("soon"), false),
+            DEFAULT_NODE_WAIT,
+            "a value that is no duration"
+        );
+    }
+
+    /// A job this machine's daemon handed to a node has that daemon's own
+    /// rule: its client ends with the exit code that puts the job back in
+    /// the daemon's queue, at once, whatever the variable names.
+    #[test]
+    fn a_job_a_daemon_handed_to_a_node_does_not_wait_for_the_nodes_daemon() {
+        assert_eq!(node_wait_of(None, true), Duration::ZERO);
+        let w = NodeWait {
+            bound: node_wait_of(Some("30s"), true),
+            poll: Duration::from_millis(20),
+        };
+        let mut node = Node::new(vec![
+            Answer::Frames(vec![], Some(3)),
+            Answer::Frames(vec![started(), Frame::Exit { code: 0 }], Some(0)),
+        ]);
+        let (ended, err) = sent_to(&mut node, w);
+        assert_eq!(err, "", "no wait");
+        assert_eq!(node.connects, [false], "not sent again");
+        assert_eq!(ended, Ok(Ended::Lost { started: false }));
+        assert_eq!(
+            ended.map(Ended::code),
+            Ok(crate::server::spill::INFRA_EXIT),
+            "the daemon queues it here again"
+        );
     }
 }

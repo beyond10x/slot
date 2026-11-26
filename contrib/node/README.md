@@ -14,6 +14,7 @@ is copied from the workstation to a node ahead of jobs.
 | `role.sh` | where the node's owner has the AWS CLI | the node's own IAM role and instance profile, and the instance's metadata options; `plan`, `check` and `apply` |
 | `conf.sh` | sourced by both | reads the config file |
 | `toolchains.sh` | on both sides | one line per rust toolchain, the go and node versions and the version of each C tool of the machine it runs on |
+| `toolchains-refresh.sh` | on the workstation, as a user unit | every 60 s: writes this host's `toolchains.sh` lines and fetches the node's into `~/.local/state/slot` |
 | `test.sh` | in `task check` | tests of `provision.sh`, `push.sh` and `toolchains.sh` under a temporary root |
 
 ## The config file
@@ -33,6 +34,10 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
 | `MIN_FREE_DISK`, `SCCACHE_GB`, `TMP_GB` | provision | disk floor, compile cache size, job tmp size (GB) |
 | `DOCKER_GB` | provision | what docker may store on the root disk before the prune timer removes what no job uses (GB, default 10, at least 1) |
+| `CPU_LIMIT`, `CPU_PRESSURE` | provision | the CPU limit of the node's pool: the busy CPUs from which a queued job is held (from 1, one decimal; default 80 % of the CPUs found; `off` for no limit) and the percent of CPU pressure from which it is held as well (over 0, at most 100; default 20; `off`) |
+| `RUN_LIMIT`, `RUN_LIMIT_MAX` | provision | the run-time limit of the node's pool: how long a job runs before the daemon ends it (a duration: seconds, or a number with `s`, `m` or `h`; default `10m`; `off` for no limit) and the most a job names with `slot --timeout` (default `30m`; not shorter than `RUN_LIMIT`) |
+| `DRAIN_MAX` | provision | the bound of a drain started by `apply --drain`: after it the unit restarts with the jobs that still run (a duration from `1m` to `24h`, default `30m`) |
+| `GO_ROOT` | provision | the directory the go archive is unpacked into, for a node whose `go env GOROOT` must answer the path the workstation's go answers (`/usr/lib/go`); empty: `/usr/local/go-<version>` |
 | `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
@@ -58,7 +63,7 @@ The instance store is empty after every stop and start; the root volume keeps th
 
 A root channel that takes one script, such as SSM Run Command, gets it from
 `provision.sh bundle CONF apply` (or `check`, or `check --canary`): one script with the config
-inside.
+inside. `bundle CONF apply` takes `--open` and `--drain` as `apply` does.
 
 `apply --open` also lets `SETUP_KEY` into `authorized_keys`. Removing the setup key does not end
 an ssh connection that is already logged in, and a control connection (`ControlMaster`,
@@ -169,11 +174,14 @@ and so is an instance without a role. An allowed call, a container that does not
 that could test nothing (no token, no credentials, no running docker) are
 `drift: role: canary: ...`. The first run pulls the image. A refusal is about that one call:
 a role that reads parameters under one path only, or reads another service, passes it.
+`--canary` also times an aborted process, reads the load average and compiles one C file with
+`musl-gcc -static` (What check compares, below).
 
 ## What check compares
 
 `provision.sh check` reads and prints; it changes nothing. `apply` never restarts a running
-`slot-node` while jobs run or queue, never changes an existing user, never formats a device
+`slot-node` while jobs run or queue (`apply --drain` starts a drain, whose bound does: Draining,
+below), never changes an existing user, never formats a device
 that holds a filesystem, and as root it neither writes nor mounts through a symbolic link in
 the build user's directories. Files it replaces keep their old version beside them as
 `<name>.slot-prev`.
@@ -182,8 +190,17 @@ The node uses its own `/usr` and `/etc`. Everything a job needs beyond the base 
 from `EXTRA_PACKAGES`, `RUST_TOOLCHAINS` or a pin.
 
 Packages that Amazon Linux 2023 lacks are not installed; a job that needs one is held by name:
-mingw cross compilers, `musl-gcc`, `dash`, `mawk`, `erlang`, `elixir`, `odin` and `gh`. The config
-file does not list them.
+mingw cross compilers, `dash`, `mawk`, `erlang`, `elixir`, `odin` and `gh`. The config file does
+not list them.
+
+No credential goes to a node. `STORE/nodebin` is the first directory of a job's PATH, and each
+script in it prints one line on stderr and exits 255: `no-credentials` (the `GIT_ASKPASS` and
+`SSH_ASKPASS` of `slot-node.service`), `ssh` (it lets through only `-G` and `-V`, which open no
+connection), and `glab` and `gh`, which work only with a credential (`NO_CREDENTIAL_TOOLS` in
+`provision.sh`). A task that calls `glab api` on the node ends with that line, not with what its
+next command makes of an empty answer. The line names the way out: run the step on the
+workstation with `slot --here <command>`, or name the command in `.slot.toml` `local = [...]` of
+its repository.
 
 Rust: rustup is installed for the build user into `STORE/rustup` and `STORE/cargo` (`~/.rustup`
 and `~/.cargo` link there) from the pinned release of `rustup-init`, with no default toolchain and
@@ -241,11 +258,112 @@ docker stores on the root disk (`/var/lib/docker`). `slot-docker-prune.timer` ru
 
 The node holds no registry credential, so a job pulls public images only.
 
-A running unit follows its file. When `apply` rewrites `sccache-node.service` it restarts that
-unit; `slot-node.service` restarts when its file, its `slot serve` arguments or the slot binary
-changed and no job runs, else `apply` prints `pending: running: ...` and the next `apply`
-restarts it. `check` names a running unit whose loaded definition or process environment is not
-the unit file's, and a `slot-node` that runs another slot version than `SLOT_VERSION`.
+A running unit follows its file. `sccache-node.service` and `slot-node.service` restart when
+`apply` rewrote the unit's file or finds its process started from another definition, and
+`slot-node.service` also when its `slot serve` arguments or the slot binary changed. Both wait for
+an empty pool: a restart of `slot-node` ends the jobs, and one of `sccache-node` ends the
+compilers the cache server runs for them. With a job running `apply` prints
+`pending: running: ...`, and an `apply` that finds no job and still finds the difference restarts
+the unit. `check` names a running unit whose loaded definition or process environment is not the
+unit file's, one whose soft core limit is not 0, and a `slot-node` that runs another slot version
+than `SLOT_VERSION`.
+
+Draining: a node that always has a job never gets that restart (one node: 10 runs of `apply` in
+29 minutes, 5 to 14 jobs each time). `apply --drain` (also `bundle CONF apply --drain`) starts it
+without an empty pool. With a restart of either unit pending and jobs in the pool, it reloads the
+manager, arms a bound and sends SIGTERM to the daemon process alone
+(`systemctl kill --kill-whom=main`), prints `draining: slot-node: <n> job(s), restart by <UTC
+time>` and goes on to its end; the exit status is the one without the drain. The daemon removes
+its socket, lets the jobs it has run and queued end, and exits; no job is signalled. systemd then
+starts the unit again (`Restart=always`), with the unit file and the build user's groups of that
+moment. While it drains the node takes no new job: a call from a workstation waits for the
+daemon (`SLOT_NODE_WAIT`). With no job in the pool `apply --drain` restarts at once, as `apply`
+does, and without `--drain` nothing changes.
+
+- The gap: `slot-node.service` runs `provision.sh start-pre` as root before every start
+  (`ExecStartPre`), whoever started it. A restart of `sccache-node.service` that was pending
+  happens there, with no daemon of the pool running (`pending: running: sccache-node restarts
+  when slot-node does, at the end of its drain: ...` until then), and the marks of the drain go.
+  A pending restart of `sccache-node` alone drains `slot-node` too: the gap is its only moment.
+- The bound: `DRAIN_MAX` after the signal, a transient timer (`slot-node-drain.timer`) runs
+  `provision.sh drain-bound`. If the daemon process that got the signal still runs (same main PID
+  and start time), the unit restarts the hard way, which ends the jobs that still run, and the
+  journal of `slot-node-drain.service` says so. Another daemon process is left alone. A unit that
+  is not active is started. A bound that cannot be armed means no signal (`failed: drain: ...`).
+- During a drain `check` has one line for it, `drift: drain: slot-node.service drains for its
+  restart (<why>): <n> job(s) left, restart by <UTC time>`, in place of the `running` lines, and
+  `check --canary` prints `canary: not tested while slot-node.service drains: core, cpu-limit`
+  and neither `ok` line. `apply`, with `--drain` or without, prints the `draining:` line again
+  and sends no second signal. The jobs left are read from the daemon's `/metrics`.
+- The marks are files of root in `/run/slot-node` (`drain`: the daemon process, the time of the
+  bound, the reason; `sccache-restart`). After the restart nothing of the drain is left; a mark
+  that outlived its drain is one `drift: drain:` line, and `apply` removes it.
+
+Core dumps: a bare node has `kernel.core_pattern` as a pipe to `systemd-coredump`, and the kernel
+runs a pipe handler whatever the core limit of the process is. A process killed by SIGABRT was
+reaped only after the handler: 142 to 256 ms later on an idle node, up to 3.5 s with 24 at once,
+and tests that wait 5 to 7 s for an aborted child timed out under load. The node's pattern is the
+file name `core`, from `/etc/sysctl.d/60-slot-core.conf` (`kernel.core_pattern=core`; the name
+sorts after systemd's `50-coredump.conf`), and `slot-node.service` and `sccache-node.service` have
+`LimitCORE=0:infinity`: a job that aborts, or a compiler the cache server runs for it, writes no
+core file and is reaped at once. The limit is the soft one. A job that wants a core file raises
+it (`ulimit -c unlimited`) and gets the file in the working directory of the process that
+crashed: `core`, or `core.<pid>`, one per crash, where `kernel.core_uses_pid` is 1.
+
+Under the pattern `core` a process whose limit is not 0 writes such a file, so `apply` loads the
+pattern only when both units run with the soft limit 0. A unit that runs with another limit
+restarts when no job runs, and the same `apply` then loads the pattern. With a job running,
+`apply` writes the unit files and the sysctl file, prints `pending: running: ...` for each unit
+and `pending: core: ...`, and the pipe stays until an `apply` finds no job. `check` names a
+pattern that is a pipe and a running unit whose soft core limit is not 0. A pattern that is
+neither a pipe nor `core` is the owner's choice and stays: with no `60-slot-core.conf` there,
+`apply` writes none, and `check` and `apply` say so in a `kept: core: ...` line; a
+`60-slot-core.conf` that is already there stays, and it makes the pattern `core` at the next
+boot. With the pattern `core`, `coredumpctl` gets no dump from the node. A process outside those
+two units whose core limit is not 0 writes a core file as well: a process in a container a job
+starts does, into its working directory in the container, which is a directory of the node when
+the job mounted its tree there, unless the job passes `--ulimit core=0`. `check --canary` aborts
+a process five times under the soft core limit 0 and reads the quickest time until it is reaped,
+and reads the soft core limit of the running `slot-node`: over 50 ms, a limit that is not 0 or a
+`slot-node` that is not active is `drift: core: canary: ...`, else the line
+`canary: ok: core: ...`.
+
+The CPU limit of the pool: slots bound how many jobs run, not what they use. On a node of 32 CPUs
+and 32 slots, 14 jobs ran about 76 threads at a load of 68 to 97, with a CPU pressure
+(`some avg10` of `/proc/pressure/cpu`) of 35.67 at load 68. Once `slot-node.service` runs, `apply`
+sets `slot cpu-limit <CPU_LIMIT> --pressure <CPU_PRESSURE>` as the build user: the daemon holds a
+queued job while the pool's jobs and the compile cache use more CPUs than the first mark, or while
+the host's CPU pressure is at the second mark or over it (4 jobs always run, and a job held for
+10 minutes starts). The defaults are 80 % of the CPUs found (32 CPUs: 25.6) and 20;
+`CPU_LIMIT=off` is no limit. The pressure default is from 15 rounds within 7 minutes on one node
+of 32 CPUs (16 cores) without a CPU limit, with a fixed CPU workload run 8 wide. Every round had
+31.7 to 32.0 of 32 CPUs busy. In 8 rounds at a pressure of 21.8 to 43.5 % (7 to 11 jobs, load 53
+to 58) the workload took 455 to 539 ms, median 490 ms; in 5 rounds at 65.0 to 76.5 % (12 to 14
+jobs, load 72 to 78) it took 701 to 2186 ms, median 981 ms. Every CPU was busy at the lowest
+pressure seen (21.8 %), so the default mark is 20; nothing was measured below 21.8 % or with a
+free CPU. The daemon keeps the marks in its state directory, on the instance
+store, so `apply` sets them again after a stop and start. `check` asks the daemon which marks it
+holds (`GET /api/cpu-limit` on the loopback address, as the build user, 5 s at most) and compares
+them as numbers; root opens no file of the build user for it. A daemon that gives no answer is
+`drift: cpu-limit: the daemon of the pool gives no answer ...`. While `slot-node.service` is not
+active, `apply` prints `failed: cpu-limit: ...`. `check --canary` reads the 5-minute load
+average: over 2.5 per CPU (32 CPUs: 80) is `drift: cpu-limit: canary: ...`, else the line
+`canary: ok: cpu-limit: ...`; with `CPU_LIMIT=off` it has no line. The bound is from a test step
+on 32 CPUs that ran 12 to 19 s at a load of 48 to 72, and 182 s and 258 s at a load of 85 to 97.
+
+The run-time limit of the pool: a daemon nobody set has none and lets a job name up to 1 h with
+`slot --timeout`; jobs ran 23 minutes on a node. Once `slot-node.service` runs, `apply` sets
+`slot run-limit <RUN_LIMIT> --max <RUN_LIMIT_MAX>` as the build user (defaults `10m` and `30m`;
+`RUN_LIMIT=off` is no limit): the daemon ends a job that runs longer than the limit (exit 124),
+and a job that names its time gets at most the maximum. Setting the limit ends no job that runs:
+the daemon fixes the limit into a job when the job starts, so a job that started before keeps
+what it started with. `check` asks the daemon (`GET /api/run-limit` on the loopback address, as
+the build user, 5 s at most), which answers in seconds, and compares seconds: `10m`, `600s` and
+`600` are one limit. Another limit or maximum is `drift: run-limit: the pool ends a job that
+runs longer than '<n>' s, and a job names up to '<n>' s, want ...`, a daemon that gives no
+answer `drift: run-limit: the daemon of the pool gives no answer ...`, and `apply` with
+`slot-node.service` not active prints `failed: run-limit: ...`. The daemon keeps the limit in
+its state directory, on the instance store, so `apply` sets it again after a stop and start.
 
 A few tools are installed from a release archive checked against its SHA-256 (`TOOL_PINS` in
 `provision.sh`, listed by `provision.sh pins`) into the store's cargo bin: the release its
@@ -271,10 +389,42 @@ version of `go` and `node`; a missing link or another version is drift. `typescr
 releases from `registry.npmjs.org` (esbuild's is its `@esbuild/linux-x64` package, the native
 binary), with `bin/prettier.cjs` linked as `prettier`; the consumers' test lanes call them by
 name. `pnpm` 11.9.0 is the same kind (`pnpm` and `pnpx` link to its `bin/*.mjs`; it needs node
-22.13 or later). `toolchains.sh` prints one `tool <name> <version>` line for each tool it finds (the list is
-below), and `push.sh check` compares those lines both ways. `zstd` and `python3` are base packages. An older directory of a
-former pin stays until someone removes it. Other releases are not installed: a consumer fetches its
-own (`GOTOOLCHAIN=auto`). The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
+22.13 or later), and `yarn` 1.22.22, the release the workstation has in `/usr/bin` (`yarn` and
+`yarnpkg` link to its `bin/yarn.js`, which needs `node` on PATH; a consumer's `task install`
+calls `yarn`). yarn 1 runs the script that `yarn-path` of a `.yarnrc` names and prints that
+script's version, so `check` and `toolchains.sh` read `yarn --version` with `YARN_IGNORE_PATH=1`:
+the release that is installed answers. `toolchains.sh` prints one `tool <name> <version>` line
+for each tool it finds (the list is below), and `push.sh check` compares those lines both ways.
+`zstd` and `python3` are base packages. An older directory of a former pin stays until someone
+removes it. Other releases are not installed: a consumer fetches its own (`GOTOOLCHAIN=auto`).
+The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
+
+`GO_ROOT`: go takes its GOROOT from the real path of its binary, so on a node `go env GOROOT`
+answers `/usr/local/go-<version>`, and on a workstation with a distribution's go `/usr/lib/go`.
+A consumer whose output carries that path builds on the node only when both answer the same one.
+A link at that path would not do: go resolves it and answers the versioned directory. With
+`GO_ROOT=/usr/lib/go` the go archive is unpacked there as a real directory, `go` and `gofmt` in
+`/usr/local/bin` link into it, and `check` compares what `go env GOROOT` answers the build user
+with `GO_ROOT` (`drift: archive:go: go env GOROOT of ... answers '<path>', want <GO_ROOT>`).
+`toolchains.sh` prints the answer on both sides as a line `goroot <path>`, after the `go` line,
+which is unchanged; `push.sh check` does not compare it.
+
+- The path is one others may own. The directory carries a mark, the file `.slot-archive` with
+  `go <version> <sha256 of the archive>`. A `GO_ROOT` that exists without the mark, that is a
+  symbolic link, or that a package owns (`rpm -qf`) is not written to: `check` has one drift
+  line and `apply` one `failed: archive:go: GO_ROOT <path> ...: nothing was changed` line that
+  names the owner or the package. A path with a symbolic link in it is not written through.
+- The config refuses a `GO_ROOT` that is not a plain absolute path, and one that is a directory
+  the provisioning manages, lies in one or holds one: `STORE`, `BUILD_HOME`, `/usr/local/bin`,
+  `/usr/local/libexec`, `/usr/bin`, `/etc`, `/run`, and the directory of a pinned archive.
+- The move: `apply` writes the new directory, switches the links, and removes the old
+  `/usr/local/go-<version>` when the pool counts no job (a go build that runs reads its
+  GOROOT). With a job running it prints `pending: archive:go: /usr/local/go-<version> is removed
+  when no job runs`, and a later `apply` removes it. `check` prints the same `pending:` line for
+  the leftover, on stdout; it is no drift, so the check still ends with `0 drift`.
+- A release change replaces the directory whole, as it does without `GO_ROOT`. A `GO_ROOT` taken
+  out of the config, or changed, leaves its old directory: nothing names it, so the owner
+  removes it.
 
 `ess` 0.99.2 and `cargo-about` 0.9.1 are pinned like `task`, in the build user's cargo bin: `ess` is
 the release the workstation has on PATH. It is a dispatcher: in a tree whose `ess-inputs.yaml`
@@ -282,7 +432,8 @@ requires another release it runs that release, which it downloads itself (SHA-25
 the build user's `~/.cache/ess/toolchains`, so a node job needs `github.com` over https and a
 writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin (the tarball names
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
-`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset, and one for `pnpm`.
+`aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset, and one each for
+`pnpm` and `yarn`.
 
 `helm` v3.8.1 is an archive pin too: the static binary of `get.helm.sh`, the release the
 workstation runs, linked as `/usr/local/bin/helm` (a consumer's chart check runs `helm lint` and
@@ -293,7 +444,7 @@ both), `toolchains.sh` reads the helm its PATH names first, the one a job starte
 release in `/usr/bin`. A helm that a relative PATH entry names is read by its absolute path. This is the one `tool` line that
 depends on the caller's PATH: run `push.sh check` from a shell with the PATH a job gets, or the
 line names the other helm. The `pnpm` line needs `node` 22.13 or later on the caller's PATH;
-without it the line reads `tool pnpm missing`.
+without it the line reads `tool pnpm missing`. The `yarn` line needs `node` there too.
 
 `aep` 0.80.0 on the PATH of a job is built on the node (the release binary is installed too, for
 runbook's driver cache path only, see below: it wants glibc 2.39 and the node has 2.34). A
@@ -321,6 +472,28 @@ set again without a download, and a real file at either name is left alone and r
 `failed`. The build runs `/usr/bin/make` under `timeout 600`. `/usr/bin/make` (4.3) stays;
 `/usr/local/bin` is before `/usr/bin` in the job PATH, so only a job that names `/usr/bin/make` by
 path still gets 4.3.
+
+`musl-gcc` is built on the node from the source of musl 1.2.6 (`MUSL_PIN` in `provision.sh`), the
+release the workstation has: Amazon Linux 2023 packages none, and a build that names it as the C
+compiler of the musl target (`CC_x86_64_unknown_linux_musl=musl-gcc`) stopped with `failed to find
+tool "musl-gcc"`. Apply downloads the tarball from `musl.libc.org`, checks its SHA-256 before
+anything is unpacked, and the build user runs `./configure --prefix=/usr/local/musl-1.2.6
+--syslibdir=/usr/local/musl-1.2.6/lib --enable-wrapper=gcc`, `make -j4` and `make install` into a
+directory of the source tree, under `timeout 600`. Root copies that tree to
+`/usr/local/musl-1.2.6` and links `bin/musl-gcc`, the wrapper that runs the node's `gcc` with
+`lib/musl-gcc.specs`, as `/usr/local/bin/musl-gcc`. The build runs once: `check` reads the link,
+the release that `lib/libc.so` names and whether `musl-gcc --version` answers (`drift: musl:
+...`), a link that alone drifts is set again without a download, a tree of another release is
+replaced whole, and a real file at the link's name is left alone and reported as `failed`. On a
+node of 32 CPUs at a load of 58 to 68 the build took 31 s of `make -j4` (104 s with one job), 1 s
+of `configure` and 3 to 8 s of `make install`. `check --canary` writes one C file that includes
+`stdio.h`, compiles it with `musl-gcc -static` as the build user in a new directory of
+`STORE/tmp`, runs the result and removes the directory: `canary: ok: musl: ...`, or `drift: musl:
+canary: ...` with the compiler's first error line. `toolchains.sh` prints `tool musl <release>`,
+read from the loader beside the wrapper's specs file on both machines, so `push.sh check` names
+another release; its `c musl-gcc` line reads the wrapper in `/usr/local/bin` too. A change of the
+pin's release builds a new directory and moves the link; the directory of the release before
+stays, like the one of make.
 
 `HOME_PINS` in `provision.sh` lists trees that jobs read by path in the build user's home. The ess
 releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 are in `~/.local/share/ess-versions/<version>/ess`
@@ -373,3 +546,24 @@ that runs as that user can alter what the node reports. Control characters in th
 are dropped before anything is printed.
 `slot-toolchains-manifest.timer` writes the node's `toolchains.sh` output to a file under the
 build user's `.local/state/slot` every 60 s.
+
+`toolchains-refresh.sh NODE [SECONDS]` keeps both manifests on the workstation for a wrapper that
+compares them before it sends a job: `toolchains-local.txt` (what `toolchains.sh` beside the
+script prints) and `toolchains-node.txt` (the node's file, fetched by `rsync` with the ssh
+config `~/.config/slot/node/ssh_config` from the same path under the same home;
+`TOOLCHAINS_NODE_FILE` names another path) in `~/.local/state/slot`. Each is written through a
+temporary file of the run's process and a rename. A `toolchains.sh` that prints nothing, a node
+that does not answer within 60 s, and an empty file or one over 1 MiB keep the manifest that is
+there, with one line on stderr that names the reason. `SECONDS` 0 writes both once: exit 0 when
+both were written. The two files have one name each, so one state directory serves one node: the
+loop holds a lock (`toolchains-refresh.lock`, its text the node), and a second loop or a single
+run for another node exits 2.
+
+As a service: copy `toolchains-refresh.sh` and `toolchains.sh` to `~/.local/share/slot/` and
+`contrib/slot-toolchains-refresh@.service` to `~/.config/systemd/user/`. The local manifest names
+the tools the script's PATH finds first, and a user unit does not get the PATH of a login shell
+(on one host `helm` was v3.8.1 from the shell and v4.3.0 from the user manager's PATH). So write
+the PATH of the shell that starts builds into the unit's environment file, from that shell:
+`printf 'PATH=%s\n' "$PATH" >~/.config/slot/node/toolchains-refresh.env`. Then
+`systemctl --user enable --now slot-toolchains-refresh@NODE`. The unit starts the script again
+10 s after it ends, except after exit 2 (a usage error or the lock).

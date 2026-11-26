@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-24",
-  "source": "CHANGELOG.md 0.1.0 to 0.38.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.39.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -331,6 +331,20 @@
       "status": "shipped",
       "detail": "--min-free-disk-light: a job whose last 5 runs used no compile server and no target directory waits only below this floor; every other job waits at --min-free-disk (0.38.0).",
       "href": "/docs/how-it-works#waiting-for-disk-and-memory"
+    },
+    {
+      "area": "Remote",
+      "label": "A job waits for a server that restarts",
+      "status": "shipped",
+      "detail": "A job sent to a server whose daemon does not answer waits and is sent again when it answers, for SLOT_NODE_WAIT (35 minutes), instead of ending with exit 3 (0.39.0).",
+      "href": "/docs/remote-builds#when-the-servers-daemon-does-not-answer"
+    },
+    {
+      "area": "Remote",
+      "label": "A build server frees its own disk",
+      "status": "shipped",
+      "detail": "A daemon that runs remote jobs evicts their target directories under the rules of a local one, and slot status names free space only when a look measured it (0.39.0).",
+      "href": "/docs/how-it-works#freeing-disk-space"
     }
   ]
 }

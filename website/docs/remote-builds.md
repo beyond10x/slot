@@ -100,7 +100,9 @@ current directory.
    slot does not know the step gets the plain sync; the line then says the bytes were not
    counted.
 4. **Run.** `slot` starts `ssh <host> slot proxy`, which connects to the server daemon's socket.
-   The daemon runs the command in the mirror, in the same subdirectory you called it from.
+   The daemon runs the command in the mirror, in the same subdirectory you called it from. While
+   that daemon does not answer, the job waits and is sent again (see [When the server's daemon
+   does not answer](#when-the-servers-daemon-does-not-answer)).
 5. **Caches.** rust and other jobs get `CARGO_TARGET_DIR=<cache-root>/target/<id>`; go and other
    jobs get `GOCACHE=<cache-root>/go-build`. The cache root is `slot serve --cache-root`, by
    default `<state-dir>/cache` on the server.
@@ -262,6 +264,38 @@ A slow link gets the same treatment. A sync whose rsync reads and writes no byte
 killed with its ssh, with `(sync killed: no byte moved for 60 s)` or `(sync killed: ran over
 300 s)` in the line above. An rsync that someone else kills ends the same way. The job is never
 sent to the server after a sync that did not finish.
+
+## When the server's daemon does not answer
+
+A server can be reached while its daemon takes no job: a daemon that was told to stop removes its
+socket and lets its running and queued jobs end before it starts again, and a daemon that
+reloads drops a job it had queued. `ssh <host> slot proxy` then ends before the job's process
+started. The job waits: `slot` prints once
+
+```text
+slot: waiting for buildbox: its daemon does not answer (a restart or a drain); the job is sent again when it answers
+```
+
+and sends the same request again every 5 s until the daemon takes it. The tree is not synced
+again, and the job runs once.
+
+The wait ends after `SLOT_NODE_WAIT`: `35m` by default, given as seconds or a number with `s`,
+`m` or `h`. The job then did not start, with `(its daemon did not answer within 35m)` in the line
+of [When the server is unreachable](#when-the-server-is-unreachable), and `SLOT_REMOTE_FALLBACK`
+decides as it does there. `SLOT_NODE_WAIT=0` turns the wait off: the call ends at once with
+`slot: connection to daemon lost` and exit 3, as every release up to 0.38.0 did.
+
+Four calls are never sent again:
+
+- one whose job had started on the server: `slot` prints `slot: connection to daemon lost` and
+  exits with 3;
+- one that got SIGINT, SIGTERM or SIGHUP: it exits with 128 plus the signal;
+- one whose ssh failed itself (exit status 255, which ssh keeps for a host it did not reach or a
+  login it did not get): the call ends as it did before the wait;
+- one the workstation's daemon handed to the node ([Hand queued jobs to a
+  node](#hand-queued-jobs-to-a-node)): it does not wait, whatever `SLOT_NODE_WAIT` says. Its
+  client ends with exit 3 at once and the daemon queues the job on the workstation again. A wait
+  would count as the job's run time there.
 
 ## Target directories on the server
 
@@ -568,7 +602,10 @@ A node takes at most its free slots from its last answer, less the jobs handed t
 submitted with `slot --local` (which never reaches the daemon) or with `SLOT_NO_REMOTE=1` in its
 environment, a remote client's job and a gate's hold. When the client ends with exit 3 (the sync
 or ssh failed, or the connection to the node was lost) the job goes back to the local queue once
-and runs here. A command that itself exits 3 is run a second time here too.
+and runs here. A command that itself exits 3 is run a second time here too. A job handed to a node
+whose daemon does not answer does not wait for it, whatever `SLOT_NODE_WAIT` says ([When the
+server's daemon does not answer](#when-the-servers-daemon-does-not-answer)): its client ends
+with exit 3 at once and the job is queued here again.
 
 A job that runs or waits here while a node takes jobs carries the reason in `local_reason`
 (`/api/state`), and `slot status` prints it under the job's line as `  local: <reason>`:

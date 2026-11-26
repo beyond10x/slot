@@ -1,6 +1,148 @@
 # Changelog
 
-## Unreleased
+## 0.39.0 — 2026-11-26
+
+- Remote mode: a job sent to a server whose daemon does not answer waits and is sent again. A
+  daemon that was told to stop removes its socket and lets its jobs end before it starts again,
+  and a reloading one drops a job it had queued; the call then ended at once with `slot:
+  connection to daemon lost` and exit 3. Now the client prints once `slot: waiting for <host>:
+  its daemon does not answer (a restart or a drain); the job is sent again when it answers` and
+  sends the same request every 5 s, without a second sync, until the daemon takes it. After
+  `SLOT_NODE_WAIT` (default `35m`; `0` = no wait, as before) the job did not start: `slot: remote
+  build on <host> did not start (its daemon did not answer within 35m)`, with the rules of
+  `SLOT_REMOTE_FALLBACK` unchanged. Not sent again: a job whose process had started, a call that
+  got a signal (128 + signal), and one whose ssh failed itself (exit status 255). A job this
+  machine's daemon handed to a node does not wait, whatever `SLOT_NODE_WAIT` says: its client
+  ends with exit 3 at once and the job is queued here again, as before. A request that could not
+  be written to the connection no longer counts as a job that ran: nothing is copied back after
+  it.
+- Eviction on a daemon that runs remote jobs. A job that arrives with a workspace has no
+  `target_dir`, only `node_target_dir`, and eviction read `target_dir` alone: a build server's
+  daemon knew no target directory and never deleted one (461 GB used on the node where this was
+  seen). Now a finished job that arrived with a workspace makes the directory it built into known
+  to eviction, under the same rules as a local one; a directory under the daemon's cache root is
+  left to the cache's own size limit, and a running job's directory is the one the daemon gave
+  it, whatever its client's environment names. A look that knows no target directory that exists
+  measured nothing and stored 0 bytes as the free space, which `slot status` printed as `disk:
+  0.0 GB free, under 50.0 GB ...: deleted 0 target dir(s), 0.0 GB`. The report now carries
+  `unmeasured`, and the line reads `disk: no target dir known, nothing measured (eviction below
+  50.0 GB, raised from 40.0 GB to the disk hold's mark)`, or `none of the 3 known target dir(s)
+  exists, nothing measured`.
+- `contrib/cache-key-probe.sh <mode> <package> <tree A> [<tree B>]`: builds one package twice
+  against the live compile cache, each run with a `--cfg` name of its own so that the first build
+  is a compile, reads the package's time from cargo's timing report and exits 0 when the second
+  build took at most a third of the first, 1 when it compiled again. Modes: two trees (`tree`),
+  two values of `CARGO_TARGET_DIR` (`var`), two `--target-dir` values (`flag`), a runner variable
+  (`runner`), two profile names (`profile`), a cargo job then cargo inside a generic job
+  (`jobkind`). Not part of `task check`: it needs a live cache. Today `flag` passes and `var`
+  fails: sccache hashes every `CARGO_*` variable into a Rust key.
+
+- `contrib/node/toolchains-refresh.sh NODE [SECONDS]` and the user unit
+  `contrib/slot-toolchains-refresh@.service`: on the workstation, every 60 s, write the
+  toolchain manifest of this host (`toolchains.sh`) and fetch the node's into
+  `~/.local/state/slot`, each through a temporary file of the run's process and a rename. A
+  failed run, a node that does not answer within 60 s, and an empty file or one over 1 MiB keep
+  the manifest that is there, and stderr names the reason. One state directory serves one node:
+  the loop holds a lock, and a second loop or a run for another node exits 2, after which the
+  unit does not start it again. The unit reads its PATH from
+  `~/.config/slot/node/toolchains-refresh.env`: a user unit does not get the PATH of a login
+  shell, and the `helm` line of the manifest follows the PATH (v3.8.1 against v4.3.0 on one
+  host). The script ran as a loop started by hand, which a restart of the machine ended.
+
+- Node drain: `provision.sh apply --drain` (also `bundle CONF apply --drain`) makes a pending
+  restart of `slot-node.service` or `sccache-node.service` happen on a node that never has an
+  empty pool; on one node `apply` ran 10 times in 29 minutes with 5 to 14 jobs each time, and the
+  restart never came. With jobs in the pool it sends SIGTERM to the daemon process alone
+  (`systemctl kill --kill-whom=main`) and prints `draining: slot-node: <n> job(s), restart by
+  <UTC time>`: the daemon takes no new job, lets its jobs end and exits, and systemd starts the
+  unit again with the unit file and groups of that moment. No job is signalled before the bound:
+  after `DRAIN_MAX` (new config key, `1m` to `24h`, default `30m`) a transient timer restarts the
+  unit if the same daemon process still runs, and leaves another one alone. The unit runs
+  `provision.sh start-pre` as root before each start (`ExecStartPre`): a pending restart of
+  `sccache-node` happens there, with no daemon of the pool running. During a drain `check` has
+  one `drift: drain:` line with the jobs left and the time, `check --canary` no `ok` line for
+  the core limit and the load, and a second `apply` prints the `draining:` line and signals
+  nothing. Without `--drain` nothing changes.
+
+- Node run-time limit: `provision.sh` sets the run-time limit of the node's pool once
+  `slot-node.service` runs, `slot run-limit <duration> --max <duration>` as the build user. A
+  node's daemon had no limit and let a job name up to 1 h; jobs ran 23 minutes there. New config
+  keys: `RUN_LIMIT` (seconds, or a number with `s`, `m` or `h`; default `10m`; `off`) and
+  `RUN_LIMIT_MAX` (the most a job names with `slot --timeout`; default `30m`; not shorter than
+  `RUN_LIMIT`). `check` asks the daemon (`GET /api/run-limit` as the build user, 5 s at most)
+  and compares seconds (`drift: run-limit:`); a daemon that gives no answer is drift. Setting
+  the limit ends no job that runs: the daemon fixes it into a job when the job starts.
+
+- Node `GO_ROOT`: a new config key for the directory the go archive is unpacked into, for a
+  node whose `go env GOROOT` must answer the path the workstation's go answers (`/usr/lib/go`
+  against the node's `/usr/local/go-<version>`); a consumer whose output carries that path
+  could not build on the node. The archive is a real directory there with the mark
+  `.slot-archive`, `check` compares what `go env GOROOT` answers the build user, and a path
+  that exists without the mark, is a symbolic link or belongs to a package is not written to
+  (`failed: archive:go: GO_ROOT ...`). The old `/usr/local/go-<version>` is removed when the
+  pool counts no job (`pending: archive:go: ...` until then, which `check` prints too and does
+  not count as drift). `toolchains.sh` prints one more line, `goroot <path>`; the `go` line is
+  unchanged. Empty, the default, changes nothing.
+
+- Node `musl-gcc`: `provision.sh` builds musl 1.2.6, the release the workstation has, from its
+  SHA-256 pinned source tarball (`MUSL_PIN`) into `/usr/local/musl-1.2.6` and links its wrapper
+  as `/usr/local/bin/musl-gcc`. Amazon Linux 2023 packages no `musl-gcc`: a build for
+  `x86_64-unknown-linux-musl` with `CC_x86_64_unknown_linux_musl=musl-gcc` stopped with `failed
+  to find tool "musl-gcc"`. The checksum is compared before anything is unpacked, the build user
+  builds (`make -j4`: 31 s on a node of 32 CPUs at a load of 58 to 68, 104 s with one job) and
+  root copies the result. The build runs once; `check` reads the link, the release the loader
+  names and the wrapper's answer (`drift: musl: ...`), and `check --canary` compiles one C file
+  that includes `stdio.h` with `musl-gcc -static` as the build user and runs it (`canary: ok:
+  musl: ...`). `toolchains.sh` prints `tool musl <release>`, which `push.sh check` compares, and
+  its `c musl-gcc` line reads the wrapper in `/usr/local/bin` too.
+
+- Node CPU limit: `provision.sh` sets the CPU limit of the node's pool once `slot-node.service`
+  runs, `slot cpu-limit <CPUs> --pressure <percent>` as the build user, so the daemon holds a
+  queued job while the host is busy. On a node of 32 CPUs and 32 slots, 14 jobs ran about 76
+  threads at a load of 68 to 97, and no limit was set. New config keys: `CPU_LIMIT` (busy CPUs
+  from 1, one decimal; default 80 % of the CPUs found, 25.6 on 32; `off`) and `CPU_PRESSURE`
+  (percent over 0, at most 100; default 20; `off`). The pressure default is from 15 rounds
+  within 7 minutes on one node of 32 CPUs (16 cores) without a CPU limit, with a fixed CPU
+  workload run 8 wide: every round had 31.7 to 32.0 of 32 CPUs busy; in 8 rounds at a pressure
+  of 21.8 to 43.5 % (7 to 11 jobs, load 53 to 58) the workload took 455 to 539 ms, median 490
+  ms, and in 5 rounds at 65.0 to 76.5 % (12 to 14 jobs, load 72 to 78) 701 to 2186 ms, median
+  981 ms. Every CPU was busy at the lowest pressure seen (21.8 %), so the default mark is 20;
+  nothing was measured below 21.8 % or with a free CPU. `check` asks the daemon which marks it holds
+  (`GET /api/cpu-limit` as the build user, 5 s at most; root opens no file of the build user)
+  and compares them as numbers (`drift: cpu-limit:`); a daemon that gives no answer is drift
+  with a line that says so. `apply` with `slot-node` not active prints `failed: cpu-limit:`.
+  `check --canary` reads the 5-minute load average: over
+  2.5 per CPU (80 on 32 CPUs) is drift, else a `canary: ok: cpu-limit:` line; a test step that
+  ran 12 to 19 s at a load of 48 to 72 ran 182 s and 258 s at 85 to 97.
+
+- Node credential tools: `glab` and `gh` on a node are scripts in the store's `nodebin`, first
+  on a job's PATH, that print one line on stderr and exit 255: the tool works with a credential,
+  no credential goes to the node, and the step runs on the workstation (`slot --here <command>`
+  or `.slot.toml` `local = [...]`). A consumer's task that called `glab api` on the node went on
+  with an empty answer and ended in the stack trace of its next command.
+
+- Node core dumps: `provision.sh` writes `/etc/sysctl.d/60-slot-core.conf`
+  (`kernel.core_pattern=core`) and loads it when the pattern is a pipe, and `slot-node.service`
+  and `sccache-node.service` get `LimitCORE=0:infinity`: the soft limit is 0, and a job that
+  wants a core file raises its own (a process in a container a job starts keeps docker's core
+  limit). A bare node pipes every core to `systemd-coredump`, and the kernel runs a pipe handler
+  whatever the core limit is: an aborted process was reaped 142 to 256 ms later on an idle node
+  and up to 3.5 s later with 24 at once, and a consumer's tests timed out under load. Under the
+  pattern `core` a process whose limit is not 0 writes a core file, so the pattern is loaded
+  only when both units run with the soft limit 0: `check` names a running unit with another
+  limit, `apply` restarts it when no job runs and loads the pattern in the same run, and with a
+  job running it prints `pending:` lines and leaves the pipe. A restart of `sccache-node` now
+  waits for an empty pool like one of `slot-node`. A pattern that is neither a pipe nor `core`
+  stays; with no sysctl file there none is written (`kept: core:`), and a file that is already
+  there makes the pattern `core` at the next boot. `check --canary` times an aborted process
+  under the soft core limit 0, the quickest of 5, and reads the core limit of the running
+  `slot-node`: over 50 ms or a limit that is not 0 is drift, else a `canary: ok: core:` line.
+
+- Node yarn: `provision.sh` installs yarn 1.22.22, the release the workstation has in
+  `/usr/bin`, as an archive pin (the npm tarball, SHA-256 pinned), with `bin/yarn.js` linked as
+  `/usr/local/bin/yarn` and `yarnpkg`. A consumer's `task install` found no `yarn` on the node.
+  `toolchains.sh` prints `tool yarn <version>`, so `push.sh check` compares it. Both read the
+  version with `YARN_IGNORE_PATH=1`: a `yarn-path` in a `.yarnrc` does not answer for it.
 
 - Node role: `contrib/node/role.sh` gives a node an IAM role and an instance profile of its own
   (`slot-node-<name>`) with one customer-managed policy, `slot-node-agent`: the 11 actions the

@@ -81,6 +81,70 @@ conf
 sed -i 's/^BUILD_UID=.*/BUILD_UID=10x1/' "$W/node.conf"
 run "$W/r0" check
 if [ $? -eq 2 ] && grep -q 'BUILD_UID must be a whole number' "$W/err"; then ok "malformed BUILD_UID is refused"; else bad "malformed BUILD_UID is refused ($(cat "$W/err"))"; fi
+# CPU_LIMIT (busy CPUs from 1) and CPU_PRESSURE (percent over 0, at most 100): a number with at
+# most one decimal, or off. cread reads the config with conf.sh alone and prints both values.
+cread() { sh -c '. "$1/conf.sh"; conf_read "$2" BUILD_USER && echo "$CPU_LIMIT|$CPU_PRESSURE"' sh "$here" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+conf
+cread
+[ $? -eq 0 ] && [ "$(cat "$W/out")" = '|' ] && ok "CPU_LIMIT and CPU_PRESSURE are config keys, empty until named (provision.sh has the defaults)" || bad "CPU keys: $(cat "$W/out" "$W/err")"
+for good_cpu in 'CPU_LIMIT=1' 'CPU_LIMIT=25.6' 'CPU_LIMIT=off' 'CPU_LIMIT=' 'CPU_PRESSURE=100' 'CPU_PRESSURE=0.5' 'CPU_PRESSURE=62.5' 'CPU_PRESSURE=off' 'CPU_PRESSURE='; do
+  conf
+  echo "$good_cpu" >>"$W/node.conf"
+  cread
+  st=$?
+  case $good_cpu in CPU_LIMIT=*) want_cpu="${good_cpu#*=}|" ;; *) want_cpu="|${good_cpu#*=}" ;; esac
+  [ $st -eq 0 ] && [ "$(cat "$W/out")" = "$want_cpu" ] && ok "$good_cpu is accepted" || bad "$good_cpu is refused ($(cat "$W/out" "$W/err"))"
+done
+for bad_cpu in 'CPU_LIMIT=0' 'CPU_LIMIT=0.9' 'CPU_LIMIT=x' 'CPU_LIMIT=1.25' 'CPU_LIMIT=-3' 'CPU_LIMIT=1e3' 'CPU_LIMIT=.5' 'CPU_LIMIT=12.' 'CPU_LIMIT=1.2.3' 'CPU_LIMIT=8 --floor 1' 'CPU_LIMIT=Off' 'CPU_PRESSURE=0' 'CPU_PRESSURE=0.0' 'CPU_PRESSURE=101' 'CPU_PRESSURE=100.1' 'CPU_PRESSURE=x' 'CPU_PRESSURE=40.55' 'CPU_PRESSURE=40%' 'CPU_PRESSURE=$(id)'; do
+  conf
+  echo "$bad_cpu" >>"$W/node.conf"
+  cread
+  [ $? -eq 2 ] && grep -q "${bad_cpu%%=*} must be .*, not '" "$W/err" && ok "$bad_cpu is refused" || bad "$bad_cpu is accepted ($(cat "$W/out" "$W/err"))"
+done
+conf
+printf 'CPU_LIMIT=off\nCPU_PRESSURE=50\n' >>"$W/node.conf"
+cread
+[ $? -eq 2 ] && grep -q "CPU_PRESSURE must be off or empty when CPU_LIMIT is off, not '50'" "$W/err" && ok "a pressure mark without a CPU limit is refused: the daemon keeps none" || bad "CPU_LIMIT=off with CPU_PRESSURE=50: $(cat "$W/out" "$W/err")"
+conf
+printf 'CPU_LIMIT=off\nCPU_PRESSURE=off\n' >>"$W/node.conf"
+cread
+[ $? -eq 0 ] && ok "CPU_LIMIT=off with CPU_PRESSURE=off is accepted" || bad "both off: $(cat "$W/err")"
+# DRAIN_MAX (the bound of a drain), RUN_LIMIT (how long a job of the pool runs, or off) and
+# RUN_LIMIT_MAX (the most a job names): durations as the slot command line takes them, seconds
+# or a number with s, m or h. dread prints the three values; conf_seconds prints a duration's
+# seconds.
+dread() { sh -c '. "$1/conf.sh"; conf_read "$2" BUILD_USER && echo "$DRAIN_MAX|$RUN_LIMIT|$RUN_LIMIT_MAX"' sh "$here" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+conf
+dread
+[ $? -eq 0 ] && [ "$(cat "$W/out")" = '30m|10m|30m' ] && ok "DRAIN_MAX, RUN_LIMIT and RUN_LIMIT_MAX are config keys with the defaults 30m, 10m and 30m" || bad "duration keys: $(cat "$W/out" "$W/err")"
+for good_d in 'DRAIN_MAX=1m' 'DRAIN_MAX=60' 'DRAIN_MAX=60s' 'DRAIN_MAX=45m' 'DRAIN_MAX=24h' 'DRAIN_MAX=86400' 'RUN_LIMIT=1' 'RUN_LIMIT=90s' 'RUN_LIMIT=30m' 'RUN_LIMIT=off' 'RUN_LIMIT_MAX=10m' 'RUN_LIMIT_MAX=600' 'RUN_LIMIT_MAX=2h'; do
+  conf
+  echo "$good_d" >>"$W/node.conf"
+  dread
+  [ $? -eq 0 ] && grep -q "${good_d#*=}" "$W/out" && ok "$good_d is accepted" || bad "$good_d is refused ($(cat "$W/out" "$W/err"))"
+done
+for bad_d in 'DRAIN_MAX=59' 'DRAIN_MAX=59s' 'DRAIN_MAX=0m' 'DRAIN_MAX=25h' 'DRAIN_MAX=86401' 'DRAIN_MAX=off' 'DRAIN_MAX=30 m' 'DRAIN_MAX=1.5h' 'DRAIN_MAX=30M' 'DRAIN_MAX=m' 'DRAIN_MAX=1h30m' 'DRAIN_MAX=-30m' 'DRAIN_MAX=9999999999' 'RUN_LIMIT=0' 'RUN_LIMIT=0m' 'RUN_LIMIT=x' 'RUN_LIMIT=10 --max 9h' 'RUN_LIMIT=1d' 'RUN_LIMIT=Off' 'RUN_LIMIT=9999999999' 'RUN_LIMIT_MAX=0' 'RUN_LIMIT_MAX=off' 'RUN_LIMIT_MAX=1.5h' 'RUN_LIMIT_MAX=h'; do
+  conf
+  echo "$bad_d" >>"$W/node.conf"
+  dread
+  [ $? -eq 2 ] && grep -q "${bad_d%%=*} must be a duration .*, not '" "$W/err" && ok "$bad_d is refused" || bad "$bad_d is accepted ($(cat "$W/out" "$W/err"))"
+done
+conf
+printf 'RUN_LIMIT=31m\n' >>"$W/node.conf"
+dread
+[ $? -eq 2 ] && grep -q "RUN_LIMIT '31m' is longer than RUN_LIMIT_MAX '30m', the most a job may name" "$W/err" && ok "a run limit over the most a job may name is refused, as the daemon refuses it" || bad "RUN_LIMIT=31m: $(cat "$W/out" "$W/err")"
+conf
+printf 'RUN_LIMIT=1800s\nRUN_LIMIT_MAX=30m\n' >>"$W/node.conf"
+dread
+[ $? -eq 0 ] && ok "a run limit equal to the most a job may name, in another form, is accepted" || bad "RUN_LIMIT=1800s with 30m: $(cat "$W/err")"
+conf
+printf 'RUN_LIMIT=off\nRUN_LIMIT_MAX=5m\n' >>"$W/node.conf"
+dread
+[ $? -eq 0 ] && ok "RUN_LIMIT=off is accepted under any RUN_LIMIT_MAX" || bad "RUN_LIMIT=off: $(cat "$W/err")"
+secs=$(sh -c '. "$1/conf.sh"; for d in 600 600s 10m 1h 90 24h 1s; do conf_seconds "$d"; done' sh "$here" | tr '\n' ' ')
+[ "$secs" = '600 600 600 3600 90 86400 1 ' ] && ok "conf_seconds: 600, 600s and 10m are 600 s, 1h is 3600 s" || bad "conf_seconds: $secs"
+nots=$(sh -c '. "$1/conf.sh"; for d in "" 0 0m x m 10x 1.5m -5 10M " 10m" 1h30m 1d 1234567890; do conf_seconds "$d" && echo "<- $d"; done' sh "$here" | tr '\n' ' ')
+[ -z "$nots" ] && ok "conf_seconds: nothing for what is no duration of at least 1 s (empty, 0, 0m, x, m, 10x, 1.5m, -5, 10M, a space, 1h30m, 1d, 10 digits)" || bad "conf_seconds answers: $nots"
 
 # 2. A fresh machine drifts in every part; apply brings it to 0 drift.
 conf
@@ -89,16 +153,20 @@ mkdir -p "$R"
 echo 64 >"$R/.state-nproc"
 run "$R" check
 st=$?
+cp "$W/out" "$W/first-check.out"
 n=$(grep -c '^drift: ' "$W/out")
 if [ $st -eq 1 ] && [ "$n" -ge 15 ]; then ok "fresh machine: check exits 1 with $n drift lines"; else bad "fresh machine: check exit $st, $n drift lines"; fi
 for item in storage binds packages user unit:slot-node.service unit:slot-storage.service keys sshd sudoers slot:/usr/local/bin/slot rustup rust:1.99.1 rust:stable; do
   grep -q "^drift: $item" "$W/out" || bad "fresh machine: no drift line for $item"
 done
 grep -q '^drift: packages: .*zstd' "$W/out" && grep -q '^drift: packages: .*python3' "$W/out" && grep -q '^drift: packages: .*glibc-static' "$W/out" && grep -q '^drift: packages: .*bubblewrap' "$W/out" && grep -q '^drift: packages: .*socat' "$W/out" && grep -q '^drift: packages: .*libubsan' "$W/out" && ok "check names zstd, python3, glibc-static, bubblewrap, socat and libubsan as packages of a bare node" || bad "base packages: $(grep '^drift: packages' "$W/out" | cut -c1-200)"
+grep -qx 'drift: nodebin: /srv/slot/nodebin/glab missing' "$W/out" && grep -qx 'drift: nodebin: /srv/slot/nodebin/gh missing' "$W/out" && ok "check names the glab and gh scripts a bare node lacks" || bad "glab, gh: $(grep nodebin "$W/out")"
+grep -qx 'drift: core: /etc/sysctl.d/60-slot-core.conf missing' "$W/out" && grep -qx "drift: core: kernel.core_pattern is '|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h', a pipe: an aborted process waits for the handler" "$W/out" && ok "check names the missing sysctl file and the core pipe of a bare node" || bad "core drift: $(grep '^drift: core' "$W/out")"
+grep -qx "drift: cpu-limit: the daemon of the pool gives no answer about its CPU limit (GET http://127.0.0.1:7411/api/cpu-limit as $me, 5 s at most), want '51.2' and '20'" "$W/out" && ok "check on a bare node, where no daemon answers, names the CPU limit it wants: 80 % of its 64 CPUs, and 20 % CPU pressure" || bad "cpu-limit drift: $(grep '^drift: cpu-limit' "$W/out")"
 : >"$R/.calls"
 run "$R" apply
-cp "$W/out" "$W/first-apply.out"
 st=$?
+cp "$W/out" "$W/first-apply.out"
 [ $st -eq 0 ] && ok "apply exits 0" || bad "apply exit $st: $(tail -3 "$W/err")"
 # A naked node needs nothing copied: one apply starts both services and leaves 0 drift.
 grep -q '^pending: ' "$W/err" && bad "apply on a naked machine leaves a pending step: $(grep '^pending: ' "$W/err")" || ok "apply on a naked machine leaves nothing pending"
@@ -108,6 +176,21 @@ done
 run "$R" check
 st=$?
 if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "after one apply: 0 drift"; else bad "after one apply: exit $st, $(cat "$W/out")"; fi
+# Core dumps: the pattern is the file name `core` (no pipe to a handler), loaded from a sysctl file
+# that sorts after systemd's 50-coredump.conf, and a job's core limit is 0: the soft one, so a
+# job that wants a core file raises its own (the hard limit stays unlimited).
+[ "$(cat "$R/etc/sysctl.d/60-slot-core.conf" 2>&1)" = 'kernel.core_pattern=core' ] && grep -qx 'sysctl -q -p /etc/sysctl.d/60-slot-core.conf' "$R/.calls" && grep -qx "changed: core: kernel.core_pattern is 'core' (sysctl -p /etc/sysctl.d/60-slot-core.conf)" "$W/first-apply.out" && ok "apply writes the sysctl file with the one line and loads it" || bad "core: $(cat "$R/etc/sysctl.d/60-slot-core.conf" 2>&1) $(grep sysctl "$R/.calls") $(grep core "$W/first-apply.out")"
+for u in slot-node.service sccache-node.service; do
+  grep -qx 'LimitCORE=0:infinity' "$R/etc/systemd/system/$u" && [ "$(grep -c '^LimitCORE=' "$R/etc/systemd/system/$u")" -eq 1 ] && ok "$u: LimitCORE=0:infinity, soft 0 and hard unlimited" || bad "$u limits: $(grep '^Limit' "$R/etc/systemd/system/$u")"
+done
+# The CPU limit of the pool is set once slot-node runs.
+grep -qx 'slot cpu-limit 51.2 --pressure 20' "$R/.calls" && grep -qx 'changed: cpu-limit: a queued job is held from 51.2 busy CPUs and 20 % CPU pressure (slot cpu-limit 51.2 --pressure 20)' "$W/first-apply.out" && ok "64 CPUs: the first apply sets slot cpu-limit 51.2 --pressure 20" || bad "cpu-limit: $(grep cpu-limit "$R/.calls" "$W/first-apply.out")"
+# The run-time limit of the pool too: 10m, and 30m as the most a job names.
+grep -qx "drift: run-limit: the daemon of the pool gives no answer about its run-time limit (GET http://127.0.0.1:7411/api/run-limit as $me, 5 s at most), want '600' s (10m) and '1800' s (30m)" "$W/first-check.out" && ok "check on a bare node names the run-time limit it wants: no daemon answers yet" || bad "run-limit drift: $(grep run-limit "$W/first-check.out")"
+grep -qx 'slot run-limit 10m --max 30m' "$R/.calls" && grep -qx 'changed: run-limit: a job that runs longer than 10m is ended (exit 124), and a job names up to 30m (slot run-limit 10m --max 30m)' "$W/first-apply.out" && [ "$(cat "$R/.state/run-limit" "$R/.state/run-limit-max" 2>&1 | tr '\n' ' ')" = '600 1800 ' ] && ok "the first apply sets slot run-limit 10m --max 30m" || bad "run-limit: $(grep run-limit "$R/.calls" "$W/first-apply.out")"
+# slot-node.service runs a step as root before each start (the end of a drain, section 6v), with
+# a clean environment: the unit's PATH begins with a directory of the build user.
+[ "$(grep -n '^ExecStartPre=\|^ExecStart=' "$R/etc/systemd/system/slot-node.service" | cut -d: -f2- | sed 's/^ExecStart=.*/ExecStart=/' | tr '\n' ' ')" = 'ExecStartPre=-+/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh /usr/local/libexec/slot-node/provision.sh start-pre /etc/slot-node/node.conf ExecStart= ' ] && ! grep -q '^ExecStartPre=' "$R/etc/systemd/system/sccache-node.service" && ok "slot-node.service: one ExecStartPre before ExecStart, as root, failure ignored, with its own PATH; sccache-node.service has none" || bad "ExecStartPre: $(grep '^ExecStart' "$R/etc/systemd/system/slot-node.service" "$R/etc/systemd/system/sccache-node.service")"
 # The units use the node's own /usr and /etc.
 for u in slot-node.service sccache-node.service; do
   grep -qE 'rootfs|BindReadOnlyPaths|ConditionPathExists|workstation' "$R/etc/systemd/system/$u" && bad "$u still binds or waits for a copy: $(grep -E 'rootfs|BindReadOnlyPaths|ConditionPathExists|workstation' "$R/etc/systemd/system/$u" | head -2)" || ok "$u uses the node's own /usr and /etc"
@@ -140,8 +223,10 @@ grep -q -- '--tokens 64 ' "$R/etc/systemd/system/slot-node.service" && ok "64 CP
 echo 32 >"$R/.state-nproc"
 run "$R" check
 grep -q '^drift: unit:slot-node.service' "$W/out" && ok "32 CPUs: slot-node.service drifts" || bad "32 CPUs: $(cat "$W/out")"
+grep -qx "drift: cpu-limit: the pool holds a queued job from '51.2' busy CPUs and '20' % CPU pressure, want '25.6' and '20'" "$W/out" && ok "32 CPUs: the CPU limit of 64 CPUs drifts" || bad "32 CPUs, cpu-limit: $(grep cpu-limit "$W/out")"
 run "$R" apply
 grep -q -- '--tokens 32 ' "$R/etc/systemd/system/slot-node.service" && ok "32 CPUs: --tokens 32" || bad "32 CPUs: $(grep ExecStart "$R/etc/systemd/system/slot-node.service")"
+[ "$(cat "$R/.state/cpu-limit" 2>&1)" = 25.6 ] && [ "$(cat "$R/.state/cpu-pressure" 2>&1)" = 20 ] && ok "32 CPUs: the CPU limit is 25.6 busy CPUs" || bad "32 CPUs, marks: $(cat "$R/.state/cpu-limit" "$R/.state/cpu-pressure" 2>&1)"
 
 # 4. Each kind of change on the machine is found, named, and closed by apply.
 echo 'Environment=EXTRA=1' >>"$R/etc/systemd/system/sccache-node.service"
@@ -356,11 +441,37 @@ run "$R5" check
 
 # typescript, prettier and esbuild are archives of the same kind (the npm tarballs of the releases
 # the consumers' test lanes read): each binary is linked as /usr/local/bin/<name>, prettier's
-# bin/prettier.cjs as `prettier`, and the script is executable. pnpm is one more of them; helm is
-# an archive with one binary, linked the same way.
-for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild pnpm:pnpm-11.9.0/bin/pnpm.mjs pnpx:pnpm-11.9.0/bin/pnpx.mjs helm:helm-v3.8.1/helm; do
+# bin/prettier.cjs as `prettier`, and the script is executable. pnpm is one more of them, and yarn
+# (one script, bin/yarn.js, linked as `yarn` and as `yarnpkg`); helm is an archive with one binary,
+# linked the same way.
+for l in tsc:typescript-6.0.3/bin/tsc tsserver:typescript-6.0.3/bin/tsserver prettier:prettier-3.8.1/bin/prettier.cjs esbuild:esbuild-0.28.2/bin/esbuild pnpm:pnpm-11.9.0/bin/pnpm.mjs pnpx:pnpm-11.9.0/bin/pnpx.mjs yarn:yarn-1.22.22/bin/yarn.js yarnpkg:yarn-1.22.22/bin/yarn.js helm:helm-v3.8.1/helm; do
   [ "$(readlink "$R5/usr/local/bin/${l%%:*}")" = "/usr/local/${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to /usr/local/${l#*:}" || bad "link ${l%%:*}: '$(readlink "$R5/usr/local/bin/${l%%:*}")'"
 done
+grep -qx 'fetch https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz' "$R5/.calls" && [ -x "$R5/usr/local/yarn-1.22.22/bin/yarn.js" ] && [ "$(YARN_IGNORE_PATH=1 "$R5/usr/local/yarn-1.22.22/bin/yarn.js" --version 2>&1)" = "1.22.22" ] && ok "yarn 1.22.22 is the npm tarball of that release, and bin/yarn.js is executable and answers it" || bad "yarn: $(grep 'fetch.*yarn' "$R5/.calls") $(ls -l "$R5/usr/local/yarn-1.22.22/bin/yarn.js" 2>&1)"
+# yarn 1 runs the script that `yarn-path` of a .yarnrc names (the build user's, or one in the
+# working directory) and prints that one's version; with YARN_IGNORE_PATH=1 it answers itself.
+# The stand-in does the same: without the variable it answers as another release would. check
+# and apply read the version with the variable (0 drift above), or every apply would install again.
+[ "$("$R5/usr/local/yarn-1.22.22/bin/yarn.js" --version 2>&1)" != "1.22.22" ] && ok "yarn's version is read with YARN_IGNORE_PATH=1: a yarn-path of a .yarnrc does not answer for it" || bad "the yarn stand-in answers 1.22.22 without YARN_IGNORE_PATH: the variable is not tested"
+# The pin itself. The SHA-256 is the one of the tarball on registry.npmjs.org; an npm tarball has
+# one top directory, package/, which is stripped. The line then goes through the real branch of
+# archive_fetch with a tarball of that shape (curl is a stand-in that serves it, with its own
+# SHA-256): bin/yarn.js is at the top of the tree, executable.
+ypin=$(grep '^yarn ' "$P")
+[ "$ypin" = 'yarn 1.22.22 c17d3797fb9a9115bf375e31bfd30058cac6bc9c3b8807a3d8cb2094794b51ca https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz 1 bin/yarn.js:yarn bin/yarn.js:yarnpkg' ] && ok "the yarn pin: release 1.22.22, the SHA-256 of its npm tarball, one leading directory stripped" || bad "yarn pin: $ypin"
+mkdir -p "$W/ysrc/package/bin" "$W/yfetch"
+printf '#!/usr/bin/env node\n' >"$W/ysrc/package/bin/yarn.js"
+tar -czf "$W/ysrc.tgz" -C "$W/ysrc" package
+ytree=$(
+  eval "$(sed -n '/^archive_src() /p; /^archive_fetch() {$/,/^}$/p' "$P")"
+  fake_fetch() { false; }
+  curl() { cp "$W/ysrc.tgz" "$2"; }
+  # shellcheck disable=SC2086
+  set -- $ypin
+  ysum=$(sha256sum "$W/ysrc.tgz" | cut -d' ' -f1)
+  archive_fetch "$W/yfetch" "$1" "$2" "$ysum" "$4" "$5" "$6" "$7" 2>&1
+)
+[ "$ytree" = "$W/yfetch/tree" ] && [ -x "$W/yfetch/tree/bin/yarn.js" ] && [ ! -e "$W/yfetch/tree/package" ] && ok "the yarn pin through the real unpack: package/ is stripped, bin/yarn.js is executable" || bad "yarn unpack: '$ytree' $(find "$W/yfetch" -type f 2>&1 | head -5)"
 [ "$("$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" --version)" = "3.8.1" ] && [ "$("$R5/usr/local/esbuild-0.28.2/bin/esbuild" --version)" = "0.28.2" ] && ok "prettier and esbuild answer their release (run by their tree path: a link names the real /usr/local)" || bad "tool versions: $("$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" --version 2>&1) $("$R5/usr/local/esbuild-0.28.2/bin/esbuild" --version 2>&1)"
 [ -x "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" ] && [ ! -L "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" ] && ok "a linked script the tarball ships without the execute bit is executable after apply" || bad "prettier.cjs mode: $(ls -l "$R5/usr/local/prettier-3.8.1/bin/prettier.cjs" 2>&1)"
 rm -f "$R5/usr/local/bin/prettier"
@@ -432,6 +543,84 @@ run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && ok "make has 0 drift after the repair" || bad "make after repair: $(cat "$W/out")"
 
+# musl 1.2.6 from its source tarball (MUSL_PIN): Amazon Linux 2023 packages no musl-gcc, and a
+# build that names it as the C compiler of the musl target stopped with `failed to find tool
+# "musl-gcc"`. The tree is /usr/local/musl-1.2.6, its wrapper linked as /usr/local/bin/musl-gcc.
+MU=/usr/local/musl-1.2.6
+musl_url=https://musl.libc.org/releases/musl-1.2.6.tar.gz
+mlines() { cat "$W/out" "$W/err" | grep 'musl' | head -5; }
+[ "$(sed -n "s/^MUSL_PIN='\(.*\)'\$/\1/p" "$P")" = "musl 1.2.6 d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a $musl_url" ] && ok "the musl pin: release 1.2.6, its SHA-256, the tarball of musl.libc.org" || bad "musl pin: $(grep '^MUSL_PIN' "$P")"
+[ "$(readlink "$R5/usr/local/bin/musl-gcc")" = "$MU/bin/musl-gcc" ] && ok "/usr/local/bin/musl-gcc links to $MU/bin/musl-gcc" || bad "musl-gcc link: '$(readlink "$R5/usr/local/bin/musl-gcc")'"
+[ -x "$R5$MU/bin/musl-gcc" ] && [ -f "$R5$MU/lib/musl-gcc.specs" ] && [ -f "$R5$MU/lib/libc.a" ] && [ -f "$R5$MU/include/stdio.h" ] && [ -z "$(find "$R5$MU" -perm /022 ! -type l)" ] && [ ! -e "$R5$MU.slot-new" ] && ok "the musl tree has the wrapper, its specs, the static library and the headers, nothing writable by group or others, no .slot-new" || bad "musl tree: $(ls -lR "$R5$MU" 2>&1 | head -20)"
+[ "$("$R5$MU/lib/libc.so" 2>&1 | sed -n 's/^Version //p')" = 1.2.6 ] && ok "the loader of the musl tree names release 1.2.6" || bad "musl loader: $("$R5$MU/lib/libc.so" 2>&1 | head -3)"
+# The build runs once: a later apply with the release present fetches and builds nothing.
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && ! grep -q "^fetch $musl_url" "$R5/.calls" && ! grep -q '^changed: musl\|^drift: musl' "$W/out" && ok "a second apply with musl 1.2.6 present fetches and builds nothing" || bad "second apply and musl: exit $st $(grep musl "$R5/.calls") $(mlines)"
+# A missing link alone is set again without a download.
+rm -f "$R5/usr/local/bin/musl-gcc"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: musl: /usr/local/bin/musl-gcc is 'missing', want a link to $MU/bin/musl-gcc" "$W/out" && ok "check names a missing musl-gcc link" || bad "musl link drift: exit $st $(mlines)"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx "changed: musl: linked musl-gcc in /usr/local/bin to $MU/bin/musl-gcc" "$W/out" && ! grep -q "^fetch $musl_url" "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/musl-gcc")" = "$MU/bin/musl-gcc" ] && ok "a missing musl-gcc link alone is set again without a download" || bad "musl relink: $(grep musl "$R5/.calls") $(mlines)"
+# A link to another place and a tree of another release: both are named, and apply replaces the
+# tree whole.
+ln -sfn /usr/bin/gcc "$R5/usr/local/bin/musl-gcc"
+printf '#!/bin/sh\necho "musl libc (x86_64)" >&2\necho "Version 1.2.5" >&2\nexit 1\n' >"$R5$MU/lib/libc.so"
+: >"$R5$MU/lib/file-of-the-old-release"
+run "$R5" check
+grep -qx "drift: musl: /usr/local/bin/musl-gcc is '/usr/bin/gcc', want a link to $MU/bin/musl-gcc" "$W/out" && ok "check names a musl-gcc link to another place" || bad "musl wrong link: $(mlines)"
+grep -qx "drift: musl: $MU/lib/libc.so says 'Version 1.2.5', want Version 1.2.6" "$W/out" && ok "check names a musl of another release" || bad "musl 1.2.5 drift: $(mlines)"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "fetch $musl_url" "$R5/.calls" && grep -qx "changed: musl: musl 1.2.6 built in $MU, linked as musl-gcc in /usr/local/bin" "$W/out" && ok "apply fetches the musl source tarball and builds release 1.2.6" || bad "musl apply: exit $st $(grep musl "$R5/.calls") $(mlines)"
+[ ! -e "$R5$MU/lib/file-of-the-old-release" ] && [ ! -e "$R5$MU.slot-new" ] && [ ! -e "$R5$MU.slot-old" ] && [ "$(readlink "$R5/usr/local/bin/musl-gcc")" = "$MU/bin/musl-gcc" ] && ok "the tree of the other release is replaced whole, the link set, no .slot-new or .slot-old left" || bad "musl replace: $(ls -a "$R5/usr/local" "$R5$MU/lib" 2>&1 | tr '\n' ' ')"
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply musl has 0 drift" || bad "musl after apply: $(cat "$W/out")"
+# A wrapper that answers nothing is drift. A real file at the link's name is left alone, and
+# nothing is fetched for it.
+cp "$R5$MU/bin/musl-gcc" "$W/musl-gcc.standin"
+printf '#!/bin/sh\nexit 1\n' >"$R5$MU/bin/musl-gcc"
+rm -f "$R5/usr/local/bin/musl-gcc"
+printf '#!/bin/sh\necho "real file"\n' >"$R5/usr/local/bin/musl-gcc"
+run "$R5" check
+grep -qx "drift: musl: $MU/bin/musl-gcc --version answers nothing" "$W/out" && ok "check names a musl-gcc that does not answer" || bad "musl no answer: $(mlines)"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: musl: /usr/local/bin/musl-gcc is a real file; not replaced' "$W/err" && [ ! -L "$R5/usr/local/bin/musl-gcc" ] && ! grep -q "^fetch $musl_url" "$R5/.calls" && ok "a real file at /usr/local/bin/musl-gcc is not replaced, apply exits 1 and fetches nothing" || bad "musl real file: exit $st $(grep musl "$R5/.calls") $(mlines)"
+rm -f "$R5/usr/local/bin/musl-gcc"
+# A failed download or build is named, exits 1 and leaves the tree as it was.
+mkdir -p "$R5$MU.slot-new"
+: >"$R5/.state-tool-fetch-fails"
+run "$R5" apply
+st=$?
+rm -f "$R5/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -q '^failed: musl: download, checksum or build of musl 1.2.6' "$W/err" && ! grep -q '^changed: musl' "$W/out" && ok "a failed musl build is named, exits 1 and is not reported as changed" || bad "musl failure: exit $st $(mlines)"
+[ "$(cat "$R5$MU/bin/musl-gcc")" = "$(printf '#!/bin/sh\nexit 1\n')" ] && [ ! -e "$R5/usr/local/bin/musl-gcc" ] && ok "a failed musl build leaves the tree as it was and sets no link" || bad "musl tree changed by a failed build: $(cat "$R5$MU/bin/musl-gcc") $(readlink "$R5/usr/local/bin/musl-gcc")"
+run "$R5" apply
+[ ! -e "$R5$MU.slot-new" ] && cmp -s "$R5$MU/bin/musl-gcc" "$W/musl-gcc.standin" && ok "the next apply builds musl again; a leftover .slot-new does not survive it" || bad "musl repair: $(ls -a "$R5/usr/local" | tr '\n' ' ') $(mlines)"
+run "$R5" check
+[ $? -eq 0 ] && ok "musl has 0 drift after the repair" || bad "musl after repair: $(cat "$W/out")"
+# A pin of another release: its own directory, and the link goes there. The directory of the
+# release before stays, like the one of make and of an archive.
+MP9="musl 9.9.9 $(printf '%064d' 9) https://musl.libc.org/releases/musl-9.9.9.tar.gz"
+: >"$R5/.calls"
+NODE_TEST_MUSL_PIN=$MP9 NODE_TEST=1 NODE_ROOT=$R5 sh "$P" check "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -qx "drift: musl: /usr/local/bin/musl-gcc is '$MU/bin/musl-gcc', want a link to /usr/local/musl-9.9.9/bin/musl-gcc" "$W/out" && grep -qx "drift: musl: /usr/local/musl-9.9.9/lib/libc.so says 'missing', want Version 9.9.9" "$W/out" && ok "check names the link and the missing tree of a pin of another release" || bad "musl pin change drift: $(mlines)"
+NODE_TEST_MUSL_PIN=$MP9 NODE_TEST=1 NODE_ROOT=$R5 sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch https://musl.libc.org/releases/musl-9.9.9.tar.gz' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/musl-gcc")" = /usr/local/musl-9.9.9/bin/musl-gcc ] && [ "$("$R5/usr/local/musl-9.9.9/lib/libc.so" 2>&1 | sed -n 's/^Version //p')" = 9.9.9 ] && [ -d "$R5$MU" ] && ok "a pin of another release is built in its own directory and the link goes there" || bad "musl pin change: exit $st $(grep musl "$R5/.calls") $(mlines)"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && ! grep -q '^fetch .*musl' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/musl-gcc")" = "$MU/bin/musl-gcc" ] && ok "back at the pin, the link returns to the tree that is there without a download" || bad "musl pin back: exit $st $(grep musl "$R5/.calls") $(mlines)"
+rm -rf "$R5/usr/local/musl-9.9.9"
+
 # The build user's home trees (HOME_PINS): the ess releases a repository pins by path, and the
 # @types/node of ESS_TYPES_NODE with its dependency.
 HP=$R5/var/lib/builder/.local/share
@@ -485,6 +674,205 @@ grep -q "^drift: home:groovy@2.4.10: .*groovy/2.4.10 is 'missing', want 2.4.10" 
 run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && [ -f "$GJ" ] && [ ! -L "$GJ" ] && ok "groovy has 0 drift after apply" || bad "groovy after apply: $(cat "$W/out")"
+
+# 5i. GO_ROOT: the directory the go archive goes to, for a node whose `go env GOROOT` must answer
+# the path the workstation's go answers (a consumer's output carries that path). Empty, go stays
+# in /usr/local/go-<version>. With it the archive is a real directory at that path, with the mark
+# .slot-archive in it (`go <version> <sha256>`), and `go env GOROOT` as the build user is
+# compared. Under NODE_TEST=1 the stand-in for go answers the directory it stands in, and the
+# file goroot under .state answers in its place; pkg-owner/<path, _ for /> names the package that
+# owns a path.
+conf
+echo 0 >"$R5/.state/jobs"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ "$(readlink "$R5/usr/local/bin/go")" = /usr/local/go-1.27.1/bin/go ] && [ ! -e "$R5/usr/local/go-1.27.1/.slot-archive" ] && ! grep -q '^pending' "$W/out" && ok "without GO_ROOT go stays in /usr/local/go-1.27.1, as before" || bad "without GO_ROOT: $(cat "$W/out") $(readlink "$R5/usr/local/bin/go")"
+gosum=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+echo 'GO_ROOT=/usr/lib/go' >>"$W/node.conf"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: archive:go: /usr/local/bin/go is '/usr/local/go-1.27.1/bin/go', want a link to /usr/lib/go/bin/go" "$W/out" && grep -qx "drift: archive:go: /usr/local/bin/gofmt is '/usr/local/go-1.27.1/bin/gofmt', want a link to /usr/lib/go/bin/gofmt" "$W/out" && grep -qx "drift: archive:go: /usr/lib/go/bin/go says 'missing', want go1.27.1" "$W/out" && ! grep -q '^pending' "$W/out" && ok "GO_ROOT=/usr/lib/go: check names the links and the go that is not there yet" || bad "GO_ROOT check: exit $st $(grep 'archive\|pending' "$W/out")"
+# The move: the new directory first, then the links; the old one goes when no job runs.
+echo 3 >"$R5/.state/jobs"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'changed: archive:go: go 1.27.1 installed in /usr/lib/go, linked in /usr/local/bin' "$W/out" && [ "$(readlink "$R5/usr/local/bin/go")" = /usr/lib/go/bin/go ] && [ "$(readlink "$R5/usr/local/bin/gofmt")" = /usr/lib/go/bin/gofmt ] && ok "apply installs go in GO_ROOT and links /usr/local/bin/go and gofmt into it" || bad "GO_ROOT apply: exit $st $(grep archive "$W/out" "$W/err") $(readlink "$R5/usr/local/bin/go")"
+[ -d "$R5/usr/lib/go" ] && [ ! -L "$R5/usr/lib/go" ] && [ "$(cat "$R5/usr/lib/go/.slot-archive")" = "go 1.27.1 $gosum" ] && [ -z "$(find "$R5/usr/lib/go" -perm /022 ! -type l)" ] && ok "GO_ROOT is a real directory with the mark .slot-archive: go, the version, the SHA-256 of the archive" || bad "GO_ROOT directory: $(ls -la "$R5/usr/lib/go" 2>&1 | head -5) $(cat "$R5/usr/lib/go/.slot-archive" 2>&1)"
+[ "$("$R5/usr/lib/go/bin/go" env GOROOT)" = "$R5/usr/lib/go" ] && [ "$("$R5/usr/lib/go/bin/go" version)" = 'go version go1.27.1 linux/amd64' ] && ok "the stand-in for go answers the directory it stands in for env GOROOT" || bad "go stand-in: $("$R5/usr/lib/go/bin/go" env GOROOT 2>&1)"
+grep -qx 'pending: archive:go: /usr/local/go-1.27.1 is removed when no job runs' "$W/err" && [ -x "$R5/usr/local/go-1.27.1/bin/go" ] && ok "with 3 jobs running the old /usr/local/go-1.27.1 stays, and a pending line says until when" || bad "old directory with jobs: $(cat "$W/err") $(ls "$R5/usr/local" | tr '\n' ' ')"
+run "$R5" check
+st=$?
+[ $st -eq 0 ] && grep -qx 'pending: archive:go: /usr/local/go-1.27.1 is removed when no job runs' "$W/out" && grep -qx '0 drift' "$W/out" && ok "check names the old directory as pending, not as drift: 0 drift, exit 0" || bad "check with the old directory: exit $st $(cat "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx '0 changed' "$W/out" && grep -qx 'pending: archive:go: /usr/local/go-1.27.1 is removed when no job runs' "$W/err" && [ -d "$R5/usr/local/go-1.27.1" ] && ! grep -q '^fetch' "$R5/.calls" && ok "a second apply with jobs: pending again, nothing fetched, nothing changed" || bad "second apply with jobs: exit $st $(cat "$W/out" "$W/err") $(cat "$R5/.calls")"
+: >"$R5/.state/jobs"
+run "$R5" apply
+grep -qx 'pending: archive:go: /usr/local/go-1.27.1 is removed when no job runs' "$W/err" && [ -d "$R5/usr/local/go-1.27.1" ] && ok "a pool that does not say how many jobs run counts as one with jobs: the old directory stays" || bad "unknown job count: $(cat "$W/out" "$W/err")"
+echo 0 >"$R5/.state/jobs"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'changed: archive:go: /usr/local/go-1.27.1 removed: go is in /usr/lib/go' "$W/out" && [ ! -e "$R5/usr/local/go-1.27.1" ] && [ -x "$R5/usr/lib/go/bin/go" ] && ok "with no job running apply removes the old /usr/local/go-1.27.1" || bad "old directory without jobs: exit $st $(cat "$W/out" "$W/err")"
+run "$R5" check
+[ $? -eq 0 ] && ! grep -q '^pending' "$W/out" && ok "after the move: 0 drift and no pending line" || bad "after the move: $(cat "$W/out")"
+# An old directory that a link of /usr/local/bin still names is not removed.
+mkdir -p "$R5/usr/local/go-1.27.1/bin"
+ln -sfn /usr/local/go-1.27.1/bin/gofmt "$R5/usr/local/bin/gofmt"
+run "$R5" check
+grep -qx "drift: archive:go: /usr/local/bin/gofmt is '/usr/local/go-1.27.1/bin/gofmt', want a link to /usr/lib/go/bin/gofmt" "$W/out" && ! grep -q '^pending' "$W/out" && ok "an old directory that /usr/local/bin still links to is drift of the link, not a pending removal" || bad "old directory still linked: $(grep 'archive\|pending' "$W/out")"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ ! -e "$R5/usr/local/go-1.27.1" ] && [ "$(readlink "$R5/usr/local/bin/gofmt")" = /usr/lib/go/bin/gofmt ] && ok "apply sets the link and then removes the old directory" || bad "old directory after the link: $(cat "$W/out") $(ls "$R5/usr/local" | tr '\n' ' ')"
+# What go answers is compared: another answer than GO_ROOT is drift, and apply does not call a go
+# that still answers it installed.
+echo /usr/local/go-1.27.1 >"$R5/.state/goroot"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: archive:go: go env GOROOT of /usr/lib/go/bin/go answers '/usr/local/go-1.27.1', want /usr/lib/go" "$W/out" && ok "check compares what go env GOROOT answers with GO_ROOT and names both" || bad "GOROOT drift: exit $st $(grep archive "$W/out")"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: archive:go: go env GOROOT of /usr/lib/go/bin/go answers '/usr/local/go-1.27.1' after the install, want /usr/lib/go" "$W/err" && ! grep -q '^changed: archive:go' "$W/out" && ok "a go that answers another GOROOT after the install: failed line, exit 1, not reported as changed" || bad "GOROOT after the install: exit $st $(grep archive "$W/out" "$W/err")"
+: >"$R5/.state/goroot"
+run "$R5" check
+grep -qx "drift: archive:go: go env GOROOT of /usr/lib/go/bin/go answers 'nothing', want /usr/lib/go" "$W/out" && ok "a go that answers nothing for env GOROOT is drift" || bad "no GOROOT answer: $(grep archive "$W/out")"
+rm -f "$R5/.state/goroot"
+run "$R5" check
+[ $? -eq 0 ] || bad "GOROOT after the stand-in answers again: $(cat "$W/out")"
+# A release change with GO_ROOT set replaces the directory whole, as it does without GO_ROOT.
+printf '#!/bin/sh\necho "go version go1.26.0 linux/amd64"\n' >"$R5/usr/lib/go/bin/go"
+echo 'go 1.26.0 0000' >"$R5/usr/lib/go/.slot-archive"
+: >"$R5/usr/lib/go/file-of-the-old-release"
+run "$R5" check
+grep -qx "drift: archive:go: /usr/lib/go/bin/go says 'go version go1.26.0 linux/amd64', want go1.27.1" "$W/out" && ok "check names another release in GO_ROOT" || bad "release in GO_ROOT: $(grep archive "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch https://go.dev/dl/go1.27.1.linux-amd64.tar.gz' "$R5/.calls" && [ ! -e "$R5/usr/lib/go/file-of-the-old-release" ] && [ "$(cat "$R5/usr/lib/go/.slot-archive")" = "go 1.27.1 $gosum" ] && [ ! -e "$R5/usr/lib/go.slot-new" ] && ok "apply replaces the directory of the old release whole and writes the mark of the new one" || bad "release change in GO_ROOT: exit $st $(grep archive "$W/out" "$W/err") $(ls -a "$R5/usr/lib/go")"
+run "$R5" check
+[ $? -eq 0 ] || bad "after the release change in GO_ROOT: $(cat "$W/out")"
+# A directory that is there and does not carry the mark is not provision.sh's: it stays as it is.
+conf
+echo 'GO_ROOT=/opt/go' >>"$W/node.conf"
+mkdir -p "$R5/opt/go/bin"
+echo theirs >"$R5/opt/go/README"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: archive:go: GO_ROOT /opt/go exists without the mark of provision.sh (/opt/go/.slot-archive), owner $me" "$W/out" && [ "$(grep -c '^drift: archive:go' "$W/out")" -eq 1 ] && ok "a GO_ROOT that exists without the mark: one drift line that names its owner" || bad "foreign GO_ROOT, check: exit $st $(grep archive "$W/out")"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: archive:go: GO_ROOT /opt/go exists without the mark of provision.sh (/opt/go/.slot-archive), owner $me: nothing was changed" "$W/err" && [ "$(grep -c 'archive:go' "$W/err")" -eq 1 ] && [ "$(cat "$R5/opt/go/README")" = theirs ] && [ "$(LC_ALL=C ls -A "$R5/opt/go" | tr '\n' ' ')" = 'README bin ' ] && [ "$(readlink "$R5/usr/local/bin/go")" = /usr/lib/go/bin/go ] && ! grep -q 'go.dev' "$R5/.calls" && ok "apply does not write into it: one failed line with the owner, exit 1, the directory and the links as they were, nothing fetched" || bad "foreign GO_ROOT, apply: exit $st $(grep archive "$W/out" "$W/err") $(ls -A "$R5/opt/go") $(readlink "$R5/usr/local/bin/go")"
+rm -rf "$R5/opt/go"
+ln -s /nowhere "$R5/opt/go"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: archive:go: GO_ROOT /opt/go is a symbolic link, owner $me: nothing was changed" "$W/err" && [ "$(readlink "$R5/opt/go")" = /nowhere ] && ok "a GO_ROOT that is a symbolic link is not replaced" || bad "GO_ROOT link: exit $st $(grep archive "$W/out" "$W/err")"
+rm -f "$R5/opt/go"
+# A mark that is not a file of its own (a link) is no mark.
+mkdir -p "$R5/opt/go"
+echo "go 1.27.1 $gosum" >"$W/mark"
+ln -s "$W/mark" "$R5/opt/go/.slot-archive"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: archive:go: GO_ROOT /opt/go exists without the mark of provision.sh' "$W/err" && ok "a mark that is a symbolic link does not count" || bad "mark link: exit $st $(grep archive "$W/out" "$W/err")"
+rm -rf "$R5/opt/go"
+# A path a package owns is the package's, also with the mark in it.
+conf
+echo 'GO_ROOT=/usr/lib/go' >>"$W/node.conf"
+mkdir -p "$R5/.state/pkg-owner"
+echo golang-1.22.5-1.amzn2023.x86_64 >"$R5/.state/pkg-owner/_usr_lib_go"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: archive:go: GO_ROOT /usr/lib/go belongs to the package golang-1.22.5-1.amzn2023.x86_64' "$W/out" && ok "a GO_ROOT that a package owns: drift that names the package" || bad "package GO_ROOT, check: exit $st $(grep archive "$W/out")"
+rm -f "$R5/usr/local/bin/go"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: archive:go: GO_ROOT /usr/lib/go belongs to the package golang-1.22.5-1.amzn2023.x86_64: nothing was changed' "$W/err" && [ ! -e "$R5/usr/local/bin/go" ] && ! grep -q 'go.dev' "$R5/.calls" && ok "apply does not write into a package's directory: failed line with the package, exit 1, no link set, nothing fetched" || bad "package GO_ROOT, apply: exit $st $(grep archive "$W/out" "$W/err")"
+rm -rf "$R5/.state/pkg-owner"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ "$(readlink "$R5/usr/local/bin/go")" = /usr/lib/go/bin/go ] && ok "without the package: apply sets the link again, 0 drift" || bad "after the package: $(cat "$W/out")"
+# A path with a symbolic link in it is not written through.
+conf
+echo 'GO_ROOT=/opt/via/go' >>"$W/node.conf"
+mkdir -p "$W/elsewhere" "$R5/opt"
+ln -s "$W/elsewhere" "$R5/opt/via"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: archive:go: GO_ROOT /opt/via/go has a symbolic link in its path: not written' "$W/err" && [ -z "$(ls -A "$W/elsewhere")" ] && ok "a GO_ROOT with a symbolic link in its path is not written" || bad "GO_ROOT through a link: exit $st $(grep archive "$W/out" "$W/err") $(ls -A "$W/elsewhere")"
+rm -f "$R5/opt/via"
+# The real queries, each alone: go as the build user, and rpm for the owner.
+gq=$(
+  eval "$(sed -n '/^q_goroot() {$/,/^}$/p; /^q_pkg_owner() {$/,/^}$/p' "$P")"
+  T= R=
+  as_user() { echo "as_user $*"; }
+  q_goroot /usr/lib/go/bin/go
+  rpm() {
+    echo "rpm $*" >"$W/rpm-args"
+    echo golang-bin-1.22.5-1.amzn2023.x86_64
+    echo golang-1.22.5-1.amzn2023.x86_64
+  }
+  q_pkg_owner /usr/lib/go
+  rpm() {
+    echo 'file /usr/lib/go is not owned by any package'
+    return 1
+  }
+  q_pkg_owner /usr/lib/go
+  echo end
+)
+[ "$gq" = "as_user /usr/lib/go/bin/go env GOROOT
+golang-bin-1.22.5-1.amzn2023.x86_64
+end" ] && [ "$(cat "$W/rpm-args")" = 'rpm -qf /usr/lib/go' ] && ok "without NODE_TEST: go env GOROOT runs as the build user, and rpm -qf names the owner (nothing for a path no package owns)" || bad "real GOROOT queries: $gq / $(cat "$W/rpm-args")"
+# GO_ROOT in the config: an absolute path, and none that provisioning manages.
+gread() { sh -c '. "$1/conf.sh"; conf_read "$2" BUILD_USER && echo "[$GO_ROOT]"' sh "$here" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+conf
+gread
+[ $? -eq 0 ] && [ "$(cat "$W/out")" = '[]' ] && ok "GO_ROOT is a config key, empty by default" || bad "GO_ROOT default: $(cat "$W/out" "$W/err")"
+for good_g in /usr/lib/go /opt/go /usr/lib/golang /usr/local/go /opt/go-1.27/x86_64; do
+  conf
+  echo "GO_ROOT=$good_g" >>"$W/node.conf"
+  gread
+  [ $? -eq 0 ] && [ "$(cat "$W/out")" = "[$good_g]" ] && ok "GO_ROOT=$good_g is accepted" || bad "GO_ROOT=$good_g is refused ($(cat "$W/err"))"
+done
+for bad_g in usr/lib/go / /usr/lib/go/ /usr/lib/../go /usr/lib/.. '/usr/lib/my go' /usr//lib/go /usr/./lib/go '/usr/lib/go;x' '/usr/lib/$go' '/usr/lib/go*'; do
+  conf
+  echo "GO_ROOT=$bad_g" >>"$W/node.conf"
+  gread
+  [ $? -eq 2 ] && grep -q "GO_ROOT must be an absolute path .*, not '" "$W/err" && [ "$(grep -c . "$W/err")" -eq 1 ] && ok "GO_ROOT=$bad_g is refused" || bad "GO_ROOT=$bad_g is accepted ($(cat "$W/out" "$W/err"))"
+done
+for bad_g in /usr/local/bin /usr/local/bin/go /usr/local /usr /usr/bin /usr/local/libexec /usr/local/libexec/go /srv/slot /srv/slot/go /srv /var/lib/builder /var/lib/builder/go /var/lib /etc/go /run/go; do
+  conf
+  echo "GO_ROOT=$bad_g" >>"$W/node.conf"
+  gread
+  [ $? -eq 2 ] && grep -q "GO_ROOT '$bad_g' is a directory the provisioning manages, lies in one or holds one (" "$W/err" && [ "$(grep -c . "$W/err")" -eq 1 ] && ok "GO_ROOT=$bad_g is refused: provisioning manages it" || bad "GO_ROOT=$bad_g is accepted ($(cat "$W/out" "$W/err"))"
+done
+# The directories of the other pinned archives are known to provision.sh, which refuses them
+# when it reads the config.
+for bad_g in /usr/local/node-v22.23.3 /usr/local/node-v22.23.3/go /usr/local/go-1.27.1 /usr/local/musl-1.2.6 /usr/local/musl-1.2.6/go /usr/local/make-4.4.1; do
+  conf
+  echo "GO_ROOT=$bad_g" >>"$W/node.conf"
+  : >"$R5/.calls"
+  run "$R5" apply
+  st=$?
+  [ $st -eq 2 ] && grep -q "^node config: .*GO_ROOT '$bad_g' is the directory of a pinned archive, or lies in one (" "$W/err" && [ ! -s "$R5/.calls" ] && ok "GO_ROOT=$bad_g is refused: the directory of a pinned archive" || bad "GO_ROOT=$bad_g: exit $st $(head -2 "$W/err")"
+done
+sh "$P" bundle "$W/node.conf" check >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && grep -q "GO_ROOT '/usr/local/make-4.4.1' is the directory of a pinned archive" "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with a GO_ROOT of a pin: $(head -2 "$W/err")"
+conf
+echo 'GO_ROOT=/usr/lib/go' >>"$W/node.conf"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] || bad "go in GO_ROOT again: $(cat "$W/out")"
+# GO_ROOT taken out of the config: go goes to /usr/local/go-<version> again. The directory of
+# the old GO_ROOT is no longer named by anything: it stays, for the owner to remove.
+conf
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ "$(readlink "$R5/usr/local/bin/go")" = /usr/local/go-1.27.1/bin/go ] && [ -e "$R5/usr/lib/go/.slot-archive" ] && ok "GO_ROOT taken out of the config: go is in /usr/local/go-1.27.1 again, 0 drift; the directory of the old GO_ROOT stays" || bad "GO_ROOT taken out: $(cat "$W/out") $(readlink "$R5/usr/local/bin/go")"
+rm -rf "$R5/usr/lib/go"
 
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
@@ -615,10 +1003,45 @@ sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go \|^node ' | t
 rm -f "$TC/p2/usr/local/bin/go"
 sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go ' >"$W/out2"
 [ "$(cat "$W/out2")" = "go go1.27.1" ] && ok "toolchains.sh: go1.27.1-X:nodwarf5 prints as go1.27.1" || bad "nodwarf5 line: $(cat "$W/out2")"
+# goroot: what `go env GOROOT` of that go answers, on a line of its own. The `go ` line stays as
+# it is: a wrapper compares the lines that begin with `go ` and a space.
+printf '#!/bin/sh\nif [ "$*" = "env GOROOT" ]; then echo /usr/lib/go; else echo "go version go1.27.1 linux/amd64"; fi\n' >"$TC/p2/usr/local/bin/go"
+chmod 755 "$TC/p2/usr/local/bin/go"
+sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" >"$W/out2" 2>/dev/null
+[ "$(grep '^go' "$W/out2" | tr '\n' ',')" = 'go go1.27.1,goroot /usr/lib/go,' ] && ok "toolchains.sh: a goroot line with what go env GOROOT answers, after the go line" || bad "goroot line: $(grep '^go' "$W/out2" | tr '\n' ',')"
+[ "$(grep -c '^go ' "$W/out2")" -eq 1 ] && [ "$(grep '^go ' "$W/out2")" = 'go go1.27.1' ] && ok "toolchains.sh: the goroot line does not begin with 'go ' and a space, and the go line is as before" || bad "go lines: $(grep '^go ' "$W/out2" | tr '\n' ',')"
+printf '#!/bin/sh\nif [ "$*" = "env GOROOT" ]; then exit 1; else echo "go version go1.27.1 linux/amd64"; fi\n' >"$TC/p2/usr/local/bin/go"
+sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^go' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = 'go go1.27.1,' ] && ok "toolchains.sh: a go that names no GOROOT gets no goroot line" || bad "goroot of a go without an answer: $(cat "$W/out2")"
+rm -f "$TC/p2/usr/local/bin/go"
+! grep -q '^goroot' "$W/out" && ok "toolchains.sh: an answer that is no absolute path is no goroot line" || bad "goroot from a version line: $(grep '^goroot' "$W/out")"
+mkdir -p "$TC/nogo/usr/bin"
+sh "$here/toolchains.sh" "$TC/nogo" "$TC/rh" 2>/dev/null | grep -c '^go' >"$W/out2"
+[ "$(cat "$W/out2")" = 0 ] && ok "toolchains.sh: without go neither a go line nor a goroot line" || bad "lines without go: $(cat "$W/out2")"
 printf '#!/bin/sh\necho "GNU Make 4.4.1"\n' >"$TC/p2/usr/local/bin/make"
 chmod 755 "$TC/p2/usr/local/bin/make"
 sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^tool make ' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool make 4.4.1" ] && ok "toolchains.sh: a tool line for make" || bad "make tool line: $(cat "$W/out2")"
+# musl: `tool musl <release>`, read from the loader beside the specs file that the musl-gcc
+# wrapper names: /usr/local/musl-<release>/lib on a node (the wrapper linked in /usr/local/bin),
+# /usr/lib/musl/lib on the workstation (the wrapper in /usr/bin). The c line reads either wrapper.
+mkdir -p "$TC/p2/usr/local/musl-1.2.6/lib" "$TC/pm/usr/bin" "$TC/pm/usr/lib/musl/lib"
+printf '#!/bin/sh\n[ "$1" != --version ] || { echo "gcc (stub) 11.5.0"; exit 0; }\nexec "${REALGCC:-gcc}" "$@" -specs "/usr/local/musl-1.2.6/lib/musl-gcc.specs"\n' >"$TC/p2/usr/local/bin/musl-gcc"
+printf '#!/bin/sh\n[ "$1" != --version ] || { echo "gcc (stub) 16.2.1"; exit 0; }\nexec "${REALGCC:-gcc}" "$@" -specs "/usr/lib/musl/lib/musl-gcc.specs"\n' >"$TC/pm/usr/bin/musl-gcc"
+for d in "$TC/p2/usr/local/musl-1.2.6/lib" "$TC/pm/usr/lib/musl/lib"; do
+  printf '#!/bin/sh\necho "musl libc (x86_64)" >&2\necho "Version 1.2.6" >&2\necho "Dynamic Program Loader" >&2\nexit 1\n' >"$d/libc.so"
+  chmod 755 "$d/libc.so"
+done
+chmod 755 "$TC/p2/usr/local/bin/musl-gcc" "$TC/pm/usr/bin/musl-gcc"
+sh "$here/toolchains.sh" "$TC/p2" "$TC/rh" 2>/dev/null | grep '^tool musl\|^c musl-gcc' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool musl 1.2.6,c musl-gcc gcc (stub) 11.5.0," ] && ok "toolchains.sh: a node's musl-gcc in /usr/local/bin gives a tool line with the release and a c line" || bad "musl lines of a node: $(cat "$W/out2")"
+sh "$here/toolchains.sh" "$TC/pm" "$TC/rh" 2>/dev/null | grep '^tool musl\|^c musl-gcc' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool musl 1.2.6,c musl-gcc gcc (stub) 16.2.1," ] && ok "toolchains.sh: a workstation's musl-gcc in /usr/bin gives the same tool line" || bad "musl lines of a workstation: $(cat "$W/out2")"
+rm -f "$TC/pm/usr/lib/musl/lib/libc.so"
+sh "$here/toolchains.sh" "$TC/pm" "$TC/rh" 2>/dev/null | grep '^tool musl' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool musl missing" ] && ok "toolchains.sh: a musl-gcc without a loader beside its specs prints missing as the release" || bad "musl without a loader: $(cat "$W/out2")"
+sh "$here/toolchains.sh" "$TC/nogo" "$TC/rh" 2>/dev/null | grep '^tool musl\|^c musl-gcc' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "c musl-gcc missing," ] && ok "toolchains.sh: without musl-gcc no tool line for musl, and the c line says missing" || bad "musl lines without musl-gcc: $(cat "$W/out2")"
 grep -qx 'node v22.1.0' "$W/out" && ok "toolchains.sh: node prints its version" || bad "node line: $(grep '^node' "$W/out")"
 grep -qx 'c gcc gcc (stub) 13.2.0' "$W/out" && ok "toolchains.sh: gcc prints the first line of its version" || bad "gcc line: $(grep '^c gcc' "$W/out")"
 grep -qx 'c clang missing' "$W/out" && ok "toolchains.sh: a missing compiler is named" || bad "clang line: $(grep '^c clang' "$W/out")"
@@ -640,13 +1063,16 @@ HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^to
 printf '#!/bin/sh\nexit 1\n' >"$TC/home/.local/bin/esbuild"
 HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool esbuild' >"$W/out2"
 [ "$(cat "$W/out2")" = "tool esbuild missing" ] && ok "toolchains.sh: a tool that is there and prints no version is 'missing', not a line with a trailing space" || bad "broken tool line: '$(cat "$W/out2")'"
-# pnpm is a tool of the same loop. helm has no `--version`: its line comes from
-# `helm version --template {{.Version}}`, and a helm on PATH is read only with the prefix "".
+# pnpm and yarn are tools of the same loop (the workstation has yarn in /usr/bin). helm has no
+# `--version`: its line comes from `helm version --template {{.Version}}`, and a helm on PATH is
+# read only with the prefix "". The yarn here answers as yarn 1 does where a .yarnrc has a
+# `yarn-path`: its own release only with YARN_IGNORE_PATH=1, else what that path prints.
 printf '#!/bin/sh\necho 11.9.0\n' >"$TC/home/.local/bin/pnpm"
+printf '#!/bin/sh\n[ "${YARN_IGNORE_PATH:-}" = 1 ] || { echo 9.9.9-from-yarn-path; exit 0; }\necho 1.22.22\n' >"$TC/p3/usr/bin/yarn"
 printf '#!/bin/sh\n[ "$1" = version ] && [ "$2" = --template ] && [ "$3" = "{{.Version}}" ] && printf v3.8.1 && exit 0\necho "Error: unknown flag" >&2\nexit 1\n' >"$TC/p3/usr/local/bin/helm"
-chmod 755 "$TC/home/.local/bin/pnpm" "$TC/p3/usr/local/bin/helm"
-HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool pnpm\|^tool helm' | tr '\n' ',' >"$W/out2"
-[ "$(cat "$W/out2")" = "tool pnpm 11.9.0,tool helm v3.8.1," ] && ok "toolchains.sh: pnpm and helm lines, helm through \`version --template\`" || bad "pnpm, helm lines: $(cat "$W/out2")"
+chmod 755 "$TC/home/.local/bin/pnpm" "$TC/p3/usr/bin/yarn" "$TC/p3/usr/local/bin/helm"
+HOME=$TC/home sh "$here/toolchains.sh" "$TC/p3" "$TC/rh" 2>/dev/null | grep '^tool pnpm\|^tool yarn\|^tool helm' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool pnpm 11.9.0,tool yarn 1.22.22,tool helm v3.8.1," ] && ok "toolchains.sh: pnpm, yarn (read with YARN_IGNORE_PATH=1) and helm lines, helm through \`version --template\`" || bad "pnpm, yarn, helm lines: $(cat "$W/out2")"
 mkdir -p "$TC/pathbin"
 printf '#!/bin/sh\nprintf v9.9.9\n' >"$TC/pathbin/helm"
 chmod 755 "$TC/pathbin/helm"
@@ -767,6 +1193,14 @@ if [ $st -eq 0 ] && sh -n "$W/bundle.sh"; then ok "bundle is valid sh"; else bad
 NODE_TEST=1 NODE_ROOT=$R sh "$W/bundle.sh" >"$W/out" 2>"$W/err"
 st=$?
 if [ $st -eq 0 ] && grep -q '^0 drift$' "$W/out"; then ok "bundle check: 0 drift"; else bad "bundle check exit $st: $(cat "$W/out" "$W/err" | tail -5)"; fi
+# The bundle carries the pins: the provision.sh inside it names the musl source pin, and the
+# bundle names a musl-gcc link that is gone by the pin's directory.
+sed -n "s/^printf '%s' '\(.*\)' | base64 -d .*/\1/p" "$W/bundle.sh" | base64 -d | tar -xzOf - provision.sh 2>/dev/null | grep -qx "MUSL_PIN='musl 1.2.6 d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a https://musl.libc.org/releases/musl-1.2.6.tar.gz'" && ok "the bundle carries the musl pin" || bad "the bundle's provision.sh has no musl pin"
+rm -f "$R/usr/local/bin/musl-gcc"
+NODE_TEST=1 NODE_ROOT=$R sh "$W/bundle.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: musl: /usr/local/bin/musl-gcc is 'missing', want a link to /usr/local/musl-1.2.6/bin/musl-gcc" "$W/out" && ok "bundle check names a missing musl-gcc link by the pin's directory" || bad "bundle and musl: exit $st $(cat "$W/out" "$W/err" | tail -5)"
+ln -s /usr/local/musl-1.2.6/bin/musl-gcc "$R/usr/local/bin/musl-gcc"
 
 # 6b. push.sh check compares only what a node cannot get from its packages alone: the rust, go and
 # node lines of toolchains.sh and the release of each pinned tool. The C tools differ between
@@ -919,19 +1353,25 @@ rm -f "$W/ran"
 realrun "$RF"
 st=$?
 [ $st -eq 1 ] && ok "downloads with a wrong SHA-256: apply exits 1" || bad "wrong SHA-256: apply exit $st"
-for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yq archive:helm make home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0 home:groovy@2.4.10; do
+for part in slot tool:wasm-bindgen tool:geckodriver tool:sccache tool:cargo-nextest tool:task tool:ess tool:cargo-about rustup archive:go archive:node archive:typescript archive:prettier archive:esbuild archive:pnpm archive:yarn archive:yq archive:helm make musl home:ess@0.97.4 home:@types/node@26.3.0 home:undici-types@8.3.0 home:aep@0.80.0 home:groovy@2.4.10; do
   grep -q "^failed: $part: " "$W/err" && ok "wrong SHA-256: $part fails" || bad "wrong SHA-256: no failed line for $part: $(grep '^failed' "$W/err" | head -3)"
 done
 [ ! -s "$W/tar.log" ] && ok "wrong SHA-256: tar never runs" || bad "tar ran on an unchecked file: $(cat "$W/tar.log")"
 [ ! -e "$W/ran" ] && ok "wrong SHA-256: no downloaded file runs" || bad "a downloaded file ran"
 [ "$(grep -c 'rustup-init\|go1.27.1\|node-v22\|task_linux\|nextest\|geckodriver\|wasm-bindgen\|sccache\|slot-0.36\|ess-0.99.2\|cargo-about-0.9.1\|yq_linux_amd64' "$W/curl.log")" -ge 12 ] && ok "wrong SHA-256: every download was attempted" || bad "curl calls: $(cat "$W/curl.log")"
+grep -q 'musl-1.2.6.tar.gz' "$W/curl.log" && ok "wrong SHA-256: the musl source was asked for" || bad "no musl download in: $(cat "$W/curl.log")"
 # Control: with the SHA256SUMS line that matches the served file, tar is reached (so the stand-in
 # tar would record a call if the check had failed open above), with no owner taken from the archive.
 RG=$W/r6b
 mkdir -p "$RG"
 printf '#!/bin/sh\ntouch "%s/ran"\n' "$W" | sha256sum | cut -d' ' -f1 >"$W/slot-sum"
 : >"$W/tar.log"
+# The same control for the musl source: with a pin that carries the SHA-256 of the served file
+# its tar is reached; make's source, served as the same file under make's own pin, is not.
+export NODE_TEST_MUSL_PIN="musl 1.2.6 $(cat "$W/slot-sum") https://musl.libc.org/releases/musl-1.2.6.tar.gz"
 realrun "$RG"
+unset NODE_TEST_MUSL_PIN
+[ "$(grep -c -- '-xf src.tar.gz -C src --strip-components=1 --no-same-owner' "$W/tar.log")" -eq 1 ] && ok "control: a musl source with the SHA-256 of its pin reaches tar, once, with no owner taken from the archive" || bad "control: musl tar: $(cat "$W/tar.log")"
 grep -q 'xzf slot-0.36.0-x86_64-unknown-linux-gnu.tar.gz' "$W/tar.log" && ok "control: a matching SHA-256 reaches tar" || bad "control: tar not reached: $(cat "$W/tar.log")"
 grep -q -- '--no-same-owner' "$W/tar.log" && ok "slot's tar takes no owner from the archive" || bad "slot's tar has no --no-same-owner: $(cat "$W/tar.log")"
 [ "$(grep -c 'no-same-owner' "$here/provision.sh")" -ge 3 ] && ok "every tar of provision.sh that runs as root has --no-same-owner" || bad "--no-same-owner count: $(grep -c 'no-same-owner' "$here/provision.sh")"
@@ -1083,9 +1523,10 @@ else
 fi
 
 # 6j. After apply changed a unit file or replaced the slot binary, each running unit it affects
-# restarts: sccache-node always, slot-node when no job runs (else a pending line). check reports a
-# running unit whose loaded definition, process environment or slot binary is not what its file
-# and the config say.
+# restarts when no job runs (else a pending line): a restart of slot-node ends the jobs, and one
+# of sccache-node ends the compilers the cache server runs for them. check reports a running unit
+# whose loaded definition, process environment or slot binary is not what its file and the config
+# say.
 conf
 R7=$W/r7
 mkdir -p "$R7"
@@ -1097,9 +1538,10 @@ sed -i 's/^GO_PRIVATE=.*/GO_PRIVATE=git.other.org/' "$W/node.conf"
 echo 1 >"$R7/.state/jobs"
 : >"$R7/.calls"
 run "$R7" apply
-grep -qx 'systemctl restart sccache-node.service' "$R7/.calls" && ok "a changed unit file: sccache-node restarts" || bad "no sccache-node restart: $(cat "$R7/.calls")"
+grep -qx 'systemctl restart sccache-node.service' "$R7/.calls" && bad "sccache-node restarted with a job running" || ok "a changed unit file: sccache-node waits while a job runs"
 grep -qx 'systemctl restart slot-node.service' "$R7/.calls" && bad "slot-node restarted with a job running" || ok "a changed unit file: slot-node waits while a job runs"
-grep -q '^pending: running: slot-node' "$W/err" && ok "slot-node's restart is a pending line" || bad "no pending line: $(cat "$W/err")"
+grep -q '^pending: running: slot-node restarts when no job runs (1 now): ' "$W/err" && ok "slot-node's restart is a pending line" || bad "no pending line: $(cat "$W/err")"
+grep -qx 'pending: running: sccache-node restarts when no job runs (1 now): its unit file changed' "$W/err" && ok "sccache-node's restart is a pending line" || bad "no pending line for sccache-node: $(cat "$W/err")"
 run "$R7" check
 st=$?
 [ $st -eq 1 ] && grep -q '^drift: running: slot-node.service: ' "$W/out" && ok "check names slot-node running an older definition" || bad "stale slot-node not named: exit $st $(cat "$W/out")"
@@ -1885,17 +2327,24 @@ cnr 'canary: role r1\ncanary: end'
 cnr 'docker: Cannot connect to the Docker daemon' 125
 st=$?
 [ $st -eq 1 ] && grep -q '^role canary: the container did not run: docker: Cannot connect' "$W/err" && ok "canary: a container that does not run is exit 1" || bad "canary no container: exit $st $(cat "$W/err")"
-# check --canary runs it; check alone starts no container.
-crun() { PATH=$W/cn/bin:$PATH NODE_TEST=1 NODE_ROOT=$RR sh "$P" check "$W/node.conf" "$@" >"$W/out" 2>"$W/err"; }
+# check --canary runs it; check alone starts no container. Under NODE_TEST=1 the canary runs
+# only the stand-in for docker that the test names (NODE_TEST_DOCKER, the directory that holds
+# it): a test or a probe that names none starts nothing, whatever `docker` its PATH has. crun
+# puts the stand-in first on PATH as well, so that no change of provision.sh makes this file
+# start a container.
+crun() { NODE_TEST_DOCKER=$W/cn/bin PATH=$W/cn/bin:$PATH NODE_TEST=1 NODE_ROOT=$RR sh "$P" check "$W/node.conf" "$@" >"$W/out" 2>"$W/err"; }
 printf 'canary: role slot-node-node-1\ncanary: answer AccessDeniedException\ncanary: end\n' >"$W/cn/answer"
 echo 0 >"$W/cn/exit"
 : >"$W/cn/calls"
 crun
 st=$?
 [ $st -eq 0 ] && [ ! -s "$W/cn/calls" ] && ok "check without --canary starts no container" || bad "check started a container: exit $st $(cat "$W/cn/calls" "$W/out")"
+PATH=$W/cn/bin:$PATH NODE_TEST=1 NODE_ROOT=$RR sh "$P" check "$W/node.conf" --canary >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 1 ] && [ ! -s "$W/cn/calls" ] && grep -qx 'drift: role: canary: NODE_TEST=1 names no stand-in for docker (NODE_TEST_DOCKER): nothing was started' "$W/out" && ok "NODE_TEST=1 without NODE_TEST_DOCKER: check --canary runs no docker, also one that is first on PATH, and says so" || bad "canary without a named stand-in: exit $st calls '$(cat "$W/cn/calls")' $(grep canary "$W/out")"
 crun --canary
 st=$?
-[ $st -eq 0 ] && grep -q '^canary: ok: role slot-node-node-1: ' "$W/out" && grep -q '^0 drift$' "$W/out" && [ "$(wc -l <"$W/cn/calls")" -eq 1 ] && ok "check --canary with a refused call: one container, one canary line, 0 drift" || bad "check --canary: exit $st $(cat "$W/out" "$W/err")"
+[ $st -eq 0 ] && grep -q '^canary: ok: role slot-node-node-1: ' "$W/out" && grep -q '^0 drift$' "$W/out" && [ "$(wc -l <"$W/cn/calls")" -eq 1 ] && ok "check --canary with a refused call: one container, the canary line of the role, 0 drift" || bad "check --canary: exit $st $(cat "$W/out" "$W/err")"
 printf 'canary: role slot-node-node-1\ncanary: answer ParameterNotFound\ncanary: end\n' >"$W/cn/answer"
 crun --canary
 st=$?
@@ -1905,9 +2354,966 @@ rm -f "$RR/.state/active/docker.service"
 crun --canary
 grep -qx 'drift: role: canary: docker.service is not active: nothing was tested' "$W/out" && [ ! -s "$W/cn/calls" ] && ok "check --canary without a running docker says that nothing was tested" || bad "canary without docker: $(cat "$W/out")"
 : >"$RR/.state/active/docker.service"
+# The musl canary: check --canary writes one C file that includes stdio.h, compiles it with
+# musl-gcc -static as the build user in a directory of the store's tmp, runs the result and
+# removes the directory. The wrapper apply writes under NODE_TEST=1 is a stand-in that makes a
+# script of the line the source prints; the two failures are stand-ins of this test, which record
+# how they were called.
+printf 'canary: role slot-node-node-1\ncanary: answer AccessDeniedException\ncanary: end\n' >"$W/cn/answer"
+MUW=$RR/usr/local/musl-1.2.6/bin/musl-gcc
+crun --canary
+st=$?
+[ $st -eq 0 ] && grep -qx 'canary: ok: musl: a C file that includes stdio.h, compiled with musl-gcc -static (musl 1.2.6), runs and prints its line' "$W/out" && grep -q '^0 drift$' "$W/out" && ok "check --canary: the musl canary compiles, runs and is one ok line, 0 drift" || bad "musl canary: exit $st $(cat "$W/out" "$W/err" | tail -5)"
+[ -d "$RR/srv/slot/tmp" ] && [ -z "$(ls -A "$RR/srv/slot/tmp" | grep 'musl')" ] && ok "the musl canary leaves no directory in the store's tmp" || bad "musl canary left: $(ls -A "$RR/srv/slot/tmp" 2>&1)"
+cp "$MUW" "$W/musl-gcc.keep"
+cat >"$MUW" <<EOF
+#!/bin/sh
+[ "\$1" != --version ] || { echo "gcc (stand-in) 11.5.0"; exit 0; }
+echo "\$*" >"$W/musl-args"
+pwd >"$W/musl-pwd"
+cat canary.c >"$W/musl-src" 2>/dev/null
+echo "canary.c: In function 'main':" >&2
+echo "canary.c:1:10: fatal error: stdio.h: No such file or directory" >&2
+echo "compilation terminated." >&2
+exit 1
+EOF
+rm -f "$W/musl-args"
+crun
+[ ! -e "$W/musl-args" ] && ! grep -q 'canary' "$W/out" && ok "check without --canary compiles nothing" || bad "check alone ran the musl canary: $(cat "$W/musl-args" 2>&1) $(grep canary "$W/out")"
+crun --canary
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: musl: canary: musl-gcc -static canary.c failed: canary.c:1:10: fatal error: stdio.h: No such file or directory' "$W/out" && ! grep -q '^canary: ok: musl' "$W/out" && ok "check --canary: a compile that fails is drift with the compiler's first error line" || bad "musl canary compile error: exit $st $(grep musl "$W/out" "$W/err")"
+[ "$(cat "$W/musl-args" 2>&1)" = '-static -o canary canary.c' ] && grep -qx '#include <stdio.h>' "$W/musl-src" && ok "the musl canary compiles a file that includes stdio.h with -static" || bad "musl canary call: $(cat "$W/musl-args" "$W/musl-src" 2>&1)"
+case $(cat "$W/musl-pwd" 2>&1) in
+  "$RR"/srv/slot/tmp/slot-musl-canary.*) [ ! -e "$(cat "$W/musl-pwd")" ] && ok "the musl canary compiles in a directory of the store's tmp and removes it after a failure too" || bad "musl canary directory left: $(cat "$W/musl-pwd")" ;;
+  *) bad "musl canary directory: $(cat "$W/musl-pwd" 2>&1)" ;;
+esac
+cat >"$MUW" <<EOF
+#!/bin/sh
+[ "\$1" != --version ] || { echo "gcc (stand-in) 11.5.0"; exit 0; }
+echo "warning: a line that is no failure" >&2
+printf '#!/bin/sh\necho "another line"\n' >canary && chmod 755 canary
+EOF
+crun --canary
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: musl: canary: the program that musl-gcc -static made prints 'another line', want 'slot musl canary'" "$W/out" && ! grep -q '^canary: ok: musl' "$W/out" && ok "check --canary: a program that prints another line is drift" || bad "musl canary output: exit $st $(grep musl "$W/out" "$W/err")"
+cp "$W/musl-gcc.keep" "$MUW"
 sh "$P" bundle "$W/node.conf" check --canary >"$W/bundle-canary.sh"
 grep -qx 'sh "$d/provision.sh" check "$d/node.conf" --canary' "$W/bundle-canary.sh" && ok "a check bundle carries --canary" || bad "bundle --canary: $(tail -4 "$W/bundle-canary.sh" | head -1)"
 
+# 6r. glab and gh work with a credential, and no credential goes to a node: each is a script in
+# nodebin, the first directory of a job's PATH, that says so in one line and exits 255. A task
+# that calls one ends with that line, not with what its next command makes of an empty answer.
+for b in glab gh; do
+  nt=$RR/srv/slot/nodebin/$b
+  line="slot: node-1 has no $b: it works with a credential, and no credential goes to the node. Run the step that calls it on the workstation: slot --here <command>, or name the command in .slot.toml local = [...] of its repository."
+  printf '#!/bin/sh\necho "%s" >&2\nexit 255\n' "$line" | cmp -s - "$nt" && [ -x "$nt" ] && ok "$b: nodebin has the script, executable" || bad "$b: $(ls -l "$nt" 2>&1) $(cat "$nt" 2>&1)"
+  msg=$("$nt" api projects/1/merge_requests 2>&1 >"$W/out")
+  st=$?
+  [ $st -eq 255 ] && [ ! -s "$W/out" ] && [ "$msg" = "$line" ] && ok "$b: run, it prints the one line on stderr, nothing on stdout, and exits 255" || bad "$b: exit $st '$msg' $(cat "$W/out")"
+done
+# nodebin is the first directory of a job's PATH: a name in it replaces that tool for every job.
+[ "$(ls "$RR/srv/slot/nodebin" | tr '\n' ' ')" = 'gh glab no-credentials ssh ' ] && ok "nodebin holds gh, glab, no-credentials and ssh and nothing else: no other tool of a job is replaced" || bad "nodebin: $(ls "$RR/srv/slot/nodebin" | tr '\n' ' ')"
+
+# 6s. Core dumps. A bare node pipes every core to systemd-coredump, and the kernel runs a pipe
+# handler whatever the core limit of the process is: an aborted process is reaped only after the
+# handler ran. The node's pattern is the file name `core`, and slot-node.service and
+# sccache-node.service run with the soft core limit 0 (section 2): an aborted process of a job
+# writes nothing and is reaped at once. Under the pattern `core` a process whose limit is not 0
+# writes a core file, so the pattern is loaded only once both units run with the limit 0.
+# `check --canary` times an abort and reads the limit of slot-node. The role canary of this root
+# answers with a refusal again.
+printf 'canary: role slot-node-node-1\ncanary: answer AccessDeniedException\ncanary: end\n' >"$W/cn/answer"
+# fn NAME...: the text of functions of provision.sh, for a test that runs one of them alone with
+# stand-ins for what it calls.
+fn() {
+  for fn_n in "$@"; do sed -n "/^$fn_n() {\$/,/^}\$/p" "$P"; done
+}
+# A node provisioned before the core limit: unit files without one, both processes with the
+# limit unlimited, a pipe as the pattern (any handler counts, not only systemd's), 3 jobs running.
+pipe='|/usr/share/apport/apport -p%p -s%s -c%c'
+sysctl_f=/etc/sysctl.d/60-slot-core.conf
+echo "$pipe" >"$RR/.state/core-pattern"
+mkdir -p "$RR/.state/core-limit"
+for u in slot-node.service sccache-node.service; do
+  sed -i '/^LimitCORE=/d' "$RR/etc/systemd/system/$u"
+  echo unlimited >"$RR/.state/core-limit/$u"
+done
+echo 3 >"$RR/.state/jobs"
+rm -f "$RR$sysctl_f"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ "$(cat "$RR$sysctl_f" 2>&1)" = 'kernel.core_pattern=core' ] && ok "a pipe of another handler than systemd's, no sysctl file, jobs running: apply writes the file for the next boot" || bad "sysctl file with jobs: $(cat "$RR$sysctl_f" 2>&1)"
+why='the process has the core limit unlimited, not 0'
+[ $st -eq 0 ] && grep -qx 'LimitCORE=0:infinity' "$RR/etc/systemd/system/slot-node.service" && grep -qx 'LimitCORE=0:infinity' "$RR/etc/systemd/system/sccache-node.service" && ! grep -q 'systemctl restart' "$RR/.calls" && grep -qx "pending: running: sccache-node restarts when no job runs (3 now): $why" "$W/err" && grep -qx "pending: running: slot-node restarts when no job runs (3 now): $why" "$W/err" && ok "jobs running: both unit files get the core limit, no unit restarts, a pending line for each" || bad "core limit with jobs: exit $st $(grep LimitCORE "$RR/etc/systemd/system/slot-node.service" "$RR/etc/systemd/system/sccache-node.service") $(cat "$RR/.calls" "$W/err")"
+! grep -q sysctl "$RR/.calls" && [ "$(cat "$RR/.state/core-pattern")" = "$pipe" ] && grep -qx "pending: core: kernel.core_pattern stays '$pipe' while sccache-node.service runs with the core limit unlimited (under the pattern core its processes write core files): the apply that restarts it loads $sysctl_f" "$W/err" && ! grep -q '^changed: core: kernel' "$W/out" && ok "jobs running: the pattern is not loaded while a unit runs with another core limit than 0, a pending line says so" || bad "pattern with jobs: $(cat "$RR/.state/core-pattern") $(grep sysctl "$RR/.calls") $(grep core "$W/out" "$W/err")"
+crun --canary
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: running: slot-node.service: $why" "$W/out" && grep -qx "drift: running: sccache-node.service: $why" "$W/out" && grep -qx "drift: core: kernel.core_pattern is '$pipe', a pipe: an aborted process waits for the handler" "$W/out" && ok "check names each running unit whose core limit is not 0, and a pipe of another handler than systemd's" || bad "check with stale core limits: exit $st $(cat "$W/out")"
+grep -qx "drift: core: canary: slot-node.service runs with the core limit 'unlimited', not 0: an aborted process of a job writes a core file" "$W/out" && ! grep -q '^canary: ok: core' "$W/out" && ok "check --canary reads the core limit of the running slot-node: not 0 is drift, no ok line" || bad "canary with a stale core limit: $(grep 'core' "$W/out")"
+# No job: the units restart first, then the pattern is loaded. Here the load does not take.
+echo 0 >"$RR/.state/jobs"
+: >"$RR/.state-core-stays"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ "$(grep 'systemctl restart\|sysctl' "$RR/.calls" | tr '\n' ',')" = "systemctl restart sccache-node.service,systemctl restart slot-node.service,sysctl -q -p $sysctl_f," ] && grep -qx "changed: running: sccache-node.service restarted: $why" "$W/out" && grep -qx "changed: running: slot-node.service restarted: $why" "$W/out" && ok "no job: one apply restarts both units and then loads the pattern" || bad "restart, then load: $(cat "$RR/.calls") $(grep running "$W/out" "$W/err")"
+[ $st -eq 1 ] && grep -qx "failed: core: kernel.core_pattern is still '$pipe' after sysctl -p $sysctl_f" "$W/err" && ! grep -q '^changed: core' "$W/out" && ok "a pattern that is still a pipe after the load: failed line, exit 1, not reported as changed" || bad "core stays a pipe: exit $st $(grep core "$W/out" "$W/err")"
+rm -f "$RR/.state-core-stays"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$RR/.calls")" = "sysctl -q -p $sysctl_f" ] && grep -qx "changed: core: kernel.core_pattern is 'core' (sysctl -p $sysctl_f)" "$W/out" && ok "a pipe with the file in place and both units at the core limit 0: apply loads the file, no restart" || bad "core pipe again: exit $st $(grep core "$W/out" "$W/err") $(cat "$RR/.calls")"
+echo 50 >"$RR/.state/abort-ms"
+crun --canary
+st=$?
+[ $st -eq 0 ] && grep -qx 'canary: ok: core: an aborted process is reaped in 50 ms (the quickest of 5), and slot-node.service runs with the core limit 0' "$W/out" && grep -q '^canary: ok: role slot-node-node-1: ' "$W/out" && grep -q '^0 drift$' "$W/out" && ok "after it: 0 drift, and check --canary has an ok line for 50 ms and the core limit 0 beside the role's" || bad "core canary 50: exit $st $(cat "$W/out" "$W/err")"
+echo 51 >"$RR/.state/abort-ms"
+crun --canary
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: core: canary: an aborted process is reaped after 51 ms (the quickest of 5), over 50' "$W/out" && grep -qx '1 drift' "$W/out" && ok "check --canary: an abort reaped after 51 ms is drift" || bad "core canary 51: exit $st $(cat "$W/out" "$W/err")"
+# A pattern that is neither a pipe nor `core` is the owner's choice: it stays, and with no sysctl
+# file there none is written (the file would make the pattern `core` at the next boot). One line
+# says so. Without --canary nothing is timed.
+echo '/var/crash/core.%e.%p' >"$RR/.state/core-pattern"
+rm -f "$RR$sysctl_f"
+kept="kept: core: kernel.core_pattern is '/var/crash/core.%e.%p', neither a pipe nor core: it stays, and $sysctl_f is not written"
+run "$RR" check
+st=$?
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && grep -qx "$kept" "$W/out" && ! grep -q canary "$W/out" && ok "another pattern that is no pipe, and no sysctl file: no drift, one line says that both stay, and check without --canary times no abort" || bad "owner's pattern: exit $st $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+[ ! -s "$RR/.calls" ] && [ ! -e "$RR$sysctl_f" ] && [ "$(cat "$RR/.state/core-pattern")" = '/var/crash/core.%e.%p' ] && grep -qx "$kept" "$W/out" && ok "apply leaves another pattern that is no pipe alone and writes no sysctl file" || bad "owner's pattern after apply: $(cat "$RR/.calls" "$RR/.state/core-pattern") $(ls "$RR$sysctl_f" 2>&1) $(grep core "$W/out")"
+rm -f "$RR/.state/abort-ms"
+echo core >"$RR/.state/core-pattern"
+echo 'kernel.core_pattern=core' >"$RR$sysctl_f"
+# The canary's answers one by one: p_core_canary alone, with $1 as the time, $2 as the core limit
+# of slot-node and, with a third word, a slot-node that is not active.
+cc_fn=$(fn p_core_canary)
+core_canary() {
+  (
+    eval "$cc_fn"
+    mode=check canary=1 cc_ms=$1 cc_l=$2 cc_off=${3:-}
+    drift() { echo "drift: $1: $2"; }
+    q_abort_ms() { echo "$cc_ms"; }
+    q_core_limit() { echo "$cc_l"; }
+    q_active() { [ -z "$cc_off" ]; }
+    p_core_canary 2>&1
+  )
+}
+[ "$(core_canary 50 0)" = 'canary: ok: core: an aborted process is reaped in 50 ms (the quickest of 5), and slot-node.service runs with the core limit 0' ] && [ "$(core_canary 51 0)" = 'drift: core: canary: an aborted process is reaped after 51 ms (the quickest of 5), over 50' ] && ok "the canary's bound: 50 ms is ok, 51 ms is drift" || bad "canary bound: $(core_canary 50 0) / $(core_canary 51 0)"
+for none in '' 'date: invalid' ' 7' -0 0x10; do
+  [ "$(core_canary "$none" 0)" = 'drift: core: canary: no time was measured for an aborted process: nothing was tested' ] && ok "canary: '$none' for a time is drift, not ok" || bad "core canary '$none': $(core_canary "$none" 0)"
+done
+big=99999999999999999999
+[ "$(core_canary $big 0)" = "drift: core: canary: an aborted process is reaped after $big ms (the quickest of 5), over 50" ] && ok "canary: a time over the shell's integer range is drift, and the shell prints no error" || bad "core canary $big: $(core_canary $big 0)"
+[ "$(core_canary 2 unlimited)" = "drift: core: canary: slot-node.service runs with the core limit 'unlimited', not 0: an aborted process of a job writes a core file" ] && [ "$(core_canary 2 '')" = "drift: core: canary: slot-node.service runs with the core limit 'unknown', not 0: an aborted process of a job writes a core file" ] && [ "$(core_canary 2 0 off)" = 'drift: core: canary: slot-node.service is not active: the core limit of its jobs was not read' ] && ok "canary: a core limit of slot-node that is not 0 or cannot be read, and a slot-node that is not active, are drift" || bad "canary limit: $(core_canary 2 unlimited) / $(core_canary 2 '') / $(core_canary 2 0 off)"
+# The real branches (NODE_TEST unset), each alone with a stand-in for the system command it runs.
+# q_abort_ms aborts under the soft core limit 0, whatever limit provision.sh was started with:
+# here `sh` prints its soft limit instead of aborting. Where this run's hard limit is 0 no other
+# limit can be set first, and the case passes untested.
+al=$(
+  ulimit -S -c unlimited 2>/dev/null || ulimit -S -c 1024 2>/dev/null
+  if [ "$(ulimit -S -c)" = 0 ]; then
+    echo hard0
+    exit 0
+  fi
+  eval "$(fn q_abort_ms)"
+  T=
+  : >"$W/abort-limits"
+  sh() { ulimit -S -c >>"$W/abort-limits"; }
+  al_ms=$(q_abort_ms)
+  echo "$al_ms $(sort -u "$W/abort-limits" | tr '\n' ' ')$(grep -c '' "$W/abort-limits") $(ulimit -S -c)"
+)
+case $al in
+  hard0) ok "q_abort_ms: the soft core limit of its five runs (not tested: the hard core limit of this run is 0)" ;;
+  [0-9]*' 0 5 '[!0]*) ok "q_abort_ms: five runs under the soft core limit 0, the quickest time in ms, and the caller's limit as it was" ;;
+  *) bad "q_abort_ms: '$al' (want '<ms> 0 5 <the limit before>')" ;;
+esac
+# q_core_limit: the soft limit in /proc/<MainPID>/limits; `systemctl` answers this shell's pid.
+cat >"$W/ql.sh" <<'EOF'
+T=
+eval "$(sed -n '/^q_core_limit() {$/,/^}$/p' "$1")"
+systemctl() { echo $$; }
+ulimit -S -c 0
+a=$(q_core_limit x.service)
+if ulimit -S -c unlimited 2>/dev/null; then b=$(q_core_limit x.service); else b=unlimited; fi
+systemctl() { echo 0; }
+c=$(q_core_limit x.service)
+echo "$a $b '$c'"
+EOF
+ql=$(sh "$W/ql.sh" "$P" 2>&1)
+[ "$ql" = "0 unlimited ''" ] && ok "q_core_limit: the soft core limit of the unit's main process (0, unlimited), nothing without a process" || bad "q_core_limit: $ql"
+sl=$(
+  eval "$(fn a_sysctl_load)"
+  T=
+  sysctl() { echo "sysctl $*"; }
+  a_sysctl_load "$sysctl_f"
+)
+[ "$sl" = "sysctl -q -p $sysctl_f" ] && ok "the load without NODE_TEST is sysctl -q -p of the file" || bad "a_sysctl_load: $sl"
+
+# 6t. The pool of a node holds a queued job while the host is busy: `slot cpu-limit` with 80 % of
+# the CPUs and 20 % CPU pressure (sections 2 and 3), or the marks the config names (CPU_LIMIT,
+# CPU_PRESSURE). check asks the daemon which marks it holds (GET /api/cpu-limit as the build
+# user, 5 s at most): root opens no file of the build user's state directory. Under NODE_TEST=1
+# the answer is made from the files cpu-limit and cpu-pressure, and there is one only while
+# slot-node.service is active. This root has 2 CPUs.
+[ "$(cat "$RR/.state/cpu-limit" 2>&1)" = 1.6 ] && [ "$(cat "$RR/.state/cpu-pressure" 2>&1)" = 20 ] && ok "2 CPUs: the marks are 1.6 busy CPUs and 20 % CPU pressure" || bad "2 CPUs: $(cat "$RR/.state/cpu-limit" "$RR/.state/cpu-pressure" 2>&1)"
+# The daemon answers 20.0 for 20: marks are compared as numbers. Without --canary the load is not
+# read.
+echo 1.60 >"$RR/.state/cpu-limit"
+echo 20.0 >"$RR/.state/cpu-pressure"
+echo '0.10 99.00 0.30 1/100 1' >"$RR/.state/loadavg"
+run "$RR" check
+st=$?
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ! grep -q canary "$W/out" && ok "the same marks in another notation (1.60, 20.0) are no drift, and check without --canary reads no load" || bad "notation: exit $st $(cat "$W/out")"
+printf 'CPU_LIMIT=20\nCPU_PRESSURE=62.5\n' >>"$W/node.conf"
+run "$RR" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: cpu-limit: the pool holds a queued job from '1.60' busy CPUs and '20.0' % CPU pressure, want '20' and '62.5'" "$W/out" && ok "CPU_LIMIT and CPU_PRESSURE name other marks: check names the difference" || bad "explicit marks: exit $st $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot cpu-limit 20 --pressure 62.5' "$RR/.calls" && grep -qx 'changed: cpu-limit: a queued job is held from 20 busy CPUs and 62.5 % CPU pressure (slot cpu-limit 20 --pressure 62.5)' "$W/out" && [ "$(cat "$RR/.state/cpu-limit")" = 20 ] && ok "apply sets the marks of the config" || bad "explicit marks apply: exit $st $(cat "$RR/.calls" "$W/out" "$W/err")"
+# Only the pressure mark differs: that is drift too, before the call and after it.
+conf
+printf 'CPU_LIMIT=20\nCPU_PRESSURE=off\n' >>"$W/node.conf"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot cpu-limit 20 --pressure off' "$RR/.calls" && [ "$(cat "$RR/.state/cpu-limit")" = 20 ] && [ ! -e "$RR/.state/cpu-pressure" ] && ok "CPU_PRESSURE=off with the CPU mark as it is: apply takes the pressure mark away" || bad "pressure off: exit $st $(cat "$RR/.calls" "$W/out" "$W/err")"
+conf
+printf 'CPU_LIMIT=20\nCPU_PRESSURE=62.5\n' >>"$W/node.conf"
+: >"$RR/.state-cpu-limit-stays"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: cpu-limit: after slot cpu-limit 20 --pressure 62.5 the pool holds a queued job from '20' busy CPUs and 'off' % CPU pressure" "$W/err" && ! grep -q '^changed: cpu-limit' "$W/out" && ok "a pressure mark the pool does not have after the call: failed line, exit 1, not reported as changed" || bad "marks stay: exit $st $(grep cpu-limit "$W/out" "$W/err")"
+rm -f "$RR/.state-cpu-limit-stays"
+conf
+echo 'CPU_LIMIT=off' >>"$W/node.conf"
+run "$RR" check
+grep -qx "drift: cpu-limit: the pool holds a queued job from '20' busy CPUs and 'off' % CPU pressure, want 'off' and 'off'" "$W/out" && ok "CPU_LIMIT=off: a mark the pool has is drift, and no pressure mark is wanted" || bad "off: $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot cpu-limit off' "$RR/.calls" && grep -qx 'changed: cpu-limit: no CPU limit (slot cpu-limit off)' "$W/out" && [ ! -e "$RR/.state/cpu-limit" ] && ok "CPU_LIMIT=off: apply turns the limit off" || bad "off apply: exit $st $(cat "$RR/.calls" "$W/out" "$W/err")"
+crun --canary
+st=$?
+[ $st -eq 0 ] && grep -q '^0 drift$' "$W/out" && ! grep -q 'cpu-limit' "$W/out" && ok "CPU_LIMIT=off: 0 drift, and check --canary has no line about the load" || bad "off canary: exit $st $(cat "$W/out" "$W/err")"
+# A daemon that does not run gives no answer: check says so, and apply does not call it.
+conf
+rm -f "$RR/.state/active/slot-node.service"
+: >"$RR/.state-start-fails-slot-node.service"
+run "$RR" check
+grep -qx "drift: cpu-limit: the daemon of the pool gives no answer about its CPU limit (GET http://127.0.0.1:7411/api/cpu-limit as $me, 5 s at most), want '1.6' and '20'" "$W/out" && ok "with slot-node.service not active no daemon answers: check says so and names the limit it wants" || bad "not active, check: $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: unit:slot-node.service: systemctl start slot-node.service' "$W/err" && grep -qx 'failed: cpu-limit: slot-node.service is not active: the limit was not set' "$W/err" && ! grep -q 'cpu-limit' "$RR/.calls" && ok "a slot-node.service that does not start: failed lines for the unit and the limit, no slot cpu-limit call" || bad "not active, apply: exit $st $(cat "$W/err" "$RR/.calls")"
+rm -f "$RR/.state-start-fails-slot-node.service"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot cpu-limit 1.6 --pressure 20' "$RR/.calls" && [ "$(cat "$RR/.state/cpu-limit" 2>&1)" = 1.6 ] && ok "once slot-node.service starts, apply sets the limit" || bad "limit after the start: exit $st $(cat "$RR/.calls" "$W/out" "$W/err")"
+# check --canary reads the 5-minute load average, the second number of /proc/loadavg: over 2.5
+# per CPU the limit does not hold the node.
+echo '9.99 4.20 0.01 1/100 1' >"$RR/.state/loadavg"
+crun --canary
+st=$?
+[ $st -eq 0 ] && grep -qx 'canary: ok: cpu-limit: the 5-minute load average is 4.20 on 2 CPUs (bound 5)' "$W/out" && grep -q '^0 drift$' "$W/out" && ok "check --canary: a 5-minute load under 2.5 per CPU is an ok line, whatever the 1-minute load is" || bad "load 4.20: exit $st $(cat "$W/out" "$W/err")"
+echo '0.01 5.01 0.02 1/100 1' >"$RR/.state/loadavg"
+crun --canary
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: cpu-limit: canary: the 5-minute load average is 5.01 on 2 CPUs, over 5 (2.5 per CPU): the limit does not hold the node' "$W/out" && grep -qx '1 drift' "$W/out" && ok "check --canary: a load over the bound is drift" || bad "load 5.01: exit $st $(cat "$W/out" "$W/err")"
+rm -f "$RR/.state/loadavg"
+# The load canary's answers one by one: p_cpu_limit_canary alone on a loadavg line whose second
+# number is $1, with $2 CPUs and the wanted mark $3.
+lc_fn=$(fn is_decimal q_load5 p_cpu_limit_canary)
+load_canary() {
+  (
+    eval "$lc_fn"
+    T=1 S=$W/lc mode=check canary=1 lc_n=$2 lc_w=${3:-1.6}
+    mkdir -p "$S"
+    printf '0.11 %s 0.33 2/345 6789\n' "$1" >"$S/loadavg"
+    drift() { echo "drift: $1: $2"; }
+    q_nproc() { echo "$lc_n"; }
+    cpu_limit_want() { echo "$lc_w"; }
+    p_cpu_limit_canary 2>&1
+  )
+}
+[ "$(load_canary 5.00 2)" = 'canary: ok: cpu-limit: the 5-minute load average is 5.00 on 2 CPUs (bound 5)' ] && [ "$(load_canary 5.01 2)" = 'drift: cpu-limit: canary: the 5-minute load average is 5.01 on 2 CPUs, over 5 (2.5 per CPU): the limit does not hold the node' ] && ok "the load canary's bound: a load at 2.5 per CPU is ok, over it is drift" || bad "load bound: $(load_canary 5.00 2) / $(load_canary 5.01 2)"
+[ "$(load_canary 80.00 32)" = 'canary: ok: cpu-limit: the 5-minute load average is 80.00 on 32 CPUs (bound 80)' ] && [ "$(load_canary 80.01 32)" = 'drift: cpu-limit: canary: the 5-minute load average is 80.01 on 32 CPUs, over 80 (2.5 per CPU): the limit does not hold the node' ] && ok "the load canary: 32 CPUs have the bound 80" || bad "load on 32 CPUs: $(load_canary 80.00 32) / $(load_canary 80.01 32)"
+miss=
+for none in '' x . .. 1e3 +3 -1 0x10 4.2.0 .5 5.; do
+  [ "$(load_canary "$none" 2)" = 'drift: cpu-limit: canary: the 5-minute load average could not be read: nothing was tested' ] || miss="$miss '$none': $(load_canary "$none" 2);"
+done
+[ -z "$miss" ] && ok "the load canary: an answer that is no plain number (nothing, x, ., .., 1e3, +3, -1, 0x10, 4.2.0, .5, 5.) is drift, not ok" || bad "load answers:$miss"
+[ -z "$(load_canary 99.00 2 off)" ] && ok "the load canary: CPU_LIMIT=off has no line" || bad "load canary with the limit off: $(load_canary 99.00 2 off)"
+lr=no
+for try in 1 2 3; do
+  [ "$(
+    eval "$(fn q_load5)"
+    T=
+    q_load5
+  )" = "$(cut -d' ' -f2 /proc/loadavg)" ] && lr=yes && break
+done
+[ $lr = yes ] && ok "without NODE_TEST the load is the second number of /proc/loadavg" || bad "q_load5 without NODE_TEST is not the second number of /proc/loadavg"
+# The daemon's answer, read alone (cpu_mark): the two marks of the object GET /api/cpu-limit
+# answers with. null is a mark that is off.
+cm_fn=$(fn is_decimal cpu_mark)
+mark() {
+  (
+    eval "$cm_fn"
+    cpu_mark "$1" "$2"
+  )
+}
+ans='{"cpu_busy_max":25.6,"cpu_busy_floor":4,"cpus":32,"busy":3.1,"held":0,"pool":2.0,"compile_cache":0.5,"outside":0.6,"cpu_pressure_max":40.0,"pressure":1.5}'
+[ "$(mark cpu_busy_max "$ans"):$(mark cpu_pressure_max "$ans")" = 25.6:40.0 ] && ok "the daemon's answer: the CPU mark and the pressure mark, not the floor, the CPUs or the pressure now" || bad "marks of the answer: $(mark cpu_busy_max "$ans"):$(mark cpu_pressure_max "$ans")"
+ans_off='{"cpu_busy_max":null,"cpu_busy_floor":null,"cpus":32,"busy":3.1,"held":0,"pool":2.0,"compile_cache":0.5,"outside":0.6,"cpu_pressure_max":null,"pressure":1.5}'
+ans_wide=$(printf '{\n  "cpu_pressure_max" : 40,\n  "cpus" : 32,\n  "cpu_busy_max" : 25.60\n}\n')
+[ "$(mark cpu_busy_max "$ans_off"):$(mark cpu_pressure_max "$ans_off")" = off:off ] && [ "$(mark cpu_busy_max "$ans_wide"):$(mark cpu_pressure_max "$ans_wide")" = 25.60:40 ] && ok "the daemon's answer: null is off, and the keys are read in any order and layout" || bad "null and layout: $(mark cpu_busy_max "$ans_off"):$(mark cpu_pressure_max "$ans_off") $(mark cpu_busy_max "$ans_wide"):$(mark cpu_pressure_max "$ans_wide")"
+# p_cpu_limit alone in check mode, wanting 25.6 and 40, on the answer $1.
+cl_fn=$(fn is_decimal cpu_mark same_mark cpu_limit_read cpu_limit_holds p_cpu_limit)
+cpu_check() {
+  (
+    eval "$cl_fn"
+    mode=check U=builder CPU_LIMIT_URL=http://127.0.0.1:7411/api/cpu-limit ca=$1
+    drift() { echo "drift: $1: $2"; }
+    fixing() { false; }
+    cpu_limit_want() { echo 25.6; }
+    cpu_pressure_want() { echo 40; }
+    q_cpu_limit_answer() { printf '%s\n' "$ca"; }
+    p_cpu_limit 2>&1
+  )
+}
+[ -z "$(cpu_check "$ans")" ] && [ "$(cpu_check '{"cpu_busy_max":25.6,"cpu_busy_floor":4,"cpus":32}')" = "drift: cpu-limit: the pool holds a queued job from '25.6' busy CPUs and 'off' % CPU pressure, want '25.6' and '40'" ] && ok "the wanted marks are no drift; an answer of a daemon that knows no pressure mark is a pressure mark that is off" || bad "answer of the daemon: '$(cpu_check "$ans")' / $(cpu_check '{"cpu_busy_max":25.6,"cpu_busy_floor":4,"cpus":32}')"
+na="drift: cpu-limit: the daemon of the pool gives no answer about its CPU limit (GET http://127.0.0.1:7411/api/cpu-limit as builder, 5 s at most), want '25.6' and '40'"
+miss=
+for a in '' '{}' 'not found' '{"cpu_busy_max":"25.6","cpu_pressure_max":40.0}' '{"cpu_busy_max":25.6,"cpu_pressure_max":"40"}' '{"cpu_busy_max":25.6e,"cpu_pressure_max":40}' '{"cpu_busy_max":-25.6,"cpu_pressure_max":40}' '{"cpu_busy_max":' '{"cpu_busy_max":25.6,"cpu_pressure_max":40' '{"cpu_busy_max":25.6,"cpu_pre'; do
+  [ "$(cpu_check "$a")" = "$na" ] || miss="$miss '$a': $(cpu_check "$a");"
+done
+[ -z "$miss" ] && ok "an answer without a CPU mark, or with a mark that is no number (nothing, {}, a text, a string, 25.6e, -25.6, an object cut off at three places), is drift: no answer" || bad "answers that are none:$miss"
+# p_cpu_limit alone in apply mode (NODE_TEST unset), wanting 25.6 and 40: the daemon gives no
+# answer to the first $1 requests, then the wanted marks.
+cpu_apply() {
+  (
+    eval "$cl_fn"
+    T= mode=apply U=builder CPU_LIMIT_URL=http://127.0.0.1:7411/api/cpu-limit ca_n=$1
+    : >"$W/ca-asked"
+    drift() { :; }
+    fixing() { true; }
+    failed() { echo "failed: $1: $2"; }
+    changed() { echo "changed: $1: $2"; }
+    q_active() { true; }
+    cpu_limit_want() { echo 25.6; }
+    cpu_pressure_want() { echo 40; }
+    a_cpu_limit() { echo "the daemon's last line"; }
+    sleep() { echo "sleep $*"; }
+    q_cpu_limit_answer() {
+      echo asked >>"$W/ca-asked"
+      [ "$(grep -c '' "$W/ca-asked")" -le "$ca_n" ] || printf '%s\n' "$ans"
+    }
+    p_cpu_limit 2>&1
+  )
+}
+[ "$(cpu_apply 3 | tr '\n' ',')" = 'sleep 1,sleep 1,changed: cpu-limit: a queued job is held from 25.6 busy CPUs and 40 % CPU pressure (slot cpu-limit 25.6 --pressure 40),' ] && ok "apply: a daemon that answers only at the third request after the call is asked again, 1 s apart, and the limit is reported as set" || bad "cpu_apply 3: $(cpu_apply 3)"
+[ "$(cpu_apply 99 | tr '\n' ',')" = "sleep 1,sleep 1,sleep 1,sleep 1,failed: cpu-limit: after slot cpu-limit 25.6 --pressure 40 the daemon of the pool gives no answer about its CPU limit: the daemon's last line," ] && [ "$(grep -c '' "$W/ca-asked")" = 6 ] && ok "apply: a daemon that never answers is asked 5 times after the call, then a failed line with the call's last line, nothing reported as changed" || bad "cpu_apply 99: $(cpu_apply 99) asked $(grep -c '' "$W/ca-asked")"
+# The default mark, and the real branches (NODE_TEST unset) with the build user's command as a
+# stand-in that prints it.
+[ "$(
+  eval "$(fn cpu_limit_want)"
+  CPU_LIMIT=
+  q_nproc() { echo 3; }
+  cpu_limit_want
+  q_nproc() { echo 1; }
+  cpu_limit_want
+)" = "2.4
+1.0" ] && ok "the default CPU mark: 80 % of the CPUs (3 CPUs: 2.4), and never under 1 (1 CPU: 1.0)" || bad "default CPU mark"
+ac=$(
+  eval "$(fn a_cpu_limit)"
+  T=
+  STORE=/srv/slot
+  as_user() { echo "$*"; }
+  a_cpu_limit 25.6 40
+  a_cpu_limit 8 off
+  a_cpu_limit off off
+)
+[ "$ac" = "/srv/slot/bin/slot cpu-limit 25.6 --pressure 40
+/srv/slot/bin/slot cpu-limit 8 --pressure off
+/srv/slot/bin/slot cpu-limit off" ] && ok "the call without NODE_TEST: slot cpu-limit as the build user with the CPU mark and --pressure, or off alone" || bad "a_cpu_limit: $ac"
+ac=$(
+  eval "$(fn a_cpu_limit)"
+  T=
+  STORE=/srv/slot
+  as_user() {
+    echo try
+    return 1
+  }
+  sleep() { echo "sleep $*"; }
+  a_cpu_limit 8 40
+  echo "exit $?"
+)
+[ "$(echo "$ac" | tr '\n' ' ')" = 'try sleep 1 try sleep 1 try sleep 1 try sleep 1 try exit 1 ' ] && ok "a daemon that does not take the call: 5 tries, 1 s apart, then the call has failed" || bad "a_cpu_limit tries: $ac"
+qa=$(
+  eval "$(fn q_cpu_limit_answer)"
+  T=
+  CPU_LIMIT_URL=http://127.0.0.1:7411/api/cpu-limit
+  as_user() { echo "$*"; }
+  q_cpu_limit_answer
+)
+[ "$qa" = 'curl -s -m 5 --max-filesize 65536 http://127.0.0.1:7411/api/cpu-limit' ] && ! grep -q 'limits\.json' "$P" && ok "the query without NODE_TEST: curl as the build user, 5 s at most; provision.sh reads no limits.json" || bad "q_cpu_limit_answer: $qa $(grep -n 'limits\.json' "$P" | head -2)"
+
+# 6v. Draining: `apply --drain` makes a pending restart happen on a node that never has 0 jobs.
+# The daemon alone gets SIGTERM: it takes no new job, waits for the running and queued ones and
+# exits, and systemd starts the unit again (Restart=always) with the unit file and the groups of
+# that moment. slot-node.service runs a step as root before each start (ExecStartPre, the mode
+# start-pre): it restarts a sccache-node whose restart waits, and takes the mark of the drain and
+# its bound away. The bound is a transient timer (slot-node-drain) that runs the mode
+# drain-bound after DRAIN_MAX: a daemon process that is still the one that got the signal is
+# restarted the hard way. Under NODE_TEST=1 the mode start-pre stands for a start of the unit by
+# systemd: the step, then the new process. The mark is under /run/slot-node; the clock is the
+# file now.
+conf
+echo 0 >"$RR/.state/jobs"
+run "$RR" apply
+run "$RR" check
+[ $? -eq 0 ] && ok "before the drains: 0 drift" || bad "6v starts with drift: $(cat "$W/out")"
+dmark=$RR/run/slot-node/drain
+smark=$RR/run/slot-node/sccache-restart
+dtimer=$RR/.state/drain-timer
+why='the process has the core limit unlimited, not 0'
+drun() { NODE_TEST=1 NODE_ROOT=$RR sh "$P" apply "$W/node.conf" --drain >"$W/out" 2>"$W/err"; }
+# sysd MODE: what systemd runs on the node, the step before a start or the bound of a drain.
+sysd() { NODE_TEST=1 NODE_ROOT=$RR sh "$P" "$1" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+sys_calls() { grep 'systemctl\|systemd-run' "$RR/.calls" | tr '\n' ','; }
+pid_of() { cat "$RR/.state/mainpid/slot-node.service" 2>/dev/null; }
+utc() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
+# stale UNIT...: the process of each unit runs with another core limit than 0, a reason to
+# restart that stays until the unit restarts.
+stale() { for stale_u in "$@"; do echo unlimited >"$RR/.state/core-limit/$stale_u.service"; done; }
+# Without --drain nothing changes: the pending line, no signal, no mark.
+stale slot-node
+echo 5 >"$RR/.state/jobs"
+echo 1700000000 >"$RR/.state/now"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "pending: running: slot-node restarts when no job runs (5 now): $why" "$W/err" && [ -z "$(sys_calls)" ] && [ ! -e "$dmark" ] && ! grep -q '^draining' "$W/out" && ok "apply without --drain, jobs running: the pending line as before, no signal, no mark" || bad "apply without --drain: exit $st $(sys_calls) $(cat "$W/out" "$W/err")"
+# With --drain: the bound is armed, then the daemon alone gets SIGTERM. No job is signalled:
+# no restart and no stop of the unit.
+p0=$(pid_of)
+drun
+st=$?
+[ $st -eq 0 ] && [ "$(grep '^draining' "$W/out")" = 'draining: slot-node: 5 job(s), restart by 2023-11-14T22:43:20Z' ] && ! grep -q 'pending: running: slot-node' "$W/err" && ok "apply --drain, 5 jobs running: one draining line with the jobs and the UTC time of the bound, exit 0, no pending line" || bad "apply --drain: exit $st $(cat "$W/out" "$W/err")"
+[ "$(sys_calls)" = 'systemctl daemon-reload,systemd-run --unit=slot-node-drain --on-active=1800 provision.sh drain-bound,systemctl kill --kill-whom=main --signal=TERM slot-node.service,' ] && ok "the calls of a drain, in order: daemon-reload, the bound armed for DRAIN_MAX, SIGTERM to the main process only; no restart and no stop of the unit" || bad "drain calls: $(sys_calls)"
+[ -s "$dmark" ] && [ -e "$dtimer" ] && [ -n "$p0" ] && [ "$(pid_of)" = "$p0" ] && [ -e "$RR/.state/active/slot-node.service" ] && ok "the mark of the drain is under /run/slot-node, the bound is armed, and the daemon process is the same and runs on" || bad "drain state: $(ls "$RR/run/slot-node" 2>&1) '$p0' '$(pid_of)'"
+# check during the drain: one drift line for it, in place of the unit's own.
+echo 3 >"$RR/.state/jobs"
+run "$RR" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: drain: slot-node.service drains for its restart ($why): 3 job(s) left, restart by 2023-11-14T22:43:20Z" "$W/out" && grep -qx '1 drift' "$W/out" && ! grep -q '^drift: running' "$W/out" && ok "check during a drain: one drift line with the reason, the jobs left and the time, exit 1" || bad "check during a drain: exit $st $(cat "$W/out")"
+crun --canary
+grep -qx 'canary: not tested while slot-node.service drains: core, cpu-limit' "$W/out" && ! grep -q '^canary: ok: core\|^canary: ok: cpu-limit' "$W/out" && grep -q '^canary: ok: role' "$W/out" && grep -qx '1 drift' "$W/out" && ok "check --canary during a drain: no ok line for the core limit and the load, one line says that they were not tested; the role's canary runs" || bad "canary during a drain: $(cat "$W/out")"
+# A second apply during the drain, with --drain or without: the line again, nothing else.
+echo 1700000600 >"$RR/.state/now"
+echo 2 >"$RR/.state/jobs"
+: >"$RR/.calls"
+drun
+st=$?
+[ $st -eq 0 ] && [ "$(grep '^draining' "$W/out")" = 'draining: slot-node: 2 job(s), restart by 2023-11-14T22:43:20Z' ] && [ -z "$(sys_calls)" ] && [ "$(pid_of)" = "$p0" ] && ok "a second apply --drain during the drain: the line again with the jobs left and the same time; no second signal, no second bound, no restart" || bad "second apply --drain: exit $st $(sys_calls) $(cat "$W/out" "$W/err")"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && [ "$(grep '^draining' "$W/out")" = 'draining: slot-node: 2 job(s), restart by 2023-11-14T22:43:20Z' ] && [ -z "$(sys_calls)" ] && ! grep -q 'pending: running: slot-node' "$W/err" && ok "apply without --drain during a drain: the draining line, no signal, no restart" || bad "apply during a drain: exit $st $(sys_calls) $(cat "$W/out" "$W/err")"
+# The bound, with the daemon process that got the signal still there: the hard restart.
+: >"$RR/.calls"
+sysd drain-bound
+[ "$(sys_calls)" = 'systemctl restart slot-node.service,' ] && grep -qx 'slot-node: the drain reached its bound (DRAIN_MAX=30m) with 2 job(s) left: slot-node.service restarts now, and the jobs that still run end' "$W/out" && [ ! -e "$dmark" ] && [ ! -e "$dtimer" ] && [ "$(pid_of)" != "$p0" ] && ok "the bound with the same daemon process still draining: the unit restarts the hard way and a line says so; the mark is gone" || bad "bound, same process: $(sys_calls) $(cat "$W/out" "$W/err") '$p0' '$(pid_of)'"
+echo 0 >"$RR/.state/jobs"
+run "$RR" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after the hard restart: 0 drift" || bad "after the bound: $(cat "$W/out")"
+# The daemon drains, exits, and systemd starts the unit again: the step before the start takes
+# the mark and the bound away, and the bound, were it to run, does nothing.
+stale slot-node
+echo 4 >"$RR/.state/jobs"
+echo 1700003600 >"$RR/.state/now"
+drun
+p1=$(pid_of)
+[ "$(grep '^draining' "$W/out")" = "draining: slot-node: 4 job(s), restart by $(utc 1700005400)" ] && [ -s "$dmark" ] && ok "a later drain has its own time" || bad "second drain: $(cat "$W/out" "$W/err")"
+: >"$RR/.calls"
+sysd start-pre
+p2=$(pid_of)
+[ "$(sys_calls)" = 'systemctl stop slot-node-drain.timer,' ] && grep -qx 'slot-node: the drain is over: slot-node.service starts' "$W/out" && [ ! -e "$dmark" ] && [ ! -e "$dtimer" ] && [ "$p2" != "$p1" ] && ok "the daemon drained and systemd starts the unit again: the step before the start removes the mark and stops the bound, a new process runs; nothing restarted the unit" || bad "start after a drain: $(sys_calls) $(cat "$W/out" "$W/err") '$p1' '$p2'"
+echo 0 >"$RR/.state/jobs"
+run "$RR" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after the drain: 0 drift, nothing of the drain is left" || bad "after the drain: $(cat "$W/out")"
+: >"$RR/.calls"
+sysd drain-bound
+[ ! -s "$RR/.calls" ] && [ ! -s "$W/out" ] && [ "$(pid_of)" = "$p2" ] && ok "the bound after the drain is over does nothing: no restart of the new daemon" || bad "bound after the drain: $(cat "$RR/.calls" "$W/out" "$W/err")"
+# A mark that outlived its drain (a start that did not run the step): the daemon process is
+# another one than the one that got the signal. The bound leaves that daemon alone.
+stale slot-node
+echo 4 >"$RR/.state/jobs"
+drun
+echo '9999@9' >"$RR/.state/mainpid/slot-node.service"
+echo 0 >"$RR/.state/core-limit/slot-node.service"
+run "$RR" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: drain: the mark of a drain that is over is still in /run/slot-node (apply removes it)' "$W/out" && grep -qx '1 drift' "$W/out" && ok "check names a mark whose drain is over: the daemon process is another one" || bad "mark of a drain that is over: exit $st $(cat "$W/out")"
+: >"$RR/.calls"
+sysd drain-bound
+! grep -q 'systemctl restart\|systemctl kill' "$RR/.calls" && [ ! -e "$dmark" ] && [ "$(pid_of)" = '9999@9' ] && ok "the bound with another daemon process than the one that got the signal: no restart, the mark is removed" || bad "bound, new process: $(cat "$RR/.calls" "$W/out" "$W/err")"
+stale slot-node
+drun
+echo '9998@8' >"$RR/.state/mainpid/slot-node.service"
+echo 0 >"$RR/.state/core-limit/slot-node.service"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'changed: drain: the mark of a drain that is over removed' "$W/out" && [ ! -e "$dmark" ] && [ ! -e "$dtimer" ] && [ "$(sys_calls)" = 'systemctl stop slot-node-drain.timer,' ] && ok "apply removes a mark whose drain is over and stops its bound; the daemon is not signalled" || bad "apply with a mark that is over: exit $st $(sys_calls) $(cat "$W/out" "$W/err")"
+# A daemon that drained and exited must not stay down: at the bound a unit that is not active
+# is started.
+stale slot-node
+drun
+rm -f "$RR/.state/active/slot-node.service"
+sysd drain-bound
+[ -e "$RR/.state/active/slot-node.service" ] && grep -qx 'slot-node: slot-node.service is not active after its drain: starting it' "$W/out" && [ ! -e "$dmark" ] && ok "the bound finds the unit not active after its drain: it starts it and says so" || bad "bound, unit down: $(cat "$W/out" "$W/err")"
+echo 0 >"$RR/.state/jobs"
+run "$RR" check
+[ $? -eq 0 ] || bad "after the start by the bound: $(cat "$W/out")"
+# sccache-node with a restart that waits: it restarts in the gap, after the old daemon exited
+# and before the new one starts, also when systemd starts the unit by itself.
+stale slot-node sccache-node
+echo 6 >"$RR/.state/jobs"
+: >"$RR/.calls"
+drun
+[ "$(grep -c '^draining' "$W/out")" -eq 1 ] && grep -qx "pending: running: sccache-node restarts when slot-node does, at the end of its drain: $why" "$W/err" && [ "$(cat "$smark" 2>&1)" = "$why" ] && ! grep -q 'systemctl restart' "$RR/.calls" && ok "a drain with a pending restart of sccache-node: one draining line, a pending line for sccache-node, its mark under /run/slot-node, no restart now" || bad "drain with sccache-node: $(sys_calls) $(cat "$W/out" "$W/err")"
+: >"$RR/.calls"
+sysd start-pre
+[ "$(sys_calls)" = 'systemctl restart sccache-node.service,systemctl stop slot-node-drain.timer,' ] && grep -qx "slot-node: sccache-node.service restarted before slot-node.service starts: $why" "$W/out" && [ ! -e "$smark" ] && [ ! -e "$dmark" ] && ok "the step before the start of slot-node restarts sccache-node in the gap and removes both marks" || bad "gap: $(sys_calls) $(cat "$W/out" "$W/err")"
+echo 0 >"$RR/.state/jobs"
+run "$RR" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after the gap: both units run from their files, 0 drift" || bad "after the gap: $(cat "$W/out")"
+# A unit file of slot-node.service without the step: nothing is done before the start.
+stale slot-node sccache-node
+echo 6 >"$RR/.state/jobs"
+drun
+sed -i '/^ExecStartPre=/d' "$RR/etc/systemd/system/slot-node.service"
+: >"$RR/.calls"
+sysd start-pre
+[ -e "$smark" ] && [ -e "$dmark" ] && ! grep -q 'systemctl restart sccache-node' "$RR/.calls" && ok "NODE_TEST=1 runs the step only for a unit file that names it (ExecStartPre)" || bad "start without ExecStartPre: $(sys_calls) $(ls "$RR/run/slot-node")"
+echo 0 >"$RR/.state/jobs"
+run "$RR" apply
+run "$RR" apply
+run "$RR" check
+[ $? -eq 0 ] && [ ! -e "$smark" ] && [ ! -e "$dmark" ] && ok "apply writes the step back, restarts both units and removes the marks: 0 drift" || bad "after the unit file without the step: $(cat "$W/out") $(ls "$RR/run/slot-node" 2>&1)"
+# A pending restart of sccache-node alone drains slot-node too: the gap is its only moment.
+stale sccache-node
+echo 2 >"$RR/.state/jobs"
+: >"$RR/.calls"
+drun
+[ "$(grep '^draining' "$W/out")" = "draining: slot-node: 2 job(s), restart by $(utc 1700005400)" ] && grep -q 'systemctl kill --kill-whom=main --signal=TERM slot-node.service' "$RR/.calls" && [ -e "$smark" ] && ! grep -q 'systemctl restart' "$RR/.calls" && ok "a pending restart of sccache-node alone: apply --drain drains slot-node for it" || bad "sccache-node alone: $(sys_calls) $(cat "$W/out" "$W/err")"
+run "$RR" check
+grep -qx "drift: drain: slot-node.service drains for its restart (sccache-node.service restarts: $why): 2 job(s) left, restart by $(utc 1700005400)" "$W/out" && grep -qx '1 drift' "$W/out" && ok "check names the reason of that drain" || bad "check, sccache-node alone: $(cat "$W/out")"
+sysd start-pre
+echo 0 >"$RR/.state/jobs"
+run "$RR" check
+[ $? -eq 0 ] || bad "after the drain for sccache-node: $(cat "$W/out")"
+# No job: --drain restarts at once, as apply does.
+stale slot-node
+: >"$RR/.calls"
+drun
+[ "$(sys_calls)" = 'systemctl restart slot-node.service,' ] && grep -qx "changed: running: slot-node.service restarted: $why" "$W/out" && ! grep -q '^draining' "$W/out" && [ ! -e "$dmark" ] && ok "apply --drain with no job: the unit restarts at once, nothing drains" || bad "drain with no job: $(sys_calls) $(cat "$W/out" "$W/err")"
+# A bound that cannot be armed: no signal. A signal that fails: no mark and no bound stay.
+stale slot-node
+echo 4 >"$RR/.state/jobs"
+: >"$RR/.state-drain-arm-fails"
+: >"$RR/.calls"
+drun
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: drain: the bound could not be armed (systemd-run --unit=slot-node-drain): slot-node.service was not signalled' "$W/err" && ! grep -q 'systemctl kill' "$RR/.calls" && [ ! -e "$dmark" ] && ! grep -q '^draining' "$W/out" && ok "a bound that cannot be armed: failed line, exit 1, the daemon is not signalled, no mark" || bad "arm fails: exit $st $(sys_calls) $(cat "$W/out" "$W/err")"
+rm -f "$RR/.state-drain-arm-fails"
+: >"$RR/.state-kill-fails"
+: >"$RR/.calls"
+drun
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: drain: systemctl kill --kill-whom=main --signal=TERM slot-node.service failed: nothing drains' "$W/err" && [ ! -e "$dmark" ] && [ ! -e "$dtimer" ] && grep -q 'systemctl stop slot-node-drain.timer' "$RR/.calls" && ! grep -q '^draining' "$W/out" && ok "a signal that fails: failed line, exit 1, the mark is removed and the bound stopped" || bad "kill fails: exit $st $(sys_calls) $(cat "$W/out" "$W/err")"
+rm -f "$RR/.state-kill-fails"
+# DRAIN_MAX names the bound; a daemon that does not say how many jobs run drains too.
+echo 'DRAIN_MAX=45m' >>"$W/node.conf"
+: >"$RR/.state/jobs"
+: >"$RR/.calls"
+drun
+[ "$(grep '^draining' "$W/out")" = "draining: slot-node: ? job(s), restart by $(utc 1700006300)" ] && grep -qx 'systemd-run --unit=slot-node-drain --on-active=2700 provision.sh drain-bound' "$RR/.calls" && ok "DRAIN_MAX=45m: the bound is armed for 2700 s; an unknown number of jobs is a ?" || bad "DRAIN_MAX=45m: $(sys_calls) $(cat "$W/out" "$W/err")"
+: >"$RR/.state-no-metrics"
+run "$RR" check
+grep -qx "drift: drain: slot-node.service drains for its restart ($why): ? job(s) left, restart by $(utc 1700006300)" "$W/out" && ok "check during a drain whose daemon gives no job count: a ? for the jobs left" || bad "check without a job count: $(cat "$W/out")"
+rm -f "$RR/.state-no-metrics"
+sysd drain-bound
+grep -qx 'slot-node: the drain reached its bound (DRAIN_MAX=45m) with ? job(s) left: slot-node.service restarts now, and the jobs that still run end' "$W/out" || bad "bound with DRAIN_MAX=45m: $(cat "$W/out" "$W/err")"
+conf
+echo 0 >"$RR/.state/jobs"
+rm -f "$RR/.state/now"
+run "$RR" apply
+run "$RR" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after the drains: 0 drift" || bad "6v ends with drift: $(cat "$W/out")"
+# The option: apply takes --drain, alone or with --open; check does not; a bundle carries it.
+sh "$P" bundle "$W/node.conf" apply --drain >"$W/bundle-drain.sh"
+grep -qx 'sh "$d/provision.sh" apply "$d/node.conf" --drain' "$W/bundle-drain.sh" && sh -n "$W/bundle-drain.sh" && ok "an apply bundle carries --drain" || bad "bundle --drain: $(tail -4 "$W/bundle-drain.sh" | head -1)"
+sh "$P" bundle "$W/node.conf" apply --open --drain >"$W/bundle-drain.sh"
+grep -qx 'sh "$d/provision.sh" apply "$d/node.conf" --open --drain' "$W/bundle-drain.sh" && ok "an apply bundle carries --open and --drain together" || bad "bundle --open --drain: $(tail -4 "$W/bundle-drain.sh" | head -1)"
+sh "$P" bundle "$W/node.conf" check --drain >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "a check bundle with --drain is refused" || bad "bundle check --drain: $(head -2 "$W/out")"
+NODE_TEST=1 NODE_ROOT=$RR sh "$P" check "$W/node.conf" --drain >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "check --drain is refused" || bad "check --drain ran: $(cat "$W/out")"
+NODE_TEST=1 NODE_ROOT=$RR sh "$P" apply "$W/node.conf" --drian >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && grep -q 'provision.sh apply CONF \[--open\] \[--drain\]' "$W/err" && ok "apply with a misspelled --drain is refused, and the usage names --drain" || bad "apply --drian ran: $(cat "$W/out" "$W/err" | head -3)"
+: >"$RR/.calls"
+NODE_TEST=1 NODE_ROOT=$RR sh "$P" apply "$W/node.conf" --drain --open >"$W/out" 2>"$W/err"
+[ $? -eq 0 ] && ok "apply takes --drain and --open in either order" || bad "apply --drain --open: $(cat "$W/err")"
+run "$RR" apply
+# The real branches (NODE_TEST unset), each alone with stand-ins for systemctl and systemd-run.
+mkdir -p "$W/sdbin"
+printf '#!/bin/sh\necho "systemd-run $*"\n' >"$W/sdbin/systemd-run"
+chmod 755 "$W/sdbin/systemd-run"
+rb=$(
+  eval "$(fn a_signal_main a_drain_arm a_drain_disarm)"
+  T= LIBEXEC=/usr/local/libexec DRAIN_UNIT=slot-node-drain PATH=$W/sdbin:$PATH
+  systemctl() { echo "systemctl $*"; }
+  a_signal_main slot-node.service
+  a_drain_arm 1800
+  a_drain_disarm
+)
+[ "$rb" = "systemctl kill --kill-whom=main --signal=TERM slot-node.service
+systemctl stop slot-node-drain.timer
+systemd-run --quiet --collect --unit=slot-node-drain --on-active=1800 --timer-property=AccuracySec=1s /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/sh /usr/local/libexec/slot-node/provision.sh drain-bound /etc/slot-node/node.conf
+systemctl stop slot-node-drain.timer" ] && ok "without NODE_TEST: the signal goes to the main process only (--kill-whom=main), and the bound is a transient timer named slot-node-drain that runs the mode drain-bound with a clean environment" || bad "real drain calls: $rb"
+mi=$(
+  eval "$(fn q_main_id)"
+  T=
+  systemctl() { printf 'MainPID=4711\nExecMainStartTimestampMonotonic=88123456\n'; }
+  q_main_id slot-node.service
+  systemctl() { printf 'ExecMainStartTimestampMonotonic=99000000\nMainPID=4711\n'; }
+  q_main_id slot-node.service
+  systemctl() { printf 'MainPID=0\nExecMainStartTimestampMonotonic=0\n'; }
+  q_main_id slot-node.service
+  echo end
+)
+[ "$mi" = "4711@88123456
+4711@99000000
+end" ] && ok "the daemon process is named by its main PID and its start time: the same PID started later is another process; no process, no name" || bad "q_main_id: $mi"
+jl=$(
+  eval "$(fn q_jobs_left)"
+  T= METRICS_URL=http://127.0.0.1:7411/metrics
+  as_user() { echo "$*" >"$W/jl-cmd"; printf '# TYPE slot_jobs_queued gauge\nslot_jobs_queued{toolchain="rust"} 2\n# TYPE slot_jobs_running gauge\nslot_jobs_running{toolchain="go"} 1\nslot_jobs_running{toolchain="rust"} 4\nslot_jobs_finished_total{toolchain="rust",result="ok"} 9\n'; }
+  q_jobs_left
+  as_user() { printf '# TYPE slot_jobs_queued gauge\n# TYPE slot_jobs_running gauge\n'; }
+  q_jobs_left
+  as_user() { echo 'not found'; }
+  q_jobs_left
+  as_user() { :; }
+  q_jobs_left
+  echo end
+)
+[ "$jl" = "7
+0
+end" ] && [ "$(cat "$W/jl-cmd")" = 'curl -s -m 5 --max-filesize 1048576 http://127.0.0.1:7411/metrics' ] && ok "the jobs left during a drain: running and queued jobs of the daemon's /metrics, asked as the build user, 5 s at most; no answer is no number" || bad "q_jobs_left: $jl $(cat "$W/jl-cmd")"
+
+# 6w. The run-time limit of the node's pool: `slot run-limit` with RUN_LIMIT (10m) and
+# RUN_LIMIT_MAX (30m, the most a job names with `slot --timeout`), set once slot-node runs
+# (section 2). check asks the daemon (GET /api/run-limit as the build user, 5 s at most), which
+# answers in seconds: the config's durations are compared as seconds. Under NODE_TEST=1 the
+# answer is made from the files run-limit and run-limit-max.
+[ "$(cat "$RR/.state/run-limit" "$RR/.state/run-limit-max" 2>&1 | tr '\n' ' ')" = '600 1800 ' ] && ok "the pool of this root has the run-time limit 600 s and the most a job names 1800 s" || bad "run limit of the root: $(cat "$RR/.state/run-limit" "$RR/.state/run-limit-max" 2>&1)"
+for same in 'RUN_LIMIT=600' 'RUN_LIMIT=600s' 'RUN_LIMIT_MAX=1800' 'RUN_LIMIT_MAX=1800s'; do
+  conf
+  echo "$same" >>"$W/node.conf"
+  : >"$RR/.calls"
+  run "$RR" apply
+  run "$RR" check
+  [ $? -eq 0 ] && ! grep -q 'run-limit' "$RR/.calls" && ok "$same is the limit the pool has, in another form: no drift, no call" || bad "$same: $(cat "$W/out") $(grep run-limit "$RR/.calls")"
+done
+conf
+printf 'RUN_LIMIT=20m\nRUN_LIMIT_MAX=1h\n' >>"$W/node.conf"
+run "$RR" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: run-limit: the pool ends a job that runs longer than '600' s, and a job names up to '1800' s, want '1200' s (20m) and '3600' s (1h)" "$W/out" && ok "RUN_LIMIT and RUN_LIMIT_MAX name another limit: check names the difference in seconds" || bad "run limit drift: exit $st $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot run-limit 20m --max 1h' "$RR/.calls" && grep -qx 'changed: run-limit: a job that runs longer than 20m is ended (exit 124), and a job names up to 1h (slot run-limit 20m --max 1h)' "$W/out" && [ "$(cat "$RR/.state/run-limit" "$RR/.state/run-limit-max" | tr '\n' ' ')" = '1200 3600 ' ] && ok "apply sets the limit of the config" || bad "run limit apply: exit $st $(grep run-limit "$RR/.calls" "$W/out" "$W/err")"
+# Only the most a job names differs: drift too, before the call and after it.
+conf
+printf 'RUN_LIMIT=20m\nRUN_LIMIT_MAX=30m\n' >>"$W/node.conf"
+run "$RR" check
+grep -qx "drift: run-limit: the pool ends a job that runs longer than '1200' s, and a job names up to '3600' s, want '1200' s (20m) and '1800' s (30m)" "$W/out" && ok "only the most a job names differs: drift" || bad "max differs: $(cat "$W/out")"
+: >"$RR/.state-run-limit-stays"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: run-limit: after slot run-limit 20m --max 30m the pool ends a job that runs longer than '1200' s, and a job names up to '3600' s" "$W/err" && ! grep -q '^changed: run-limit' "$W/out" && ok "a limit the pool does not have after the call: failed line, exit 1, not reported as changed" || bad "run limit stays: exit $st $(grep run-limit "$W/out" "$W/err")"
+rm -f "$RR/.state-run-limit-stays"
+conf
+echo 'RUN_LIMIT=off' >>"$W/node.conf"
+run "$RR" check
+grep -qx "drift: run-limit: the pool ends a job that runs longer than '1200' s, and a job names up to '3600' s, want 'off' and '1800' s (30m)" "$W/out" && ok "RUN_LIMIT=off: a limit the pool has is drift" || bad "off: $(cat "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot run-limit off --max 30m' "$RR/.calls" && grep -qx 'changed: run-limit: no run-time limit, and a job names up to 30m (slot run-limit off --max 30m)' "$W/out" && [ ! -e "$RR/.state/run-limit" ] && [ "$(cat "$RR/.state/run-limit-max")" = 1800 ] && ok "RUN_LIMIT=off: apply turns the limit off and keeps the most a job names" || bad "off apply: exit $st $(grep run-limit "$RR/.calls" "$W/out" "$W/err")"
+run "$RR" check
+[ $? -eq 0 ] && ok "RUN_LIMIT=off: 0 drift after apply" || bad "off, after apply: $(cat "$W/out")"
+conf
+run "$RR" check
+grep -qx "drift: run-limit: the pool has no run-time limit, and a job names up to '1800' s, want '600' s (10m) and '1800' s (30m)" "$W/out" && ok "a pool without a run-time limit drifts from the default" || bad "no limit: $(cat "$W/out")"
+# A daemon that does not run gives no answer: check says so, and apply does not call it.
+rm -f "$RR/.state/active/slot-node.service"
+: >"$RR/.state-start-fails-slot-node.service"
+run "$RR" check
+grep -qx "drift: run-limit: the daemon of the pool gives no answer about its run-time limit (GET http://127.0.0.1:7411/api/run-limit as $me, 5 s at most), want '600' s (10m) and '1800' s (30m)" "$W/out" && ok "with slot-node.service not active no daemon answers: check says so and names the limit it wants" || bad "not active, check: $(grep run-limit "$W/out")"
+: >"$RR/.calls"
+run "$RR" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: run-limit: slot-node.service is not active: the limit was not set' "$W/err" && ! grep -q 'run-limit' "$RR/.calls" && ok "a slot-node.service that does not start: a failed line for the run-time limit, no slot run-limit call" || bad "not active, apply: exit $st $(cat "$W/err" "$RR/.calls")"
+rm -f "$RR/.state-start-fails-slot-node.service"
+run "$RR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'slot run-limit 10m --max 30m' "$RR/.calls" && [ "$(cat "$RR/.state/run-limit" 2>&1)" = 600 ] && ok "once slot-node.service starts, apply sets the run-time limit" || bad "limit after the start: exit $st $(cat "$RR/.calls" "$W/out" "$W/err")"
+run "$RR" check
+[ $? -eq 0 ] || bad "6w ends with drift: $(cat "$W/out")"
+# p_run_limit alone in check mode, wanting 10m and 30m, on the answer $1.
+rl_fn=$(fn is_decimal cpu_mark run_limit_read run_limit_holds run_limit_text p_run_limit)
+run_check() {
+  (
+    . "$here/conf.sh"
+    eval "$rl_fn"
+    mode=check U=builder RUN_LIMIT=${2:-10m} RUN_LIMIT_MAX=30m RUN_LIMIT_URL=http://127.0.0.1:7411/api/run-limit ra=$1
+    drift() { echo "drift: $1: $2"; }
+    fixing() { false; }
+    q_run_limit_answer() { printf '%s\n' "$ra"; }
+    p_run_limit 2>&1
+  )
+}
+[ -z "$(run_check '{"run_limit_s":600,"run_limit_max_s":1800}')" ] && [ -z "$(run_check '{"run_limit_max_s":1800,"run_limit_s":null}' off)" ] && [ "$(run_check '{"run_limit_s":null,"run_limit_max_s":3600}')" = "drift: run-limit: the pool has no run-time limit, and a job names up to '3600' s, want '600' s (10m) and '1800' s (30m)" ] && ok "the daemon's answer in seconds: 600 and 1800 are 10m and 30m, null is off; the answer of a daemon without a limit is drift" || bad "run limit answers: '$(run_check '{"run_limit_s":600,"run_limit_max_s":1800}')' '$(run_check '{"run_limit_max_s":1800,"run_limit_s":null}' off)' $(run_check '{"run_limit_s":null,"run_limit_max_s":3600}')"
+[ "$(run_check '{"run_limit_s":601,"run_limit_max_s":1800}')" = "drift: run-limit: the pool ends a job that runs longer than '601' s, and a job names up to '1800' s, want '600' s (10m) and '1800' s (30m)" ] && [ "$(run_check '{"run_limit_s":600,"run_limit_max_s":1801}')" = "drift: run-limit: the pool ends a job that runs longer than '600' s, and a job names up to '1801' s, want '600' s (10m) and '1800' s (30m)" ] && [ -n "$(run_check '{"run_limit_s":600,"run_limit_max_s":1800}' off)" ] && [ -n "$(run_check '{"run_limit_s":10,"run_limit_max_s":1800}')" ] && ok "one second more in the limit or in the most a job names is drift; a limit where off is wanted too; 10 s is not 10m" || bad "run limit compare: $(run_check '{"run_limit_s":601,"run_limit_max_s":1800}') / $(run_check '{"run_limit_s":600,"run_limit_max_s":1801}') / $(run_check '{"run_limit_s":600,"run_limit_max_s":1800}' off) / $(run_check '{"run_limit_s":10,"run_limit_max_s":1800}')"
+rna="drift: run-limit: the daemon of the pool gives no answer about its run-time limit (GET http://127.0.0.1:7411/api/run-limit as builder, 5 s at most), want '600' s (10m) and '1800' s (30m)"
+miss=
+for a in '' '{}' 'not found' '{"run_limit_s":600}' '{"run_limit_s":600,"run_limit_max_s":null}' '{"run_limit_s":"600","run_limit_max_s":1800}' '{"run_limit_s":600.5,"run_limit_max_s":1800}' '{"run_limit_s":600,"run_limit_max_s":18e2}' '{"run_limit_s":-600,"run_limit_max_s":1800}' '{"run_limit_s":600,"run_limit_max_s":1800' '{"run_limit_s":600,"run_limit_m'; do
+  [ "$(run_check "$a")" = "$rna" ] || miss="$miss '$a': $(run_check "$a");"
+done
+[ -z "$miss" ] && ok "an answer without both values, or with one that is no whole number of seconds (nothing, {}, a text, no max, a null max, a string, 600.5, 18e2, -600, a cut-off object), is drift: no answer" || bad "run limit answers that are none:$miss"
+ar=$(
+  eval "$(fn a_run_limit q_run_limit_answer)"
+  T= STORE=/srv/slot RUN_LIMIT_URL=http://127.0.0.1:7411/api/run-limit
+  as_user() { echo "$*"; }
+  a_run_limit 10m 30m
+  a_run_limit off 30m
+  q_run_limit_answer
+)
+[ "$ar" = "/srv/slot/bin/slot run-limit 10m --max 30m
+/srv/slot/bin/slot run-limit off --max 30m
+curl -s -m 5 --max-filesize 65536 http://127.0.0.1:7411/api/run-limit" ] && ok "without NODE_TEST: slot run-limit as the build user with the limit (or off) and --max, and the query is curl as the build user, 5 s at most" || bad "a_run_limit: $ar"
+ar=$(
+  eval "$(fn a_run_limit)"
+  T= STORE=/srv/slot
+  as_user() {
+    echo try
+    return 1
+  }
+  sleep() { echo "sleep $*"; }
+  a_run_limit 10m 30m
+  echo "exit $?"
+)
+[ "$(echo "$ar" | tr '\n' ' ')" = 'try sleep 1 try sleep 1 try sleep 1 try sleep 1 try exit 1 ' ] && ok "a daemon that does not take the run-limit call: 5 tries, 1 s apart, then the call has failed" || bad "a_run_limit tries: $ar"
+
+# 6u. toolchains-refresh.sh, on the workstation: both manifests are written whole or not at all.
+# rsync is replaced: it copies $W/rf/node-manifest when that file exists and fails otherwise;
+# toolchains.sh is a copy beside the script that prints $W/rf/local-lines; timeout is replaced by
+# one that records its arguments and runs the command.
+# The copy reads where its output goes before it writes the name down: dash redirects in the
+# shell itself while a command with a redirection runs, so `readlink /proc/$$/fd/1 >file` reads
+# the name of that file there.
+RF=$W/rf
+mkdir -p "$RF/bin" "$RF/lib" "$RF/home" "$RF/state/slot"
+cp "$here/toolchains-refresh.sh" "$RF/lib/"
+cat >"$RF/lib/toolchains.sh" <<EOF
+#!/bin/sh
+dst=\$(readlink /proc/\$\$/fd/1)
+printf '%s\n' "\$dst" >"$RF/local.dst"
+[ -f "$RF/local-lines" ] || exit 1
+cat "$RF/local-lines"
+EOF
+cat >"$RF/bin/rsync" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >"$RF/rsync.args"
+for a in "\$@"; do dst=\$a; done
+printf '%s\n' "\$dst" >"$RF/rsync.dst"
+[ -f "$RF/node-manifest" ] || { echo "rsync: connection unexpectedly closed" >&2; exit 23; }
+cp "$RF/node-manifest" "\$dst"
+while [ -e "$RF/rsync-block" ]; do sleep 1; done
+EOF
+cat >"$RF/bin/timeout" <<EOF
+#!/bin/sh
+printf '%s\n' "\$1 \$2" >"$RF/timeout.args"
+shift
+exec "\$@"
+EOF
+chmod 755 "$RF/bin/rsync" "$RF/bin/timeout"
+rf() {
+  HOME=$RF/home XDG_STATE_HOME=$RF/state XDG_CONFIG_HOME=${RFC:-$RF/config} PATH=$RF/bin:$PATH \
+    sh "$RF/lib/toolchains-refresh.sh" "$@" >"$W/out" 2>"$W/err"
+}
+rf_left() { find "$RF/state/slot" -name '*.tmp*'; }
+echo "node v22.23.3" >"$RF/local-lines"
+echo "node v22.23.3" >"$RF/node-manifest"
+rf node-1 0
+rc=$?
+[ $rc -eq 0 ] && [ "$(cat "$RF/state/slot/toolchains-local.txt")" = "node v22.23.3" ] &&
+  [ "$(cat "$RF/state/slot/toolchains-node.txt")" = "node v22.23.3" ] && [ ! -s "$W/err" ] &&
+  [ -z "$(rf_left)" ] &&
+  ok "refresh: SECONDS 0 writes both manifests once and exits 0" ||
+  bad "refresh once: rc=$rc $(cat "$W/err") $(rf_left)"
+grep -q -- "-e ssh -F '$RF/config/slot/node/ssh_config' -o BatchMode=yes -o ConnectTimeout=10 node-1:$RF/state/slot/toolchains-node.txt " "$RF/rsync.args" &&
+  ok "refresh: the node's file is read at the same path with the node ssh config, its path quoted" ||
+  bad "refresh rsync: $(cat "$RF/rsync.args")"
+grep -q -- ' --timeout=20 --max-size=1m ' "$RF/rsync.args" && [ "$(cat "$RF/timeout.args")" = "60 rsync" ] &&
+  ok "refresh: the read of the node ends after 60 s, a silent connection after 20 s, a file over 1 MiB is not taken" ||
+  bad "refresh bounds: $(cat "$RF/rsync.args") timeout: $(cat "$RF/timeout.args" 2>&1)"
+# Each run writes through files of its own, so two runs never share a half-written one.
+case "$(cat "$RF/rsync.dst")|$(cat "$RF/local.dst")" in
+  "$RF/state/slot/toolchains-node.txt.tmp."[0-9]*"|$RF/state/slot/toolchains-local.txt.tmp."[0-9]*)
+    ok "refresh: both temporary files carry the id of the run's process" ;;
+  *) bad "refresh temporary names: $(cat "$RF/rsync.dst") $(cat "$RF/local.dst")" ;;
+esac
+# A node that does not answer keeps the node manifest that is there.
+rm "$RF/node-manifest"
+echo "node v22.99.0" >"$RF/local-lines"
+rf node-1 0
+rc=$?
+[ $rc -eq 1 ] && [ "$(cat "$RF/state/slot/toolchains-node.txt")" = "node v22.23.3" ] &&
+  [ "$(cat "$RF/state/slot/toolchains-local.txt")" = "node v22.99.0" ] &&
+  grep -q 'no manifest from node-1: toolchains-node.txt kept (rsync: connection unexpectedly closed)' "$W/err" &&
+  [ -z "$(rf_left)" ] &&
+  ok "refresh: a node that does not answer keeps its last manifest, exit 1, the reason on stderr, no temporary file" ||
+  bad "refresh no node: rc=$rc $(cat "$W/err") $(ls "$RF/state/slot")"
+# An empty file from the node is no manifest.
+: >"$RF/node-manifest"
+rf node-1 0
+rc=$?
+[ $rc -eq 1 ] && [ "$(cat "$RF/state/slot/toolchains-node.txt")" = "node v22.23.3" ] &&
+  [ -z "$(rf_left)" ] &&
+  ok "refresh: an empty file from the node keeps the last manifest" ||
+  bad "refresh empty: rc=$rc $(cat "$RF/state/slot/toolchains-node.txt")"
+# toolchains.sh fails here: the local manifest stays, the node's is still written.
+echo "node v22.24.0" >"$RF/node-manifest"
+rm "$RF/local-lines"
+rf node-1 0
+rc=$?
+[ $rc -eq 1 ] && [ "$(cat "$RF/state/slot/toolchains-local.txt")" = "node v22.99.0" ] &&
+  [ "$(cat "$RF/state/slot/toolchains-node.txt")" = "node v22.24.0" ] &&
+  grep -q 'toolchains-local.txt kept' "$W/err" &&
+  ok "refresh: a failed toolchains.sh keeps the local manifest and still reads the node's" ||
+  bad "refresh local fails: rc=$rc $(cat "$W/err")"
+# toolchains.sh exits 0 and prints nothing: that is no manifest either.
+: >"$RF/local-lines"
+rf node-1 0
+rc=$?
+[ $rc -eq 1 ] && [ "$(cat "$RF/state/slot/toolchains-local.txt")" = "node v22.99.0" ] &&
+  grep -q 'toolchains-local.txt kept' "$W/err" && [ -z "$(rf_left)" ] &&
+  ok "refresh: a toolchains.sh that prints nothing keeps the local manifest" ||
+  bad "refresh local empty: rc=$rc local=$(cat "$RF/state/slot/toolchains-local.txt")"
+# TOOLCHAINS_NODE_FILE names the node's file.
+echo "node v22.23.3" >"$RF/local-lines"
+TOOLCHAINS_NODE_FILE=/var/lib/builder/manifest.txt rf node-1 0
+grep -q ' node-1:/var/lib/builder/manifest.txt ' "$RF/rsync.args" &&
+  ok "refresh: TOOLCHAINS_NODE_FILE names the node's file" || bad "refresh file: $(cat "$RF/rsync.args")"
+# A node name that could be an option or carry a command, and a SECONDS that is no number.
+rm -f "$RF/rsync.args"
+st=
+for n in "" "-v" "-oProxyCommand=x" "node 1" 'node;id' 'a/b'; do
+  rf "$n" 0
+  [ $? -eq 2 ] || st="$st [$n]"
+done
+rf node-1 soon
+[ $? -eq 2 ] || st="$st [soon]"
+RFC="$RF/it's"
+rf node-1 0
+[ $? -eq 2 ] || st="$st [quote in the config path]"
+RFC=
+[ -z "$st" ] && [ ! -e "$RF/rsync.args" ] &&
+  ok "refresh: a node name that is an option or holds a separator, a SECONDS that is no number and a quote in the config path are refused" ||
+  bad "refresh usage accepted:$st"
+# The loop: a failed run does not end it, and it keeps the two files for its node.
+rm -f "$RF/node-manifest" "$RF/state/slot/toolchains-node.txt"
+HOME=$RF/home XDG_STATE_HOME=$RF/state XDG_CONFIG_HOME=${RFC:-$RF/config} PATH=$RF/bin:$PATH \
+  sh "$RF/lib/toolchains-refresh.sh" node-1 1 >"$RF/loop.out" 2>"$RF/loop.err" &
+rfpid=$!
+i=0
+until grep -q 'no manifest from node-1' "$RF/loop.err" 2>/dev/null || [ $i -ge 10 ]; do
+  sleep 1
+  i=$((i + 1))
+done
+echo "node v22.30.0" >"$RF/node-manifest"
+i=0
+until [ -s "$RF/state/slot/toolchains-node.txt" ] || [ $i -ge 10 ]; do
+  sleep 1
+  i=$((i + 1))
+done
+grep -q 'no manifest from node-1' "$RF/loop.err" && kill -0 $rfpid 2>/dev/null &&
+  [ "$(cat "$RF/state/slot/toolchains-node.txt" 2>/dev/null)" = "node v22.30.0" ] &&
+  ok "refresh: the loop goes on after a run that failed and writes the manifest on a later one" ||
+  bad "refresh loop: $(cat "$RF/loop.err") node=$(cat "$RF/state/slot/toolchains-node.txt" 2>&1)"
+echo "node v99.0.0" >"$RF/node-manifest"
+rf node-2 0
+rc=$?
+[ $rc -eq 2 ] && grep -q "another run keeps the manifests of 'node-1'" "$W/err" &&
+  ok "refresh: a run for a second node is refused while a loop keeps the files of the first" ||
+  bad "refresh second node: rc=$rc $(cat "$W/err")"
+timeout 5 env HOME="$RF/home" XDG_STATE_HOME="$RF/state" XDG_CONFIG_HOME="$RF/config" PATH="$RF/bin:$PATH" \
+  sh "$RF/lib/toolchains-refresh.sh" node-1 5 >"$W/out" 2>"$W/err"
+rc=$?
+[ $rc -eq 2 ] && grep -q "another run keeps the manifests of 'node-1'" "$W/err" &&
+  ok "refresh: a second loop for the same node is refused" || bad "refresh second loop: rc=$rc $(cat "$W/err")"
+rf node-1 0
+rc=$?
+[ $rc -eq 0 ] && ok "refresh: a single run for the loop's node goes on beside it" ||
+  bad "refresh single beside loop: rc=$rc $(cat "$W/err")"
+kill $rfpid 2>/dev/null
+wait $rfpid 2>/dev/null
+rf node-2 0
+rc=$?
+[ $rc -eq 0 ] && [ -z "$(rf_left)" ] &&
+  ok "refresh: after the loop ended the lock is free and no temporary file is left" ||
+  bad "refresh after loop: rc=$rc $(cat "$W/err") $(rf_left)"
+# A run that is stopped while it reads the node leaves no temporary file.
+: >"$RF/rsync-block"
+rm -f "$RF/rsync.dst"
+HOME=$RF/home XDG_STATE_HOME=$RF/state XDG_CONFIG_HOME=$RF/config PATH=$RF/bin:$PATH \
+  sh "$RF/lib/toolchains-refresh.sh" node-2 0 >"$RF/stop.out" 2>"$RF/stop.err" &
+rfpid=$!
+i=0
+until [ -n "$(rf_left)" ] && [ -s "$RF/rsync.dst" ] || [ $i -ge 10 ]; do
+  sleep 1
+  i=$((i + 1))
+done
+held=$(rf_left)
+kill $rfpid 2>/dev/null
+rm -f "$RF/rsync-block"
+wait $rfpid 2>/dev/null
+rc=$?
+[ -n "$held" ] && [ $rc -eq 143 ] && [ -z "$(rf_left)" ] &&
+  ok "refresh: a run stopped while it reads the node exits 143 and leaves no temporary file" ||
+  bad "refresh stopped: rc=$rc held=$held left=$(rf_left) $(cat "$RF/stop.err")"
+u=$here/../slot-toolchains-refresh@.service
+grep -q '^ExecStart=/bin/sh %h/.local/share/slot/toolchains-refresh.sh %i 60$' "$u" &&
+  grep -q '^Restart=always$' "$u" && grep -q '^RestartSec=10$' "$u" &&
+  [ "$(sed -n '/^\[Install\]$/,$p' "$u" | grep -c '^WantedBy=default.target$')" -eq 1 ] &&
+  ok "refresh: the unit runs the script for its instance name, restarts it after 10 s and starts with the session" ||
+  bad "refresh unit: $(cat "$u" 2>&1)"
+grep -q '^RestartPreventExitStatus=2$' "$u" &&
+  ok "refresh: the unit does not start the script again after a usage error or a held lock" ||
+  bad "refresh unit exit 2: $(grep Restart "$u")"
+grep -q '^EnvironmentFile=-%h/.config/slot/node/toolchains-refresh.env$' "$u" &&
+  ok "refresh: the unit reads its PATH from an environment file of the host" ||
+  bad "refresh unit environment: $(grep Environment "$u")"
 # 6h. The example config carries what consumers build with: the rust toolchains and the wasm
 # target, the dnf packages that exist on the node's repositories. Go and node come from the
 # archive pins, so neither a golang nor a nodejs package is listed.
@@ -1924,6 +3330,8 @@ for p in golang nodejs nodejs-npm nodejs22 mingw64-gcc musl-gcc dash mawk erlang
 done
 ok "example: package list checked"
 grep -q 'not installed; a job that needs one is held by name' "$here/README.md" && ok "README names the packages that are not installed" || bad "README has no 'not installed; a job that needs one is held by name'"
+sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'musl' && bad "README still lists musl-gcc as not installed" || ok "README no longer lists musl-gcc as not installed"
+grep -qx 'GO_ROOT=' "$ex" && [ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "[$GO_ROOT]"' sh "$here" 2>&1)" = '[]' ] && ok "example: GO_ROOT is shown empty, the default" || bad "example GO_ROOT: $(grep GO_ROOT "$ex")"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

@@ -653,7 +653,9 @@ fn lost_line(s: &State) -> Option<String> {
 /// `disk: 32.0 GB free, under 40.0 GB: deleted 2 target dir(s), 31.0 GB`, or in
 /// a dry run `disk: … eviction is off (dry run), would free 31.0 GB in 2 dir(s)`;
 /// nothing when eviction is off or never looked. A mark the disk hold raised
-/// reads `under 50.0 GB, raised from 40.0 GB to the disk hold's mark`.
+/// reads `under 50.0 GB, raised from 40.0 GB to the disk hold's mark`. A look
+/// that measured nothing names no free space: `disk: no target dir known,
+/// nothing measured (eviction below 40.0 GB)`.
 fn evict_line(r: &crate::evict::Report) -> Option<String> {
     if r.floor == 0 || r.checked_ms == 0 {
         return None;
@@ -667,6 +669,17 @@ fn evict_line(r: &crate::evict::Report) -> Option<String> {
     } else {
         String::new()
     };
+    if r.unmeasured {
+        let what = if r.known == 0 {
+            "no target dir known".to_string()
+        } else {
+            format!("none of the {} known target dir(s) exists", r.known)
+        };
+        return Some(format!(
+            "disk: {what}, nothing measured ({mode}eviction below {}){deleted}\n",
+            crate::evict::mark_text(r.floor, r.raised_from)
+        ));
+    }
     if r.free >= r.floor && r.last.is_empty() {
         return Some(format!(
             "disk: {} free, eviction below {} ({mode}{} target dir(s) known){deleted}\n",
@@ -903,6 +916,7 @@ mod tests {
             last: vec![e(20 * gb), e(11 * gb)],
             deleted_bytes: 0,
             raised_from: 0,
+            unmeasured: false,
         };
         assert_eq!(
             evict_line(&r).unwrap(),
@@ -955,6 +969,43 @@ mod tests {
             evict_line(&r).unwrap(),
             "disk: 60.0 GB free, eviction below 40.0 GB (12 target dir(s) known)\n",
             "not raised: the mark alone"
+        );
+    }
+
+    /// A look that found no known target directory on disk measured
+    /// nothing: the line names no free space, only the mark. The report of
+    /// a daemon older than the flag reads as it did.
+    #[test]
+    fn the_eviction_line_names_no_free_space_when_the_look_measured_nothing() {
+        let gb = crate::admission::GB;
+        let report = |more: serde_json::Value| -> crate::evict::Report {
+            let mut v = serde_json::json!({
+                "floor": 50 * gb, "raised_from": 40 * gb, "free": 0, "checked_ms": 1,
+            });
+            v.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            serde_json::from_value(v).unwrap()
+        };
+        assert_eq!(
+            evict_line(&report(serde_json::json!({"unmeasured": true}))).unwrap(),
+            "disk: no target dir known, nothing measured (eviction below 50.0 GB, raised from \
+             40.0 GB to the disk hold's mark)\n"
+        );
+        assert_eq!(
+            evict_line(&report(serde_json::json!({
+                "unmeasured": true, "known": 12, "dry_run": true,
+                "raised_from": 0, "deleted_bytes": 31 * gb,
+            })))
+            .unwrap(),
+            "disk: none of the 12 known target dir(s) exists, nothing measured (dry run, \
+             eviction below 50.0 GB), 31.0 GB deleted since start\n"
+        );
+        assert_eq!(
+            evict_line(&report(serde_json::json!({}))).unwrap(),
+            "disk: 0.0 GB free, under 50.0 GB, raised from 40.0 GB to the disk hold's mark: \
+             deleted 0 target dir(s), 0.0 GB\n",
+            "an older daemon's report, without the flag"
         );
     }
 
