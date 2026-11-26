@@ -90,6 +90,39 @@
   the client says whether the directory is cargo's own (`workspace.target_default`), and a server
   that gets no word exports the variable as before. The environment reference lists what slot
   sets in a job and what that means for the cache key.
+- The gate runs its three shell tests through `contrib/shell-tests.sh`: under dash where dash is
+  on PATH, else under `sh`, each test once, and its first line says which shell ran them. The
+  forge's `sh` is dash and a node's or a workstation's may be bash; a test of
+  `toolchains-refresh.sh` passed under bash and failed on the forge. `contrib/node/provision.sh`
+  builds dash 0.5.12, the release of the forge's runner image, from its source tarball with a
+  pinned SHA-256 and links it as `/usr/local/bin/dash` (never as `sh`); `toolchains.sh` prints
+  `tool dash <release>`.
+- Node: one `apply --drain` is enough for the core pattern. The pattern was loaded only inside
+  an `apply`, and after `apply --drain` the units restart later by themselves, so
+  `kernel.core_pattern` stayed a pipe (`drift: core: ...`) until a second `apply`. The step
+  before the start of `slot-node.service` now loads `/etc/sysctl.d/60-slot-core.conf` at the end
+  of a drain, under the condition `apply` checks: `sccache-node` runs with the soft core limit 0
+  and `slot-node.service` starts with it.
+- Node: the config key `SLOT_TARGET` names which archive of the slot release
+  `contrib/node/provision.sh` installs: `x86_64-unknown-linux-gnu` (the default, as before) or
+  `x86_64-unknown-linux-musl`, the static build, checked against its own line of the release's
+  `SHA256SUMS`. Both builds print the same version, so `check` and `apply` read the build from
+  the binary at each path and from the running daemon, and a change of the key at one version
+  installs the other archive and restarts the daemon.
+- Node: Firefox. `firefox` is a name of the config key `EXTRA_TOOLS`, beside `erlang`, `elixir`,
+  `gleam` and `odin`: one key names every optional tool of a node, and a name with no pin in
+  `contrib/node/provision.sh` is refused. `firefox` there installs Mozilla's archive of Firefox
+  159.0, checked
+  against the SHA-256 of the release's `SHA256SUMS`, into `/usr/local/firefox-159.0`, links
+  `/usr/local/bin/firefox`, and installs the packages it loads (`gtk3`, `alsa-lib`, `libX11-xcb`,
+  `dbus-libs`, and `xz` for the archive). A consumer's browser tests start `firefox` by name and
+  failed on a node, which had none. `check --canary` starts it headless as the build user until
+  it listens for WebDriver BiDi; `toolchains.sh` prints `tool firefox <release>`.
+- Node: sdkman's `current` link of Groovy. `contrib/node/provision.sh` links
+  `~/.sdkman/candidates/groovy/current` to the version of the groovy line of `HOME_PINS`
+  (`2.4.10`) as the build user, so a job that carries the workstation's
+  `GROOVY_HOME=~/.sdkman/candidates/groovy/current` finds the tree; the path did not exist on a
+  node. A missing link or one to another version is drift; a directory there is left alone.
 
 ## 0.39.1 — 2026-11-26
 

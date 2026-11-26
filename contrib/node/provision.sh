@@ -121,6 +121,15 @@ RUST_TRIPLE=x86_64-unknown-linux-gnu
 # that Arch Linux's package build file of musl 1.2.6-2 carries for the same tarball (`sha256sums`
 # of its PKGBUILD, whose build checks the upstream signature): the two agree.
 MUSL_PIN='musl 1.2.6 d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a https://musl.libc.org/releases/musl-1.2.6.tar.gz'
+# dash, built on the node from its source tarball (p_dash): name, version, SHA-256, URL. The
+# release is the one of the forge's runner image (ubuntu-26.04, whose /bin/sh is the package dash
+# 0.5.12-12ubuntu3), so that a shell test runs under the same shell on a node as on the forge.
+# The SHA-256 is the one of upstream's release tarball as downloaded on 2026-11-26, the one of
+# the `dash_0.5.12.orig.tar.gz` of Ubuntu's and of Debian's package pool, and the one that the
+# `Checksums-Sha256` of Ubuntu's source package description (dash_0.5.12-12ubuntu3.dsc) carries for
+# it: the four agree. Upstream serves the tarball over plain http only; the SHA-256 is what
+# ties the download to the release.
+DASH_PIN='dash 0.5.12 6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz'
 # Tools built on the node from a git revision, as the build user, into the store's cargo bin. One
 # line each: name, version, repository URL, revision (the pin: a git object id; the release tag
 # peels to it), package, rust toolchain (installed by the rust part), the binary (its `--version`
@@ -162,9 +171,10 @@ chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb
 chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell
 aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep
 groovy 2.4.10 1c4dff3b6edf9a8ced3bca658ee1857cee90cfed1ee3474a2790045033c317a9 https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-binary/2.4.10/groovy-binary-2.4.10.zip zip1 .sdkman/candidates/groovy/2.4.10 embeddable/groovy-all-2.4.10.jar'
-# Tools a node gets only when its config names them in EXTRA_TOOLS (erlang, elixir, gleam, odin):
-# a consumer's tasks call gleam, elixir, mix, erl and odin by name, and Amazon Linux 2023 packages
-# none of them. A node without the key gets none.
+# Tools a node gets only when its config names them in EXTRA_TOOLS (erlang, elixir, gleam, odin,
+# firefox): a consumer's tasks call gleam, elixir, mix, erl and odin by name, its browser tests
+# start firefox by name, and Amazon Linux 2023 packages none of them. A node without the key gets
+# none. The names are erlang and the first field of each line of EXTRA_ARCHIVE_PINS.
 # erlang: Erlang/OTP, built on the node from the source tarball of its release (p_erlang): name,
 # version, SHA-256, URL. The SHA-256 is the one the release publishes in its SHA256.txt. Upstream
 # publishes no Linux binary, and the builds that the Hex build site makes for Ubuntu did not serve
@@ -176,8 +186,8 @@ ERLANG_PIN='erlang 29.0.6 36c89ffdac9d7531c19be0cee34355b167ea95188625d32bee61eb
 # headers (crypto and ssl) and the terminal library's headers. All but ncurses-devel are base
 # packages of a node; that one a node names in EXTRA_PACKAGES.
 ERLANG_BUILD_PACKAGES='gcc gcc-c++ make perl openssl-devel ncurses-devel'
-# elixir, gleam, odin: release archives, in the form of ARCHIVE_PINS and installed by the same
-# code (p_archives). elixir is the precompiled release for the OTP major of the erlang pin: its
+# elixir, gleam, odin, firefox: release archives, in the form of ARCHIVE_PINS and installed by the
+# same code (p_archives). elixir is the precompiled release for the OTP major of the erlang pin: its
 # version field is `<release>-otp-<major>`, which its check reads from `elixir --version` (`Elixir
 # 1.20.4 (compiled with Erlang/OTP 29)`), and its strip field is `zip`, a zip with its files at
 # the top. gleam is the static binary of its release. odin is the monthly release dev-2026-09 (a
@@ -187,10 +197,18 @@ ERLANG_BUILD_PACKAGES='gcc gcc-c++ make perl openssl-devel ncurses-devel'
 # of gleam are the ones their releases publish beside the archives (elixir-otp-29.zip.sha256sum,
 # <archive>.sha256). Odin's release publishes none: its SHA-256 is the digest of the archive as
 # downloaded from the release twice, on two machines, equal to the digest the release's asset list
-# shows.
+# shows. firefox is the release archive of Mozilla for linux-x86_64, en-US, at the release the
+# workstation runs; its SHA-256 is the line of that file in the release's SHA256SUMS on
+# archive.mozilla.org. It is a .tar.xz (xz unpacks it); the libraries its binaries need beside
+# their own come from gtk3, alsa-lib, libX11-xcb and dbus-libs (and what gtk3 requires); the
+# newest symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19.
 EXTRA_ARCHIVE_PINS='elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip zip bin/elixir bin/elixirc bin/mix bin/iex
 gleam 1.19.0 6083148cb404460810afe35e7878527e58fd2512dd79a76b47d59723815753be https://github.com/gleam-lang/gleam/releases/download/v1.19.0/gleam-v1.19.0-x86_64-unknown-linux-musl.tar.gz 0 gleam
-odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 https://github.com/odin-lang/Odin/releases/download/dev-2026-09/odin-linux-amd64-dev-2026-09.tar.gz 1 odin'
+odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 https://github.com/odin-lang/Odin/releases/download/dev-2026-09/odin-linux-amd64-dev-2026-09.tar.gz 1 odin
+firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox'
+# The packages a tool of EXTRA_TOOLS loads at run time, one line per tool: the name, then the
+# packages, installed with the base packages on a node that names the tool.
+EXTRA_TOOL_PACKAGES='firefox gtk3 alsa-lib libX11-xcb dbus-libs xz'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -225,12 +243,18 @@ METRICS_URL=http://127.0.0.1:7411/metrics
 # after a boot, and the name of the transient timer that is its bound.
 DRAIN_DIR=/run/slot-node
 DRAIN_UNIT=slot-node-drain
+# The packages of the tools that EXTRA_TOOLS names (EXTRA_TOOL_PACKAGES).
+extra_tool_packages() {
+  echo "$EXTRA_TOOL_PACKAGES" | while read -r ep_n ep_p; do
+    case " $EXTRA_TOOLS " in *" $ep_n "*) echo "$ep_p" ;; esac
+  done
+}
 # GO_ROOT may not be the directory of a pinned archive or of the make this script builds, nor lie
 # in one: each of those is replaced whole at a release change. conf.sh, which does not know the
 # pins, refuses the other directories of the provisioning.
 go_root_pins() {
   [ -n "$GO_ROOT" ] || return 0
-  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)"; do
+  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)" "/usr/local/dash-$(echo "$DASH_PIN" | cut -d' ' -f2)"; do
     case $GO_ROOT/ in
       "$gp_d"/*)
         conf_fail "$cf: GO_ROOT '$GO_ROOT' is the directory of a pinned archive, or lies in one ($gp_d)"
@@ -242,15 +266,13 @@ go_root_pins() {
 }
 # EXTRA_TOOLS names tools that have a pin above, and elixir only beside erlang: elixir runs on
 # erl. GO_ROOT may not be the directory of one of those pins either, whatever EXTRA_TOOLS says.
+# conf.sh, which does not know the pins, checks the form of the names.
 extra_tools_conf() {
+  xt_all=$(printf '%s\n%s\n' "$ERLANG_PIN" "$EXTRA_ARCHIVE_PINS" | awk '{ print $1 }' | tr '\n' ' ' | sed 's/ $//')
   for xt_w in $EXTRA_TOOLS; do
-    case $xt_w in
-      erlang | elixir | gleam | odin) ;;
-      *)
-        conf_fail "$cf: EXTRA_TOOLS names '$xt_w', which is no tool of provision.sh (erlang elixir gleam odin)"
-        return 2
-        ;;
-    esac
+    case " $xt_all " in *" $xt_w "*) continue ;; esac
+    conf_fail "$cf: EXTRA_TOOLS names '$xt_w', which is no tool of provision.sh ($xt_all)"
+    return 2
   done
   case " $EXTRA_TOOLS " in
     *" erlang "*) ;;
@@ -494,6 +516,34 @@ q_running_version() {
     [ -n "$qm" ] && [ "$qm" != 0 ] && as_user "/proc/$qm/exe" --version 2>/dev/null </dev/null | head -n 1
   fi
 }
+# Which build of slot the file $1 is, as the target of its release archive (SLOT_TARGET): both
+# builds answer the same `--version`. The build against glibc names a program interpreter (the
+# loader); the static musl build has program headers and none. Read with readelf (binutils, which
+# the base package gcc requires) as the build user. Nothing printed: no such file, no readelf, or
+# no ELF file, and then nothing is compared. NODE_TEST=1: a stand-in that carries the musl target
+# in its text is the musl build, any other file the gnu one.
+q_slot_target() {
+  if [ -n "$T" ]; then
+    [ -f "$1" ] || return 0
+    if grep -q 'x86_64-unknown-linux-musl' "$1" 2>/dev/null; then echo x86_64-unknown-linux-musl; else echo x86_64-unknown-linux-gnu; fi
+  else
+    qt=$(as_user env LC_ALL=C readelf -lW "$1" 2>/dev/null </dev/null) || return 0
+    case $qt in
+      *"Requesting program interpreter"*) echo x86_64-unknown-linux-gnu ;;
+      *"Program Headers:"*) echo x86_64-unknown-linux-musl ;;
+    esac
+  fi
+}
+# The build of the slot binary the running unit executes (not the file at the path now).
+# NODE_TEST=1: the file running-target/<unit>, which a_start writes.
+q_running_target() {
+  if [ -n "$T" ]; then
+    cat "$S/running-target/$1" 2>/dev/null
+  else
+    qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
+    [ -n "$qm" ] && [ "$qm" != 0 ] && q_slot_target "/proc/$qm/exe"
+  fi
+}
 q_jobs() {
   if [ -n "$T" ]; then
     cat "$S/jobs" 2>/dev/null || echo 0
@@ -541,6 +591,18 @@ q_core_limit() {
     qm=$(systemctl show -p MainPID --value "$1" 2>/dev/null)
     case $qm in '' | 0 | *[!0-9]*) return 0 ;; esac
     awk '/^Max core file size/ { print $5 }' "/proc/$qm/limits" 2>/dev/null
+  fi
+}
+# The soft core limit that the next main process of unit $1 gets: systemd's LimitCORESoft of the
+# unit as it is loaded (`0`, `infinity` or a number of bytes). The step before a start of
+# slot-node.service asks it: no process of the unit runs then. Nothing printed: no answer.
+# NODE_TEST=1: the soft part of the unit file's LimitCORE, as a_start gives it to the process.
+q_core_limit_next() {
+  if [ -n "$T" ]; then
+    qn=$(sed -n 's/^LimitCORE=\([^:]*\).*/\1/p' "$R/etc/systemd/system/$1" 2>/dev/null | head -n 1)
+    echo "${qn:-unlimited}"
+  else
+    systemctl show -p LimitCORESoft --value "$1" 2>/dev/null
   fi
 }
 # The time until an aborted process is reaped, under the soft core limit 0 (what a job of
@@ -706,6 +768,7 @@ a_start() {
     unit_defs "$1" >"$S/loaded/$1"
     unit_defs "$1" | grep '^Environment=' >"$S/procenv/$1"
     [ "$1" = slot-node.service ] && "$R$STORE/bin/slot" --version >"$S/running-version/$1" 2>/dev/null
+    [ "$1" = slot-node.service ] && mkdir -p "$S/running-target" && q_slot_target "$R$STORE/bin/slot" >"$S/running-target/$1"
     return 0
   else
     systemctl start "$1"
@@ -1370,7 +1433,7 @@ want_file() {
 
 p_packages() {
   missing=
-  for p in $BASE_PACKAGES $EXTRA_PACKAGES; do q_pkg "$p" || missing="$missing $p"; done
+  for p in $BASE_PACKAGES $EXTRA_PACKAGES $(extra_tool_packages); do q_pkg "$p" || missing="$missing $p"; done
   [ -z "$missing" ] && return 0
   drift packages "not installed:$missing"
   if fixing; then
@@ -1698,12 +1761,20 @@ p_units() {
 slot_paths() { echo "$STORE/bin/slot /usr/local/bin/slot $H/.local/bin/slot"; }
 # Downloads the release into directory $1 and prints the path of its binary. NODE_TEST=1: a stub
 # binary, or nothing when $R/.state-slot-fetch-fails exists.
+# The archive is the one of SLOT_TARGET: the build against glibc (the default), or the static musl
+# build. Both are checked against the line of their own name in the release's SHA256SUMS, so a
+# release that has no such archive installs nothing.
 slot_fetch() {
-  a=slot-$SLOT_VERSION-x86_64-unknown-linux-gnu
+  a=slot-$SLOT_VERSION-$SLOT_TARGET
   if fake_fetch; then
     [ -e "$R/.state-slot-fetch-fails" ] && return 0
-    mkdir -p "$1/$a" && printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
-    calls "fetch slot $SLOT_VERSION"
+    if [ "$SLOT_TARGET" = x86_64-unknown-linux-gnu ]; then
+      mkdir -p "$1/$a" && printf '#!/bin/sh\necho slot %s\n' "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
+      calls "fetch slot $SLOT_VERSION"
+    else
+      mkdir -p "$1/$a" && printf '#!/bin/sh\n# %s\necho slot %s\n' "$SLOT_TARGET" "$SLOT_VERSION" >"$1/$a/slot" && chmod 755 "$1/$a/slot"
+      calls "fetch slot $SLOT_VERSION $SLOT_TARGET"
+    fi
   else
     u=https://github.com/beyond10x/slot/releases/download/$SLOT_VERSION
     (cd "$1" && curl -fsSLO "$u/$a.tar.gz" && curl -fsSLO "$u/SHA256SUMS" &&
@@ -1743,21 +1814,36 @@ install_slot() {
     if [ "$v" != "slot $SLOT_VERSION" ]; then
       failed slot "$p is '${v:-missing}' after the install"
       rc=1
+      continue
+    fi
+    is_t=$(q_slot_target "$R$p")
+    if [ -n "$is_t" ] && [ "$is_t" != "$SLOT_TARGET" ]; then
+      failed slot "$p is the build for $is_t after the install, config says $SLOT_TARGET"
+      rc=1
     fi
   done
   rm -rf "$d"
   return $rc
 }
+# A path is drift when it does not answer the release, or answers it and is the other build
+# (SLOT_TARGET): a node changes between the gnu and the musl archive at one version.
 p_slot() {
   todo=
   for p in $(slot_paths); do
     v=$(as_user "$R$p" --version 2>/dev/null)
-    [ "$v" = "slot $SLOT_VERSION" ] && continue
-    drift "slot:$p" "is '${v:-missing}', config says slot $SLOT_VERSION"
+    if [ "$v" = "slot $SLOT_VERSION" ]; then
+      ps_t=$(q_slot_target "$R$p")
+      if [ -z "$ps_t" ] || [ "$ps_t" = "$SLOT_TARGET" ]; then continue; fi
+      drift "slot:$p" "is the build for $ps_t, config says $SLOT_TARGET"
+    else
+      drift "slot:$p" "is '${v:-missing}', config says slot $SLOT_VERSION"
+    fi
     todo="$todo $p"
   done
   if fixing && [ -n "$todo" ]; then
-    install_slot $todo && changed slot "slot $SLOT_VERSION installed at$todo" && slot_replaced=1
+    ps_n=
+    [ "$SLOT_TARGET" = x86_64-unknown-linux-gnu ] || ps_n=" ($SLOT_TARGET)"
+    install_slot $todo && changed slot "slot $SLOT_VERSION$ps_n installed at$todo" && slot_replaced=1
   fi
 }
 
@@ -2177,6 +2263,10 @@ archive_fetch() {
         # Like yarn 1 under a `yarn-path` of a .yarnrc: its own release only with
         # YARN_IGNORE_PATH=1, else what that path prints.
         printf '#!/bin/sh\n[ "${YARN_IGNORE_PATH:-}" = 1 ] || { echo 9.9.9-from-yarn-path; exit 0; }\necho %s\n' "$fv" >"$fd/tree/$b"
+      elif [ "$fn" = firefox ]; then
+        # Like firefox: `--version` prints `Mozilla Firefox <release>`; a start prints the line of
+        # WebDriver BiDi on standard error and runs until it is ended.
+        printf '#!/bin/sh\n[ "$1" != --version ] || { echo "Mozilla Firefox %s"; exit 0; }\necho "WebDriver BiDi listening on ws://127.0.0.1:9222" >&2\nexec sleep 30\n' "$fv" >"$fd/tree/$b"
       else
         printf '#!/bin/sh\necho %s\n' "$fv" >"$fd/tree/$b"
       fi
@@ -2203,7 +2293,7 @@ archive_fetch() {
 }
 # The first line of the version of binary $2 of archive $1, run as the build user. yarn 1 runs
 # the script a `yarn-path` of the build user's .yarnrc names and prints that one's version:
-# YARN_IGNORE_PATH=1 makes it answer for itself.
+# YARN_IGNORE_PATH=1 makes it answer for itself. firefox reads MOZ_HEADLESS=1 and opens no window.
 archive_version() {
   case $1 in
     go) as_user "$2" version ;;
@@ -2211,6 +2301,7 @@ archive_version() {
     odin) as_user "$2" version | head -n 1 | awk '{ print $NF }' | sed 's/-nightly:.*//' ;;
     helm) as_user "$2" version --template '{{.Version}}' ;;
     yarn) as_user env YARN_IGNORE_PATH=1 "$2" --version ;;
+    firefox) as_user env MOZ_HEADLESS=1 "$2" --version ;;
     *) as_user "$2" --version ;;
   esac 2>/dev/null </dev/null | head -n 1
 }
@@ -2476,6 +2567,101 @@ $MAKE_PIN
 EOF
 }
 
+# dash built from its source tarball (DASH_PIN): Amazon Linux 2023 packages no dash, and the
+# forge's runner image has dash as its sh, so a shell test that passes under a node's sh (bash) can
+# fail there. Built like make: by the build user in a temporary directory with the package's make
+# and no jobserver; root installs the one binary into /usr/local/dash-<version>/bin and links it
+# as dash in /usr/local/bin (never as sh: a node's sh stays the distribution's). dash prints no
+# version, so the tree carries the SHA-256 of the tarball it was built from (.slot-sha256, written
+# by root), and the check also runs one command with the binary.
+# Prints the path of the built dash; nothing when the download, the checksum or the build failed.
+dash_build() {
+  db_d=$1
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    calls "fetch $5"
+    printf '#!/bin/sh\nexec sh "$@"\n' >"$db_d/dash" && chmod 755 "$db_d/dash" && echo "$db_d/dash"
+    return 0
+  fi
+  source_unpack "$db_d" "$4" "$5" || return 0
+  [ -x /usr/bin/make ] || {
+    echo "error: /usr/bin/make (the package's make, which builds dash) is missing" >&2
+    return 0
+  }
+  as_user timeout 600 sh -c 'cd "$1" && ./configure && /usr/bin/make' sh "$db_d/src" </dev/null >&2 || return 0
+  cp -P "$db_d/src/src/dash" "$db_d/dash" 2>/dev/null && chown root:root "$db_d/dash" &&
+    [ -f "$db_d/dash" ] && [ ! -L "$db_d/dash" ] && [ -x "$db_d/dash" ] && echo "$db_d/dash"
+}
+# dash_answer PATH: what the dash at PATH prints for one arithmetic command, run as the build user.
+dash_answer() { as_user timeout 10 "$1" -c 'echo $((6 * 7))' 2>/dev/null </dev/null | head -n 1; }
+p_dash() {
+  while read -r dn dv ds du; do
+    [ -n "$dn" ] || continue
+    dir=/usr/local/$dn-$dv
+    binok=1
+    linkok=1
+    real=
+    got=$(readlink "$R/usr/local/bin/dash" 2>/dev/null)
+    if [ "$got" != "$dir/bin/dash" ]; then
+      drift "dash" "/usr/local/bin/dash is '${got:-missing}', want a link to $dir/bin/dash"
+      linkok=
+      if [ -e "$R/usr/local/bin/dash" ] && [ ! -L "$R/usr/local/bin/dash" ]; then real=1; fi
+    fi
+    if [ -x "$R$dir/bin/dash" ] && [ ! -L "$R$dir/bin/dash" ]; then
+      mark=$(cat "$R$dir/.slot-sha256" 2>/dev/null)
+      if [ "$mark" != "$ds" ]; then
+        drift "dash" "$dir is of the tarball '${mark:-unknown}', want $ds"
+        binok=
+      else
+        v=$(dash_answer "$R$dir/bin/dash")
+        if [ "$v" != 42 ]; then
+          drift "dash" "$dir/bin/dash does not run a command (it answers '$v', want 42)"
+          binok=
+        fi
+      fi
+    else
+      drift "dash" "$dir/bin/dash is missing, want dash $dv built from its source tarball"
+      binok=
+    fi
+    fixing && { [ -z "$binok" ] || [ -z "$linkok" ]; } || continue
+    if [ -n "$real" ]; then
+      failed "dash" "/usr/local/bin/dash is a real file; not replaced"
+      continue
+    fi
+    if [ -n "$binok" ]; then
+      if ln -sfn "$dir/bin/dash" "$R/usr/local/bin/dash"; then
+        changed "dash" "linked dash in /usr/local/bin to $dir/bin/dash"
+      else
+        failed "dash" "link in /usr/local/bin"
+      fi
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-dash.XXXXXX); fi || {
+      failed "dash" "no temporary directory"
+      continue
+    }
+    dl=$(mktemp)
+    db=$(dash_build "$td" "$dn" "$dv" "$ds" "$du" 2>"$dl")
+    if [ -z "$db" ]; then
+      failed "dash" "download, checksum or build of dash $dv: $({ grep -m 3 -i 'error' "$dl"; tail -n 2 "$dl"; } | tr '\n' ' ')"
+    elif mkdir -p "$R$dir/bin" "$R/usr/local/bin" && install -m 0755 "$db" "$R$dir/bin/dash.slot-new" && mv "$R$dir/bin/dash.slot-new" "$R$dir/bin/dash" &&
+      printf '%s\n' "$ds" >"$R$dir/.slot-sha256" && ln -sfn "$dir/bin/dash" "$R/usr/local/bin/dash"; then
+      v=$(dash_answer "$R$dir/bin/dash")
+      if [ "$v" = 42 ]; then
+        changed "dash" "dash $dv built, linked as dash in /usr/local/bin"
+      else
+        failed "dash" "$dir/bin/dash answers '$v' after the install, want 42"
+      fi
+    else
+      rm -f "$R$dir/bin/dash.slot-new"
+      failed "dash" "$dir not written"
+    fi
+    rm -rf "$td" "$dl"
+  done <<EOF
+$DASH_PIN
+EOF
+}
+
 # musl built from its source tarball (MUSL_PIN): Amazon Linux 2023 packages no musl-gcc, and a
 # build that names it as the C compiler of the musl target (CC_x86_64_unknown_linux_musl=musl-gcc)
 # stopped with `failed to find tool "musl-gcc"`. The build user configures the source for the
@@ -2641,6 +2827,58 @@ rm -rf "$d"' sh "$R/usr/local/$un-$uv/bin/musl-gcc" "$R$STORE/tmp" "$mc_w" </dev
 $MUSL_PIN
 EOF
 }
+# check --canary with firefox in EXTRA_TOOLS: what a consumer's browser tests do with firefox. The
+# build user starts it from its tree in a new directory of the store's tmp (the directory holds its
+# HOME, TMPDIR and profile), headless with a WebDriver BiDi port, waits up to 30 s for the line
+# `WebDriver BiDi listening on ws://...` on standard error, ends it and removes the directory. The
+# script answers one line: `bidi <that line>`, `exit <status> <line>` when firefox ended before it,
+# `none <line>` when it runs without it, or `tmp` without a directory. <line> is the first line of
+# standard error that is not the notice of headless mode, else that notice.
+p_firefox_canary() {
+  [ -n "$canary" ] && [ "$mode" = check ] || return 0
+  case " $EXTRA_TOOLS " in *" firefox "*) ;; *) return 0 ;; esac
+  fc_v=$(echo "$EXTRA_ARCHIVE_PINS" | awk '$1 == "firefox" { print $2 }')
+  [ -n "$fc_v" ] || return 0
+  fc_t=30
+  [ -z "$T" ] || fc_t=${NODE_TEST_FIREFOX_WAIT:-$fc_t}
+  fc_o=$(as_user timeout $((fc_t + 30)) sh -c 'd=$(mktemp -d "$2/slot-firefox-canary.XXXXXX" 2>/dev/null) || { echo tmp; exit 0; }
+first() { l=$(grep -v -m 1 "^\*\*\* You are running in headless mode" "$d/err"); [ -n "$l" ] || l=$(head -n 1 "$d/err"); echo "${l:-no line on standard error}"; }
+if cd "$d" && mkdir home tmp profile; then
+  HOME=$d/home TMPDIR=$d/tmp MOZ_HEADLESS=1 "$1" --headless --no-remote --remote-debugging-port 0 --profile "$d/profile" about:blank >"$d/out" 2>"$d/err" </dev/null &
+  p=$!
+  i=0
+  l=
+  while [ "$i" -lt $(($3 * 5)) ]; do
+    l=$(grep -m 1 "^WebDriver BiDi listening on ws://" "$d/err") && break
+    kill -0 "$p" 2>/dev/null || break
+    sleep 0.2
+    i=$((i + 1))
+  done
+  [ -n "$l" ] || l=$(grep -m 1 "^WebDriver BiDi listening on ws://" "$d/err")
+  if [ -n "$l" ]; then
+    echo "bidi $l"
+  elif kill -0 "$p" 2>/dev/null; then
+    echo "none $(first)"
+  else
+    wait "$p"
+    echo "exit $? $(first)"
+  fi
+  kill "$p" 2>/dev/null
+  wait "$p" 2>/dev/null
+fi
+cd /
+rm -rf "$d"' sh "$R/usr/local/firefox-$fc_v/firefox" "$R$STORE/tmp" "$fc_t" </dev/null 2>&1)
+  case $fc_o in
+    "bidi WebDriver BiDi listening on "*) echo "canary: ok: firefox: firefox $fc_v started headless as the build user and listened for WebDriver BiDi (${fc_o#bidi WebDriver BiDi listening on })" ;;
+    "exit "*)
+      fc_r=${fc_o#exit }
+      drift firefox "canary: firefox exited with status ${fc_r%% *} before it listened for WebDriver BiDi: ${fc_r#* }"
+      ;;
+    "none "*) drift firefox "canary: no WebDriver BiDi line from firefox within $fc_t s: ${fc_o#none }" ;;
+    tmp*) drift firefox "canary: the build user got no directory in $STORE/tmp: nothing was started" ;;
+    *) drift firefox "canary: no answer from the start within $((fc_t + 30)) s: nothing was tested" ;;
+  esac
+}
 
 # The trees of HOME_PINS. Downloads the archive into directory $1, checks its SHA-256, unpacks it
 # into $1/tree and prints that path. Arguments: dir version sha256 url strip check. NODE_TEST=1:
@@ -2727,7 +2965,38 @@ $HOME_PINS
 EOF
 }
 
-# EXTRA_TOOLS: Erlang/OTP, Elixir, Gleam and Odin, only on a node whose config names them.
+# sdkman's `current` link of groovy: ~/.sdkman/candidates/groovy/current names the version of the
+# first groovy line of HOME_PINS, relative, as sdkman makes it. A job that carries the
+# workstation's GROOVY_HOME (that path, named in SLOT_ENV) finds the tree there. The build user
+# writes the link; a path there that is no symbolic link is left alone.
+p_groovy_current() {
+  gc_l=$(echo "$HOME_PINS" | awk '$1 == "groovy" { print $2 " " $6; exit }')
+  [ -n "$gc_l" ] || return 0
+  gc_v=${gc_l%% *}
+  gc_p=$H/$(dirname "${gc_l#* }")/current
+  gc_g=$(readlink "$R$gc_p" 2>/dev/null)
+  [ -L "$R$gc_p" ] && [ "$gc_g" = "$gc_v" ] && return 0
+  if [ -L "$R$gc_p" ]; then
+    gc_s="'$gc_g'"
+  elif [ -d "$R$gc_p" ]; then
+    gc_s='a directory'
+  elif [ -e "$R$gc_p" ]; then
+    gc_s='a file'
+  else
+    gc_s="'missing'"
+  fi
+  drift home:groovy-current "$gc_p is $gc_s, want a link to $gc_v"
+  fixing || return 0
+  if [ -e "$R$gc_p" ] && [ ! -L "$R$gc_p" ]; then
+    failed home:groovy-current "$gc_p is no symbolic link: not replaced"
+  elif as_user ln -sfn "$gc_v" "$R$gc_p" </dev/null && [ "$(readlink "$R$gc_p")" = "$gc_v" ]; then
+    changed home:groovy-current "$gc_p links to $gc_v"
+  else
+    failed home:groovy-current "$gc_p not written"
+  fi
+}
+
+# EXTRA_TOOLS: Erlang/OTP, Elixir, Gleam, Odin and Firefox, only on a node whose config names them.
 #
 # Erlang/OTP built from the source tarball of its release (ERLANG_PIN), like musl: the build user
 # configures the source for the prefix /usr/local/erlang-<version>, builds it with 4 make jobs and
@@ -2889,9 +3158,9 @@ $ERLANG_PIN
 EOF
 }
 # The tools EXTRA_TOOLS names; nothing is read or written for a tool it does not name, and one
-# taken out of the config stays as it is. elixir, gleam and odin are archives in the form of
-# ARCHIVE_PINS and go through p_archives. In apply, elixir waits for Erlang/OTP: its check and
-# every mix task run erl.
+# taken out of the config stays as it is. elixir, gleam, odin and firefox are archives in the
+# form of ARCHIVE_PINS and go through p_archives. In apply, elixir waits for Erlang/OTP: its check
+# and every mix task run erl.
 p_extra_tools() {
   [ -n "$EXTRA_TOOLS" ] || return 0
   erlang_ok=
@@ -3020,7 +3289,11 @@ p_core_load() {
     q_active "$co_u" || continue
     co_l=$(q_core_limit "$co_u")
     [ "$co_l" = 0 ] && continue
-    echo "pending: core: kernel.core_pattern stays '$co_v' while $co_u runs with the core limit ${co_l:-unknown} (under the pattern core its processes write core files): the apply that restarts it loads $CORE_SYSCTL" >&2
+    # During a drain no apply is needed for it: the start that ends the drain loads the file
+    # (gap_core_load).
+    co_t="the apply that restarts it loads $CORE_SYSCTL"
+    [ ! -f "$R$DRAIN_DIR/drain" ] || co_t="the start of slot-node.service at the end of its drain loads $CORE_SYSCTL"
+    echo "pending: core: kernel.core_pattern stays '$co_v' while $co_u runs with the core limit ${co_l:-unknown} (under the pattern core its processes write core files): $co_t" >&2
     return 0
   done
   a_sysctl_load "$CORE_SYSCTL"
@@ -3222,6 +3495,13 @@ stale_reason() {
       echo "it runs '$sr_v', the config says slot $SLOT_VERSION"
       return 0
     fi
+    # The same version of the other build: the binary at the path was replaced by an apply whose
+    # restart waited for jobs.
+    sr_t=$(q_running_target "$1")
+    if [ -n "$sr_t" ] && [ "$sr_t" != "$SLOT_TARGET" ]; then
+      echo "it runs the slot build for $sr_t, the config says $SLOT_TARGET"
+      return 0
+    fi
     # A job is a child of this process and has its groups. Under a role that is not the node's
     # own (p_role) a restart for the group would hand docker to the jobs: it waits.
     sr_g=$(q_proc_groups "$1")
@@ -3336,8 +3616,41 @@ gap_step() {
     rm -f "$R$DRAIN_DIR/drain"
     a_drain_disarm
     echo "slot-node: the drain is over: slot-node.service starts"
+    gap_core_load
   fi
   return 0
+}
+# The end of a drain, in the step before the start: the pattern of the running kernel, which
+# p_core_load leaves a pipe while a unit runs with another core limit than 0. `apply --drain` ends
+# before the units restart, so without this the pipe stayed until a second apply. The condition
+# is p_core_load's: the pattern is a pipe, the sysctl file is there, sccache-node (restarted above
+# when its restart waited) runs with the soft limit 0, and slot-node, of which no process runs
+# now, gets the soft limit 0 at this start. A start that ends no drain loads nothing.
+gap_core_load() {
+  gc_v=$(q_core_pattern)
+  case $gc_v in
+    "|"*) ;;
+    *) return 0 ;;
+  esac
+  [ -e "$R$CORE_SYSCTL" ] || return 0
+  if q_active sccache-node.service; then
+    gc_l=$(q_core_limit sccache-node.service)
+    if [ "$gc_l" != 0 ]; then
+      echo "slot-node: kernel.core_pattern stays '$gc_v' while sccache-node.service runs with the core limit ${gc_l:-unknown}: the next apply loads $CORE_SYSCTL"
+      return 0
+    fi
+  fi
+  gc_l=$(q_core_limit_next slot-node.service)
+  if [ "$gc_l" != 0 ]; then
+    echo "slot-node: kernel.core_pattern stays '$gc_v' while slot-node.service starts with the core limit ${gc_l:-unknown}: the next apply loads $CORE_SYSCTL"
+    return 0
+  fi
+  a_sysctl_load "$CORE_SYSCTL"
+  gc_v=$(q_core_pattern)
+  case $gc_v in
+    "|"*) echo "slot-node: kernel.core_pattern is still '$gc_v' after sysctl -p $CORE_SYSCTL" ;;
+    *) echo "slot-node: kernel.core_pattern is '$gc_v' (sysctl -p $CORE_SYSCTL)" ;;
+  esac
 }
 # The bound of a drain (mode drain-bound, run by the timer of a_drain_arm). The daemon process of
 # the mark still runs: the unit restarts the hard way, which ends the jobs that still run. Another
@@ -3670,8 +3983,11 @@ case $mode in
     p_make
     [ -z "$T" ] || [ -z "${NODE_TEST_MUSL_PIN:-}" ] || MUSL_PIN=$NODE_TEST_MUSL_PIN
     p_musl
+    [ -z "$T" ] || [ -z "${NODE_TEST_DASH_PIN:-}" ] || DASH_PIN=$NODE_TEST_DASH_PIN
+    p_dash
     [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
     [ -n "$imds_open" ] || p_home_pins
+    [ -n "$imds_open" ] || p_groovy_current
     [ -z "$T" ] || [ -z "${NODE_TEST_ERLANG_PIN:-}" ] || ERLANG_PIN=$NODE_TEST_ERLANG_PIN
     [ -z "$T" ] || [ -z "${NODE_TEST_EXTRA_ARCHIVE_PINS:-}" ] || EXTRA_ARCHIVE_PINS=$NODE_TEST_EXTRA_ARCHIVE_PINS
     [ -n "$imds_open" ] || p_extra_tools
@@ -3685,6 +4001,7 @@ case $mode in
     p_core_canary
     p_cpu_limit_canary
     p_musl_canary
+    p_firefox_canary
     p_drain_canary
     [ -n "$imds_open" ] || p_source_tools
     if [ "$mode" = check ]; then

@@ -10,7 +10,8 @@ conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSIO
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
 EXTRA_TOOLS
-INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT'
+INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT
+SLOT_TARGET'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -110,6 +111,7 @@ conf_read() {
   RUN_LIMIT=${CONF_RUN_LIMIT:-10m}
   RUN_LIMIT_MAX=${CONF_RUN_LIMIT_MAX:-30m}
   GO_ROOT=${CONF_GO_ROOT:-}
+  SLOT_TARGET=${CONF_SLOT_TARGET:-x86_64-unknown-linux-gnu}
   conf_check_forms "$cf"
 }
 
@@ -237,6 +239,14 @@ conf_check_forms() {
     conf_fail "$1: SLOT_VERSION must be a release version such as 0.36.0"
     return 2
     ;;
+  esac
+  # Which archive of the release a node installs: the build against glibc, or the static one.
+  case $SLOT_TARGET in
+    x86_64-unknown-linux-gnu | x86_64-unknown-linux-musl) ;;
+    *)
+      conf_fail "$1: SLOT_TARGET must be x86_64-unknown-linux-gnu or x86_64-unknown-linux-musl, not '$SLOT_TARGET'"
+      return 2
+      ;;
   esac
   for k in BUILD_KEY SETUP_KEY; do
     eval "v=\${$k}"
