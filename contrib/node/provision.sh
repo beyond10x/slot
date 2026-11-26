@@ -249,6 +249,11 @@ extra_tool_packages() {
     case " $EXTRA_TOOLS " in *" $ep_n "*) echo "$ep_p" ;; esac
   done
 }
+# The packages of the clang that CLANG_VERSION names: clang<major> (its binaries are
+# /usr/bin/clang-<major> and the like) and the libraries they load.
+clang_packages() {
+  [ -z "$CLANG_VERSION" ] || echo "clang$CLANG_VERSION clang$CLANG_VERSION-libs"
+}
 # GO_ROOT may not be the directory of a pinned archive or of the make this script builds, nor lie
 # in one: each of those is replaced whole at a release change. conf.sh, which does not know the
 # pins, refuses the other directories of the provisioning.
@@ -1433,16 +1438,47 @@ want_file() {
 
 p_packages() {
   missing=
-  for p in $BASE_PACKAGES $EXTRA_PACKAGES $(extra_tool_packages); do q_pkg "$p" || missing="$missing $p"; done
+  for p in $BASE_PACKAGES $EXTRA_PACKAGES $(extra_tool_packages) $(clang_packages); do q_pkg "$p" || missing="$missing $p"; done
   [ -z "$missing" ] && return 0
   drift packages "not installed:$missing"
-  if fixing; then
-    if [ -n "$T" ]; then
-      for p in $missing; do st_add packages "$p"; done
-    else
-      dnf -y -q install $missing >/dev/null || failed packages "dnf install$missing"
-    fi
-    changed packages "installed$missing"
+  fixing || return 0
+  # The clang packages go in a transaction of their own: on Amazon Linux 2023 clang21 and
+  # clang22 conflict with the base clang's clang-resource-filesystem, and a conflict fails every
+  # package of its transaction.
+  pk_main=
+  pk_clang=
+  for p in $missing; do
+    case " $(clang_packages) " in
+      *" $p "*) pk_clang="$pk_clang $p" ;;
+      *) pk_main="$pk_main $p" ;;
+    esac
+  done
+  if [ -n "$pk_main" ]; then
+    a_pkg_install $pk_main >&2 || failed packages "dnf install$pk_main"
+    changed packages "installed$pk_main"
+  fi
+  [ -n "$pk_clang" ] || return 0
+  if pk_e=$(a_pkg_install $pk_clang); then
+    changed packages "installed$pk_clang"
+  else
+    pk_w=$(printf '%s\n' "$pk_e" | grep -m 1 'conflicts with' | sed 's/^[ -]*//')
+    [ -n "$pk_w" ] || pk_w=$(printf '%s\n' "$pk_e" | grep -v '^[[:space:]]*$' | tail -n 1)
+    failed packages "dnf install$pk_clang (CLANG_VERSION): ${pk_w:-no message}"
+  fi
+}
+# dnf install of the packages $@; its messages on stdout. NODE_TEST=1: a package named in
+# $R/.state-pkg-conflicts fails the whole call, as a conflict does.
+a_pkg_install() {
+  if [ -n "$T" ]; then
+    for p in "$@"; do
+      grep -qx "$p" "$R/.state-pkg-conflicts" 2>/dev/null || continue
+      echo " Problem: problem with installed package stand-in-1.0"
+      echo "  - package $p-1.0 from stand-in conflicts with stand-in < 99 provided by stand-in-1.0 from @System"
+      return 1
+    done
+    for p in "$@"; do st_add packages "$p"; done
+  else
+    dnf -y -q install "$@" 2>&1 >/dev/null
   fi
 }
 
@@ -2996,6 +3032,64 @@ p_groovy_current() {
   fi
 }
 
+# CLANG_VERSION: the clang a job finds on PATH is the packaged major it names, not the
+# distribution's default (Amazon Linux 2023: clang 15 in /usr/bin, newer majors as the packages
+# clang<major>, which install /usr/bin/clang-<major> and the like). The packages come with the
+# others (clang_packages); this part links clang, clang++ and clang-cpp in /usr/local/bin, which
+# is before /usr/bin on a job's PATH, and reads the first line of `clang --version` there as the
+# build user. A link is set only to a binary that is there; a real file at a link's name is left
+# alone. A config without the key leaves the links as they are.
+clang_says() {
+  cs_b=/usr/local/bin/clang
+  # NODE_TEST=1: the link's absolute target lies under NODE_ROOT.
+  if [ -n "$T" ] && [ -L "$R$cs_b" ]; then cs_b=$(readlink "$R$cs_b"); fi
+  as_user timeout 10 "$R$cs_b" --version 2>/dev/null </dev/null | head -n 1
+}
+p_clang() {
+  [ -n "$CLANG_VERSION" ] || return 0
+  cl_n=$CLANG_VERSION
+  cl_set=
+  cl_real=
+  for cl_b in clang clang++ clang-cpp; do
+    cl_w=/usr/bin/$cl_b-$cl_n
+    cl_g=$(readlink "$R/usr/local/bin/$cl_b" 2>/dev/null)
+    [ -L "$R/usr/local/bin/$cl_b" ] && [ "$cl_g" = "$cl_w" ] && continue
+    if [ -e "$R/usr/local/bin/$cl_b" ] && [ ! -L "$R/usr/local/bin/$cl_b" ]; then
+      drift clang "/usr/local/bin/$cl_b is a real file, want a link to $cl_w"
+      cl_real="$cl_real $cl_b"
+    else
+      drift clang "/usr/local/bin/$cl_b is '${cl_g:-missing}', want a link to $cl_w"
+      cl_set="$cl_set $cl_b"
+    fi
+  done
+  if fixing; then
+    for cl_b in $cl_real; do failed clang "/usr/local/bin/$cl_b is a real file; not replaced"; done
+    cl_done=
+    for cl_b in $cl_set; do
+      if [ ! -x "$R/usr/bin/$cl_b-$cl_n" ] || [ -d "$R/usr/bin/$cl_b-$cl_n" ]; then
+        failed clang "/usr/bin/$cl_b-$cl_n is missing (package clang$cl_n): not linked"
+      elif mkdir -p "$R/usr/local/bin" && ln -sfn "/usr/bin/$cl_b-$cl_n" "$R/usr/local/bin/$cl_b"; then
+        cl_done="$cl_done $cl_b"
+      else
+        failed clang "/usr/local/bin/$cl_b: link not written"
+      fi
+    done
+    [ -z "$cl_done" ] || changed clang "linked$cl_done in /usr/local/bin to /usr/bin/<name>-$cl_n"
+  fi
+  cl_v=$(clang_says)
+  case $cl_v in
+    *"clang version $cl_n."*) return 0 ;;
+  esac
+  cl_m="clang --version as the build user (/usr/local/bin/clang) says '$cl_v', want clang $cl_n"
+  if fixing; then
+    # A missing binary is named above already.
+    [ -x "$R/usr/bin/clang-$cl_n" ] || return 0
+    failed clang "$cl_m"
+  else
+    drift clang "$cl_m"
+  fi
+}
+
 # EXTRA_TOOLS: Erlang/OTP, Elixir, Gleam, Odin and Firefox, only on a node whose config names them.
 #
 # Erlang/OTP built from the source tarball of its release (ERLANG_PIN), like musl: the build user
@@ -3991,6 +4085,7 @@ case $mode in
     [ -z "$T" ] || [ -z "${NODE_TEST_ERLANG_PIN:-}" ] || ERLANG_PIN=$NODE_TEST_ERLANG_PIN
     [ -z "$T" ] || [ -z "${NODE_TEST_EXTRA_ARCHIVE_PINS:-}" ] || EXTRA_ARCHIVE_PINS=$NODE_TEST_EXTRA_ARCHIVE_PINS
     [ -n "$imds_open" ] || p_extra_tools
+    [ -n "$imds_open" ] || p_clang
     [ -n "$imds_open" ] || p_keys
     p_services
     p_core_load
