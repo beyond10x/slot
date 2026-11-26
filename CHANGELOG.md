@@ -41,6 +41,19 @@
   `serde_json` 0.73 s in the first worktree, 0.17 s and 0.17 s in the next two, where two trees
   without the view took 0.69 s and 0.69 s. Nothing in slot changes; the numbers and the
   proposal are `docs/design.md` § 28.
+- Node provisioning: a node whose config names them in the new key `EXTRA_TOOLS` gets
+  Erlang/OTP 29.0.6, Elixir 1.20.4 (the precompiled release for OTP 29), Gleam 1.19.0 and Odin
+  dev-2026-09, each pinned in `provision.sh` by version and SHA-256, with `erl`, `erlc`,
+  `escript`, `elixir`, `elixirc`, `mix`, `iex`, `gleam` and `odin` linked in `/usr/local/bin`,
+  which is on the PATH of every job. A node without the key gets none of them. Erlang/OTP is
+  built once on the node from the source tarball of its release, as the build user: upstream
+  publishes no Linux binary, and the prebuilt builds for Ubuntu did not load their crypto
+  library, or did not start, with a node's OpenSSL and glibc. Its build needs `ncurses-devel`,
+  which the node names in `EXTRA_PACKAGES`; `check` and `apply` name the package when it is
+  missing. Elixir, Gleam and Odin are release archives, installed by the code of the other
+  archive pins (Elixir's is a zip). `toolchains.sh` prints `tool erlang`, `tool elixir`,
+  `tool gleam` and `tool odin` lines, so `push.sh check` compares the four between the
+  workstation and the node (`contrib/node/README.md`).
 
 ## 0.39.1 — 2026-11-26
 
