@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Node aep for runbook's driver: `provision.sh` installs the aep 0.80.0 release binary at
+  `~/.cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu/aep` (`HOME_PINS`, the archive SHA-256 of
+  the driver's `aep-pin.json`), where its tests look; the driver compares the file's digest with
+  the pin, so the source-built aep on the node's PATH could not fill it. `toolchains.sh` prints
+  `tool sdc-aep-<version> <16 hex digits of the SHA-256>` for each such file, so `push.sh check`
+  covers it (copy `toolchains.sh` to `~/.local/share/slot/` after the merge).
+
+- Node pnpm: `provision.sh` installs pnpm 11.9.0, the release the workstation runs, as an archive
+  pin (the npm tarball, SHA-256 pinned) and links `pnpm` and `pnpx` in `/usr/local/bin`. A
+  repository's `pnpm` step (spindle's `task ui`) exited 201 on the node.
+
 - Node home trees: `provision.sh` installs the ess releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 in
   `~/.local/share/ess-versions/<version>/ess` and `@types/node` 26.3.0 with `undici-types` 8.3.0 in
   `~/.local/share/ess-node/node_modules` (`HOME_PINS`, SHA-256 pinned). A repository that calls an

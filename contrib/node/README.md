@@ -155,7 +155,8 @@ version of `go` and `node`; a missing link or another version is drift. `typescr
 `tsserver`), `prettier` and `esbuild` are archives of the same kind: the npm tarballs of those
 releases from `registry.npmjs.org` (esbuild's is its `@esbuild/linux-x64` package, the native
 binary), with `bin/prettier.cjs` linked as `prettier`; the consumers' test lanes call them by
-name. `toolchains.sh` prints one `tool <name> <version>` line for each tool it finds (the list is
+name. `pnpm` 11.9.0 is the same kind (`pnpm` and `pnpx` link to its `bin/*.mjs`; it needs node
+22.13 or later). `toolchains.sh` prints one `tool <name> <version>` line for each tool it finds (the list is
 below), and `push.sh check` compares those lines both ways. `zstd` and `python3` are base packages. An older directory of a
 former pin stays until someone removes it. Other releases are not installed: a consumer fetches its
 own (`GOTOOLCHAIN=auto`). The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
@@ -168,7 +169,8 @@ writable `~/.cache`. `yq` is the Go one of mikefarah at v4.30.8, an archive pin 
 its binary `yq_linux_amd64`, linked as `yq`). `toolchains.sh` prints a `tool` line for `ess`,
 `aep`, `yq` and `cargo-about` as well, read from `/` with `ESS_TOOLCHAIN` unset.
 
-`aep` 0.80.0 is built on the node: its release binary needs glibc 2.39 and the node has 2.34. A
+`aep` 0.80.0 on the PATH of a job is built on the node (the release binary is installed too, for
+runbook's driver cache path only, see below: it wants glibc 2.39 and the node has 2.34). A
 source pin (`SOURCE_PINS` in `provision.sh`) names the repository, the git revision of the release
 tag (the pin: there is no archive to hash) and the rust toolchain; apply runs `cargo +1.99.1
 install --locked --git <url> --rev <rev> aep-cli --root <store>/cargo` as the build user after
@@ -204,6 +206,13 @@ tree into place through a `.slot-new` directory, with group and other write and 
 writes the archive's SHA-256 to `.slot-sha256` in the tree. Check runs `ess --version` or reads
 `package.json`, and reports drift when `.slot-sha256` is not the pin's SHA-256. These steps are
 skipped while the metadata service is open, like the other downloads that run as the build user.
+
+The same list holds the aep release binary of runbook's driver pin
+(`~/.cache/sdc/aep/<version>/x86_64-unknown-linux-gnu/aep`; the driver compares its SHA-256 with
+`driver/aep-pin.json`, so the aep built from source on the node's PATH cannot stand in for it). The
+release binary asks for glibc 2.39 through two weak symbols; on the node's 2.34 the loader prints
+one warning and `aep --version` still answers. `toolchains.sh` prints
+`tool sdc-aep-<version> <16 hex digits of the SHA-256>` for it.
 
 The same list holds the Playwright browsers a repository's tests use: the Chrome for Testing
 headless shell of revision 1254 (Playwright 1.65.0) and 1234 (1.62.1) in
