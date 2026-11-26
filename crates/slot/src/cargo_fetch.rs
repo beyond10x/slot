@@ -1,5 +1,5 @@
 //! Fetch once: the crates of a mirror's `Cargo.lock` are downloaded once on
-//! the node, and its cargo jobs then run offline.
+//! the node, before the job that needs them is queued.
 //!
 //! Parallel cargo jobs on one node took turns on cargo's package-cache lock
 //! while one of them downloaded, for up to 28 minutes. Before a cargo job of
@@ -10,10 +10,21 @@
 //! workstation's cargo, the fetch updates a `Cargo.lock` that is out of date
 //! (a path dependency just added); only a job that passes `--locked` or
 //! `--frozen` itself gets `cargo fetch --locked`, so it fails as it would
-//! locally. Every such job then runs with `CARGO_NET_OFFLINE=true`, so it
-//! takes the package-cache lock only for the moment it reads the cache. A
-//! fetch that fails sends the job back to the client, which runs it on its
-//! own machine's daemon.
+//! locally. The job then finds every crate in the cargo home and takes the
+//! package-cache lock only for the moment it reads the cache. A fetch that
+//! fails sends the job back to the client, which runs it on its own
+//! machine's daemon.
+//!
+//! The job's environment is left as it is. Until 0.39.1 such a job got
+//! `CARGO_NET_OFFLINE=true`, so that it could not download under the lock
+//! whatever the fetch had left out. A compile cache keys every `CARGO_*`
+//! variable of the compiler's environment: with the variable a cargo job
+//! shared no entry with cargo inside a generic job, which gets no fetch and
+//! no variable (and cannot get it: a script may run `cargo install`, or
+//! build a workspace with another lock file). Without it, a job whose crate
+//! is missing after the fetch (the cargo home was cleaned) downloads it
+//! under the lock instead of failing, and a job whose `Cargo.lock` is out
+//! of date asks the registry's index.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -30,12 +41,10 @@ pub const DIR: &str = ".cargo-fetch";
 /// may take before the job goes back to the client.
 pub const LIMIT: Duration = Duration::from_secs(300);
 
-/// What runs offline after the fetch.
-pub const OFFLINE: &str = "CARGO_NET_OFFLINE=true";
-
 /// Whether `argv` is a cargo command that resolves and builds the
-/// workspace, so a fetch ahead of it lets it run offline. `fetch`, `update`,
-/// `add`, `install` and the like need the network themselves.
+/// workspace, so a fetch ahead of it leaves it nothing to download.
+/// `fetch`, `update`, `add`, `install` and the like need the network
+/// themselves.
 pub fn applies(argv: &[String]) -> bool {
     crate::artifacts::subcommand(argv).is_some_and(|i| {
         matches!(
@@ -104,9 +113,9 @@ fn digest(file: &Path) -> Option<String> {
 pub enum Outcome {
     /// No `Cargo.lock`: the job runs as it would without the check.
     NoLock,
-    /// The recorded digest matches: the job runs offline.
+    /// The recorded digest matches: the crates were fetched before.
     Current,
-    /// `cargo fetch` ran this long; the job runs offline.
+    /// `cargo fetch` ran this long.
     Fetched(Duration),
 }
 

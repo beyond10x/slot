@@ -55,10 +55,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Each architecture builds on a runner of its own kind, where the binary runs.
           # Ubuntu 22.04 keeps the glibc floor lower than `ubuntu-latest` for downloaded binaries.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+          # Static binaries, for a host with an older glibc or none. rustc links them with the
+          # musl it ships for the target: the runner needs no musl package.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -78,7 +85,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
-      - name: Build the web UI, then build, smoke-test and package slot
+      - name: Build the web UI, then build and smoke-test slot
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -92,9 +99,31 @@ jobs:
             echo "::error::the built binary reports $printed, but the release tag is $GITHUB_REF_NAME" >&2
             exit 1
           fi
+      - name: Prove the musl binary is static and runs in Alpine
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          # The image index of Alpine 3.23: one digest, an image for each architecture.
+          ALPINE: docker.io/library/alpine@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2
+        run: |
+          set -euo pipefail
+          bin="target/$TARGET/release/slot"
+          sh .github/scripts/static-binary.sh "$bin"
+          printed=$(docker run --rm --network none --volume "$PWD/$bin:/slot:ro" "$ALPINE" /slot --version | awk '{print $NF}')
+          if [ "$printed" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::in Alpine the $TARGET binary reports '$printed', but the release tag is $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+      - name: Package slot
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
           package="slot-$GITHUB_REF_NAME-$TARGET"
           mkdir -p "dist/$package"
-          cp "$bin" LICENSE README.md "dist/$package/"
+          cp "target/$TARGET/release/slot" LICENSE README.md "dist/$package/"
           tar -C dist -czf "dist/$package.tar.gz" "$package"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -118,7 +147,7 @@ jobs:
       - name: Verify archives, write checksums and notes
         run: |
           set -euo pipefail
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             test -f "dist/slot-$GITHUB_REF_NAME-$target.tar.gz" || { echo "::error::missing slot-$GITHUB_REF_NAME-$target.tar.gz" >&2; exit 1; }
           done
           (cd dist && sha256sum slot-*.tar.gz > SHA256SUMS && sha256sum --check SHA256SUMS && cat SHA256SUMS)

@@ -2,6 +2,94 @@
 
 ## Unreleased
 
+- Releases carry static binaries: `slot-<version>-x86_64-unknown-linux-musl.tar.gz` and
+  `slot-<version>-aarch64-unknown-linux-musl.tar.gz` beside the two gnu archives, all four in
+  `SHA256SUMS`. A gnu binary names the glibc versions of the image it was built on and stops on
+  a host with an older one (`version 'GLIBC_…' not found`); a musl binary loads no library and
+  runs whatever C library the host has, Alpine included. The release workflow builds each
+  musl target on the runner of its architecture, as it builds the gnu one, proves the binary
+  static (`.github/scripts/static-binary.sh`: no `NEEDED` entry and no program interpreter in
+  its ELF headers) and runs `slot --version` in an Alpine container named by digest; the answer
+  must be the tag. The bundle job fails when one of the four archives is missing. Which archive
+  a host takes is in Getting started (`website/docs/getting-started.md`). Where a gnu binary
+  runs it stays the one to take: with musl's allocator the daemon ended a burst of 400 jobs on
+  16 slots at 75 jobs a second, the gnu build at 86.
+- Remote mode: a job that a deny list keeps on this machine (a tree on the never-sync list, a
+  denied git dependency of a `Cargo.lock`) runs in this machine's pool also when the caller's
+  environment carries `SLOT_SPILLED`. The client read that variable alone as the mark of a job
+  this machine's daemon had handed to a node: it printed `slot: git dependency denied: <source>:
+  the tree is not synced to <host>`, ended with exit 3 and left the job to that daemon to queue
+  again. A wrapper that sets `SLOT_SPILLED` beside `SLOT_HOST`, so that a failed remote start
+  never runs here, has no such daemon, and the job ran nowhere. Now only the client the daemon
+  started itself for a handed job ends that way (it has `SLOT_PHASES_FILE` too); every other
+  call prints the line with `; running on this machine` and runs the job here. Its record names
+  the deny reason in `local_reason`, also on a daemon with a node, where a request with
+  `SLOT_SPILLED` in its environment was labelled `sent back by a node` before any reason the
+  client named. Unchanged: a remote start that failed (ssh, the sync, a node that did not start
+  the job) ends with exit 3, and `slot --here` says nothing about a node.
+- `contrib/cache-key-probe.sh both <package> <tree>`: three new worktrees of the tree's
+  repository, each on a branch of its own with a test that prints that branch's name, build in
+  generic jobs that bind their own `<worktree>/target` at one absolute path
+  (`/mnt/slot-probe-target`, `PROBE_VIEW`) in a mount namespace of the job alone (bwrap, else
+  `unshare`; no root, nothing changed on the machine). Worktree 1 builds alone, worktrees 2 and 3
+  then build and run the test at the same time. Exit 0 when each of the two ran the test binary
+  of its own branch and neither log has a line waiting for a file lock; it prints the package's
+  time for each and how many library units were served. `PROBE_SHARE_TARGET=1` is the negative
+  control (one directory for all three: exit 1). An sccache server outside the view does not see
+  the path in its default mode (`error writing dependencies to …: No such file or directory`),
+  so the builds set `SCCACHE_CLIENT_SIDE=1` (`PROBE_VIEW_ENV`). Measured on a build node:
+  `serde_json` 0.73 s in the first worktree, 0.17 s and 0.17 s in the next two, where two trees
+  without the view took 0.69 s and 0.69 s. Nothing in slot changes; the numbers and the
+  proposal are `docs/design.md` § 28.
+- Node provisioning: a node whose config names them in the new key `EXTRA_TOOLS` gets
+  Erlang/OTP 29.0.6, Elixir 1.20.4 (the precompiled release for OTP 29), Gleam 1.19.0 and Odin
+  dev-2026-09, each pinned in `provision.sh` by version and SHA-256, with `erl`, `erlc`,
+  `escript`, `elixir`, `elixirc`, `mix`, `iex`, `gleam` and `odin` linked in `/usr/local/bin`,
+  which is on the PATH of every job. A node without the key gets none of them. Erlang/OTP is
+  built once on the node from the source tarball of its release, as the build user: upstream
+  publishes no Linux binary, and the prebuilt builds for Ubuntu did not load their crypto
+  library, or did not start, with a node's OpenSSL and glibc. Its build needs `ncurses-devel`,
+  which the node names in `EXTRA_PACKAGES`; `check` and `apply` name the package when it is
+  missing. Elixir, Gleam and Odin are release archives, installed by the code of the other
+  archive pins (Elixir's is a zip). `toolchains.sh` prints `tool erlang`, `tool elixir`,
+  `tool gleam` and `tool odin` lines, so `push.sh check` compares the four between the
+  workstation and the node (`contrib/node/README.md`).
+- Remote mode: a `go build -o <path>` or `go test -c -o <path>` that exits 0 leaves what it built
+  at the same path in the caller's checkout, with mode and modification time. Before, the file
+  stayed on the server whenever the path lay in a directory the sync leaves out (`target/`,
+  anything in `.gitignore`), and the job still ended with exit 0. `-o <path>` and `-o=<path>` are
+  read against the directory of the call (after `-C`). For a directory, slot lists it on the
+  server before the job and after it and copies the files that are new or whose size or
+  modification time changed, and no other file of that directory; the top of the checkout
+  (`-o .`) is such a directory. A directory on the path that is a symlink in the checkout stays
+  a symlink (the copy goes into the directory as this machine resolves it). A path outside the
+  checkout, a job that did not exit 0, `go run`, `go vet`, a `go build` without `-o`, a `go test` without
+  `-c`, and a `go test -c` without `-o` (its `<package>.test` stays in the working directory on
+  the server) copy nothing and print nothing. `SLOT_NO_PRODUCTS=1` turns it off, as for cargo. A
+  listing or a copy that fails prints `slot: artifacts not fetched: <path>: …` and turns exit 0
+  into 1; a single file needs no listing before the job, so a failed one is listed again after
+  it.
+- Remote mode: a cargo job, cargo inside a generic job and the jobs of another tree of the
+  repository get the same `CARGO_*` variables, so a compile cache that keys them (sccache keys
+  every `CARGO_*` variable of the compiler's environment) can serve a crate one of them built to
+  the others. Two changes. For a tree mirrored at the same path, the job gets no
+  `CARGO_TARGET_DIR` when it builds into the directory cargo resolves by itself (`target` beside
+  the workspace's root manifest); before, it got `CARGO_TARGET_DIR=<tree>/target`, one value per
+  tree; the server daemon's own `CARGO_TARGET_DIR` and `CARGO_BUILD_TARGET_DIR` are removed
+  from it too. A caller that set `CARGO_TARGET_DIR`, or whose cargo configuration names another
+  directory, still gets the variable with that directory, and so does a job for which
+  `cargo metadata` failed on the caller's machine (`target` beside the nearest `Cargo.lock` is
+  then a guess that a cargo configuration in the tree may contradict). And a cargo job gets no
+  `CARGO_NET_OFFLINE=true` after its fetch: cargo inside a generic job never had it. The fetch
+  once per `Cargo.lock` stays; its line now ends after the time (`slot: new Cargo.lock on this
+  mirror: cargo fetch took 2.1 s`). A job whose crate is missing after the fetch now downloads it
+  where it failed before; a `CARGO_NET_OFFLINE` of the caller's own reaches the job. The job's
+  record, eviction and the products read the target directory as before. Not changed: a tree
+  mirrored below the workspace root gets `CARGO_TARGET_DIR=<cache-root>/target/<id>`, and a
+  sandbox with fixed paths `/work/target`. Needs this release on the server and on the client:
+  the client says whether the directory is cargo's own (`workspace.target_default`), and a server
+  that gets no word exports the variable as before. The environment reference lists what slot
+  sets in a job and what that means for the cache key.
 - The gate runs its three shell tests through `contrib/shell-tests.sh`: under dash where dash is
   on PATH, else under `sh`, each test once, and its first line says which shell ran them. The
   forge's `sh` is dash and a node's or a workstation's may be bash; a test of
@@ -21,9 +109,10 @@
   `SHA256SUMS`. Both builds print the same version, so `check` and `apply` read the build from
   the binary at each path and from the running daemon, and a change of the key at one version
   installs the other archive and restarts the daemon.
-- Node: Firefox. The config key `EXTRA_ARCHIVES` names archives a node installs besides the
-  pinned ones (`EXTRA_ARCHIVE_PINS` of `contrib/node/provision.sh`); a name with no archive there
-  is refused. `EXTRA_ARCHIVES=firefox` installs Mozilla's archive of Firefox 159.0, checked
+- Node: Firefox. `firefox` is a name of the config key `EXTRA_TOOLS`, beside `erlang`, `elixir`,
+  `gleam` and `odin`: one key names every optional tool of a node, and a name with no pin in
+  `contrib/node/provision.sh` is refused. `firefox` there installs Mozilla's archive of Firefox
+  159.0, checked
   against the SHA-256 of the release's `SHA256SUMS`, into `/usr/local/firefox-159.0`, links
   `/usr/local/bin/firefox`, and installs the packages it loads (`gtk3`, `alsa-lib`, `libX11-xcb`,
   `dbus-libs`, and `xz` for the archive). A consumer's browser tests start `firefox` by name and

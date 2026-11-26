@@ -112,16 +112,6 @@ pnpm 11.9.0 2b567aa66026238078ac2e0a33bec3febd60e962987aac697456f3180819b287 htt
 yarn 1.22.22 c17d3797fb9a9115bf375e31bfd30058cac6bc9c3b8807a3d8cb2094794b51ca https://registry.npmjs.org/yarn/-/yarn-1.22.22.tgz 1 bin/yarn.js:yarn bin/yarn.js:yarnpkg
 yq v4.30.8 2e07c9b81699a6823dafc36a9c01aef5025179c069fedd42b1c6983545386771 https://github.com/mikefarah/yq/releases/download/v4.30.8/yq_linux_amd64.tar.gz 0 yq_linux_amd64:yq
 helm v3.8.1 d643f48fe28eeb47ff68a1a7a26fc5142f348d02c8bc38d699674016716f61cd https://get.helm.sh/helm-v3.8.1-linux-amd64.tar.gz 1 helm'
-# Archives in the form of ARCHIVE_PINS that a node installs only when its config names them
-# (EXTRA_ARCHIVES), and the packages each loads (EXTRA_ARCHIVE_PACKAGES: the name, then the
-# packages, installed with the base packages). firefox is the release archive of Mozilla for
-# linux-x86_64, en-US, at the release the workstation runs; its SHA-256 is the line of that file in
-# the release's SHA256SUMS on archive.mozilla.org. A consumer's browser tests start `firefox` by
-# name, headless. The archive is a .tar.xz (xz unpacks it); the libraries its binaries need beside
-# their own come from gtk3, alsa-lib, libX11-xcb and dbus-libs (and what gtk3 requires); the newest
-# symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19.
-EXTRA_ARCHIVE_PINS='firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox'
-EXTRA_ARCHIVE_PACKAGES='firefox gtk3 alsa-lib libX11-xcb dbus-libs xz'
 RUSTUP_VERSION=1.29.3
 RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
 RUSTUP_URL=https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init
@@ -181,6 +171,44 @@ chrome-headless-shell 158.0.8127.18 18352d22cb0cdf520cbff2ad8c41391f0e02a72886cb
 chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14 https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-headless-shell-linux64.zip zip .cache/ms-playwright/chromium_headless_shell-1234 chrome-headless-shell-linux64/chrome-headless-shell
 aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep
 groovy 2.4.10 1c4dff3b6edf9a8ced3bca658ee1857cee90cfed1ee3474a2790045033c317a9 https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-binary/2.4.10/groovy-binary-2.4.10.zip zip1 .sdkman/candidates/groovy/2.4.10 embeddable/groovy-all-2.4.10.jar'
+# Tools a node gets only when its config names them in EXTRA_TOOLS (erlang, elixir, gleam, odin,
+# firefox): a consumer's tasks call gleam, elixir, mix, erl and odin by name, its browser tests
+# start firefox by name, and Amazon Linux 2023 packages none of them. A node without the key gets
+# none. The names are erlang and the first field of each line of EXTRA_ARCHIVE_PINS.
+# erlang: Erlang/OTP, built on the node from the source tarball of its release (p_erlang): name,
+# version, SHA-256, URL. The SHA-256 is the one the release publishes in its SHA256.txt. Upstream
+# publishes no Linux binary, and the builds that the Hex build site makes for Ubuntu did not serve
+# on a node (glibc 2.34, OpenSSL 3.5): the one for 22.04 starts, and its crypto library does not
+# load (`undefined symbol: EVP_sm4_cbc, version OPENSSL_3.0.0`), so nothing over TLS works, mix's
+# package download among it; the one for 24.04 asks for GLIBC_2.38.
+ERLANG_PIN='erlang 29.0.6 36c89ffdac9d7531c19be0cee34355b167ea95188625d32bee61ebf49ac82afa https://github.com/erlang/otp/releases/download/OTP-29.0.6/otp_src_29.0.6.tar.gz'
+# The packages the build of Erlang/OTP needs: the C and C++ compilers, make and perl, the OpenSSL
+# headers (crypto and ssl) and the terminal library's headers. All but ncurses-devel are base
+# packages of a node; that one a node names in EXTRA_PACKAGES.
+ERLANG_BUILD_PACKAGES='gcc gcc-c++ make perl openssl-devel ncurses-devel'
+# elixir, gleam, odin, firefox: release archives, in the form of ARCHIVE_PINS and installed by the
+# same code (p_archives). elixir is the precompiled release for the OTP major of the erlang pin: its
+# version field is `<release>-otp-<major>`, which its check reads from `elixir --version` (`Elixir
+# 1.20.4 (compiled with Erlang/OTP 29)`), and its strip field is `zip`, a zip with its files at
+# the top. gleam is the static binary of its release. odin is the monthly release dev-2026-09 (a
+# static binary with its core and vendor libraries beside it, which it reads from the directory
+# of its binary; it links with the node's clang); `odin version` prints
+# `dev-2026-09-nightly:<commit>`, and the check reads the release of it. The SHA-256 of elixir and
+# of gleam are the ones their releases publish beside the archives (elixir-otp-29.zip.sha256sum,
+# <archive>.sha256). Odin's release publishes none: its SHA-256 is the digest of the archive as
+# downloaded from the release twice, on two machines, equal to the digest the release's asset list
+# shows. firefox is the release archive of Mozilla for linux-x86_64, en-US, at the release the
+# workstation runs; its SHA-256 is the line of that file in the release's SHA256SUMS on
+# archive.mozilla.org. It is a .tar.xz (xz unpacks it); the libraries its binaries need beside
+# their own come from gtk3, alsa-lib, libX11-xcb and dbus-libs (and what gtk3 requires); the
+# newest symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19.
+EXTRA_ARCHIVE_PINS='elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip zip bin/elixir bin/elixirc bin/mix bin/iex
+gleam 1.19.0 6083148cb404460810afe35e7878527e58fd2512dd79a76b47d59723815753be https://github.com/gleam-lang/gleam/releases/download/v1.19.0/gleam-v1.19.0-x86_64-unknown-linux-musl.tar.gz 0 gleam
+odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 https://github.com/odin-lang/Odin/releases/download/dev-2026-09/odin-linux-amd64-dev-2026-09.tar.gz 1 odin
+firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox'
+# The packages a tool of EXTRA_TOOLS loads at run time, one line per tool: the name, then the
+# packages, installed with the base packages on a node that names the tool.
+EXTRA_TOOL_PACKAGES='firefox gtk3 alsa-lib libX11-xcb dbus-libs xz'
 pins() {
   echo "$TOOL_PINS" | while read -r _ pv _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
   echo "$SOURCE_PINS" | while read -r _ pv _ _ _ _ pb; do for b in $pb; do echo "$b $pv"; done; done
@@ -215,40 +243,49 @@ METRICS_URL=http://127.0.0.1:7411/metrics
 # after a boot, and the name of the transient timer that is its bound.
 DRAIN_DIR=/run/slot-node
 DRAIN_UNIT=slot-node-drain
-# The archives this node installs: ARCHIVE_PINS, then the lines of EXTRA_ARCHIVE_PINS that
-# EXTRA_ARCHIVES names.
-archive_pins() {
-  echo "$ARCHIVE_PINS"
-  echo "$EXTRA_ARCHIVE_PINS" | while read -r ap_n ap_r; do
-    case " $EXTRA_ARCHIVES " in *" $ap_n "*) echo "$ap_n $ap_r" ;; esac
+# The packages of the tools that EXTRA_TOOLS names (EXTRA_TOOL_PACKAGES).
+extra_tool_packages() {
+  echo "$EXTRA_TOOL_PACKAGES" | while read -r ep_n ep_p; do
+    case " $EXTRA_TOOLS " in *" $ep_n "*) echo "$ep_p" ;; esac
   done
-}
-# The packages of the extra archives that EXTRA_ARCHIVES names.
-extra_archive_packages() {
-  echo "$EXTRA_ARCHIVE_PACKAGES" | while read -r ep_n ep_p; do
-    case " $EXTRA_ARCHIVES " in *" $ep_n "*) echo "$ep_p" ;; esac
-  done
-}
-# EXTRA_ARCHIVES names archives of EXTRA_ARCHIVE_PINS only. conf.sh, which does not know the pins,
-# checks the form of the names.
-extra_archives_known() {
-  ek_all=$(echo "$EXTRA_ARCHIVE_PINS" | awk '{ print $1 }' | tr '\n' ' ' | sed 's/ $//')
-  for ek_n in $EXTRA_ARCHIVES; do
-    case " $ek_all " in *" $ek_n "*) continue ;; esac
-    conf_fail "$cf: EXTRA_ARCHIVES names '$ek_n', which is no archive of provision.sh ($ek_all)"
-    return 2
-  done
-  return 0
 }
 # GO_ROOT may not be the directory of a pinned archive or of the make this script builds, nor lie
 # in one: each of those is replaced whole at a release change. conf.sh, which does not know the
 # pins, refuses the other directories of the provisioning.
 go_root_pins() {
   [ -n "$GO_ROOT" ] || return 0
-  for gp_d in $(archive_pins | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)" "/usr/local/dash-$(echo "$DASH_PIN" | cut -d' ' -f2)"; do
+  for gp_d in $(echo "$ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }') "/usr/local/make-$(echo "$MAKE_PIN" | cut -d' ' -f2)" "/usr/local/musl-$(echo "$MUSL_PIN" | cut -d' ' -f2)" "/usr/local/dash-$(echo "$DASH_PIN" | cut -d' ' -f2)"; do
     case $GO_ROOT/ in
       "$gp_d"/*)
         conf_fail "$cf: GO_ROOT '$GO_ROOT' is the directory of a pinned archive, or lies in one ($gp_d)"
+        return 2
+        ;;
+    esac
+  done
+  return 0
+}
+# EXTRA_TOOLS names tools that have a pin above, and elixir only beside erlang: elixir runs on
+# erl. GO_ROOT may not be the directory of one of those pins either, whatever EXTRA_TOOLS says.
+# conf.sh, which does not know the pins, checks the form of the names.
+extra_tools_conf() {
+  xt_all=$(printf '%s\n%s\n' "$ERLANG_PIN" "$EXTRA_ARCHIVE_PINS" | awk '{ print $1 }' | tr '\n' ' ' | sed 's/ $//')
+  for xt_w in $EXTRA_TOOLS; do
+    case " $xt_all " in *" $xt_w "*) continue ;; esac
+    conf_fail "$cf: EXTRA_TOOLS names '$xt_w', which is no tool of provision.sh ($xt_all)"
+    return 2
+  done
+  case " $EXTRA_TOOLS " in
+    *" erlang "*) ;;
+    *" elixir "*)
+      conf_fail "$cf: EXTRA_TOOLS has elixir without erlang: elixir runs on erl"
+      return 2
+      ;;
+  esac
+  [ -n "$GO_ROOT" ] || return 0
+  for xt_d in $(printf '%s\n%s\n' "$ERLANG_PIN" "$EXTRA_ARCHIVE_PINS" | awk '{ print "/usr/local/" $1 "-" $2 }'); do
+    case $GO_ROOT/ in
+      "$xt_d"/*)
+        conf_fail "$cf: GO_ROOT '$GO_ROOT' is the directory of a pinned archive, or lies in one ($xt_d)"
         return 2
         ;;
     esac
@@ -259,7 +296,7 @@ go_root_pins() {
 if [ "$mode" = bundle ]; then
   conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
   go_root_pins || exit 2
-  extra_archives_known || exit 2
+  extra_tools_conf || exit 2
   m=${3:-}
   o=${4:-}
   [ $# -le 5 ] || usage
@@ -284,7 +321,7 @@ fi
 
 conf_read "$cf" BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SLOT_VERSION || exit 2
 go_root_pins || exit 2
-extra_archives_known || exit 2
+extra_tools_conf || exit 2
 H=$BUILD_HOME
 U=$BUILD_USER
 # The instance profile of this node: INSTANCE_PROFILE, else the one role.sh makes for NODE_NAME.
@@ -1396,7 +1433,7 @@ want_file() {
 
 p_packages() {
   missing=
-  for p in $BASE_PACKAGES $EXTRA_PACKAGES $(extra_archive_packages); do q_pkg "$p" || missing="$missing $p"; done
+  for p in $BASE_PACKAGES $EXTRA_PACKAGES $(extra_tool_packages); do q_pkg "$p" || missing="$missing $p"; done
   [ -z "$missing" ] && return 0
   drift packages "not installed:$missing"
   if fixing; then
@@ -2213,6 +2250,12 @@ archive_fetch() {
       if [ "$fn" = go ]; then
         # Like go: `env GOROOT` answers the directory the binary stands in.
         printf '#!/bin/sh\n[ "$*" != "env GOROOT" ] || { dirname "$(dirname "$0")"; exit 0; }\necho "go version go%s linux/amd64"\n' "$fv" >"$fd/tree/$b"
+      elif [ "$fn" = elixir ]; then
+        # Like elixir: the line of the Erlang system first, then its own with the OTP major.
+        printf '#!/bin/sh\necho "Erlang/OTP %s [stand-in]"\necho\necho "Elixir %s (compiled with Erlang/OTP %s)"\n' "${fv##*-otp-}" "${fv%%-otp-*}" "${fv##*-otp-}" >"$fd/tree/$b"
+      elif [ "$fn" = odin ]; then
+        # Like odin: no `--version`; `version` prints the release with the commit of the build.
+        printf '#!/bin/sh\n[ "$*" = version ] || exit 1\necho "odin version %s-nightly:0000000"\n' "$fv" >"$fd/tree/$b"
       elif [ "$fn" = helm ]; then
         # Like helm: no `--version`, the version without a newline for `version --template`.
         printf '#!/bin/sh\n[ "$*" = "version --template {{.Version}}" ] || exit 1\nprintf %%s "%s"\n' "$fv" >"$fd/tree/$b"
@@ -2230,6 +2273,10 @@ archive_fetch() {
       chmod "$fm" "$fd/tree/$b"
     done
     calls "fetch $fu"
+  elif [ "$fk" = zip ]; then
+    # A zip with its files at the top (elixir). unzip restores no owner and no set-id bit.
+    (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir tree && unzip -q archive -d tree) || return 0
   else
     (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xf archive -C tree --strip-components="$fk" --no-same-owner) || return 0
@@ -2250,6 +2297,8 @@ archive_fetch() {
 archive_version() {
   case $1 in
     go) as_user "$2" version ;;
+    elixir) as_user "$2" --version | sed -n 's/^Elixir \([^ ]*\) (compiled with Erlang\/OTP \([0-9]*\)).*/\1-otp-\2/p' ;;
+    odin) as_user "$2" version | head -n 1 | awk '{ print $NF }' | sed 's/-nightly:.*//' ;;
     helm) as_user "$2" version --template '{{.Version}}' ;;
     yarn) as_user env YARN_IGNORE_PATH=1 "$2" --version ;;
     firefox) as_user env MOZ_HEADLESS=1 "$2" --version ;;
@@ -2419,7 +2468,7 @@ p_archives() {
     changed "archive:$an" "$an $av installed in $dir, linked in /usr/local/bin"
     [ -z "$old" ] || go_old_dir "$old" "$dir" </dev/null
   done <<EOF
-$(archive_pins)
+$ARCHIVE_PINS
 EOF
 }
 
@@ -2778,7 +2827,7 @@ rm -rf "$d"' sh "$R/usr/local/$un-$uv/bin/musl-gcc" "$R$STORE/tmp" "$mc_w" </dev
 $MUSL_PIN
 EOF
 }
-# check --canary with EXTRA_ARCHIVES=firefox: what a consumer's browser tests do with firefox. The
+# check --canary with firefox in EXTRA_TOOLS: what a consumer's browser tests do with firefox. The
 # build user starts it from its tree in a new directory of the store's tmp (the directory holds its
 # HOME, TMPDIR and profile), headless with a WebDriver BiDi port, waits up to 30 s for the line
 # `WebDriver BiDi listening on ws://...` on standard error, ends it and removes the directory. The
@@ -2787,7 +2836,8 @@ EOF
 # standard error that is not the notice of headless mode, else that notice.
 p_firefox_canary() {
   [ -n "$canary" ] && [ "$mode" = check ] || return 0
-  fc_v=$(archive_pins | awk '$1 == "firefox" { print $2 }')
+  case " $EXTRA_TOOLS " in *" firefox "*) ;; *) return 0 ;; esac
+  fc_v=$(echo "$EXTRA_ARCHIVE_PINS" | awk '$1 == "firefox" { print $2 }')
   [ -n "$fc_v" ] || return 0
   fc_t=30
   [ -z "$T" ] || fc_t=${NODE_TEST_FIREFOX_WAIT:-$fc_t}
@@ -2944,6 +2994,194 @@ p_groovy_current() {
   else
     failed home:groovy-current "$gc_p not written"
   fi
+}
+
+# EXTRA_TOOLS: Erlang/OTP, Elixir, Gleam, Odin and Firefox, only on a node whose config names them.
+#
+# Erlang/OTP built from the source tarball of its release (ERLANG_PIN), like musl: the build user
+# configures the source for the prefix /usr/local/erlang-<version>, builds it with 4 make jobs and
+# installs it into a directory of its own source tree (DESTDIR). Root copies that tree, so nothing
+# of the build runs as root and no installed file is the build user's. Left out of the build: the
+# Java interface, ODBC, and the applications that need a window system (wx, debugger, observer,
+# et). The tree carries the mark .slot-archive, `erlang <version> <sha256 of the tarball>`: the
+# build runs once, and every later run reads the mark and what erl answers.
+# erl, erlc and escript are linked into /usr/local/bin from lib/erlang/bin of the tree: the erl
+# script finds its system by walking up from its own path, without resolving a link, and falls
+# back to the prefix it was configured for. So the tree works at that prefix and nowhere else.
+# Measured on a node of 32 CPUs at a load of 10 to 21: configure 11 to 12 s, make 79 s with 4 jobs
+# and 58 s with 8, make install 6 s; the installed tree has 152 MiB, the source tree with its
+# objects 724 MiB.
+#
+# The OTP release that the erl at $1 answers to the build user (`29.0.6`): erl has no `--version`,
+# so it prints the text of releases/<major>/OTP_VERSION under the root of the system that runs.
+erlang_says() {
+  as_user timeout 60 "$1" -noshell -eval '{ok,V}=file:read_file(filename:join([code:root_dir(),"releases",erlang:system_info(otp_release),"OTP_VERSION"])), io:put_chars(V), halt().' 2>/dev/null </dev/null | head -n 1
+}
+# Prints the path of the tree to install; nothing when the download, the checksum or the build
+# failed. Arguments: dir name version sha256 url prefix. NODE_TEST=1: a tree of stand-ins, or
+# nothing when $R/.state-tool-fetch-fails exists.
+erlang_build() {
+  eb_d=$1
+  if fake_fetch; then
+    [ -e "$R/.state-tool-fetch-fails" ] && return 0
+    calls "fetch $5"
+    mkdir -p "$eb_d/tree/lib/erlang/bin" "$eb_d/tree/lib/erlang/releases/${3%%.*}" "$eb_d/tree/lib/erlang/lib/crypto-0/priv/lib" || return 0
+    # Like erl with the line of erlang_says: the OTP release.
+    printf '#!/bin/sh\necho %s\n' "$3" >"$eb_d/tree/lib/erlang/bin/erl"
+    printf '#!/bin/sh\nexit 0\n' >"$eb_d/tree/lib/erlang/bin/erlc"
+    printf '#!/bin/sh\nexit 0\n' >"$eb_d/tree/lib/erlang/bin/escript"
+    echo "$3" >"$eb_d/tree/lib/erlang/releases/${3%%.*}/OTP_VERSION"
+    : >"$eb_d/tree/lib/erlang/lib/crypto-0/priv/lib/crypto.so"
+    echo "$2 $3 $4" >"$eb_d/tree/.slot-archive"
+    chmod -R go-w "$eb_d/tree" && chmod -R a+rX "$eb_d/tree" && chmod 755 "$eb_d/tree/lib/erlang/bin/erl" "$eb_d/tree/lib/erlang/bin/erlc" "$eb_d/tree/lib/erlang/bin/escript" && echo "$eb_d/tree"
+    return 0
+  fi
+  source_unpack "$eb_d" "$4" "$5" || return 0
+  [ -x /usr/bin/make ] || {
+    echo "error: /usr/bin/make (the package's make, which builds Erlang/OTP) is missing" >&2
+    return 0
+  }
+  as_user timeout 1800 sh -c 'cd "$1" && ./configure --prefix="$2" --without-javac --without-odbc --without-wx --without-debugger --without-observer --without-et && /usr/bin/make -j4 && /usr/bin/make install DESTDIR="$1/.slot-stage"' sh "$eb_d/src" "$6" </dev/null >&2 || return 0
+  # The copy is root's: made without the owner or the set-id bits of the build's files, a link
+  # copied as a link. A link in the path of the installed tree, or in place of one of the files
+  # that are linked into /usr/local/bin or read by the check, refuses the whole tree.
+  eb_s=$eb_d/src/.slot-stage$6
+  if ! no_link "$eb_s" || [ ! -d "$eb_s" ]; then
+    echo "error: the build of Erlang/OTP left no directory $6 under its DESTDIR" >&2
+    return 0
+  fi
+  cp -RP "$eb_s" "$eb_d/tree" || return 0
+  chmod -R go-w,u-s,g-s "$eb_d/tree" && chmod -R a+rX "$eb_d/tree" || return 0
+  for eb_f in lib/erlang/bin/erl lib/erlang/bin/erlc lib/erlang/bin/escript "lib/erlang/releases/${3%%.*}/OTP_VERSION"; do
+    if [ ! -f "$eb_d/tree/$eb_f" ] || [ -L "$eb_d/tree/$eb_f" ]; then
+      echo "error: the build of Erlang/OTP left no file $eb_f" >&2
+      return 0
+    fi
+  done
+  # configure only warns when it finds no OpenSSL headers and builds a system without crypto and
+  # ssl, on which mix and gleam fetch no package.
+  eb_c=
+  for eb_f in "$eb_d"/tree/lib/erlang/lib/crypto-*/priv/lib/crypto.so; do
+    if [ -f "$eb_f" ] && [ ! -L "$eb_f" ]; then eb_c=1; fi
+  done
+  if [ -z "$eb_c" ]; then
+    echo "error: the build of Erlang/OTP left no crypto library (lib/erlang/lib/crypto-*/priv/lib/crypto.so): the package openssl-devel has the headers it is built from" >&2
+    return 0
+  fi
+  # The mark goes into the tree before the tree goes to its place.
+  echo "$2 $3 $4" >"$eb_d/tree/.slot-archive" && chmod 644 "$eb_d/tree/.slot-archive" || return 0
+  echo "$eb_d/tree"
+}
+# erlang_ok: set when Erlang/OTP of the pin is in place and linked after this run's part; elixir
+# is installed only then.
+erlang_ok=
+p_erlang() {
+  while read -r en ev es eu; do
+    [ -n "$en" ] || continue
+    dir=/usr/local/$en-$ev
+    eb=$dir/lib/erlang/bin
+    binok=1
+    linkok=1
+    real=
+    for l in erl erlc escript; do
+      got=$(readlink "$R/usr/local/bin/$l" 2>/dev/null)
+      [ "$got" = "$eb/$l" ] && continue
+      drift "erlang" "/usr/local/bin/$l is '${got:-missing}', want a link to $eb/$l"
+      linkok=
+      if [ -e "$R/usr/local/bin/$l" ] && [ ! -L "$R/usr/local/bin/$l" ]; then real="$real /usr/local/bin/$l"; fi
+    done
+    em=missing
+    if [ -f "$R$dir/.slot-archive" ] && [ ! -L "$R$dir/.slot-archive" ]; then em=$(head -n 1 "$R$dir/.slot-archive"); fi
+    if [ "$em" != "$en $ev $es" ]; then
+      drift "erlang" "$dir has the mark '$em' (.slot-archive), want '$en $ev $es': the build of Erlang/OTP $ev from its source"
+      binok=
+    else
+      v=$(erlang_says "$R$eb/erl")
+      if [ "$v" != "$ev" ]; then
+        drift "erlang" "$eb/erl says '${v:-missing}', want $ev"
+        binok=
+      fi
+    fi
+    need=
+    if [ -z "$binok" ]; then
+      for ep in $ERLANG_BUILD_PACKAGES; do q_pkg "$ep" || need="$need $ep"; done
+      [ -z "$need" ] || drift "erlang" "the build needs the package(s)$need, not installed: name them in EXTRA_PACKAGES"
+    fi
+    if [ -n "$binok" ] && [ -n "$linkok" ]; then
+      erlang_ok=1
+      continue
+    fi
+    fixing || continue
+    if [ -n "$real" ]; then
+      failed "erlang" "${real# } is a real file; not replaced"
+      continue
+    fi
+    if [ -n "$binok" ]; then
+      if ln -sfn "$eb/erl" "$R/usr/local/bin/erl" && ln -sfn "$eb/erlc" "$R/usr/local/bin/erlc" && ln -sfn "$eb/escript" "$R/usr/local/bin/escript"; then
+        changed "erlang" "linked erl, erlc and escript in /usr/local/bin to $eb"
+        erlang_ok=1
+      else
+        failed "erlang" "link in /usr/local/bin"
+      fi
+      continue
+    fi
+    if [ -n "$need" ]; then
+      failed "erlang" "the build needs the package(s)$need, not installed: name them in EXTRA_PACKAGES; nothing was fetched"
+      continue
+    fi
+    if [ -n "$T" ]; then td=$(mktemp -d); else td=$(mktemp -d /var/tmp/slot-erlang.XXXXXX); fi || {
+      failed "erlang" "no temporary directory"
+      continue
+    }
+    el=$(mktemp)
+    src=$(erlang_build "$td" "$en" "$ev" "$es" "$eu" "$dir" 2>"$el" </dev/null)
+    if [ -z "$src" ]; then
+      ee=$(grep -m 3 '^error: \|^configure: error' "$el" | tr '\n' ' ')
+      [ -n "$ee" ] || ee=$(tail -n 2 "$el" | tr '\n' ' ')
+      failed "erlang" "download, checksum or build of Erlang/OTP $ev: $ee"
+    elif mkdir -p "$R/usr/local/bin" && rm -rf "$R$dir.slot-new" && mv "$src" "$R$dir.slot-new" && rm -rf "$R$dir" && mv "$R$dir.slot-new" "$R$dir" &&
+      ln -sfn "$eb/erl" "$R/usr/local/bin/erl" && ln -sfn "$eb/erlc" "$R/usr/local/bin/erlc" && ln -sfn "$eb/escript" "$R/usr/local/bin/escript"; then
+      v=$(erlang_says "$R$eb/erl")
+      if [ "$v" = "$ev" ]; then
+        changed "erlang" "Erlang/OTP $ev built in $dir, linked as erl, erlc and escript in /usr/local/bin"
+        erlang_ok=1
+      else
+        failed "erlang" "$eb/erl says '${v:-missing}' after the install"
+      fi
+    else
+      rm -rf "$R$dir.slot-new"
+      failed "erlang" "$dir not written"
+    fi
+    rm -rf "$td" "$el"
+  done <<EOF
+$ERLANG_PIN
+EOF
+}
+# The tools EXTRA_TOOLS names; nothing is read or written for a tool it does not name, and one
+# taken out of the config stays as it is. elixir, gleam, odin and firefox are archives in the
+# form of ARCHIVE_PINS and go through p_archives. In apply, elixir waits for Erlang/OTP: its check
+# and every mix task run erl.
+p_extra_tools() {
+  [ -n "$EXTRA_TOOLS" ] || return 0
+  erlang_ok=
+  case " $EXTRA_TOOLS " in *" erlang "*) p_erlang ;; esac
+  xt_pins=
+  while read -r xt_n xt_v xt_r; do
+    [ -n "$xt_n" ] || continue
+    case " $EXTRA_TOOLS " in *" $xt_n "*) ;; *) continue ;; esac
+    if [ "$xt_n" = elixir ] && fixing && [ -z "$erlang_ok" ]; then
+      failed "archive:elixir" "left as it is: elixir runs on erl, and Erlang/OTP $(echo "$ERLANG_PIN" | cut -d' ' -f2) is not installed (the erlang lines say why)"
+      continue
+    fi
+    xt_pins="$xt_pins$xt_n $xt_v $xt_r
+"
+  done <<EOF
+$EXTRA_ARCHIVE_PINS
+EOF
+  xt_keep=$ARCHIVE_PINS
+  ARCHIVE_PINS=$xt_pins
+  p_archives
+  ARCHIVE_PINS=$xt_keep
 }
 
 p_keys() {
@@ -3750,6 +3988,9 @@ case $mode in
     [ -z "$T" ] || [ -z "${NODE_TEST_HOME_PINS:-}" ] || HOME_PINS=$NODE_TEST_HOME_PINS
     [ -n "$imds_open" ] || p_home_pins
     [ -n "$imds_open" ] || p_groovy_current
+    [ -z "$T" ] || [ -z "${NODE_TEST_ERLANG_PIN:-}" ] || ERLANG_PIN=$NODE_TEST_ERLANG_PIN
+    [ -z "$T" ] || [ -z "${NODE_TEST_EXTRA_ARCHIVE_PINS:-}" ] || EXTRA_ARCHIVE_PINS=$NODE_TEST_EXTRA_ARCHIVE_PINS
+    [ -n "$imds_open" ] || p_extra_tools
     [ -n "$imds_open" ] || p_keys
     p_services
     p_core_load

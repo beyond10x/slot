@@ -33,6 +33,18 @@ pub const INFRA_EXIT: i32 = 3;
 /// with it is never spilled.
 pub const SPILLED_ENV: &str = "SLOT_SPILLED";
 
+/// Whether this process is the client of a job this machine's daemon
+/// handed to a node: the daemon set [`SPILLED_ENV`] and named the file it
+/// reads the job's phases from ([`crate::phases::FILE_ENV`]). Only then
+/// does a daemon wait for this client and queue the job here again when it
+/// ends with [`INFRA_EXIT`]. A caller's environment that carries
+/// [`SPILLED_ENV`] alone (a wrapper that wants no run here after a failed
+/// start) has no such daemon.
+pub fn handed() -> bool {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty());
+    set(SPILLED_ENV) && set(crate::phases::FILE_ENV)
+}
+
 /// How often a queued job looks for a node with room.
 pub const TICK: Duration = Duration::from_secs(1);
 
@@ -135,7 +147,9 @@ fn named(req: &Request) -> String {
 /// Why the job of `req` stays here, or `None` when it may go to a node:
 /// a nested job, one whose caller asked for this machine or named a
 /// reason, and the ones that are no command of a caller here (a remote
-/// client's, a gate's hold, one a node sent back).
+/// client's, a gate's hold, one a node sent back). A reason the client
+/// named comes before [`SPILLED_ENV`] of its environment: a client that
+/// kept its job here for a deny list says more than the variable does.
 pub fn refusal(req: &Request) -> Option<String> {
     if req.workspace.is_some() {
         return Some("remote job".into());
@@ -146,12 +160,12 @@ pub fn refusal(req: &Request) -> Option<String> {
     if set(&req.env, super::JOB_ENV) {
         return Some("nested job".into());
     }
-    if set(&req.env, SPILLED_ENV) {
-        return Some(SENT_BACK.into());
-    }
     let named = named(req);
     if !named.is_empty() {
         return Some(named);
+    }
+    if set(&req.env, SPILLED_ENV) {
+        return Some(SENT_BACK.into());
     }
     if set(&req.env, "SLOT_NO_REMOTE") {
         return Some(LOCAL_REQUESTED.into());
@@ -544,6 +558,26 @@ mod tests {
         assert_eq!(local_reason(&no_remote, false), "");
         assert_eq!(local_reason(&generic, false), "needs the GPU here");
         assert_eq!(local_reason(&base, true), "");
+    }
+
+    /// A job a deny list kept here was sent back by no node, whatever its
+    /// caller's environment says: the reason its client named is its
+    /// record's, from the request or from `SLOT_LOCAL_REASON`.
+    #[test]
+    fn a_named_reason_comes_before_spilled_of_the_environment() {
+        let mut r = req(&["cargo", "build"]);
+        r.env.push("SLOT_SPILLED=1".into());
+        assert_eq!(why(&r), Some(SENT_BACK.into()));
+        let mut wrapped = r.clone();
+        wrapped.env.push("SLOT_LOCAL_REASON=cache rule".into());
+        assert_eq!(why(&wrapped), Some("cache rule".into()));
+        r.local_reason = "git dependency denied: git+https://h/o/r?tag=v1".into();
+        assert_eq!(why(&r), Some(r.local_reason.clone()));
+        assert_eq!(local_reason(&r, true), r.local_reason);
+        assert_eq!(local_reason(&r, false), r.local_reason);
+        // A nested job is named as one whatever it inherited.
+        r.env.push("SLOT_JOB=3".into());
+        assert_eq!(why(&r), Some("nested job".into()));
     }
 
     const FILE: &str = "spill_after_s = 5\n\

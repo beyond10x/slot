@@ -21,11 +21,22 @@
 //! supersede (the same target under an older hash), so the local target
 //! directory does not grow with every rebuild. `SLOT_NO_PRODUCTS=1` turns
 //! all of it off for a job ([`NO_PRODUCTS_ENV`]).
+//!
+//! The go command names its product itself: `go build -o <path>` and
+//! `go test -c -o <path>` ([`go_output`]). After such a job exited 0 the
+//! same rsync copies that file from the job's tree on the node to the same
+//! path in the client's tree ([`GoProduct`]), also under `target/`, which
+//! no sync of the tree carries. A path that is a directory there (it
+//! existed before the job, or `-o` ends in `/`) is listed on the node
+//! before the job and after it ([`list`]), and the files the job wrote
+//! come back: those that are new or whose size or modification time
+//! changed ([`written`]). Both listings are the node's own, so no clock of
+//! this machine is compared with one of the node.
 
 use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
@@ -410,30 +421,15 @@ pub struct Source<'a> {
     pub host: &'a str,
     /// ssh command and options.
     pub ssh: &'a [String],
-    /// The job's target directory on the host.
+    /// The directory on the host the paths are relative to: the job's
+    /// target directory, or for a go job's output its tree.
     pub target: &'a str,
 }
 
-/// One rsync of `rels` from `src` into `local`; the bytes it received.
-fn rsync(
-    src: &Source<'_>,
-    rels: &[String],
-    local: &Path,
-    bounds: &crate::sync::Bounds,
-) -> Result<u64> {
-    let mut rsync = Command::new("rsync");
+/// Runs `rsync`, bounded like a sync; how it ended and what it printed on
+/// stdout.
+fn bounded(mut rsync: Command, bounds: &crate::sync::Bounds) -> Result<(ExitStatus, String)> {
     rsync
-        .args(["-a", "--relative", "--mkpath", "--stats", "-e"])
-        .arg(src.ssh.join(" "));
-    for r in rels {
-        rsync.arg(format!(
-            "{}:{}/./{r}",
-            src.host,
-            src.target.trim_end_matches('/')
-        ));
-    }
-    rsync
-        .arg(format!("{}/", local.display()))
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped());
@@ -452,6 +448,34 @@ fn rsync(
     );
     let out = reader.join().unwrap_or_default();
     let st = st.map_err(|stop| anyhow!("rsync killed: {stop}"))?;
+    Ok((st, out))
+}
+
+/// One rsync of `rels` from `src` into `local`; the bytes it received.
+/// `--relative` sends the directories on each path too: one that is a
+/// symlink in `local` is replaced by a directory (rsync 3.5 refuses
+/// to write through it even with `--keep-dirlinks`), so a caller whose
+/// paths may cross one passes `local` resolved and `rels` without
+/// directories ([`GoProduct::split`]).
+fn rsync(
+    src: &Source<'_>,
+    rels: &[String],
+    local: &Path,
+    bounds: &crate::sync::Bounds,
+) -> Result<u64> {
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-a", "--relative", "--mkpath", "--stats", "-e"])
+        .arg(src.ssh.join(" "));
+    for r in rels {
+        rsync.arg(format!(
+            "{}:{}/./{r}",
+            src.host,
+            src.target.trim_end_matches('/')
+        ));
+    }
+    rsync.arg(format!("{}/", local.display()));
+    let (st, out) = bounded(rsync, bounds)?;
     if !st.success() {
         bail!("rsync exited with {st}");
     }
@@ -490,6 +514,274 @@ pub fn fetch(
         elapsed: t0.elapsed(),
         pruned: Pruned::default(),
     })
+}
+
+/// Flags of `go build` and `go test` that take their value as the next
+/// word. Any other flag is a switch or carries its value after `=`.
+const GO_VALUE_FLAGS: &[&str] = &[
+    "C",
+    "asmflags",
+    "bench",
+    "benchtime",
+    "blockprofile",
+    "blockprofilerate",
+    "buildmode",
+    "compiler",
+    "count",
+    "covermode",
+    "coverpkg",
+    "coverprofile",
+    "cpu",
+    "cpuprofile",
+    "exec",
+    "fuzz",
+    "fuzzminimizetime",
+    "fuzztime",
+    "gccgoflags",
+    "gcflags",
+    "installsuffix",
+    "ldflags",
+    "list",
+    "memprofile",
+    "memprofilerate",
+    "mod",
+    "modfile",
+    "mutexprofile",
+    "mutexprofilefraction",
+    "o",
+    "outputdir",
+    "overlay",
+    "p",
+    "parallel",
+    "pgo",
+    "pkgdir",
+    "run",
+    "shuffle",
+    "skip",
+    "tags",
+    "timeout",
+    "toolexec",
+    "trace",
+    "vet",
+];
+
+/// What a go command line says of the file it builds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoOutput {
+    /// `-C <dir>`: the go command changes to it first and reads `-o` from
+    /// there.
+    pub chdir: Option<String>,
+    /// The value of `-o`.
+    pub path: String,
+}
+
+/// The output `argv` names: `-o <path>` or `-o=<path>` of a `go build`, or
+/// of a `go test` with `-c` (without it the test also runs, and its command
+/// stays as it is). `None` for any other command, `go run` and `go vet`
+/// among them. `go build` reads no flag after its first package, `go test`
+/// none after `-args`; the last `-o` wins, as in the go command.
+pub fn go_output(argv: &[String]) -> Option<GoOutput> {
+    let name = Path::new(argv.first()?).file_name()?.to_str()?;
+    if name != "go" {
+        return None;
+    }
+    let test = match argv.get(1)?.as_str() {
+        "build" => false,
+        "test" => true,
+        _ => return None,
+    };
+    let (mut chdir, mut out, mut compiles) = (None, None, !test);
+    let mut it = argv[2..].iter();
+    while let Some(a) = it.next() {
+        let flag = a
+            .strip_prefix("--")
+            .or_else(|| a.strip_prefix('-'))
+            .filter(|f| !f.is_empty());
+        let Some(flag) = flag else {
+            // A package or a file, or `--`.
+            if test && a != "--" {
+                continue;
+            }
+            break;
+        };
+        let (name, inline) = match flag.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (flag, None),
+        };
+        let name = name.strip_prefix("test.").unwrap_or(name);
+        let mut value = || inline.map(String::from).or_else(|| it.next().cloned());
+        match name {
+            "args" if test => break,
+            "o" => out = value(),
+            "C" => chdir = value(),
+            "c" if test => {
+                compiles =
+                    inline.is_none_or(|v| matches!(v, "1" | "t" | "T" | "true" | "TRUE" | "True"));
+            }
+            n if GO_VALUE_FLAGS.contains(&n) => drop(value()),
+            _ => {}
+        }
+    }
+    let path = out.filter(|p| !p.is_empty())?;
+    compiles.then_some(GoOutput { chdir, path })
+}
+
+/// A go job's output in the client's tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoProduct {
+    /// Its path relative to the tree; empty for the tree itself.
+    pub rel: String,
+    /// `-o` ends in `/`: a directory, which the go command makes.
+    pub dir: bool,
+}
+
+impl GoOutput {
+    /// Where the output lies in the tree at `top` for a job run from `cwd`:
+    /// a relative `-o` is read against `cwd` (after `-C`). `None` for a path
+    /// outside the tree, and for an absolute one unless the tree keeps its
+    /// own path on the node (`same_path`): elsewhere the node's tree is at
+    /// another path, and an absolute path names no file of it.
+    pub fn product(&self, cwd: &Path, top: &Path, same_path: bool) -> Option<GoProduct> {
+        let mut at = cwd.to_path_buf();
+        for part in self.chdir.iter().chain(std::iter::once(&self.path)) {
+            if Path::new(part).is_absolute() && !same_path {
+                return None;
+            }
+            at.push(part);
+        }
+        let mut plain = PathBuf::new();
+        for c in at.components() {
+            match c {
+                Component::ParentDir => {
+                    plain.pop();
+                }
+                Component::CurDir => {}
+                c => plain.push(c),
+            }
+        }
+        let rel = plain.strip_prefix(top).ok()?.to_str()?;
+        // The tree itself (`-o .` at its top) is a directory.
+        Some(GoProduct {
+            rel: rel.to_string(),
+            dir: rel.is_empty() || self.path.ends_with('/'),
+        })
+    }
+}
+
+impl GoProduct {
+    /// The directory the files to copy lie in, relative to the tree (empty:
+    /// the tree), and their names: for the one file (`written` is `None`)
+    /// its parent and its name, for a directory itself and `written`. The
+    /// copy goes into that directory resolved on the client's side, so a
+    /// directory on the path that is a symlink there stays one.
+    pub fn split(&self, written: Option<Vec<String>>) -> (String, Vec<String>) {
+        let rel = self.rel.trim_end_matches('/');
+        match written {
+            Some(names) => (rel.to_string(), names),
+            None => match rel.rsplit_once('/') {
+                Some((dir, name)) => (dir.to_string(), vec![name.to_string()]),
+                None => (String::new(), vec![rel.to_string()]),
+            },
+        }
+    }
+
+    /// Its path for a message: `.` for the tree itself.
+    pub fn shown(&self) -> &str {
+        if self.rel.is_empty() { "." } else { &self.rel }
+    }
+}
+
+/// One entry of a directory on the node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// File name.
+    pub name: String,
+    /// Bytes.
+    pub size: u64,
+    /// Modification time as rsync prints it, to the second, in this
+    /// machine's time zone: compared with another listing, never read.
+    pub mtime: String,
+    /// A regular file.
+    pub file: bool,
+}
+
+/// What a path on the node is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listing {
+    /// A directory with these entries.
+    Dir(Vec<Entry>),
+    /// No directory: a file, or nothing.
+    Absent,
+    /// The listing did not work; why.
+    Failed(String),
+}
+
+/// One line of rsync's listing: `-rwxr-xr-x  1,234 2026/11/26 13:14:10 name`.
+fn entry(line: &str) -> Option<Entry> {
+    let mut rest = line;
+    let mut field = || {
+        let (f, r) = rest.trim_start_matches(' ').split_once(' ')?;
+        rest = r;
+        Some(f)
+    };
+    let (kind, size, date, time) = (field()?, field()?, field()?, field()?);
+    let size = size
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    (!rest.is_empty() && rest != ".").then(|| Entry {
+        name: rest.to_string(),
+        size,
+        mtime: format!("{date} {time}"),
+        file: kind.starts_with('-'),
+    })
+}
+
+/// The entries of rsync's listing `out`, without the directory itself.
+pub fn entries(out: &str) -> Vec<Entry> {
+    out.lines().filter_map(entry).collect()
+}
+
+/// rsync's exit status for a source it cannot read: a missing path, or one
+/// that is no directory.
+const RSYNC_PARTIAL: i32 = 23;
+
+/// Lists the directory `rel` below `src` on the node (empty: `src` itself),
+/// not its subdirectories: one rsync with no destination, which `slot
+/// shell` admits as a fetch. Bounded like a sync; rsync's own error lines
+/// are not shown.
+pub fn list(src: &Source<'_>, rel: &str, bounds: &crate::sync::Bounds) -> Listing {
+    let mut dir = format!("{}/", src.target.trim_end_matches('/'));
+    if !rel.is_empty() {
+        dir.push_str(rel.trim_end_matches('/'));
+        dir.push('/');
+    }
+    let mut rsync = Command::new("rsync");
+    rsync
+        .args(["-d", "-e"])
+        .arg(src.ssh.join(" "))
+        .arg(format!("{}:{dir}", src.host))
+        .stderr(Stdio::null());
+    match bounded(rsync, bounds) {
+        Ok((st, out)) if st.success() => Listing::Dir(entries(&out)),
+        Ok((st, _)) if st.code() == Some(RSYNC_PARTIAL) => Listing::Absent,
+        Ok((st, _)) => Listing::Failed(format!("rsync exited with {st}")),
+        Err(e) => Listing::Failed(format!("{e:#}")),
+    }
+}
+
+/// The files of a directory a job wrote, from its listing `before` the job
+/// and `after` it: each regular file that is new, or whose size or
+/// modification time changed. A file the job wrote again with the same
+/// size within the second of its earlier time reads as not written.
+pub fn written(before: &[Entry], after: &[Entry]) -> Vec<String> {
+    after
+        .iter()
+        .filter(|a| a.file && !before.contains(a))
+        .map(|a| a.name.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -640,6 +932,188 @@ mod tests {
         assert_eq!(local_target(&sub, top, None), top.join("target"));
         assert_eq!(local_target(&sub, top, Some("/t")), PathBuf::from("/t"));
         assert_eq!(local_target(&sub, top, Some("out")), sub.join("out"));
+    }
+
+    fn go(cmd: &str) -> Option<(Option<String>, String)> {
+        let argv: Vec<String> = cmd.split_whitespace().map(String::from).collect();
+        go_output(&argv).map(|o| (o.chdir, o.path))
+    }
+
+    #[test]
+    fn a_go_build_and_a_compiled_go_test_name_their_output() {
+        let out = |p: &str| Some((None, p.to_string()));
+        for (cmd, want) in [
+            ("go build -o target/x/tool ./cmd/tool", out("target/x/tool")),
+            ("/usr/local/go/bin/go build -o=bin/ ./...", out("bin/")),
+            ("go build --o bin/tool .", out("bin/tool")),
+            ("go build -v -tags a,b -ldflags -s -o x ./cmd", out("x")),
+            ("go build -o first -o=last .", out("last")),
+            ("go build -trimpath -o x", out("x")),
+            ("go test -c -o pkg.test ./pkg", out("pkg.test")),
+            ("go test ./pkg -c -run Slow -o=pkg.test", out("pkg.test")),
+            ("go test -c=true -o t ./pkg", out("t")),
+            ("go test -test.run X -c -o t", out("t")),
+            (
+                "go build -C sub -o out/tool .",
+                Some((Some("sub".into()), "out/tool".into())),
+            ),
+        ] {
+            assert_eq!(go(cmd), want, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn other_go_commands_name_no_output() {
+        for cmd in [
+            "go build ./...",
+            "go build ./cmd/tool -o x",
+            "go build -ldflags -o x",
+            "go build -o",
+            "go build -o= .",
+            "go build -- -o x",
+            "go run ./cmd/tool -o x",
+            "go vet -o x ./...",
+            "go install -o x ./...",
+            "go test -o x ./...",
+            "go test -c=false -o x ./...",
+            "go test ./... -args -c -o x",
+            "go test -run -c -o x ./...",
+            "go",
+            "gofmt -o x",
+            "gotestsum -o x",
+            "cargo build -o x",
+        ] {
+            assert_eq!(go(cmd), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_go_output_is_read_against_the_working_directory_and_stays_in_the_tree() {
+        let top = Path::new("/h/repo");
+        let at = |chdir: Option<&str>, path: &str, cwd: &str, same_path: bool| {
+            GoOutput {
+                chdir: chdir.map(String::from),
+                path: path.to_string(),
+            }
+            .product(Path::new(cwd), top, same_path)
+            .map(|p| (p.rel, p.dir))
+        };
+        let file = |rel: &str| Some((rel.to_string(), false));
+        assert_eq!(
+            at(None, "target/x/tool", "/h/repo", false),
+            file("target/x/tool")
+        );
+        assert_eq!(
+            at(None, "../out/tool", "/h/repo/cmd", false),
+            file("out/tool")
+        );
+        assert_eq!(at(None, "./a/../b", "/h/repo/cmd", false), file("cmd/b"));
+        assert_eq!(
+            at(Some("cmd"), "out/tool", "/h/repo", false),
+            file("cmd/out/tool")
+        );
+        assert_eq!(
+            at(None, "bin/", "/h/repo", false),
+            Some(("bin".to_string(), true))
+        );
+        // The copy goes into the directory of the file, or the directory.
+        let p = |rel: &str, dir: bool| GoProduct {
+            rel: rel.to_string(),
+            dir,
+        };
+        assert_eq!(
+            p("target/x/tool", false).split(None),
+            ("target/x".to_string(), v(&["tool"]))
+        );
+        assert_eq!(p("tool", false).split(None), (String::new(), v(&["tool"])));
+        assert_eq!(
+            p("out/bin", true).split(Some(v(&["a", "b"]))),
+            ("out/bin".to_string(), v(&["a", "b"]))
+        );
+        assert_eq!(
+            p("", true).split(Some(v(&["a"]))),
+            (String::new(), v(&["a"]))
+        );
+        // The tree itself is a directory like any other: `-o .` at the top.
+        let top_dir = Some((String::new(), true));
+        assert_eq!(at(None, ".", "/h/repo", false), top_dir);
+        assert_eq!(at(None, "./", "/h/repo", false), top_dir);
+        assert_eq!(at(None, "..", "/h/repo/cmd", false), top_dir);
+        assert_eq!(at(None, "/h/repo", "/h/repo/cmd", true), top_dir);
+        // Outside the tree.
+        for (path, cwd) in [
+            ("../tool", "/h/repo"),
+            ("../../repo2/tool", "/h/repo/cmd"),
+            ("..", "/h/repo"),
+            ("/dev/null", "/h/repo"),
+            ("/h/repo2/tool", "/h/repo"),
+        ] {
+            assert_eq!(at(None, path, cwd, true), None, "{path} from {cwd}");
+        }
+        assert_eq!(at(Some("/h/other"), "tool", "/h/repo", true), None);
+        // An absolute path names a file of the node's tree only when the
+        // tree keeps its path there.
+        assert_eq!(at(None, "/h/repo/out/tool", "/h/repo", false), None);
+        assert_eq!(
+            at(None, "/h/repo/out/tool", "/h/repo/cmd", true),
+            file("out/tool")
+        );
+        assert_eq!(at(Some("/h/repo/cmd"), "tool", "/h/repo", false), None);
+        assert_eq!(
+            at(Some("/h/repo/cmd"), "tool", "/h/repo", true),
+            file("cmd/tool")
+        );
+    }
+
+    const LISTING: &str = "\
+drwxr-xr-x          4,096 2026/11/26 13:14:10 .
+-rwxr-xr-x      2,345,678 2026/11/26 13:14:10 tool
+-rw-r--r--              3 2026/11/25 09:00:01 b c
+drwxr-xr-x          4,096 2026/11/26 13:14:09 sub
+lrwxrwxrwx              4 2026/11/26 13:14:08 link -> tool
+";
+
+    #[test]
+    fn a_listing_names_each_entry_with_its_size_and_time() {
+        let got = entries(LISTING);
+        let names: Vec<(&str, u64, bool)> = got
+            .iter()
+            .map(|e| (e.name.as_str(), e.size, e.file))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("tool", 2_345_678, true),
+                ("b c", 3, true),
+                ("sub", 4096, false),
+                ("link -> tool", 4, false)
+            ]
+        );
+        assert_eq!(got[0].mtime, "2026/11/26 13:14:10");
+        assert_eq!(entries("rsync: something else\n\n"), Vec::new());
+    }
+
+    #[test]
+    fn the_files_a_job_wrote_are_the_new_and_the_changed_ones() {
+        let before = entries(LISTING);
+        assert_eq!(written(&before, &before), Vec::<String>::new());
+        let after = entries(
+            "\
+drwxr-xr-x          4,096 2026/11/26 13:20:00 .
+-rwxr-xr-x      2,345,678 2026/11/26 13:20:00 tool
+-rw-r--r--              4 2026/11/25 09:00:01 b c
+-rwxr-xr-x             10 2026/11/26 13:20:00 new
+drwxr-xr-x          4,096 2026/11/26 13:20:00 sub
+drwxr-xr-x          4,096 2026/11/26 13:20:00 made
+lrwxrwxrwx              4 2026/11/26 13:20:00 link -> tool
+",
+        );
+        assert_eq!(
+            written(&before, &after),
+            ["tool", "b c", "new"],
+            "a later time, another size, a new file; no directory, no link"
+        );
+        assert_eq!(written(&[], &after), ["tool", "b c", "new"]);
     }
 
     const H1: &str = "0123456789abcdef";

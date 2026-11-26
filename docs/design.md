@@ -138,9 +138,28 @@ the job ends with exit 3 and nothing is synced. A folder of several repositories
 whole, with every git-ignored file in it. The request carries
 `workspace.target_dir`: `CARGO_TARGET_DIR` of the client, else `cargo metadata`'s
 `target_directory` for the command's manifest, else `target` beside the nearest lock file; empty
-for a command that is not cargo. The daemon admits it only below a `--same-path-root`, sets
-`CARGO_TARGET_DIR` to it (or unsets it, keeping cargo's default in the tree), binds it writable
-in the sandbox and names it in the `start` frame, so products are fetched to the same path.
+for a command that is not cargo. The daemon admits it only below a `--same-path-root`, binds it
+writable in the sandbox, records it as the job's target directory (which eviction reads) and
+names it in the `start` frame, so products are fetched to the same path.
+
+What the job's environment carries of it is a second question, because a compile cache keys
+every `CARGO_*` variable of the compiler's environment (sccache: all but `CARGO_MAKEFLAGS`,
+`CARGO_BUILD_JOBS`, `CARGO_REGISTRIES_*`, `CARGO_ENCODED_RUSTFLAGS`). The request carries
+`workspace.target_default`: true when the directory is the one cargo resolves by itself, that
+is `target` in `cargo metadata`'s `workspace_root` with no `CARGO_TARGET_DIR` of the caller
+(`same_path::target_dir`, the one place that decides the directory). The daemon then exports no
+`CARGO_TARGET_DIR` and removes its own and its `CARGO_BUILD_TARGET_DIR`; cargo finds the same
+directory in the tree. Otherwise (the caller's variable, a `build.target-dir` of a cargo
+configuration, `CARGO_BUILD_TARGET_DIR`, a `cargo metadata` that failed on the client, whose
+`target` beside the lock file is a guess an in-tree configuration may contradict, or a client
+older than the field) it sets `CARGO_TARGET_DIR` to the directory, as before: a configuration
+in the caller's home does not exist on the server. So a cargo job, cargo inside a
+generic job (which never got the variable) and the jobs of a second tree of the repository
+carry the same `CARGO_*` variables. For the same reason a cargo job gets no `CARGO_NET_OFFLINE`
+after its fetch (`cargo_fetch.rs`). Not changed: a mirror below the workspace root gets
+`CARGO_TARGET_DIR=<cache-root>/target/<id>`, one value per tree, and a sandbox with fixed paths
+its own `/work/target`. A server whose own cargo configuration (`build.target-dir`) names a
+target directory would move a default build away from the recorded directory.
 
 ### 3.3 Transport and access
 
@@ -418,7 +437,9 @@ Tested and rejected:
 
 - `SCCACHE_BASEDIRS`: building one workspace cold in two directories gave 77 of 88 Rust hits in
   the second directory with and without it. Dependencies already hit across directories; the 11
-  misses are the workspace's own crates and build scripts.
+  misses are the workspace's own crates and build scripts. A dependency that includes a file
+  from its build script's output directory does not hit across target directories, nor does a
+  crate that depends on it: § 28.
 - `resolver.feature-unification = "workspace"` (cargo 1.99.1, stable): cargo parses the key and
   rejects bad values, but five `cargo check -p` runs over ess compiled 128 units with it and 128
   without, and left 5 `syn` variants either way. It takes effect only on nightly.
@@ -1789,7 +1810,8 @@ rewritten from `/work/src` to the client's root.
   binary and runs rustc in the job. No test covers it: it needs a live server. A cache that
   runs inside the job's sandbox would serve these paths; none is built, and no second server is
   started. This departs from the workspace rule that every Rust build compiles through the
-  host's compile cache, which is why the option is off by default.
+  host's compile cache, which is why the option is off by default. § 28 measures what lifts it:
+  sccache's client-side mode, and a view of the target directory alone.
 
 **Build nodes.** Amazon Linux 2023 has no `bwrap` by default. The node boot script
 (`docs/design/remote-pool.md` § 7.3, step 3) installs it with the other packages:
@@ -1824,3 +1846,192 @@ crates.io succeeded with `CARGO_HOME` read-only but `registry/`, `git/` and the 
   test suite that writes gigabytes there needs a per-job directory on disk instead.
 - A sccache server started by a job, where no server runs, starts inside the sandbox: it cannot
   write its store and ends with the job. Run sccache as a service on a sandboxed host.
+
+## 28. One target path that every job sees (measured 2026-11-26, not built)
+
+Nothing in this section is built in slot. The view below was made by a probe inside its own jobs
+(`contrib/cache-key-probe.sh both`), on one build node: Amazon Linux 2023, kernel 6.18,
+bubblewrap 0.12.0, `unshare` of util-linux 2.37.4, sccache 0.18.0, rustc 1.100.0,
+`user.max_user_namespaces` 252898, the daemon without `--sandbox`, same-path mirrors. A statement
+marked *unverified* was neither measured nor read in a source.
+
+**The problem, in numbers** (measured the same day on one lane of a consumer repository,
+wasm32-unknown-unknown, 93 rustc calls through the cache, eight crates of one git dependency on
+the critical path):
+
+- First build in a worktree: 1 min 46 s, the eight crates 86.67 s. Again in the same worktree on
+  an empty target directory: 18.15 s, the eight crates 11.03 s. In a second, new worktree:
+  2 min 13 s, the eight crates 105.61 s; nothing was served.
+- With every `CARGO_*` variable held equal and only the target path different, 41 of 67 library
+  units were served and 26 compiled again: three crates that include a file from their build
+  script's output directory, and every crate that depends on one of them. cargo sets `OUT_DIR`
+  to an absolute path below the target directory; rustc records it (`# env-dep:OUT_DIR=…` in
+  dep-info), and sccache hashes every such variable and the contents of every extern into the
+  key (sccache 0.18.0, `src/compiler/rust.rs`, `generate_hash_key`).
+- With the target directory at one absolute path for two worktrees the second one got the eight
+  crates in 5.77 s instead of 105.61 s.
+- The same on a small graph, in two trees with no `CARGO_TARGET_DIR` in either job:
+  `serde_core` 1.0.229 (includes from `OUT_DIR`) 1.61 s then 1.57 s, `serde_json` 1.0.154 (depends
+  on it) 0.69 s then 0.69 s; on wasm32-unknown-unknown 1.65 s then 1.74 s and 0.71 s then 0.74 s.
+  `itoa`, which has no such dependency, was served: 0.11 s then 0.03 s. The probe's mode `tree`
+  on the same graph, as two cargo jobs of slot 0.39.1 (each carries its own `CARGO_TARGET_DIR`):
+  `serde_json` 0.65 s then 0.67 s, on wasm32-unknown-unknown 0.63 s then 0.64 s, exit 1.
+
+**The condition.** Each worktree keeps its own target data. One directory shared by the
+worktrees of a repository is ruled out: two branches in it overwrite each other's test binaries
+and wait on cargo's lock. The probe's negative control (`PROBE_SHARE_TARGET=1`: one directory
+bound for three worktrees) shows it: worktree 3 found everything fresh and ran the test binary
+of worktree 2 (`its test printed its own branch's value 0 time(s), another worktree's 1 time(s)
+(worktree 2)`, exit 1). The one absolute path is therefore a view: the job's own `<tree>/target`,
+bound at that path in a mount namespace of that job alone.
+
+**The mechanism, as the probe makes it.** The job's command runs under
+
+```sh
+bwrap --dev-bind / / --tmpfs /mnt --bind <tree>/target /mnt/slot-probe-target -- <command>
+```
+
+with `CARGO_TARGET_DIR=/mnt/slot-probe-target` in its environment, the same value in every
+worktree. The root is the host's. A tmpfs covers the parent of the path in this job's view only,
+so the mount point needs no directory on the host and no root. Without bwrap the probe uses
+`unshare --user --map-root-user --mount` and two `mount` calls; the build is then root of a new
+user namespace, where bwrap keeps the user. Both ran unprivileged in a job. Sources stay at
+their own paths.
+
+**The mechanism in slot** (a proposal). A daemon option, off by default, names the path. The
+daemon wraps a job as it wraps one for `--sandbox` (§ 27: `systemd-run --scope` around `bwrap`,
+no new session, the process group shared for a cancel) and sets `CARGO_TARGET_DIR` to the path.
+
+- A cargo job: the request already carries the tree's target directory (§ 3.2a,
+  `workspace.target_dir`); that directory is bound.
+- A generic job that runs cargo inside (`slot task check`): the request's target directory is
+  empty today for a command that is not cargo. The daemon would bind `target` beside the nearest
+  lock file, as the client resolves it for a cargo job. A tree with two workspaces (a second
+  manifest with a `target` of its own) would then build both into the one bound directory:
+  *unverified*.
+- A job whose caller named the directory (`CARGO_TARGET_DIR`, `--target-dir`): no view. It builds
+  where it said.
+- With `--sandbox` the two options join the sandbox's own; a tmpfs over a directory of the
+  read-only root with a bind on top is what the sandbox does for its hidden paths. Not run for
+  this path. A view made inside a sandboxed job (bwrap in bwrap) was not run either: the node's
+  daemon runs without `--sandbox`.
+
+**What the daemon reads: unchanged.** The job record's `target_dir`, eviction (§ 18) and disk
+admission (§ 14.1) keep the real `<tree>/target`. A bind mount is the same filesystem, so
+`statvfs` answers the same. The products of a remote cargo job are copied from the real
+directory; the paths of cargo's `compiler-artifact` messages, from which the client takes the
+file list (`artifacts.rs`), would name the view and need the prefix replaced (read, not run).
+
+**What a job sees.**
+
+- Source paths in compiler output are the tree's own: `Compiling fx v0.0.0 (<tree>)`, and
+  diagnostics with them. Sources are not bound anywhere else.
+- Paths below the target directory name the view: `Timing report saved to
+  /mnt/slot-probe-target/cargo-timings/cargo-timing-….html`, `Running tests/where_.rs
+  (/mnt/slot-probe-target/debug/…/where_-f175ac0373cd504f)`. The file is at the same place below
+  `<tree>/target`: replacing the prefix `<path>/` by `<tree>/target/` maps every such path back,
+  and the daemon would do that in the job's output as `--sandbox-fixed-paths` does for
+  `/work/src`.
+- `cargo metadata` answers `target_directory: /mnt/slot-probe-target` in the view and
+  `<tree>/target` outside it.
+
+**What breaks.**
+
+- A test binary run outside the view. Built in the view, `env!("CARGO_TARGET_TMPDIR")` is
+  `/mnt/slot-probe-target/tmp`: the test passed in the view (`exists=true`) and the same binary
+  failed outside it (`exists=false`, `test result: FAILED`). The same holds for `env!("OUT_DIR")`
+  read at run time and for `CARGO_BIN_EXE_<name>` (*unverified*, same mechanism). The products
+  the client copies back to a workstation are such binaries.
+- Dep-info files name the view: 3 absolute paths below `/mnt/slot-probe-target` in the dep-info
+  of a workspace crate. A cargo that later builds in the same real directory
+  without the view sees another `OUT_DIR` and builds those units again: *unverified*. One real
+  directory should be built always in the view or never.
+- A test that asserts the target directory lies below the repository root fails in the view (a
+  consumer reports one; not run). A build script that walks up from `OUT_DIR` to find the
+  workspace root finds `/mnt`: *unverified*.
+- Debuggers and coverage tools: a source generated into `OUT_DIR` is recorded at the view's
+  path, and so is every object path of split debug info; outside the view they do not resolve.
+  *Unverified*; builds on this host carry no debug info.
+- A consumer of `cargo metadata` outside the job (an editor) gets the real path and is not
+  affected. One inside the job gets the view, which holds only there.
+- Whatever the job would read below the parent of the path (`/mnt` here) is hidden from it.
+- Not served, as before: the workspace's own crates (their working directory is the tree; the
+  probe's own crate took 0.20 s then 0.19 s), a second profile name, a variable the caller sets
+  such as a runner, check and clippy builds (not measured).
+
+**The compile cache server is outside the view.** That decides the options.
+
+- In sccache's default mode the client sends the command line, the working directory and the
+  environment (`src/commands.rs`, `do_compile` and `request_compile`), and the server computes
+  the key and runs rustc itself (`src/server.rs`, `SccacheService::handle_compile`;
+  `src/compiler/compiler.rs`, `get_cached_or_compile`). The request arrives (during the
+  build the server's `Compile requests` went from 7759 to 7766 and its `Compilation failures`
+  from 71 to 73; the server counts every job of the node), and the
+  server's rustc does not see the path: ``error: error writing dependencies to
+  `/mnt/slot-probe-target/debug/build/itoa/0c0ea665ad493427/out/itoa-0c0ea665ad493427.d`: No such
+  file or directory (os error 2)``, cargo exit 101. Which of the server's rustc calls printed it
+  (the dep-info pass of `get_source_files_and_env_deps` or the compile) was not determined.
+- A build script, a test binary and a proc macro are compiled in the view all the same: the
+  server answers `UnhandledCompile` for what it does not cache and the client runs rustc
+  (`src/commands.rs`, `handle_compile_result`). Only cacheable library units fail.
+- With the path present outside the view and writable for the server's user, the build failed
+  with the same line and 0 files were written outside: the directories cargo made exist only in
+  the view.
+- `SCCACHE_CLIENT_SIDE=1` in the job (sccache 0.18.0, `docs/Architecture.md`, "Client-side
+  mode"; `src/commands.rs`, `do_compile_client_side`; `src/cache/ipc_storage.rs`, `IpcStorage`):
+  the client computes the key and runs rustc in the job, and the server only reads and writes
+  the store and adds up the statistics. The server is neither restarted nor configured for it.
+  sccache stays in its default mode when `SCCACHE_LOG` is set for the client or a distributed
+  scheduler is configured (`src/config.rs`; the architecture page names `SCCACHE_ERROR_LOG`).
+
+**Options, measured.** One small graph: `serde_json` 1.0.154 and `toml_edit` 0.22.27 with their
+dependencies, each build with a `--cfg` name of its own; times of the named unit from cargo's
+timing report, the first build and then the build in another worktree.
+
+| option | host target | wasm32-unknown-unknown | result |
+|---|---|---|---|
+| no view (today), no `CARGO_TARGET_DIR` in either job | `serde_core` 1.61 s, 1.57 s; `serde_json` 0.69 s, 0.69 s | 1.65 s, 1.74 s; 0.71 s, 0.74 s | compiled again |
+| view, server in its default mode | exit 101 | not run | fails, line above |
+| view, `SCCACHE_CLIENT_SIDE=1`, the shared server | `serde_core` 1.59 s, 0.25 s; `serde_json` 0.73 s, 0.17 s | 2.67 s, 0.27 s; 0.85 s, 0.18 s | served; the server's Rust hits rose by 5 during the build of 5 units |
+| view, a private server inside the view for each build, one store of its own | `serde_core` 1.81 s, 0.18 s; `serde_json` 0.71 s, 0.10 s | not run | served; 5 hits |
+| view of the target directory and of the sources, `SCCACHE_CLIENT_SIDE=1` | as the third row, and the tree's own crate 0.20 s, 0.11 s | not run | the tree's own crate served too |
+
+- The probe's mode `both` with the third option: worktree 1 alone, then worktrees 2 and 3 at
+  the same time. `serde_json` 0.73 s, then 0.17 s and 0.17 s; `toml_edit` 1.40 s, then 0.18 s and
+  0.17 s; on wasm32-unknown-unknown `serde_json` 0.73 s, then 0.17 s and 0.23 s, `toml_edit`
+  1.39 s, then 0.17 s and 0.17 s. Each worktree ran the test binary of its own branch (on wasm32
+  it was built, not run: no runner), and no build log has a line waiting for a file lock. With
+  `unshare` in place of bwrap: `toml_edit` 1.65 s, then 0.18 s and 0.19 s.
+- What the client-side mode costs: about 0.1 s more for each rustc call that goes through the
+  cache, hit or compile. Three rounds without a view, the server's mode against the client's:
+  `itoa` compiled in 0.10 s, 0.10 s, 0.10 s against 0.20 s, 0.19 s, 0.23 s and was served in
+  0.03 s, 0.03 s, 0.03 s against 0.12 s, 0.12 s, 0.17 s; a build of five library units took
+  2.20 s to 2.43 s against 2.69 s to 2.97 s. Each client process finds out about the compiler by
+  itself, where the server remembers it between requests (`src/server.rs`, `compiler_info`);
+  that this is the 0.1 s is *unverified*. A unit that compiles in under about half a second is
+  therefore not three times faster when it is served, which is why the probe counted 2 or 3 of
+  6 library units as "at most a third of their first compile" while the server counted a hit
+  for each.
+- Not measured: the private server against the shared store (two servers on one disk store,
+  each with its own account of the size: *unverified*); a build of the consumer's size; and
+  seeding a new tree's target directory with the dependency units of a built sibling, which
+  needs no view.
+
+**Recommended:** the third option, a view of the target directory alone with
+`SCCACHE_CLIENT_SIDE=1` set by the daemon in the jobs that get the view, as a daemon option that
+is off by default. It is the only variant measured to keep both the shared cache server and one
+target directory for each worktree, and it changes nothing in how the server runs. Its price is
+the 0.1 s for each rustc call above, against the 105.61 s of the eight crates in each new
+worktree. Binding the sources too would also serve a workspace's own crates, and it moves every
+source path in the output: that is `--sandbox-fixed-paths` with the wrapper kept, a second step.
+
+**Open before it is built.**
+
+- The watchdog of § 12 (idea 7) counts the server's child processes as compiles and `sccache`
+  processes as clients. In the client-side mode the compiles are children of the clients, so its
+  condition "more clients than compiles" holds all the time; whether the other conditions still
+  keep it from writing tokens is *unverified*.
+- The CPU and memory of a compile then count in the job's own process tree and scope, not in
+  the server's (`compile_server_cpu_s`, § 24): *unverified*.
+- The path: its parent must exist on every node (`/mnt` here, owned by root, not writable for
+  the build user).

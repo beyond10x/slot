@@ -9,8 +9,9 @@
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
+EXTRA_TOOLS
 INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT
-SLOT_TARGET EXTRA_ARCHIVES'
+SLOT_TARGET'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -93,7 +94,7 @@ conf_read() {
   TMP_GB=${CONF_TMP_GB:-400}
   DOCKER_GB=${CONF_DOCKER_GB:-10}
   EXTRA_PACKAGES=${CONF_EXTRA_PACKAGES:-}
-  EXTRA_ARCHIVES=${CONF_EXTRA_ARCHIVES:-}
+  EXTRA_TOOLS=${CONF_EXTRA_TOOLS:-}
   DISK_MODEL=${CONF_DISK_MODEL:-Amazon EC2 NVMe Instance Storage}
   NODE_NAME=${CONF_NODE_NAME:-this node}
   NODE_SSH=${CONF_NODE_SSH:-}
@@ -269,7 +270,14 @@ conf_check_forms() {
     return 2
     ;;
   esac
-  for k in RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS EXTRA_PACKAGES EXTRA_ARCHIVES; do
+  # EXTRA_TOOLS: names of tools that provision.sh has a pin for; provision.sh, which knows the
+  # pins, refuses a name it has none for.
+  case $EXTRA_TOOLS in *[!a-z0-9\ -]*)
+    conf_fail "$1: EXTRA_TOOLS must be names of lowercase letters, digits and dashes, separated by spaces"
+    return 2
+    ;;
+  esac
+  for k in RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS EXTRA_PACKAGES; do
     eval "v=\${$k}"
     case $k in
       EXTRA_PACKAGES) case $v in *[!A-Za-z0-9._+\ -]*) v=\* ;; esac ;;

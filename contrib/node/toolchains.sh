@@ -11,6 +11,8 @@
 #   tool sdc-aep-<version> <16 hex digits of the SHA-256 of ~/.cache/sdc/aep/<version>/…/aep>
 #   tool groovy-all-<version> <16 hex digits of the SHA-256 of
 #        ~/.sdkman/candidates/groovy/<version>/embeddable/groovy-all-<version>.jar>
+#   tool <erlang|elixir|gleam|odin> <version>: the OTP release (29.0.6), `<release>-otp-<the OTP
+#        major it was compiled with>`, the release, and the last word of `odin version`
 #   c <tool> <first line of its --version>, or `c <tool> missing`
 # Run with prefix "" on the workstation and on the node: each prints what its own machine has.
 # push.sh check compares the rust, go, node and tool lines; the C tools are for reading.
@@ -101,7 +103,7 @@ for b in "$P/usr/local/bin/dash" "$P/usr/bin/dash"; do
   break
 done
 # firefox: the browser a consumer's tests start by name, headless. A node has it in /usr/local/bin
-# when its config asks for the archive (EXTRA_ARCHIVES of provision.sh), the workstation in
+# when its config names it in EXTRA_TOOLS (provision.sh), the workstation in
 # /usr/bin. `firefox --version` prints `Mozilla Firefox <release>` and opens no window. The node's
 # link names /usr/local/firefox-<release>/firefox, read under the prefix.
 for b in "$P/usr/local/bin/firefox" "$P/usr/bin/firefox"; do
@@ -125,6 +127,33 @@ for b in "$ph" "$P/usr/local/bin/helm" "$P/usr/bin/helm" "$HOME/.local/bin/helm"
   hv=$(cd / && "$b" version --template '{{.Version}}' 2>/dev/null </dev/null | head -n 1)
   echo "tool helm ${hv:-missing}"
   break
+done
+# Erlang/OTP, Elixir, Gleam and Odin (EXTRA_TOOLS of provision.sh). A node has them in
+# /usr/local/bin. A workstation has erl in /usr/bin, and the others where its PATH names them: like
+# helm, with the prefix "" the one PATH names first is read, so these four lines depend on the
+# caller's PATH as well. No tool here has a `--version` that is its release on the first line:
+#   erlang  erl has none. The OTP release is the text of releases/<major>/OTP_VERSION under the
+#           root of the system that runs, which erl prints here (29.0.6).
+#   elixir  `--version` prints the line of the Erlang system first, then `Elixir 1.20.4 (compiled
+#           with Erlang/OTP 29)`: the line is `1.20.4-otp-29`, the release and the OTP major of the
+#           precompiled archive. It runs `erl` from the caller's PATH; without one: `missing`.
+#   gleam   the last word of `gleam --version`.
+#   odin    the last word of `odin version` (`dev-2026-09-nightly:a2fb372`: release and commit).
+for n in erl elixir gleam odin; do
+  pb=$([ -n "$P" ] || command -v "$n" 2>/dev/null)
+  case $pb in /* | "") ;; *) pb=$(pwd)/$pb ;; esac
+  for b in "$pb" "$P/usr/local/bin/$n" "$P/usr/bin/$n" "$HOME/.local/bin/$n"; do
+    [ -n "$b" ] && [ -x "$b" ] || continue
+    case $n in
+      erl) bv=$(cd / && "$b" -noshell -eval '{ok,V}=file:read_file(filename:join([code:root_dir(),"releases",erlang:system_info(otp_release),"OTP_VERSION"])), io:put_chars(V), halt().' 2>/dev/null </dev/null | head -n 1) ;;
+      elixir) bv=$(cd / && "$b" --version 2>/dev/null </dev/null | sed -n 's/^Elixir \([^ ]*\) (compiled with Erlang\/OTP \([0-9]*\)).*/\1-otp-\2/p' | head -n 1) ;;
+      odin) bv=$(cd / && "$b" version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }') ;;
+      *) bv=$(cd / && "$b" --version 2>/dev/null </dev/null | head -n 1 | awk '{ print $NF }') ;;
+    esac
+    [ "$n" != erl ] || n=erlang
+    echo "tool $n ${bv:-missing}"
+    break
+  done
 done
 # The aep binary of runbook's driver pin, one file per version in the user's cache
 # (~/.cache/sdc/aep/<version>/x86_64-unknown-linux-gnu/aep): `tool sdc-aep-<version> <the first 16

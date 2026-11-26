@@ -146,6 +146,59 @@ fn a_tree_on_the_never_sync_list_is_not_copied() {
     assert!(err.contains("slot: synced to node"), "{err}");
 }
 
+/// `SLOT_SPILLED` in a caller's environment (a wrapper that wants no run
+/// here after a failed start) does not turn the rule into a job that ran
+/// nowhere: a tree on the list runs in this machine's pool. Only the client
+/// a daemon started for a job it handed to a node, which names the phases
+/// file too, ends with exit 3: that daemon queues the job here again.
+#[test]
+fn a_listed_tree_runs_here_when_the_callers_environment_says_spilled() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let a = root.join("a");
+    std::fs::create_dir(&a).unwrap();
+    super::git(&a, &["init", "-q"]);
+    never_sync(&d, &[&a]);
+    let ssh = forced_ssh(&root, &d, "");
+    let reason = format!("never sync: {}", a.display());
+
+    let argv = ["echo", "listed"];
+    let caller = [("SLOT_SPILLED", "1"), ("SLOT_PHASES_FILE", "")];
+    let out = remote_call_env(&d, &ssh, &a, &argv, &caller);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "listed\n", "{err}");
+    assert!(
+        err.contains(&format!(
+            "slot: {reason}: the tree is not synced to node; running on this machine"
+        )),
+        "{err}"
+    );
+    let line = logged_line(&d, &argv);
+    assert!(
+        line.contains(&format!("\"local_reason\":\"{reason}\"")),
+        "{line}"
+    );
+
+    let argv = ["echo", "handed"];
+    let phases = root.join("phases.json");
+    let handed = [
+        ("SLOT_SPILLED", "1"),
+        ("SLOT_PHASES_FILE", phases.to_str().unwrap()),
+    ];
+    let out = remote_call_env(&d, &ssh, &a, &argv, &handed);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l == format!("slot: {reason}: the tree is not synced to node")),
+        "{err}"
+    );
+    assert_eq!(d.logged(&argv), 0, "{err}");
+    assert_eq!(ssh_calls(&root), "", "ssh ran");
+}
+
 /// A symlink to a file outside the tree reaches the mirror as the link,
 /// never as the file's content, and the sync line counts it.
 #[test]

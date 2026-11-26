@@ -17,8 +17,9 @@ workstation timed out from about 06:13 CET. All remote jobs stopped until the ru
 the account, which only the owner may do.
 
 Every job crosses on the same ssh path: `rsync` of the tree and the `slot shell` run use the build
-key (it may only run `slot shell`), and `push.sh apply` uses the setup key, let in only after
-`provision.sh apply --open`. The options below change how that ssh connection reaches the node;
+key (it may only run `slot shell`), and a login that sets the node up by hand uses the setup key,
+let in only after `provision.sh apply --open`. Nothing is copied to a node ahead of jobs: it
+installs everything itself (`provision.sh apply`). The options below change how that ssh connection reaches the node;
 the keys, the forced command and the deny lists stay as they are.
 
 ## 2. Options
@@ -62,7 +63,8 @@ A private endpoint in the node's VPC tunnels the ssh connection; the security gr
 - Limits that matter for slot: one connection lasts at most 1 hour; an endpoint carries at most 20
   concurrent connections, and a VPC has one endpoint (both not adjustable,
   [quotas](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/eice-quotas.html)). "High volume
-  data transfers are throttled" (connect page): the first `push.sh apply` copies tens of GB.
+  data transfers are throttled" (connect page): the first sync of a tree can send GB (3.3 GB
+  measured for one tree without its build output).
 - The workstation needs an identity allowed `ec2-instance-connect:OpenTunnel` for the endpoint.
 - Compared with A: a new resource in the VPC, the 1-hour cap and the throttle, for nothing A
   lacks here.
