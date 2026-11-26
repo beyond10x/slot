@@ -173,6 +173,15 @@ The check is in the `slot` binary, so it holds however the binary is called: wit
 already set, through a wrapper or without one. A list file that cannot be read, or a host
 configuration that does not parse, keeps every job on this machine.
 
+Nothing failed, so the job runs here without `SLOT_REMOTE_FALLBACK`, and it runs here whatever
+else the caller's environment holds. One call ends with exit 3 instead, and its line has no
+`; running on this machine`: the client that this machine's daemon started itself for a job it
+handed to a node ([Hand queued jobs to a node](#hand-queued-jobs-to-a-node)). The daemon gives
+that client `SLOT_SPILLED` and `SLOT_PHASES_FILE`, and it queues the job here again when the
+client ends that way. `SLOT_SPILLED` alone, set by a wrapper beside `SLOT_HOST`, is no such
+client: up to 0.39.1 its job ended with exit 3 and ran nowhere; now it runs in this machine's
+pool.
+
 The same lists hold for the [git dependencies](#git-dependencies-come-from-this-machine) the
 checkout's lock files name, together with a second file,
 `$XDG_CONFIG_HOME/slot/remote-deny-origins`. Either file may hold either kind of line:
@@ -226,6 +235,11 @@ it names are not read. A job stays on this machine when a `git+` source of one o
 ```text
 slot: git dependency denied: git+https://git.example.org/team/dep.git?branch=main: the tree is not synced to buildbox; running on this machine
 ```
+
+The job then runs in this machine's pool as the job of a listed tree does: neither the tree nor
+the dependency is sent, its exit code is the command's, and its record carries the reason in
+`local_reason`. Exit 3 is kept for the one call named above, the client of a job this machine's
+daemon handed to a node.
 
 With both files naming nothing no lock file is read.
 
@@ -395,6 +409,42 @@ slot cargo test --no-run
 - **Off.** `SLOT_NO_PRODUCTS=1` in your environment copies nothing back and runs your command
   unchanged; slot prints `slot: artifacts not fetched: SLOT_NO_PRODUCTS is set` instead.
 
+### What a go build wrote
+
+A remote `go build -o <path>` or `go test -c -o <path>` that exits 0 leaves the file it built at
+the same path in your checkout, with its mode and modification time, also when the path lies
+under `target/` or another directory the sync leaves out:
+
+```console
+slot go build -o target/tools/mytool ./cmd/mytool
+./target/tools/mytool --version
+slot go test -c -o target/tools/pkg.test ./pkg
+```
+
+- **Which path.** The value of `-o`, written as `-o <path>` or `-o=<path>`; a relative path is
+  read against the directory you called from (after `-C <dir>`). A path outside the checkout
+  brings nothing back and prints nothing. An absolute path counts as inside the checkout only
+  for a tree [mirrored at the same path](#mirror-at-the-same-path).
+- **A directory.** When the path is a directory on the server before the job, or `-o` ends in
+  `/`, slot lists it on the server before the job and after it and copies the files the job
+  wrote: those that are new, or whose size or modification time changed. Any other file of that
+  directory stays on the server. The top of the checkout is such a directory too
+  (`go build -o . ./cmd/...` called there). Both listings are the server's, so no clock of this
+  machine is compared with the server's. The times are compared to the second: a file written
+  again with the same size within the second of its earlier time counts as not written.
+- **Links.** A directory on the path that is a symlink in your checkout (`out -> /data/out`)
+  stays a symlink: the file arrives where it points.
+- **When.** After exit 0 only. The line is the same, for example
+  `slot: fetched 1 artifact, 2.1 MB, in 0.2 s`. A listing or a copy that fails prints
+  `slot: artifacts not fetched: <path>: …` and turns exit 0 into 1. A single file needs no
+  listing before the job: when that listing fails, slot lists the path again after the job and
+  copies the file when it is no directory.
+- **Not touched.** `go run`, `go vet`, `go install`, a `go build` without `-o` and a `go test`
+  without `-c` run as before: no listing, no copy. A `go test -c` without `-o` writes
+  `<package>.test` into the working directory on the server, and it stays there: name the file
+  with `-o` to get it back.
+- **Off.** `SLOT_NO_PRODUCTS=1`, as for cargo.
+
 ## Crates are fetched once per Cargo.lock
 
 Parallel cargo jobs on one server wait in turn on cargo's package-cache lock while one of them
@@ -402,8 +452,19 @@ downloads crates. Before a cargo job that builds (`build`, `check`, `clippy`, `t
 `doc`, `rustc`, `nextest`, `llvm-cov`), the server daemon compares the digest of the mirror's
 `Cargo.lock` with the one it recorded for that mirror. When they differ it runs
 `cargo fetch` once, under a lock per repository, records the digest, and prints
-`slot: new Cargo.lock on this mirror: cargo fetch took 2.1 s; its cargo jobs run
-offline`. Every such job of the mirror then runs with `CARGO_NET_OFFLINE=true`.
+`slot: new Cargo.lock on this mirror: cargo fetch took 2.1 s`. The job then finds every crate in
+the server's cargo home and downloads nothing.
+
+The job's environment is not changed. Releases up to 0.39.1 set `CARGO_NET_OFFLINE=true` for
+such a job. A compile cache keys every `CARGO_*` variable, so a cargo job shared no cache entry
+with cargo inside a generic job (`slot sh -c 'cargo build'`), which gets no fetch and no
+variable ([Cargo variables and the compile
+cache](reference/environment.md#cargo-variables-and-the-compile-cache)). What the variable
+guarded is now different: when a crate is missing after the fetch (the server's cargo home was
+cleaned), the job downloads it and holds the package-cache lock for that long, where it failed
+before; and a job whose `Cargo.lock` is out of date asks the registry's index. Set
+`CARGO_NET_OFFLINE=true` yourself for a job that must not use the network: your value reaches
+the job.
 
 Like cargo on your machine, the fetch updates a `Cargo.lock` that is out of date, for example
 after you add a path dependency. A job that passes `--locked` or `--frozen` itself gets
@@ -413,8 +474,9 @@ A fetch that fails (a `Cargo.toml` cargo cannot resolve, an unreachable registry
 `Cargo.lock` under `--locked`) or takes longer than 5 minutes is a job that did not start:
 `slot: remote build on <host> did not start (cargo fetch failed …)`, exit 3, or this machine's
 daemon with `SLOT_REMOTE_FALLBACK=local` ([When the server is
-unreachable](#when-the-server-is-unreachable)). A mirror without a `Cargo.lock` gets no fetch and runs online. Commands that
-need the network themselves (`cargo update`, `add`, `install`, `fetch`) run online.
+unreachable](#when-the-server-is-unreachable)). A mirror without a `Cargo.lock` gets no fetch,
+and neither do commands that need the network themselves (`cargo update`, `add`, `install`,
+`fetch`).
 
 The digests live in `<ws-root>/.cargo-fetch/` on the server and go with their mirror when it is
 evicted. Both features need this release of slot on the server and on the workstation.
@@ -512,7 +574,20 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
   names for the command's manifest (`--manifest-path driver/Cargo.toml` builds into
   `driver/target`). The paths cargo prints, and `CARGO_BIN_EXE_*` in tests, are valid on both
   machines, and a build's products come back to the same paths. It must lie below a
-  `--same-path-root` too.
+  `--same-path-root` too. When it is the directory cargo resolves by itself (`target` beside
+  the workspace's root manifest), the job gets no `CARGO_TARGET_DIR`: the variable is part of a
+  compile cache's key and would differ in every tree, so a crate built in one worktree would be
+  compiled again in the next ([Cargo variables and the compile
+  cache](reference/environment.md#cargo-variables-and-the-compile-cache)). When you set
+  `CARGO_TARGET_DIR`, or `CARGO_BUILD_TARGET_DIR` or a `build.target-dir` of a cargo
+  configuration on this machine names another directory, the job gets `CARGO_TARGET_DIR` with
+  that directory's absolute path. So does a job for which `cargo metadata` fails here: slot
+  then takes `target` beside the nearest `Cargo.lock`, which a cargo configuration might have
+  moved, and names it to cargo rather than leave it to cargo. The job's record names the
+  directory either way. Where the job gets no `CARGO_TARGET_DIR` it gets no
+  `CARGO_BUILD_TARGET_DIR` either, also not one of the server daemon's own environment. A
+  server whose own cargo configuration sets `build.target-dir` would build elsewhere than the
+  record says: keep it off the server.
 - A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
   directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
 - A directory outside any git checkout (a scratch copy) is the tree itself, unless it is the

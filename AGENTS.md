@@ -69,6 +69,12 @@ reference and UI types. It prints `rustc --version` first: `rust-toolchain.toml`
 rustc of the local gate and of every workflow, which install the version that file names.
 CI runs it in `.github/workflows/gate.yml`.
 
+Its shell tests (`contrib/slot-shim.test.sh`, `contrib/rustc-gate.test.sh`,
+`contrib/node/test.sh`) run once each through `contrib/shell-tests.sh`: under dash where dash is
+on PATH, as on the forge, whose `sh` is dash, else under `sh`. Its first line says which
+(`shell tests: under dash (…)` or `shell tests: under sh (…): no dash on PATH`). A test that
+fails only under dash is a bashism in the test or in the script it tests.
+
 A pull request whose changed files are all planning or prose files (everything under
 `.engineering/`, `*.md` outside `website/` and `ui/`) passes `gate` and `Build documentation`
 without building (`website/docs/getting-started.md` counts as code: `cargo test` reads it):
@@ -242,10 +248,16 @@ Bare SemVer tags (`0.1.0`).
    `website/product.json`. `task check` green on that commit.
 2. Annotated tag on `main`, created and pushed as the bot.
 3. The tag push runs `.github/workflows/release.yml` (contents: read): `task check`; tag,
-   `Cargo.toml` and `CHANGELOG.md` agree; two Linux targets built and smoke-tested (x86_64 and
-   aarch64 gnu; slot reads `/proc` and has no macOS port). It uploads the artifact
-   `slot-<version>-release`: `slot-<version>-<target>.tar.gz` for both targets, `SHA256SUMS`
-   and `notes.md` (the changelog section).
+   `Cargo.toml` and `CHANGELOG.md` agree; four Linux targets built and smoke-tested, each
+   architecture on a runner of its own kind (`x86_64-unknown-linux-gnu`,
+   `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`; slot
+   reads `/proc` and has no macOS port). A musl binary is also proven static
+   (`.github/scripts/static-binary.sh`: no `NEEDED` entry, no program interpreter) and answers
+   `--version` in an Alpine container whose image the workflow names by digest. It uploads the
+   artifact `slot-<version>-release`: `slot-<version>-<target>.tar.gz` for the four targets,
+   `SHA256SUMS` and `notes.md` (the changelog section). `crates/slot-docs/tests/ci/mod.rs` reads
+   the workflow: a target added to the matrix is added to the bundle's list, to
+   `RELEASE_TARGETS` there and to `website/docs/getting-started.md`.
 4. `gh run download <run> -n slot-<version>-release -D target/release-assets` (read-only), then
    `sha256sum -c SHA256SUMS` there.
 5. From the checkout, with paths relative to it (Gates refuses a home-directory path):

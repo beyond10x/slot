@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-26T12:14:56Z",
+  "actor": "human:operator",
+  "artifact": "story:node-installs-its-toolchains-by-script",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "health_observation",
+    "source": "the node's job log of 2026-11-26 holds 6,543 ended jobs of 16 repositories; a cargo build of a crate for x86_64-unknown-linux-musl exited 0 there"
+  }
+}

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use super::{Daemon, SLOT, forced_ssh, git, remote_call_env};
+use super::{Daemon, SLOT, forced_ssh, git, remote_call_env, script};
 
 /// A bare repository `<root>/forge/dep.git` holding crate `dep`, whose
 /// `n()` is 7; its URL and the commit id of its head.
@@ -309,6 +309,205 @@ fn a_denied_git_dependency_keeps_the_job_here() {
             "{line}"
         );
     }
+}
+
+/// What a wrapper in front of the binary may set beside `SLOT_HOST`, so
+/// that a failed remote start never runs here: the mark of a job a daemon
+/// handed to a node, without the phases file such a daemon names.
+const CALLER_SAYS_SPILLED: [(&str, &str); 2] = [("SLOT_SPILLED", "1"), ("SLOT_PHASES_FILE", "")];
+
+/// A daemon whose cluster file names a node that takes jobs and never
+/// answers: every job's record says why the job stays here.
+fn daemon_with_a_node(root: &Path) -> Daemon {
+    let ssh = root.join("node-ssh");
+    script(&ssh, "exit 255");
+    let cluster = root.join("cluster.toml");
+    std::fs::write(
+        &cluster,
+        format!("[remote.node-a]\nssh = \"{} node-a\"\n", ssh.display()),
+    )
+    .unwrap();
+    Daemon::start_env(&[], &[("SLOT_CLUSTER_FILE", cluster.as_os_str())])
+}
+
+/// The job log line of the one job of `d` whose command is `argv`.
+fn logged_line(d: &Daemon, argv: &[&str]) -> String {
+    let want = super::super::serde_like(argv);
+    assert!(
+        super::super::wait_for(|| d.logged(argv) == 1),
+        "not on this machine's daemon"
+    );
+    std::fs::read_to_string(d.dir.path().join("state/jobs.jsonl"))
+        .unwrap()
+        .lines()
+        .find(|l| l.contains(&want))
+        .unwrap()
+        .to_string()
+}
+
+/// A checkout `<root>/app` whose lock file names a source that
+/// `origin:*git.example.org[:/]team/*` denies, the client's deny list with
+/// that line, and the job's reason.
+fn denied_checkout(root: &Path, d: &Daemon) -> (PathBuf, String) {
+    config(
+        d,
+        "remote-deny-origins",
+        "origin:*git.example.org[:/]team/*\n",
+    );
+    let url = "https://git.example.org/team/dep.git?tag=v1";
+    let repo = app(root, url, "0123456789abcdef0123456789abcdef01234567");
+    (repo, format!("git dependency denied: git+{url}"))
+}
+
+/// A caller's environment may carry `SLOT_SPILLED` beside `SLOT_HOST` (a
+/// wrapper that wants no run here after a failed start). No daemon waits
+/// for that client's exit 3, so a denied git dependency still keeps the job
+/// in this machine's pool: one line names the reason, nothing reaches the
+/// node, and the job's record carries the reason, also on a daemon that
+/// hands jobs to a node.
+#[test]
+fn a_denied_git_dependency_runs_here_when_the_callers_environment_says_spilled() {
+    let t0 = Instant::now();
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let d = daemon_with_a_node(&root);
+    let (repo, reason) = denied_checkout(&root, &d);
+    let ssh = forced_ssh(&root, &d, "");
+    let argv = ["echo", "kept-here"];
+    let out = remote_call_env(&d, &ssh, &repo, &argv, &CALLER_SAYS_SPILLED);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "kept-here\n", "{err}");
+    let said: Vec<&str> = err
+        .lines()
+        .filter(|l| l.contains("git dependency denied"))
+        .collect();
+    assert_eq!(
+        said,
+        [format!(
+            "slot: {reason}: the tree is not synced to node; running on this machine"
+        )],
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("ssh.log")).unwrap_or_default(),
+        "",
+        "ssh ran"
+    );
+    let line = logged_line(&d, &argv);
+    assert!(
+        line.contains(&format!("\"local_reason\":\"{reason}\"")),
+        "{line}"
+    );
+    eprintln!("took {:.1} s", t0.elapsed().as_secs_f64());
+}
+
+/// The client of a job this machine's daemon handed to a node (the daemon
+/// sets `SLOT_SPILLED` and names the phases file) still sends a job with a
+/// denied git dependency back: exit 3, on which that daemon queues the job
+/// here again. It submits no second job.
+#[test]
+fn a_handed_job_with_a_denied_git_dependency_goes_back_to_its_daemon() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let d = Daemon::start();
+    let (repo, reason) = denied_checkout(&root, &d);
+    let ssh = forced_ssh(&root, &d, "");
+    let phases = root.join("phases.json");
+    let argv = ["echo", "handed"];
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &repo,
+        &argv,
+        &[
+            ("SLOT_SPILLED", "1"),
+            ("SLOT_PHASES_FILE", phases.to_str().unwrap()),
+        ],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    assert!(
+        err.lines()
+            .any(|l| l == format!("slot: {reason}: the tree is not synced to node")),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("ssh.log")).unwrap_or_default(),
+        "",
+        "ssh ran"
+    );
+    assert_eq!(d.logged(&argv), 0, "{err}");
+}
+
+/// `SLOT_SPILLED` in a caller's environment keeps no job here by itself: a
+/// git dependency no list denies goes to the node with its job.
+#[test]
+fn an_allowed_git_dependency_goes_to_the_node_when_the_caller_says_spilled() {
+    let t0 = Instant::now();
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (url, rev) = forge(&root);
+    let repo = app(&root, &url, &rev);
+    let here_home = root.join("cargo-here");
+    let n = node(&root, |_| String::new());
+    config(
+        &n.d,
+        "remote-deny-origins",
+        "origin:*git.example.org[:/]team/*\n",
+    );
+    let env = [
+        ("CARGO_HOME", here_home.to_str().unwrap()),
+        CALLER_SAYS_SPILLED[0],
+        CALLER_SAYS_SPILLED[1],
+    ];
+    let out = remote_call_env(&n.d, &n.ssh, &repo, &["echo", "on-the-node"], &env);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "on-the-node\n",
+        "{err}"
+    );
+    assert!(err.contains("slot: synced to node"), "{err}");
+    assert!(!err.contains("git dependency denied"), "{err}");
+    assert_eq!(db_copies(&root), 1, "the dependency went with it: {err}");
+    eprintln!("took {:.1} s", t0.elapsed().as_secs_f64());
+}
+
+/// `slot --here` with a denied git dependency is a job of this machine's
+/// pool as before, with nothing said about a node and nothing sent to one,
+/// whatever the caller's environment says.
+#[test]
+fn here_with_a_denied_git_dependency_stays_a_job_of_this_pool() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let d = Daemon::start();
+    let (repo, reason) = denied_checkout(&root, &d);
+    let ssh = forced_ssh(&root, &d, "");
+    let plain = [("SLOT_SPILLED", ""), ("SLOT_PHASES_FILE", "")];
+    for (name, env) in [("here-plain", plain), ("here-spilled", CALLER_SAYS_SPILLED)] {
+        let out = remote_call_env(&d, &ssh, &repo, &["--here", "echo", name], &env);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{name}: {err}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{name}\n"),
+            "{err}"
+        );
+        assert!(!err.contains("the tree is not synced"), "{name}: {err}");
+        let line = logged_line(&d, &["echo", name]);
+        assert!(
+            line.contains(&format!("\"local_reason\":\"{reason}\"")),
+            "{name}: {line}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("ssh.log")).unwrap_or_default(),
+        "",
+        "ssh ran"
+    );
 }
 
 /// The entries of both places a node's cargo git database could be: the

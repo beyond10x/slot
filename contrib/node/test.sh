@@ -57,6 +57,12 @@ conf
 printf 'RUST_COMPONENTS=clippy\nRUST_TARGETS=wasm32-unknown-unknown\n' >>"$W/node.conf"
 run "$W/r0" check
 if grep -q 'unknown key' "$W/err"; then bad "RUST_COMPONENTS and RUST_TARGETS are refused ($(cat "$W/err"))"; else ok "RUST_COMPONENTS and RUST_TARGETS are config keys"; fi
+for bad_target in aarch64-unknown-linux-musl musl x86_64-unknown-linux-gnu.tar.gz 'x86_64-unknown-linux-musl x' '../x86_64-unknown-linux-musl'; do
+  conf
+  echo "SLOT_TARGET=$bad_target" >>"$W/node.conf"
+  run "$W/r0" check
+  if [ $? -eq 2 ] && grep -q "SLOT_TARGET must be x86_64-unknown-linux-gnu or x86_64-unknown-linux-musl, not '$bad_target'" "$W/err"; then ok "SLOT_TARGET=$bad_target is refused"; else bad "SLOT_TARGET=$bad_target is accepted ($(cat "$W/err"))"; fi
+done
 for bad_rust in 'RUST_TOOLCHAINS=stable;id' 'RUST_COMPONENTS=clippy*' 'RUST_TARGETS=$(id)' 'RUST_TARGETS=1.99.1:-t' 'RUST_TARGETS=1.99.1:a,-b' 'RUST_TOOLCHAINS=1.99.1 -stable' 'EXTRA_PACKAGES=jq;id' 'EXTRA_PACKAGES=git --nogpgcheck' 'EXTRA_PACKAGES=a $(id)' 'EXTRA_PACKAGES=a*'; do
   conf
   echo "$bad_rust" >>"$W/node.conf"
@@ -314,6 +320,74 @@ grep -q '^changed: slot' "$W/out" && bad "a failed install is reported as change
 run "$R" apply
 run "$R" check
 [ $? -eq 0 ] && ok "after the download works: 0 drift" || bad "after the download: $(cat "$W/out")"
+# SLOT_TARGET: which archive of the release a node installs. The default is the build against
+# glibc (x86_64-unknown-linux-gnu), as before the key; x86_64-unknown-linux-musl is the static
+# one. `slot --version` answers the same for both, so check also reads which build a binary is,
+# at each path and for the running daemon. Under NODE_TEST=1 the stand-in of the musl build
+# carries its target in a comment line.
+tlines() { cat "$W/out" "$W/err" | grep 'slot' | tr '\n' ' '; }
+rm -f "$R/usr/local/bin/slot"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'fetch slot 0.36.0' "$R/.calls" && grep -qx 'changed: slot: slot 0.36.0 installed at /usr/local/bin/slot' "$W/out" && ok "without SLOT_TARGET the archive, the call and the line of an install are the ones before the key" || bad "default target: $(grep fetch "$R/.calls") $(tlines)"
+echo 'SLOT_TARGET=x86_64-unknown-linux-gnu' >>"$W/node.conf"
+run "$R" check
+! grep -q '^drift: slot\|^drift: running' "$W/out" && grep -qx '1 drift' "$W/out" && grep -q '^drift: libexec: /etc/slot-node/node.conf' "$W/out" && ok "SLOT_TARGET=x86_64-unknown-linux-gnu is the default by name: no drift of slot (the one line is the node's copy of the config file)" || bad "gnu by name: $(cat "$W/out" "$W/err")"
+conf
+echo 'SLOT_TARGET=x86_64-unknown-linux-musl' >>"$W/node.conf"
+run "$R" check
+st=$?
+n=0
+for p in /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot; do
+  grep -qx "drift: slot:$p: is the build for x86_64-unknown-linux-gnu, config says x86_64-unknown-linux-musl" "$W/out" && n=$((n + 1))
+done
+[ $st -eq 1 ] && [ $n -eq 3 ] && ok "SLOT_TARGET=x86_64-unknown-linux-musl at the same version: check names each path as the other build" || bad "musl check: exit $st, $n of 3 lines: $(tlines)"
+echo 0 >"$R/.state/jobs"
+: >"$R/.calls"
+run "$R" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch slot 0.36.0 x86_64-unknown-linux-musl' "$R/.calls" && grep -qx 'changed: slot: slot 0.36.0 (x86_64-unknown-linux-musl) installed at /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot' "$W/out" && ok "apply fetches the musl archive and installs it at the three paths" || bad "musl apply: exit $st $(grep fetch "$R/.calls") $(tlines)"
+grep -qx 'systemctl restart slot-node.service' "$R/.calls" && [ "$(cat "$R/.state/running-target/slot-node.service" 2>/dev/null)" = x86_64-unknown-linux-musl ] && ok "with no job running the daemon restarts on the other build" || bad "musl restart: $(grep systemctl "$R/.calls" | tr '\n' ' ') running '$(cat "$R/.state/running-target/slot-node.service" 2>&1)'"
+[ "$("$R/srv/slot/bin/slot" --version)" = 'slot 0.36.0' ] && ok "the musl build answers the same version" || bad "musl stand-in: $("$R/srv/slot/bin/slot" --version 2>&1)"
+run "$R" check
+[ $? -eq 0 ] && ok "after the install of the musl build: 0 drift" || bad "musl after apply: $(cat "$W/out")"
+# A daemon that still runs the other build (its restart waited for jobs, and the binary at the
+# path is already the new one): the running process is read, not the file.
+echo x86_64-unknown-linux-gnu >"$R/.state/running-target/slot-node.service"
+run "$R" check
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: running: slot-node.service: it runs the slot build for x86_64-unknown-linux-gnu, the config says x86_64-unknown-linux-musl' "$W/out" && ok "check names a daemon that still runs the other build" || bad "running target: exit $st $(cat "$W/out")"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'systemctl restart slot-node.service' "$R/.calls" && ! grep -q '^fetch slot' "$R/.calls" && ok "apply restarts that daemon and downloads nothing" || bad "running target apply: $(cat "$R/.calls" | tr '\n' ' ')"
+# Back to the default: the gnu archive again, and nothing of the key is left.
+conf
+run "$R" check
+grep -qx 'drift: slot:/usr/local/bin/slot: is the build for x86_64-unknown-linux-musl, config says x86_64-unknown-linux-gnu' "$W/out" && ok "without the key a musl build is drift" || bad "back to gnu check: $(tlines)"
+: >"$R/.calls"
+run "$R" apply
+grep -qx 'fetch slot 0.36.0' "$R/.calls" && grep -qx 'changed: slot: slot 0.36.0 installed at /srv/slot/bin/slot /usr/local/bin/slot /var/lib/builder/.local/bin/slot' "$W/out" && ok "apply installs the gnu archive again" || bad "back to gnu apply: $(grep fetch "$R/.calls") $(tlines)"
+run "$R" check
+[ $? -eq 0 ] && ok "back at the default: 0 drift" || bad "back to gnu: $(cat "$W/out")"
+# How a real binary is told apart: the build against glibc names a program interpreter, the
+# static one has program headers and none. A file readelf cannot read gives no answer.
+st_o=$(
+  eval "$(sed -n '/^q_slot_target() {$/,/^}$/p' "$P")"
+  T=
+  as_user() { echo "$*" >>"$W/st-cmd"; cat "$W/st-answer"; }
+  printf 'Program Headers:\n  INTERP 0x318\n      [Requesting program interpreter: /lib64/ld-linux-x86-64.so.2]\n  LOAD 0x0\n' >"$W/st-answer"
+  q_slot_target /a/slot
+  printf 'Program Headers:\n  LOAD 0x0\n  DYNAMIC 0x1\n' >"$W/st-answer"
+  q_slot_target /a/slot
+  : >"$W/st-answer"
+  q_slot_target /a/slot
+  as_user() { return 1; }
+  q_slot_target /a/slot
+  echo end
+)
+[ "$st_o" = "x86_64-unknown-linux-gnu
+x86_64-unknown-linux-musl
+end" ] && [ "$(head -n 1 "$W/st-cmd")" = 'env LC_ALL=C readelf -lW /a/slot' ] && ok "a binary with a program interpreter is the gnu build, one with program headers and none the musl build; no answer from readelf is no answer" || bad "q_slot_target: $st_o / $(head -n 1 "$W/st-cmd" 2>&1)"
 
 # 5e. Cargo tools pinned in provision.sh (the release a consumer's CI installs) are installed at
 # that release in the store's cargo bin and read back; check names one of another release.
@@ -621,6 +695,96 @@ st=$?
 [ $st -eq 0 ] && ! grep -q '^fetch .*musl' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/musl-gcc")" = "$MU/bin/musl-gcc" ] && ok "back at the pin, the link returns to the tree that is there without a download" || bad "musl pin back: exit $st $(grep musl "$R5/.calls") $(mlines)"
 rm -rf "$R5/usr/local/musl-9.9.9"
 
+# dash 0.5.12 from its source tarball (DASH_PIN): the shell that is `sh` on the forge's runner
+# image, so a shell test of a job can run under it. The binary is in /usr/local/dash-0.5.12/bin,
+# linked as dash and never as sh. dash prints no version: the tree carries the SHA-256 of the
+# tarball it was built from, and the binary must run a command.
+DA=/usr/local/dash-0.5.12
+DS=6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a
+dlines() { cat "$W/out" "$W/err" | grep 'dash' | tr '\n' ' '; }
+[ "$(readlink "$R5/usr/local/bin/dash")" = "$DA/bin/dash" ] && ok "/usr/local/bin/dash links to $DA/bin/dash" || bad "dash link: '$(readlink "$R5/usr/local/bin/dash")'"
+[ "$(cat "$R5$DA/.slot-sha256" 2>/dev/null)" = "$DS" ] && ok "the dash tree names the SHA-256 of its tarball" || bad "dash mark: '$(cat "$R5$DA/.slot-sha256" 2>&1)'"
+[ "$("$R5$DA/bin/dash" -c 'echo $((6 * 7))' 2>&1)" = 42 ] && ok "the installed dash runs a command" || bad "dash -c: $("$R5$DA/bin/dash" -c 'echo $((6 * 7))' 2>&1)"
+[ ! -e "$R5/usr/local/bin/sh" ] && [ ! -L "$R5/usr/local/bin/sh" ] && ok "dash is not linked as sh" || bad "/usr/local/bin/sh exists"
+sh "$here/toolchains.sh" "$R5" "$W/norust" 2>/dev/null | grep '^tool dash' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool dash 0.5.12" ] && ok "toolchains.sh: one line, tool dash 0.5.12" || bad "tool dash line: '$(cat "$W/out2")'"
+rm -f "$R5/usr/local/bin/dash"
+printf 'abc\n' >"$R5$DA/.slot-sha256"
+run "$R5" check
+grep -qx "drift: dash: /usr/local/bin/dash is 'missing', want a link to $DA/bin/dash" "$W/out" && ok "check names a missing dash link" || bad "dash link drift: $(dlines)"
+grep -qx "drift: dash: $DA is of the tarball 'abc', want $DS" "$W/out" && ok "check names a dash tree of another tarball" || bad "dash mark drift: $(dlines)"
+printf '%s\n' "$DS" >"$R5$DA/.slot-sha256"
+printf '#!/bin/sh\nexit 1\n' >"$R5$DA/bin/dash"
+run "$R5" check
+grep -qx "drift: dash: $DA/bin/dash does not run a command (it answers '', want 42)" "$W/out" && ok "check names a dash that runs no command" || bad "dash run drift: $(dlines)"
+: >"$R5/.calls"
+run "$R5" apply
+grep -qx 'fetch http://gondor.apana.org.au/~herbert/dash/files/dash-0.5.12.tar.gz' "$R5/.calls" && ok "apply fetches the dash source tarball" || bad "dash URL: $(grep fetch "$R5/.calls" | tr '\n' ' ')"
+grep -q '^changed: dash: dash 0.5.12 built, linked as dash in /usr/local/bin$' "$W/out" && ok "apply builds dash 0.5.12" || bad "dash apply: $(dlines)"
+run "$R5" check
+[ $? -eq 0 ] && ok "after apply dash has 0 drift" || bad "dash after apply: $(cat "$W/out")"
+rm -f "$R5/usr/local/bin/dash"
+: >"$R5/.calls"
+run "$R5" apply
+grep -q '^fetch .*dash-' "$R5/.calls" && bad "a missing link fetched the dash tarball again" || ok "a missing dash link alone does not fetch or build"
+grep -q "^changed: dash: linked dash in /usr/local/bin to $DA/bin/dash\$" "$W/out" && ok "a missing dash link alone is relinked" || bad "dash relink: $(dlines)"
+rm -f "$R5/usr/local/bin/dash"
+printf '#!/bin/sh\necho "real file"\n' >"$R5/usr/local/bin/dash"
+run "$R5" apply
+st=$?
+grep -q '^failed: dash: /usr/local/bin/dash is a real file; not replaced$' "$W/err" && [ ! -L "$R5/usr/local/bin/dash" ] && [ "$st" -eq 1 ] && ok "a real file at /usr/local/bin/dash is not replaced, and apply exits 1" || bad "dash real file: exit $st $(dlines)"
+rm -f "$R5/usr/local/bin/dash"
+printf '#!/bin/sh\nexit 1\n' >"$R5$DA/bin/dash"
+printf 'stale\n' >"$R5$DA/bin/dash.slot-new"
+: >"$R5/.state-tool-fetch-fails"
+run "$R5" apply
+st=$?
+rm -f "$R5/.state-tool-fetch-fails"
+grep -q '^failed: dash: download, checksum or build of dash 0.5.12' "$W/err" && [ "$st" -eq 1 ] && ! grep -q '^changed: dash' "$W/out" && ok "a failed dash build is named, exits 1 and is not reported as changed" || bad "dash failure: exit $st $(dlines)"
+[ "$(cat "$R5$DA/bin/dash")" = "$(printf '#!/bin/sh\nexit 1\n')" ] && [ ! -e "$R5/usr/local/bin/dash" ] && ok "a failed dash build leaves the binary as it was and sets no link" || bad "dash binary changed by a failed build"
+run "$R5" apply
+[ ! -e "$R5$DA/bin/dash.slot-new" ] && ok "a leftover dash.slot-new does not survive the next apply" || bad "dash.slot-new left"
+run "$R5" check
+[ $? -eq 0 ] && ok "dash has 0 drift after the repair" || bad "dash after repair: $(cat "$W/out")"
+# A pin of another release: its own directory, and the link goes there.
+DP9="dash 9.9.9 $(printf '%064d' 9) http://gondor.apana.org.au/~herbert/dash/files/dash-9.9.9.tar.gz"
+: >"$R5/.calls"
+NODE_TEST_DASH_PIN=$DP9 NODE_TEST=1 NODE_ROOT=$R5 sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch http://gondor.apana.org.au/~herbert/dash/files/dash-9.9.9.tar.gz' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/dash")" = /usr/local/dash-9.9.9/bin/dash ] && [ -x "$R5$DA/bin/dash" ] && ok "a pin of another release is built into its own directory and the link moves; the tree before stays" || bad "dash 9.9.9: exit $st $(dlines)"
+sh "$here/toolchains.sh" "$R5" "$W/norust" 2>/dev/null | grep '^tool dash' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool dash 9.9.9" ] && ok "toolchains.sh reads the release from the tree the link names" || bad "tool dash line: '$(cat "$W/out2")'"
+: >"$R5/.calls"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && ! grep -q '^fetch .*dash' "$R5/.calls" && [ "$(readlink "$R5/usr/local/bin/dash")" = "$DA/bin/dash" ] && ok "back at the pin, the dash link returns to the tree that is there without a download" || bad "dash pin back: exit $st $(dlines)"
+rm -rf "$R5/usr/local/dash-9.9.9"
+# toolchains.sh for a dash that is no build of the pin: a tree without the tarball's SHA-256
+# prints `missing`; a package's dash prints the release its package manager names, without the
+# package revision; a machine without dash prints no line.
+TD=$W/tcd
+mkdir -p "$TD/a/usr/local/bin" "$TD/a/usr/local/dash-0.5.12/bin" "$TD/b/usr/bin" "$TD/c/usr/bin" "$TD/pm"
+printf '#!/bin/sh\nexit 0\n' >"$TD/a/usr/local/dash-0.5.12/bin/dash"
+printf '#!/bin/sh\nexit 0\n' >"$TD/b/usr/bin/dash"
+chmod 755 "$TD/a/usr/local/dash-0.5.12/bin/dash" "$TD/b/usr/bin/dash"
+ln -s /usr/local/dash-0.5.12/bin/dash "$TD/a/usr/local/bin/dash"
+for pm in pacman dpkg-query rpm; do
+  printf '#!/bin/sh\n[ -s "%s/pm/%s.out" ] || exit 1\ncat "%s/pm/%s.out"\n' "$TD" "$pm" "$TD" "$pm" >"$TD/pm/$pm"
+  chmod 755 "$TD/pm/$pm"
+done
+tcd() { PATH=$TD/pm:$PATH sh "$here/toolchains.sh" "$TD/$1" "$W/norust" 2>/dev/null | grep '^tool dash' | tr '\n' ','; }
+[ "$(tcd a)" = "tool dash missing," ] && ok "toolchains.sh: a dash tree without the tarball's SHA-256 prints missing" || bad "tool dash without mark: '$(tcd a)'"
+[ "$(tcd b)" = "tool dash missing," ] && ok "toolchains.sh: a dash that no package manager knows prints missing" || bad "tool dash unknown: '$(tcd b)'"
+echo 'dash 0.5.12-1' >"$TD/pm/pacman.out"
+[ "$(tcd b)" = "tool dash 0.5.12," ] && ok "toolchains.sh: a package's dash prints the release pacman names" || bad "tool dash pacman: '$(tcd b)'"
+rm -f "$TD/pm/pacman.out"
+echo '0.5.12-12ubuntu3' >"$TD/pm/dpkg-query.out"
+[ "$(tcd b)" = "tool dash 0.5.12," ] && ok "toolchains.sh: a package's dash prints the release dpkg names" || bad "tool dash dpkg: '$(tcd b)'"
+rm -f "$TD/pm/dpkg-query.out"
+echo '0.5.12' >"$TD/pm/rpm.out"
+[ "$(tcd b)" = "tool dash 0.5.12," ] && ok "toolchains.sh: a package's dash prints the release rpm names" || bad "tool dash rpm: '$(tcd b)'"
+[ -z "$(tcd c)" ] && ok "toolchains.sh: no dash line on a machine without dash" || bad "tool dash without dash: '$(tcd c)'"
+
 # The build user's home trees (HOME_PINS): the ess releases a repository pins by path, and the
 # @types/node of ESS_TYPES_NODE with its dependency.
 HP=$R5/var/lib/builder/.local/share
@@ -674,6 +838,34 @@ grep -q "^drift: home:groovy@2.4.10: .*groovy/2.4.10 is 'missing', want 2.4.10" 
 run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && [ -f "$GJ" ] && [ ! -L "$GJ" ] && ok "groovy has 0 drift after apply" || bad "groovy after apply: $(cat "$W/out")"
+# sdkman's `current` link: ~/.sdkman/candidates/groovy/current names the version of the groovy line
+# of HOME_PINS, relative, as sdkman makes it. A job that carries GROOVY_HOME of the workstation
+# (that path) finds the tree.
+GC=/var/lib/builder/.sdkman/candidates/groovy/current
+[ "$(readlink "$R5$GC")" = 2.4.10 ] && ok "apply links $GC to 2.4.10" || bad "groovy current after apply: '$(readlink "$R5$GC")'"
+rm -f "$R5$GC"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: home:groovy-current: $GC is 'missing', want a link to 2.4.10" "$W/out" && ok "check names a missing groovy current link" || bad "groovy current missing: exit $st $(grep groovy "$W/out")"
+run "$R5" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "changed: home:groovy-current: $GC links to 2.4.10" "$W/out" && [ "$(readlink "$R5$GC")" = 2.4.10 ] && ok "apply creates the groovy current link" || bad "groovy current apply: exit $st $(grep groovy "$W/out" "$W/err") '$(readlink "$R5$GC")'"
+ln -sfn 3.0.13 "$R5$GC"
+run "$R5" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: home:groovy-current: $GC is '3.0.13', want a link to 2.4.10" "$W/out" && ok "a current link to another version is drift" || bad "groovy current other: exit $st $(grep groovy "$W/out")"
+run "$R5" apply
+run "$R5" check
+[ $? -eq 0 ] && [ "$(readlink "$R5$GC")" = 2.4.10 ] && ok "apply sets the current link back to 2.4.10" || bad "groovy current back: $(cat "$W/out") '$(readlink "$R5$GC")'"
+rm -f "$R5$GC"
+mkdir "$R5$GC"
+run "$R5" check
+grep -qx "drift: home:groovy-current: $GC is a directory, want a link to 2.4.10" "$W/out" && ok "a directory at the current path is drift" || bad "groovy current directory: $(grep groovy "$W/out")"
+run "$R5" apply
+st=$?
+[ $st -eq 1 ] && grep -qx "failed: home:groovy-current: $GC is no symbolic link: not replaced" "$W/err" && [ -d "$R5$GC" ] && [ ! -L "$R5$GC" ] && ok "apply leaves a directory at the current path and says so" || bad "groovy current over a directory: exit $st $(grep groovy "$W/out" "$W/err")"
+rmdir "$R5$GC"
+run "$R5" apply
 
 # 5i. GO_ROOT: the directory the go archive goes to, for a node whose `go env GOROOT` must answer
 # the path the workstation's go answers (a consumer's output carries that path). Empty, go stays
@@ -873,6 +1065,338 @@ run "$R5" apply
 run "$R5" check
 [ $? -eq 0 ] && [ "$(readlink "$R5/usr/local/bin/go")" = /usr/local/go-1.27.1/bin/go ] && [ -e "$R5/usr/lib/go/.slot-archive" ] && ok "GO_ROOT taken out of the config: go is in /usr/local/go-1.27.1 again, 0 drift; the directory of the old GO_ROOT stays" || bad "GO_ROOT taken out: $(cat "$W/out") $(readlink "$R5/usr/local/bin/go")"
 rm -rf "$R5/usr/lib/go"
+
+# 5j. EXTRA_TOOLS: Erlang/OTP, Elixir, Gleam and Odin, for a node whose config names them (a
+# consumer's tasks call gleam, elixir, mix, erl and odin by name). Erlang/OTP is built once from
+# the source tarball of its release, as the build user: no prebuilt build loads its crypto
+# library on a node. The other three are release archives. Each is pinned by version and SHA-256,
+# and each binary is a link in /usr/local/bin. A config without the key installs none of them.
+XE=/usr/local/erlang-29.0.6
+XL=/usr/local/elixir-1.20.4-otp-29
+otp_url=https://github.com/erlang/otp/releases/download/OTP-29.0.6/otp_src_29.0.6.tar.gz
+otp_sha=36c89ffdac9d7531c19be0cee34355b167ea95188625d32bee61ebf49ac82afa
+elixir_url=https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip
+gleam_url=https://github.com/gleam-lang/gleam/releases/download/v1.19.0/gleam-v1.19.0-x86_64-unknown-linux-musl.tar.gz
+odin_url=https://github.com/odin-lang/Odin/releases/download/dev-2026-09/odin-linux-amd64-dev-2026-09.tar.gz
+xlines() { cat "$W/out" "$W/err" | grep 'erlang\|elixir\|gleam\|odin' | head -8; }
+# xconf TOOLS [PACKAGES]: the test config with EXTRA_TOOLS and EXTRA_PACKAGES.
+xconf() {
+  conf
+  [ -z "$1" ] || echo "EXTRA_TOOLS=$1" >>"$W/node.conf"
+  [ -z "${2:-}" ] || echo "EXTRA_PACKAGES=$2" >>"$W/node.conf"
+}
+[ "$(sed -n "s/^ERLANG_PIN='\(.*\)'\$/\1/p" "$P")" = "erlang 29.0.6 $otp_sha $otp_url" ] && ok "the erlang pin: OTP 29.0.6, the SHA-256 its release publishes for the source tarball" || bad "erlang pin: $(grep '^ERLANG_PIN' "$P")"
+[ "$(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P" | sed "s/^EXTRA_ARCHIVE_PINS='//; s/'\$//" | grep -v '^firefox ')" = "elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 $elixir_url zip bin/elixir bin/elixirc bin/mix bin/iex
+gleam 1.19.0 6083148cb404460810afe35e7878527e58fd2512dd79a76b47d59723815753be $gleam_url 0 gleam
+odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 $odin_url 1 odin" ] && ok "the elixir, gleam and odin pins: the release archives with their SHA-256 (elixir the one built for OTP 29, a zip)" || bad "extra archive pins: $(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P")"
+RX=$W/rx
+mkdir -p "$RX"
+# The key names tools this script has a pin for; elixir runs on erl.
+xconf 'erlang rebar3'
+run "$RX" check
+[ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'rebar3', which is no tool of provision.sh (erlang elixir gleam odin firefox)" "$W/err" && ok "EXTRA_TOOLS with a name that has no pin is refused" || bad "EXTRA_TOOLS=erlang rebar3: $(cat "$W/out" "$W/err")"
+sh "$P" bundle "$W/node.conf" check >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'rebar3'" "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with an unknown EXTRA_TOOLS name: $(head -2 "$W/err")"
+xconf 'elixir gleam'
+run "$RX" check
+[ $? -eq 2 ] && grep -q 'EXTRA_TOOLS has elixir without erlang: elixir runs on erl' "$W/err" && ok "EXTRA_TOOLS with elixir and no erlang is refused" || bad "EXTRA_TOOLS=elixir gleam: $(cat "$W/out" "$W/err")"
+for bad_x in 'erlang --prefix=/x' 'Erlang' 'erlang;odin'; do
+  xconf "$bad_x"
+  run "$RX" check
+  [ $? -eq 2 ] && grep -q 'EXTRA_TOOLS must be names of lowercase letters, digits and dashes' "$W/err" && ok "EXTRA_TOOLS=$bad_x is refused" || bad "EXTRA_TOOLS=$bad_x: $(cat "$W/out" "$W/err")"
+done
+for bad_g in "$XE" "$XE/go" "$XL/x" /usr/local/gleam-1.19.0 /usr/local/odin-dev-2026-09; do
+  xconf ''
+  echo "GO_ROOT=$bad_g" >>"$W/node.conf"
+  run "$RX" check
+  [ $? -eq 2 ] && grep -q "^node config: .*GO_ROOT '$bad_g' is the directory of a pinned archive, or lies in one (" "$W/err" && ok "GO_ROOT=$bad_g is refused: the directory of an EXTRA_TOOLS pin" || bad "GO_ROOT=$bad_g: $(head -n 2 "$W/err")"
+done
+# Without the key: nothing of the four is checked, fetched, built or linked.
+xconf ''
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+cp "$W/out" "$W/x-apply.out"
+run "$RX" check
+st2=$?
+[ $st -eq 0 ] && [ $st2 -eq 0 ] && grep -q '^0 drift$' "$W/out" && ! grep -q 'erlang\|elixir\|gleam\|odin' "$RX/.calls" "$W/x-apply.out" "$W/out" && ok "a config without EXTRA_TOOLS: apply fetches and reports nothing of the four, and check has 0 drift" || bad "no EXTRA_TOOLS: apply exit $st, check exit $st2 $(grep 'erlang\|elixir\|gleam\|odin' "$RX/.calls" "$W/x-apply.out" "$W/out" | head -5)"
+xn=
+for l in erl erlc escript elixir elixirc mix iex gleam odin; do
+  if [ -e "$RX/usr/local/bin/$l" ] || [ -L "$RX/usr/local/bin/$l" ]; then xn="$xn $l"; fi
+done
+[ -z "$xn" ] && [ -z "$(ls "$RX/usr/local" | grep '^erlang-\|^elixir-\|^gleam-\|^odin-')" ] && ok "a config without EXTRA_TOOLS installs none of the four: no link in /usr/local/bin, no tree in /usr/local" || bad "installed without EXTRA_TOOLS:$xn $(ls "$RX/usr/local" | tr '\n' ' ')"
+# With the key on a node that lacks them: check names every link, the missing build of
+# Erlang/OTP with the package its build needs, and the three archives.
+xconf 'erlang elixir gleam odin'
+run "$RX" check
+st=$?
+xm=
+for l in erl erlc escript; do
+  grep -qx "drift: erlang: /usr/local/bin/$l is 'missing', want a link to $XE/lib/erlang/bin/$l" "$W/out" || xm="$xm $l"
+done
+[ $st -eq 1 ] && [ -z "$xm" ] && ok "check names the missing erl, erlc and escript links" || bad "erlang link drift: exit $st, no line for$xm: $(xlines)"
+grep -qx "drift: erlang: $XE has the mark 'missing' (.slot-archive), want 'erlang 29.0.6 $otp_sha': the build of Erlang/OTP 29.0.6 from its source" "$W/out" && ok "check names the missing build of Erlang/OTP 29.0.6 by its mark" || bad "erlang mark drift: $(xlines)"
+grep -qx 'drift: erlang: the build needs the package(s) ncurses-devel, not installed: name them in EXTRA_PACKAGES' "$W/out" && ok "check names the package the build of Erlang/OTP needs and the node lacks" || bad "erlang package drift: $(xlines)"
+grep -qx "drift: archive:elixir: /usr/local/bin/mix is 'missing', want a link to $XL/bin/mix" "$W/out" && grep -qx "drift: archive:gleam: /usr/local/bin/gleam is 'missing', want a link to /usr/local/gleam-1.19.0/gleam" "$W/out" && grep -qx "drift: archive:odin: /usr/local/odin-dev-2026-09/odin says 'missing', want dev-2026-09" "$W/out" && ok "check names the missing elixir, gleam and odin" || bad "extra archive drift: $(xlines)"
+# apply without the package: Erlang/OTP is not fetched, elixir waits for erl, gleam and odin go in.
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: erlang: the build needs the package(s) ncurses-devel, not installed: name them in EXTRA_PACKAGES; nothing was fetched' "$W/err" && ! grep -q "^fetch $otp_url" "$RX/.calls" && [ ! -e "$RX$XE" ] && ok "apply without ncurses-devel names the package, exits 1 and fetches no Erlang/OTP source" || bad "erlang without its package: exit $st $(grep erlang "$RX/.calls") $(xlines)"
+grep -qx 'failed: archive:elixir: left as it is: elixir runs on erl, and Erlang/OTP 29.0.6 is not installed (the erlang lines say why)' "$W/err" && ! grep -q "^fetch $elixir_url" "$RX/.calls" && [ ! -e "$RX$XL" ] && ok "elixir is not fetched while Erlang/OTP is not installed, and the line says so" || bad "elixir without erl: $(grep elixir "$RX/.calls") $(xlines)"
+grep -qx "fetch $gleam_url" "$RX/.calls" && grep -qx "fetch $odin_url" "$RX/.calls" && grep -qx 'changed: archive:gleam: gleam 1.19.0 installed in /usr/local/gleam-1.19.0, linked in /usr/local/bin' "$W/out" && [ "$(readlink "$RX/usr/local/bin/odin")" = /usr/local/odin-dev-2026-09/odin ] && ok "gleam 1.19.0 and odin dev-2026-09 are fetched from their releases and linked" || bad "gleam and odin: $(grep fetch "$RX/.calls") $(xlines)"
+# With the package: the source tarball is fetched, Erlang/OTP built and linked, then elixir.
+xconf 'erlang elixir gleam odin' ncurses-devel
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "fetch $otp_url" "$RX/.calls" && grep -qx "changed: erlang: Erlang/OTP 29.0.6 built in $XE, linked as erl, erlc and escript in /usr/local/bin" "$W/out" && ok "apply fetches the source tarball of OTP 29.0.6 from its release and builds it" || bad "erlang apply: exit $st $(grep fetch "$RX/.calls") $(xlines)"
+grep -qx "fetch $elixir_url" "$RX/.calls" && grep -qx "changed: archive:elixir: elixir 1.20.4-otp-29 installed in $XL, linked in /usr/local/bin" "$W/out" && ! grep -q "^fetch $gleam_url\|^fetch $odin_url" "$RX/.calls" && ok "elixir 1.20.4 for OTP 29 is fetched once erl is there; gleam and odin are not fetched again" || bad "elixir apply: $(grep fetch "$RX/.calls") $(xlines)"
+for l in erl:$XE/lib/erlang/bin/erl erlc:$XE/lib/erlang/bin/erlc escript:$XE/lib/erlang/bin/escript elixir:$XL/bin/elixir elixirc:$XL/bin/elixirc mix:$XL/bin/mix iex:$XL/bin/iex gleam:/usr/local/gleam-1.19.0/gleam odin:/usr/local/odin-dev-2026-09/odin; do
+  [ "$(readlink "$RX/usr/local/bin/${l%%:*}")" = "${l#*:}" ] && ok "/usr/local/bin/${l%%:*} links to ${l#*:}" || bad "link ${l%%:*}: '$(readlink "$RX/usr/local/bin/${l%%:*}")'"
+done
+[ "$(cat "$RX$XE/.slot-archive" 2>&1)" = "erlang 29.0.6 $otp_sha" ] && [ "$(cat "$RX$XE/lib/erlang/releases/29/OTP_VERSION" 2>&1)" = 29.0.6 ] && [ -z "$(find "$RX$XE" -perm /022 ! -type l)" ] && [ ! -e "$RX$XE.slot-new" ] && ok "the Erlang/OTP tree carries the mark of its source, nothing writable by group or others, no .slot-new" || bad "erlang tree: $(cat "$RX$XE/.slot-archive" 2>&1) $(ls -a "$RX/usr/local" | tr '\n' ' ')"
+run "$RX" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after apply the four tools have 0 drift" || bad "extra tools after apply: $(cat "$W/out")"
+# The build runs once: a later apply fetches and builds nothing.
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+[ $st -eq 0 ] && ! grep -q '^fetch ' "$RX/.calls" && ! grep -q '^changed: ' "$W/out" && ok "a second apply with the four tools present fetches and builds nothing" || bad "second apply: exit $st $(grep fetch "$RX/.calls") $(grep '^changed' "$W/out" | head -3)"
+# A missing link alone is set again without a download; a real file at a link's name stays.
+rm -f "$RX/usr/local/bin/escript" "$RX/usr/local/bin/erlc"
+printf '#!/bin/sh\necho "real file"\n' >"$RX/usr/local/bin/erlc"
+run "$RX" check
+grep -qx "drift: erlang: /usr/local/bin/escript is 'missing', want a link to $XE/lib/erlang/bin/escript" "$W/out" && ! grep -q '^drift: erlang: .*mark\|^drift: erlang: .*says\|^drift: erlang: .*package' "$W/out" && ok "check names a missing escript link, and no build" || bad "escript link drift: $(xlines)"
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: erlang: /usr/local/bin/erlc is a real file; not replaced' "$W/err" && [ ! -L "$RX/usr/local/bin/erlc" ] && ! grep -q '^fetch ' "$RX/.calls" && ok "a real file at /usr/local/bin/erlc is not replaced, apply exits 1 and fetches nothing" || bad "erlc real file: exit $st $(xlines)"
+rm -f "$RX/usr/local/bin/erlc"
+: >"$RX/.calls"
+run "$RX" apply
+grep -qx "changed: erlang: linked erl, erlc and escript in /usr/local/bin to $XE/lib/erlang/bin" "$W/out" && ! grep -q '^fetch ' "$RX/.calls" && [ "$(readlink "$RX/usr/local/bin/escript")" = "$XE/lib/erlang/bin/escript" ] && [ "$(readlink "$RX/usr/local/bin/erlc")" = "$XE/lib/erlang/bin/erlc" ] && ok "missing links alone are set again without a download" || bad "erlang relink: $(grep fetch "$RX/.calls") $(xlines)"
+# Another release of each: named by check, replaced whole by apply.
+printf '#!/bin/sh\necho 28.4.1\n' >"$RX$XE/lib/erlang/bin/erl"
+: >"$RX$XE/lib/erlang/file-of-the-old-build"
+printf '#!/bin/sh\necho "gleam 1.18.0"\n' >"$RX/usr/local/gleam-1.19.0/gleam"
+printf '#!/bin/sh\necho "Erlang/OTP 28 [stand-in]"\necho\necho "Elixir 1.19.0 (compiled with Erlang/OTP 28)"\n' >"$RX$XL/bin/elixir"
+printf '#!/bin/sh\necho "$0 version dev-2026-08-nightly:1111111"\n' >"$RX/usr/local/odin-dev-2026-09/odin"
+rm -f "$RX/usr/local/bin/iex"
+run "$RX" check
+grep -qx "drift: erlang: $XE/lib/erlang/bin/erl says '28.4.1', want 29.0.6" "$W/out" && ok "check names an Erlang/OTP of another release" || bad "erlang 28.4.1 drift: $(xlines)"
+grep -qx "drift: archive:elixir: $XL/bin/elixir says '1.19.0-otp-28', want 1.20.4-otp-29" "$W/out" && grep -qx "drift: archive:elixir: /usr/local/bin/iex is 'missing', want a link to $XL/bin/iex" "$W/out" && ok "check names an elixir of another release or built for another OTP, and a missing iex link" || bad "elixir drift: $(xlines)"
+grep -qx "drift: archive:gleam: /usr/local/gleam-1.19.0/gleam says 'gleam 1.18.0', want 1.19.0" "$W/out" && grep -qx "drift: archive:odin: /usr/local/odin-dev-2026-09/odin says 'dev-2026-08', want dev-2026-09" "$W/out" && ok "check names a gleam and an odin of another release" || bad "gleam, odin drift: $(xlines)"
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+[ $st -eq 0 ] && [ "$(grep -c '^fetch ' "$RX/.calls")" -eq 4 ] && [ ! -e "$RX$XE/lib/erlang/file-of-the-old-build" ] && [ ! -e "$RX$XE.slot-new" ] && ok "apply fetches the four again and replaces the Erlang/OTP tree whole" || bad "extra tools replace: exit $st $(grep fetch "$RX/.calls") $(xlines)"
+run "$RX" check
+[ $? -eq 0 ] && ok "the four tools have 0 drift after the replace" || bad "extra tools after replace: $(cat "$W/out")"
+# A tree with the mark of another source is drift. A failed download or build is named, exits 1
+# and leaves the tree as it was; elixir is left as it is meanwhile.
+echo "erlang 29.0.6 $(printf '%064d' 1)" >"$RX$XE/.slot-archive"
+run "$RX" check
+grep -qx "drift: erlang: $XE has the mark 'erlang 29.0.6 $(printf '%064d' 1)' (.slot-archive), want 'erlang 29.0.6 $otp_sha': the build of Erlang/OTP 29.0.6 from its source" "$W/out" && ok "check names a tree built from another source by its mark" || bad "erlang other mark: $(xlines)"
+mkdir -p "$RX$XE.slot-new"
+: >"$RX/.state-tool-fetch-fails"
+run "$RX" apply
+st=$?
+rm -f "$RX/.state-tool-fetch-fails"
+[ $st -eq 1 ] && grep -q '^failed: erlang: download, checksum or build of Erlang/OTP 29.0.6' "$W/err" && ! grep -q '^changed: erlang' "$W/out" && ok "a failed Erlang/OTP build is named, exits 1 and is not reported as changed" || bad "erlang failure: exit $st $(xlines)"
+[ "$(cat "$RX$XE/.slot-archive")" = "erlang 29.0.6 $(printf '%064d' 1)" ] && [ "$(readlink "$RX/usr/local/bin/erl")" = "$XE/lib/erlang/bin/erl" ] && grep -q '^failed: archive:elixir: left as it is' "$W/err" && [ -x "$RX$XL/bin/elixir" ] && ok "a failed build leaves the tree and the links as they were, and elixir as it is" || bad "erlang tree after a failed build: $(cat "$RX$XE/.slot-archive") $(xlines)"
+run "$RX" apply
+run "$RX" check
+[ $? -eq 0 ] && [ ! -e "$RX$XE.slot-new" ] && [ "$(cat "$RX$XE/.slot-archive")" = "erlang 29.0.6 $otp_sha" ] && ok "the next apply builds Erlang/OTP again: 0 drift, and a leftover .slot-new does not survive it" || bad "erlang repair: $(ls -a "$RX/usr/local" | tr '\n' ' ') $(cat "$W/out")"
+# A pin of another release: its own directory, and the links go there; back at the pin the
+# links return to the tree that is there, without a download.
+EP9="erlang 9.9.9 $(printf '%064d' 9) https://github.com/erlang/otp/releases/download/OTP-9.9.9/otp_src_9.9.9.tar.gz"
+: >"$RX/.calls"
+NODE_TEST_ERLANG_PIN=$EP9 NODE_TEST=1 NODE_ROOT=$RX sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch https://github.com/erlang/otp/releases/download/OTP-9.9.9/otp_src_9.9.9.tar.gz' "$RX/.calls" && [ "$(readlink "$RX/usr/local/bin/erl")" = /usr/local/erlang-9.9.9/lib/erlang/bin/erl ] && [ "$(cat "$RX/usr/local/erlang-9.9.9/lib/erlang/releases/9/OTP_VERSION" 2>&1)" = 9.9.9 ] && [ -d "$RX$XE" ] && ok "a pin of another release is built in its own directory and the links go there" || bad "erlang pin change: exit $st $(grep fetch "$RX/.calls") $(xlines)"
+: >"$RX/.calls"
+run "$RX" apply
+st=$?
+[ $st -eq 0 ] && ! grep -q '^fetch ' "$RX/.calls" && [ "$(readlink "$RX/usr/local/bin/erl")" = "$XE/lib/erlang/bin/erl" ] && ok "back at the pin, the links return to the tree that is there without a download" || bad "erlang pin back: exit $st $(grep fetch "$RX/.calls") $(xlines)"
+rm -rf "$RX/usr/local/erlang-9.9.9"
+# The key taken out of the config: nothing of the four is checked any more (a missing gleam link
+# is no drift), and nothing is removed.
+rm -f "$RX/usr/local/bin/gleam"
+xconf ''
+run "$RX" check
+! grep -q 'erlang\|elixir\|gleam\|odin' "$W/out" "$W/err" && [ -d "$RX$XE" ] && [ -L "$RX/usr/local/bin/mix" ] && ok "EXTRA_TOOLS taken out of the config: check names none of the four, and the trees and links stay" || bad "EXTRA_TOOLS taken out: $(cat "$W/out")"
+
+# The real download branch of the four (NODE_TEST_REAL_FETCH=1): `curl` serves a file that is not
+# what the pins say, and `tar` and `unzip` record a call. Nothing is unpacked and nothing runs.
+mkdir -p "$W/xstub"
+cat >"$W/xstub/curl" <<EOF
+#!/bin/sh
+echo "\$*" >>"$W/xcurl.log"
+out=
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -fsSLo) out=\$2; shift ;;
+  esac
+  shift
+done
+printf '#!/bin/sh\ntouch "$W/xran"\n' >"\$out"
+EOF
+printf '#!/bin/sh\necho "tar $*" >>"%s/xunpack.log"\nexit 1\n' "$W" >"$W/xstub/tar"
+printf '#!/bin/sh\necho "unzip $*" >>"%s/xunpack.log"\nexit 1\n' "$W" >"$W/xstub/unzip"
+chmod 755 "$W/xstub/curl" "$W/xstub/tar" "$W/xstub/unzip"
+xreal() { NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_ROOT=$RX PATH=$1:$PATH sh "$P" "$2" "$W/node.conf" >"$W/out" 2>"$W/err"; }
+xconf 'erlang elixir gleam odin' ncurses-devel
+rm -rf "$RX$XE" "$RX$XL" "$RX/usr/local/gleam-1.19.0" "$RX/usr/local/odin-dev-2026-09"
+: >"$W/xcurl.log"
+: >"$W/xunpack.log"
+rm -f "$W/xran"
+xreal "$W/xstub" apply
+st=$?
+[ $st -eq 1 ] && grep -q '^failed: erlang: download, checksum or build of Erlang/OTP 29.0.6' "$W/err" && grep -qx 'failed: archive:gleam: download or checksum of gleam 1.19.0' "$W/err" && grep -qx 'failed: archive:odin: download or checksum of odin dev-2026-09' "$W/err" && ok "a wrong SHA-256: the Erlang/OTP source, gleam and odin fail, apply exits 1" || bad "wrong SHA-256, extra tools: exit $st $(xlines)"
+grep -q 'otp_src_29.0.6.tar.gz' "$W/xcurl.log" && grep -q 'gleam-v1.19.0-x86_64-unknown-linux-musl.tar.gz' "$W/xcurl.log" && grep -q 'odin-linux-amd64-dev-2026-09.tar.gz' "$W/xcurl.log" && ok "a wrong SHA-256: each of the three downloads was attempted" || bad "curl calls: $(cat "$W/xcurl.log")"
+[ ! -s "$W/xunpack.log" ] && [ ! -e "$W/xran" ] && [ ! -e "$RX$XE" ] && [ ! -e "$RX/usr/local/gleam-1.19.0" ] && [ ! -e "$RX/usr/local/odin-dev-2026-09" ] && ok "a wrong SHA-256: tar never runs, no downloaded file runs, no tree is written" || bad "unchecked file used: $(cat "$W/xunpack.log") $(ls "$RX/usr/local" | tr '\n' ' ')"
+# The same for the elixir zip, which needs erl there to be reached.
+run "$RX" apply
+rm -rf "$RX$XL"
+: >"$W/xcurl.log"
+xreal "$W/xstub" apply
+st=$?
+[ $st -eq 1 ] && grep -qx 'failed: archive:elixir: download or checksum of elixir 1.20.4-otp-29' "$W/err" && grep -q 'elixir-otp-29.zip' "$W/xcurl.log" && [ ! -s "$W/xunpack.log" ] && [ ! -e "$W/xran" ] && [ ! -e "$RX$XL" ] && ok "a wrong SHA-256: the elixir zip fails, unzip never runs, no tree is written" || bad "wrong SHA-256, elixir: exit $st $(cat "$W/xunpack.log") $(xlines)"
+# Control: archives whose SHA-256 is the pin's go through the real unpack, and a source tarball
+# through the real build, with a stand-in source whose configure and make install write a tree
+# as the build of Erlang/OTP does (a link in bin/, a setuid and world-writable erl). Needs
+# /usr/bin/make; the elixir zip needs zip and unzip.
+if [ -x /usr/bin/make ]; then
+  mkdir -p "$W/xsrc/otp/otp_src_9.9.9" "$W/xsrc/otp2/otp_src_8.8.8" "$W/xsrc/gleam" "$W/xsrc/odin/odin-linux-amd64-nightly+9999-09-01/core" "$W/xsrc/elixir/bin" "$W/xsrc/elixir/lib" "$W/xstub2"
+  cat >"$W/xsrc/otp/otp_src_9.9.9/configure" <<'EOF'
+#!/bin/sh
+p=
+for a in "$@"; do
+  case $a in --prefix=*) p=${a#--prefix=} ;; esac
+done
+case $p in /usr/local/erlang-[89].*) ;; *) echo "configure: error: prefix '$p'" >&2; exit 1 ;; esac
+printf 'all:\n\ttouch built\ninstall:\n\tsh ./install.sh "$(DESTDIR)" "%s"\n' "$p" >Makefile
+EOF
+  cat >"$W/xsrc/otp/otp_src_9.9.9/install.sh" <<'EOF'
+#!/bin/sh
+[ -e built ] || exit 1
+t=$1$2
+v=${2##*-}
+mkdir -p "$t/bin" "$t/lib/erlang/bin" "$t/lib/erlang/releases/${v%%.*}" "$t/lib/erlang/lib/crypto-1.0/priv/lib" || exit 1
+printf '#!/bin/sh\necho %s\n' "$v" >"$t/lib/erlang/bin/erl"
+printf '#!/bin/sh\nexit 0\n' >"$t/lib/erlang/bin/erlc"
+cp "$t/lib/erlang/bin/erlc" "$t/lib/erlang/bin/escript"
+chmod 755 "$t/lib/erlang/bin/erlc" "$t/lib/erlang/bin/escript"
+chmod 4777 "$t/lib/erlang/bin/erl"
+echo "$v" >"$t/lib/erlang/releases/${v%%.*}/OTP_VERSION"
+[ -e no-crypto ] || : >"$t/lib/erlang/lib/crypto-1.0/priv/lib/crypto.so"
+ln -s ../lib/erlang/bin/erl "$t/bin/erl"
+EOF
+  chmod 755 "$W/xsrc/otp/otp_src_9.9.9/configure"
+  cp "$W/xsrc/otp/otp_src_9.9.9/configure" "$W/xsrc/otp/otp_src_9.9.9/install.sh" "$W/xsrc/otp2/otp_src_8.8.8/"
+  : >"$W/xsrc/otp2/otp_src_8.8.8/no-crypto"
+  tar -czf "$W/xotp.tar.gz" -C "$W/xsrc/otp" otp_src_9.9.9
+  tar -czf "$W/xotp2.tar.gz" -C "$W/xsrc/otp2" otp_src_8.8.8
+  printf '#!/bin/sh\necho "gleam 9.9.9"\n' >"$W/xsrc/gleam/gleam"
+  chmod 755 "$W/xsrc/gleam/gleam"
+  tar -czf "$W/xgleam.tar.gz" -C "$W/xsrc/gleam" gleam
+  printf '#!/bin/sh\necho "$0 version dev-9999-09-nightly:abc1234"\n' >"$W/xsrc/odin/odin-linux-amd64-nightly+9999-09-01/odin"
+  chmod 755 "$W/xsrc/odin/odin-linux-amd64-nightly+9999-09-01/odin"
+  echo 'package os' >"$W/xsrc/odin/odin-linux-amd64-nightly+9999-09-01/core/os.odin"
+  tar -czf "$W/xodin.tar.gz" -C "$W/xsrc/odin" 'odin-linux-amd64-nightly+9999-09-01'
+  OSHA=$(sha256sum "$W/xotp.tar.gz" | cut -d' ' -f1)
+  O2SHA=$(sha256sum "$W/xotp2.tar.gz" | cut -d' ' -f1)
+  XPINS="gleam 9.9.9 $(sha256sum "$W/xgleam.tar.gz" | cut -d' ' -f1) https://extra.test/gleam.tar.gz 0 gleam
+odin dev-9999-09 $(sha256sum "$W/xodin.tar.gz" | cut -d' ' -f1) https://extra.test/odin.tar.gz 1 odin"
+  xtools='erlang gleam odin'
+  if command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+    printf '#!/bin/sh\necho "Erlang/OTP 9 [stand-in]"\necho\necho "Elixir 9.9.9 (compiled with Erlang/OTP 9)"\n' >"$W/xsrc/elixir/bin/elixir"
+    printf '#!/usr/bin/env elixir\n' >"$W/xsrc/elixir/bin/mix"
+    echo beam >"$W/xsrc/elixir/lib/elixir.beam"
+    chmod 4755 "$W/xsrc/elixir/bin/elixir"
+    chmod 644 "$W/xsrc/elixir/bin/mix"
+    chmod 666 "$W/xsrc/elixir/lib/elixir.beam"
+    (cd "$W/xsrc/elixir" && zip -qr "$W/xelixir.zip" bin lib)
+    XPINS="elixir 9.9.9-otp-9 $(sha256sum "$W/xelixir.zip" | cut -d' ' -f1) https://extra.test/elixir.zip zip bin/elixir bin/mix
+$XPINS"
+    xtools='erlang elixir gleam odin'
+  fi
+  cat >"$W/xstub2/curl" <<EOF
+#!/bin/sh
+out=
+url=
+while [ \$# -gt 0 ]; do
+  case \$1 in
+    -fsSLo) out=\$2; shift ;;
+    -*) ;;
+    *) url=\$1 ;;
+  esac
+  shift
+done
+case \$url in
+  https://extra.test/otp_src.tar.gz) cp "$W/xotp.tar.gz" "\$out" ;;
+  https://extra.test/otp_src2.tar.gz) cp "$W/xotp2.tar.gz" "\$out" ;;
+  https://extra.test/elixir.zip) cp "$W/xelixir.zip" "\$out" ;;
+  https://extra.test/gleam.tar.gz) cp "$W/xgleam.tar.gz" "\$out" ;;
+  https://extra.test/odin.tar.gz) cp "$W/xodin.tar.gz" "\$out" ;;
+  *) printf 'junk\n' >"\$out" ;;
+esac
+EOF
+  chmod 755 "$W/xstub2/curl"
+  xconf "$xtools" ncurses-devel
+  X9=/usr/local/erlang-9.9.9
+  NODE_TEST_ERLANG_PIN="erlang 9.9.9 $OSHA https://extra.test/otp_src.tar.gz"
+  NODE_TEST_EXTRA_ARCHIVE_PINS=$XPINS
+  export NODE_TEST_ERLANG_PIN NODE_TEST_EXTRA_ARCHIVE_PINS
+  xreal "$W/xstub2" apply
+  st=$?
+  [ $st -eq 0 ] && grep -qx "changed: erlang: Erlang/OTP 9.9.9 built in $X9, linked as erl, erlc and escript in /usr/local/bin" "$W/out" && [ "$("$RX$X9/lib/erlang/bin/erl" 2>&1)" = 9.9.9 ] && ok "control: a source tarball with the SHA-256 of its pin is unpacked, configured for its prefix, built and installed by the real branch" || bad "erlang real build: exit $st $(xlines)"
+  [ "$(cat "$RX$X9/.slot-archive" 2>&1)" = "erlang 9.9.9 $OSHA" ] && [ "$(stat -c %a "$RX$X9/lib/erlang/bin/erl" 2>&1)" = 755 ] && [ -z "$(find "$RX$X9" \( -perm /022 -o -perm /6000 \) ! -type l)" ] && [ "$(readlink "$RX$X9/bin/erl")" = ../lib/erlang/bin/erl ] && ok "the built tree: the mark of its source, no setuid and nothing writable by group or others, a link of the build kept as a link" || bad "erlang built tree: $(cat "$RX$X9/.slot-archive" 2>&1) $(find "$RX$X9" \( -perm /022 -o -perm /6000 \) ! -type l | head -3)"
+  grep -qx 'changed: archive:gleam: gleam 9.9.9 installed in /usr/local/gleam-9.9.9, linked in /usr/local/bin' "$W/out" && grep -qx 'changed: archive:odin: odin dev-9999-09 installed in /usr/local/odin-dev-9999-09, linked in /usr/local/bin' "$W/out" && [ -f "$RX/usr/local/odin-dev-9999-09/core/os.odin" ] && [ ! -e "$RX/usr/local/odin-dev-9999-09/odin-linux-amd64-nightly+9999-09-01" ] && ok "control: gleam's archive (the binary at its top) and odin's (one top directory, stripped, with its core library) are unpacked by the real branch" || bad "gleam, odin real unpack: $(xlines) $(ls "$RX/usr/local/odin-dev-9999-09" 2>&1 | tr '\n' ' ')"
+  if [ "$xtools" = 'erlang elixir gleam odin' ]; then
+    XL9=/usr/local/elixir-9.9.9-otp-9
+    grep -qx "changed: archive:elixir: elixir 9.9.9-otp-9 installed in $XL9, linked in /usr/local/bin" "$W/out" && [ -x "$RX$XL9/bin/mix" ] && [ -f "$RX$XL9/lib/elixir.beam" ] && [ -z "$(find "$RX$XL9" \( -perm /022 -o -perm /6000 \) ! -type l)" ] && [ "$(readlink "$RX/usr/local/bin/mix")" = "$XL9/bin/mix" ] && ok "control: the elixir zip is unzipped by the real branch: no setuid, nothing writable by group or others, mix executable and linked" || bad "elixir real unzip: $(xlines) $(find "$RX$XL9" \( -perm /022 -o -perm /6000 \) ! -type l 2>&1 | head -3)"
+  fi
+  xreal "$W/xstub2" check
+  [ $? -eq 0 ] && ! grep -q 'erlang\|elixir\|gleam\|odin' "$W/out" && ok "control: check has 0 drift after the real unpack and build" || bad "after the real branch: $(cat "$W/out")"
+  # A build that leaves no crypto library (no OpenSSL headers) is refused: mix and hex need it.
+  NODE_TEST_ERLANG_PIN="erlang 8.8.8 $O2SHA https://extra.test/otp_src2.tar.gz"
+  xreal "$W/xstub2" apply
+  st=$?
+  [ $st -eq 1 ] && grep -q '^failed: erlang: download, checksum or build of Erlang/OTP 8.8.8: .*left no crypto library' "$W/err" && [ ! -e "$RX/usr/local/erlang-8.8.8" ] && [ "$(readlink "$RX/usr/local/bin/erl")" = "$X9/lib/erlang/bin/erl" ] && ok "a build of Erlang/OTP without its crypto library is refused: named, no tree, the links stay" || bad "erlang without crypto: exit $st $(xlines)"
+  unset NODE_TEST_ERLANG_PIN NODE_TEST_EXTRA_ARCHIVE_PINS
+fi
+
+# toolchains.sh: a `tool` line for each of the four, equal on a node (/usr/local/bin) and on a
+# workstation (erl in /usr/bin, the others where PATH names them). erl has no --version and
+# answers the OTP release; elixir's line is its release and the OTP major it was compiled with.
+XT=$W/xtc
+mkdir -p "$XT/node/usr/local/bin" "$XT/ws/usr/bin" "$XT/pathbin" "$XT/none/usr/bin" "$XT/home" "$XT/rh"
+for xd in "$XT/node/usr/local/bin" "$XT/ws/usr/bin"; do
+  printf '#!/bin/sh\n[ "$1" = -noshell ] && [ "$2" = -eval ] || exit 1\ncase $3 in *OTP_VERSION*) echo 29.0.6 ;; *) exit 1 ;; esac\n' >"$xd/erl"
+  chmod 755 "$xd/erl"
+done
+for xd in "$XT/node/usr/local/bin" "$XT/pathbin"; do
+  printf '#!/bin/sh\n[ "$1" = --version ] || exit 1\necho "Erlang/OTP 29 [erts-17.0.6] [source] [64-bit]"\necho\necho "Elixir 1.20.4 (compiled with Erlang/OTP 29)"\n' >"$xd/elixir"
+  printf '#!/bin/sh\n[ "$1" = --version ] || exit 1\necho "gleam 1.19.0"\n' >"$xd/gleam"
+  printf '#!/bin/sh\n[ "$1" = version ] || exit 1\necho "$0 version dev-2026-09-nightly:a2fb372"\n' >"$xd/odin"
+  chmod 755 "$xd/elixir" "$xd/gleam" "$xd/odin"
+done
+xwant='tool erlang 29.0.6,tool elixir 1.20.4-otp-29,tool gleam 1.19.0,tool odin dev-2026-09-nightly:a2fb372,'
+HOME=$XT/home sh "$here/toolchains.sh" "$XT/node" "$XT/rh" 2>/dev/null | grep '^tool erlang\|^tool elixir\|^tool gleam\|^tool odin' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "$xwant" ] && ok "toolchains.sh: a node's erl, elixir, gleam and odin in /usr/local/bin give one tool line each" || bad "extra tool lines of a node: $(cat "$W/out2")"
+HOME=$XT/home PATH=$XT/pathbin:$XT/ws/usr/bin:$PATH sh "$here/toolchains.sh" "" "$XT/rh" 2>/dev/null | grep '^tool erlang\|^tool elixir\|^tool gleam\|^tool odin' | tr '\n' ',' >"$W/out2"
+[ "$(cat "$W/out2")" = "$xwant" ] && ok "toolchains.sh: with the prefix \"\" the four that PATH names first give the same lines as the node's" || bad "extra tool lines from PATH: $(cat "$W/out2")"
+HOME=$XT/home PATH=$XT/pathbin:$XT/ws/usr/bin:$PATH sh "$here/toolchains.sh" "$XT/none" "$XT/rh" 2>/dev/null | grep -c '^tool erlang\|^tool elixir\|^tool gleam\|^tool odin' >"$W/out2"
+[ "$(cat "$W/out2")" = 0 ] && ok "toolchains.sh: with a prefix the four on PATH are not read, and a machine without them has no line" || bad "extra tool lines under a prefix without them: $(cat "$W/out2")"
+printf '#!/bin/sh\necho "erl: command not found" >&2\nexit 127\n' >"$XT/node/usr/local/bin/elixir"
+HOME=$XT/home sh "$here/toolchains.sh" "$XT/node" "$XT/rh" 2>/dev/null | grep '^tool elixir' >"$W/out2"
+[ "$(cat "$W/out2")" = 'tool elixir missing' ] && ok "toolchains.sh: an elixir that finds no erl prints missing as its version" || bad "elixir without erl: '$(cat "$W/out2")'"
+# The example config asks for the four and for the package the build of Erlang/OTP needs, and
+# the README names the key.
+[ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "$EXTRA_TOOLS"' sh "$here" 2>&1)" = 'erlang elixir gleam odin firefox' ] && sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo " $EXTRA_PACKAGES "' sh "$here" 2>/dev/null | grep -q ' ncurses-devel ' && sh "$P" bundle "$here/node.conf.example" check >/dev/null 2>"$W/err" && ok "example: EXTRA_TOOLS names the four and firefox, EXTRA_PACKAGES has ncurses-devel, and provision.sh takes the config" || bad "example EXTRA_TOOLS: $(grep '^EXTRA_TOOLS' "$here/node.conf.example") $(cat "$W/err")"
+grep -q '^| `EXTRA_TOOLS` |' "$here/README.md" && ok "README has the EXTRA_TOOLS key" || bad "README has no row for EXTRA_TOOLS"
 
 # 5f. Rust toolchains: check names what is missing, apply installs it, a failed download is a
 # `failed` line and exit 1, a toolchain that is there is not installed again.
@@ -1360,6 +1884,7 @@ done
 [ ! -e "$W/ran" ] && ok "wrong SHA-256: no downloaded file runs" || bad "a downloaded file ran"
 [ "$(grep -c 'rustup-init\|go1.27.1\|node-v22\|task_linux\|nextest\|geckodriver\|wasm-bindgen\|sccache\|slot-0.36\|ess-0.99.2\|cargo-about-0.9.1\|yq_linux_amd64' "$W/curl.log")" -ge 12 ] && ok "wrong SHA-256: every download was attempted" || bad "curl calls: $(cat "$W/curl.log")"
 grep -q 'musl-1.2.6.tar.gz' "$W/curl.log" && ok "wrong SHA-256: the musl source was asked for" || bad "no musl download in: $(cat "$W/curl.log")"
+grep -q '^failed: dash: download, checksum or build of dash 0.5.12' "$W/err" && grep -q 'dash-0.5.12.tar.gz' "$W/curl.log" && ok "wrong SHA-256: the dash source was asked for, and dash fails" || bad "wrong SHA-256: dash: $(grep '^failed: dash' "$W/err") $(grep dash "$W/curl.log")"
 # Control: with the SHA256SUMS line that matches the served file, tar is reached (so the stand-in
 # tar would record a call if the check had failed open above), with no owner taken from the archive.
 RG=$W/r6b
@@ -1374,6 +1899,24 @@ unset NODE_TEST_MUSL_PIN
 [ "$(grep -c -- '-xf src.tar.gz -C src --strip-components=1 --no-same-owner' "$W/tar.log")" -eq 1 ] && ok "control: a musl source with the SHA-256 of its pin reaches tar, once, with no owner taken from the archive" || bad "control: musl tar: $(cat "$W/tar.log")"
 grep -q 'xzf slot-0.36.0-x86_64-unknown-linux-gnu.tar.gz' "$W/tar.log" && ok "control: a matching SHA-256 reaches tar" || bad "control: tar not reached: $(cat "$W/tar.log")"
 grep -q -- '--no-same-owner' "$W/tar.log" && ok "slot's tar takes no owner from the archive" || bad "slot's tar has no --no-same-owner: $(cat "$W/tar.log")"
+# SLOT_TARGET=x86_64-unknown-linux-musl through the real download branch: the archive of that
+# name is asked for, and its checksum is the line of that name in the release's SHA256SUMS. A
+# release whose SHA256SUMS has no such line (one before the musl archives) installs nothing; with
+# the line that matches the served file, tar is reached with the musl archive.
+RM=$W/r6m
+mkdir -p "$RM" "$W/stubbin-musl"
+echo 'SLOT_TARGET=x86_64-unknown-linux-musl' >>"$W/node.conf"
+: >"$W/curl.log"
+: >"$W/tar.log"
+realrun "$RM"
+grep -q 'releases/download/0.36.0/slot-0.36.0-x86_64-unknown-linux-musl.tar.gz' "$W/curl.log" && ! grep -q 'slot-0.36.0-x86_64-unknown-linux-gnu' "$W/curl.log" && ok "SLOT_TARGET musl: the musl archive is asked for, not the gnu one" || bad "musl download: $(grep 'slot-0.36.0' "$W/curl.log" | tr '\n' ' ')"
+grep -q '^failed: slot: download or checksum of slot 0.36.0' "$W/err" && ! grep -q 'slot-0.36.0' "$W/tar.log" && ok "SLOT_TARGET musl: a SHA256SUMS without the line of the musl archive installs nothing, and tar never runs on it" || bad "musl without a checksum line: $(grep '^failed: slot' "$W/err") $(grep slot "$W/tar.log")"
+sed 's/slot-0\.36\.0-x86_64-unknown-linux-gnu\.tar\.gz/slot-0.36.0-x86_64-unknown-linux-musl.tar.gz/' "$W/stubbin/curl" >"$W/stubbin-musl/curl"
+chmod 755 "$W/stubbin-musl/curl"
+: >"$W/tar.log"
+NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_ROOT=$RM PATH=$W/stubbin-musl:$W/stubbin:$PATH sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -q 'xzf slot-0.36.0-x86_64-unknown-linux-musl.tar.gz --no-same-owner' "$W/tar.log" && ok "SLOT_TARGET musl: with the SHA256SUMS line of the musl archive, tar is reached with it and takes no owner from it" || bad "musl control: $(grep slot "$W/tar.log") $(grep '^failed: slot' "$W/err")"
+conf
 [ "$(grep -c 'no-same-owner' "$here/provision.sh")" -ge 3 ] && ok "every tar of provision.sh that runs as root has --no-same-owner" || bad "--no-same-owner count: $(grep -c 'no-same-owner' "$here/provision.sh")"
 [ "$(grep -c 'u-s,g-s' "$here/provision.sh")" -ge 3 ] && ok "unpacked trees lose setuid and setgid (static check)" || bad "u-s,g-s count: $(grep -c 'u-s,g-s' "$here/provision.sh")"
 
@@ -3018,6 +3561,117 @@ jl=$(
 0
 end" ] && [ "$(cat "$W/jl-cmd")" = 'curl -s -m 5 --max-filesize 1048576 http://127.0.0.1:7411/metrics' ] && ok "the jobs left during a drain: running and queued jobs of the daemon's /metrics, asked as the build user, 5 s at most; no answer is no number" || bad "q_jobs_left: $jl $(cat "$W/jl-cmd")"
 
+# 6x. One `apply --drain` is enough for the core pattern. The pattern is loaded only once
+# sccache-node and slot-node run with the soft core limit 0 (6s), and after `apply --drain` both
+# restart later, by themselves, when no apply runs: the step before the start of slot-node.service
+# (start-pre) loads /etc/sysctl.d/60-slot-core.conf at the end of a drain, under the condition
+# an apply checks. A root of its own: a node provisioned before the core limit, with 1 job.
+conf
+RX=$W/r6x
+mkdir -p "$RX"
+echo 8 >"$RX/.state-nproc"
+xpipe='|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h'
+xsys=/etc/sysctl.d/60-slot-core.conf
+xrun() { NODE_TEST=1 NODE_ROOT=$RX sh "$P" "$@" >"$W/out" 2>"$W/err"; }
+xcalls() { grep 'systemctl restart\|sysctl' "$RX/.calls" | tr '\n' ','; }
+# xold [UNIT...]: the node as it was before the core limit, with the pipe as its pattern: no
+# limit in the unit files named (default: both), every process with the limit unlimited, 1 job.
+xold() {
+  [ $# -gt 0 ] || set -- slot-node sccache-node
+  rm -f "$RX/.state-core-stays" "$RX/.state-start-fails-sccache-node.service"
+  mkdir -p "$RX/.state"
+  echo 0 >"$RX/.state/jobs"
+  xrun apply "$W/node.conf"
+  echo "$xpipe" >"$RX/.state/core-pattern"
+  for xu in "$@"; do sed -i '/^LimitCORE=/d' "$RX/etc/systemd/system/$xu.service"; done
+  for xu in slot-node sccache-node; do echo unlimited >"$RX/.state/core-limit/$xu.service"; done
+  echo 1 >"$RX/.state/jobs"
+  echo 1700000000 >"$RX/.state/now"
+  : >"$RX/.state/journal"
+  : >"$RX/.calls"
+}
+xold
+xrun apply "$W/node.conf" --drain
+st=$?
+[ $st -eq 0 ] && grep -q '^draining: slot-node: 1 job(s), restart by ' "$W/out" && [ -z "$(xcalls)" ] && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && ok "apply --drain with a job running: the drain starts, no unit restarts, the pattern is not loaded" || bad "6x apply --drain: exit $st $(xcalls) $(cat "$W/out" "$W/err")"
+grep -qx "pending: core: kernel.core_pattern stays '$xpipe' while sccache-node.service runs with the core limit unlimited (under the pattern core its processes write core files): the start of slot-node.service at the end of its drain loads $xsys" "$W/err" && ok "apply --drain: the pending line names the start after the drain, not a second apply" || bad "6x pending line: $(grep 'pending: core' "$W/err")"
+echo 0 >"$RX/.state/jobs"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+[ "$(xcalls)" = "systemctl restart sccache-node.service,sysctl -q -p $xsys," ] && [ "$(cat "$RX/.state/core-pattern")" = core ] && ok "the start after the drain: sccache-node restarts, then the sysctl file is loaded and the pattern is core" || bad "6x start-pre: $(xcalls) pattern '$(cat "$RX/.state/core-pattern")' $(cat "$W/out" "$W/err")"
+grep -qx "slot-node: kernel.core_pattern is 'core' (sysctl -p $xsys)" "$W/out" && ok "the start after the drain says in the journal that it loaded the pattern" || bad "6x journal: $(cat "$W/out")"
+: >"$RX/.calls"
+xrun check "$W/node.conf"
+st=$?
+[ $st -eq 0 ] && grep -qx '0 drift' "$W/out" && ok "after one apply --drain and the restart it started: 0 drift, the pattern is no pipe" || bad "6x check after the drain: exit $st $(grep '^drift' "$W/out" | tr '\n' ' ')"
+xrun apply "$W/node.conf"
+grep -qx '0 changed' "$W/out" && [ -z "$(xcalls)" ] && ok "a second apply has nothing left to do" || bad "6x second apply: $(xcalls) $(cat "$W/out" "$W/err")"
+# The bound of the drain restarts the unit the hard way: the same step, the same load.
+xold
+xrun apply "$W/node.conf" --drain
+: >"$RX/.calls"
+xrun drain-bound "$W/node.conf"
+[ "$(xcalls)" = "systemctl restart slot-node.service,systemctl restart sccache-node.service,sysctl -q -p $xsys," ] && [ "$(cat "$RX/.state/core-pattern")" = core ] && grep -qx "slot-node: kernel.core_pattern is 'core' (sysctl -p $xsys)" "$RX/.state/journal" && ok "the bound of a drain: the restart runs the same step, and the pattern is loaded" || bad "6x bound: $(xcalls) pattern '$(cat "$RX/.state/core-pattern")' $(cat "$RX/.state/journal" 2>&1)"
+# sccache-node does not restart: its process keeps the limit unlimited, and the pattern stays.
+xold
+xrun apply "$W/node.conf" --drain
+: >"$RX/.state-start-fails-sccache-node.service"
+echo 0 >"$RX/.state/jobs"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && grep -qx "slot-node: kernel.core_pattern stays '$xpipe' while sccache-node.service runs with the core limit unlimited: the next apply loads $xsys" "$W/out" && ok "sccache-node did not restart: the pattern stays a pipe, and one line says why" || bad "6x sccache stays: $(xcalls) $(cat "$W/out" "$W/err")"
+rm -f "$RX/.state-start-fails-sccache-node.service"
+xrun apply "$W/node.conf"
+[ "$(cat "$RX/.state/core-pattern")" = core ] && grep -q '^changed: core: kernel.core_pattern is .core. ' "$W/out" && ok "the next apply restarts sccache-node and loads the pattern, as before" || bad "6x apply after a failed restart: $(cat "$W/out" "$W/err")"
+# The unit file of slot-node.service has no core limit at the start (taken out after the apply):
+# its next process would write core files under the pattern core, so the pattern stays.
+xold
+xrun apply "$W/node.conf" --drain
+sed -i '/^LimitCORE=/d' "$RX/etc/systemd/system/slot-node.service"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && grep -qx "slot-node: kernel.core_pattern stays '$xpipe' while slot-node.service starts with the core limit unlimited: the next apply loads $xsys" "$W/out" && ok "slot-node would start with another core limit than 0: the pattern stays a pipe" || bad "6x unit without a limit: $(xcalls) $(cat "$W/out" "$W/err")"
+# A load that does not change the pattern is named.
+xold
+xrun apply "$W/node.conf" --drain
+: >"$RX/.state-core-stays"
+xrun start-pre "$W/node.conf"
+grep -qx "slot-node: kernel.core_pattern is still '$xpipe' after sysctl -p $xsys" "$W/out" && ok "a sysctl load that leaves the pipe is named in the journal" || bad "6x pattern stays after the load: $(cat "$W/out" "$W/err")"
+rm -f "$RX/.state-core-stays"
+# No sysctl file (the owner's pattern was kept, then became a pipe): nothing is loaded.
+xold
+xrun apply "$W/node.conf" --drain
+rm -f "$RX$xsys"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && ! grep -q 'core_pattern' "$W/out" && ok "no sysctl file: the start after a drain loads nothing" || bad "6x no sysctl file: $(xcalls) $(cat "$W/out")"
+# A pattern that is no pipe is left alone, and a start that ends no drain loads nothing.
+xold
+xrun apply "$W/node.conf" --drain
+echo '/var/crash/core.%e.%p' >"$RX/.state/core-pattern"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = '/var/crash/core.%e.%p' ] && ok "a pattern that is no pipe: the start after a drain leaves it alone" || bad "6x owner's pattern: $(xcalls) $(cat "$RX/.state/core-pattern")"
+echo "$xpipe" >"$RX/.state/core-pattern"
+: >"$RX/.calls"
+xrun start-pre "$W/node.conf"
+! grep -q sysctl "$RX/.calls" && [ "$(cat "$RX/.state/core-pattern")" = "$xpipe" ] && ok "a start of the unit that ends no drain loads nothing: the pattern is an apply's, or a drain's end" || bad "6x start without a drain: $(xcalls) $(cat "$W/out")"
+# What the next process of a unit gets is asked from systemd: the unit's LimitCORESoft.
+nl=$(
+  eval "$(sed -n '/^q_core_limit_next() {$/,/^}$/p' "$P")"
+  T=
+  systemctl() { echo "$*" >"$W/nl-cmd"; echo 0; }
+  q_core_limit_next slot-node.service
+  systemctl() { echo infinity; }
+  q_core_limit_next slot-node.service
+  systemctl() { return 1; }
+  q_core_limit_next slot-node.service
+  echo end
+)
+[ "$nl" = "0
+infinity
+end" ] && [ "$(cat "$W/nl-cmd" 2>/dev/null)" = 'show -p LimitCORESoft --value slot-node.service' ] && ok "the limit of a unit's next process is systemd's LimitCORESoft of the unit; no answer is no 0" || bad "q_core_limit_next: $nl / $(cat "$W/nl-cmd" 2>&1)"
+
 # 6w. The run-time limit of the node's pool: `slot run-limit` with RUN_LIMIT (10m) and
 # RUN_LIMIT_MAX (30m, the most a job names with `slot --timeout`), set once slot-node runs
 # (section 2). check asks the daemon (GET /api/run-limit as the build user, 5 s at most), which
@@ -3331,7 +3985,172 @@ done
 ok "example: package list checked"
 grep -q 'not installed; a job that needs one is held by name' "$here/README.md" && ok "README names the packages that are not installed" || bad "README has no 'not installed; a job that needs one is held by name'"
 sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'musl' && bad "README still lists musl-gcc as not installed" || ok "README no longer lists musl-gcc as not installed"
+sed -n '/are not installed; a job that needs one is held by name/,/^$/p' "$here/README.md" | grep -q 'dash' && bad "README still lists dash as not installed" || ok "README no longer lists dash as not installed"
 grep -qx 'GO_ROOT=' "$ex" && [ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "[$GO_ROOT]"' sh "$here" 2>&1)" = '[]' ] && ok "example: GO_ROOT is shown empty, the default" || bad "example GO_ROOT: $(grep GO_ROOT "$ex")"
+grep -qx 'SLOT_TARGET=x86_64-unknown-linux-gnu' "$ex" && [ "$(sh -c '. "$1/conf.sh"; conf_read "$1/node.conf.example" BUILD_USER && echo "[$SLOT_TARGET]"; grep -v "^SLOT_TARGET=" "$1/node.conf.example" >"$2"; conf_read "$2" BUILD_USER && echo "[$SLOT_TARGET]"' sh "$here" "$W/ex-no-target" 2>&1 | tr '\n' ' ')" = '[x86_64-unknown-linux-gnu] [x86_64-unknown-linux-gnu] ' ] && ok "example: SLOT_TARGET is shown with its default, the archive a node installs without the key" || bad "example SLOT_TARGET: $(grep SLOT_TARGET "$ex")"
+
+# 6y. The gate's step for the shell tests (contrib/shell-tests.sh): under dash where dash is on
+# PATH, else under sh; its first line says which; every test runs once; the first failure stops it.
+# `dash` here is a stand-in that writes its arguments down and runs the machine's sh.
+ST=$W/st
+SS=$here/../shell-tests.sh
+mkdir -p "$ST/bin" "$ST/dashbin"
+for t in sh mktemp ln rm readlink; do ln -s "$(command -v "$t")" "$ST/bin/$t"; done
+printf '#!/bin/sh\necho "$*" >>"%s/dash.log"\nexec /bin/sh "$@"\n' "$ST" >"$ST/dashbin/dash"
+chmod 755 "$ST/dashbin/dash"
+for t in t1 t2 t4; do printf 'echo "%s $(command -v sh)" >>"%s/ran.log"\nsh -c "echo nested-%s" >/dev/null\n' "$t" "$ST" "$t" >"$ST/$t.sh"; done
+printf 'exit 1\n' >"$ST/t3.sh"
+: >"$ST/dash.log"
+: >"$ST/ran.log"
+PATH=$ST/dashbin:$ST/bin sh "$SS" "$ST/t1.sh" "$ST/t2.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && [ "$(head -n 1 "$W/out")" = "shell tests: under dash ($ST/dashbin/dash), which is sh for the tests" ] && [ "$(grep -c '^shell tests: ' "$W/out")" -eq 1 ] && ok "shell tests: with dash on PATH one line names dash" || bad "shell tests under dash: exit $st $(cat "$W/out" "$W/err")"
+[ "$(cut -d' ' -f1 "$ST/ran.log" | tr '\n' ' ')" = "t1 t2 " ] && ok "shell tests: each test ran once, in order" || bad "shell tests ran: $(cat "$ST/ran.log")"
+[ "$(grep -c "^$ST/t[12]\.sh\$" "$ST/dash.log")" -eq 2 ] && [ "$(grep -c '^-c echo nested-t[12]$' "$ST/dash.log")" -eq 2 ] && ok "shell tests: dash runs each test, and the sh a test starts by name" || bad "shell tests dash calls: $(tr '\n' '|' <"$ST/dash.log")"
+sd=$(sed -n '1s/^t1 //p' "$ST/ran.log")
+[ -n "$sd" ] && [ "$sd" != "$ST/bin/sh" ] && [ ! -e "$(dirname "$sd")" ] && ok "shell tests: the directory of the sh link is gone at the end" || bad "shell tests: sh was '$sd', directory left: $(ls -d "$(dirname "$sd")" 2>&1)"
+: >"$ST/dash.log"
+: >"$ST/ran.log"
+PATH=$ST/bin sh "$SS" "$ST/t1.sh" "$ST/t2.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && [ "$(cat "$W/out")" = "shell tests: under sh ($(readlink -f "$ST/bin/sh")): no dash on PATH" ] && ok "shell tests: without dash on PATH one line names the machine's sh" || bad "shell tests under sh: exit $st $(cat "$W/out" "$W/err")"
+[ "$(tr '\n' ',' <"$ST/ran.log")" = "t1 $ST/bin/sh,t2 $ST/bin/sh," ] && [ ! -s "$ST/dash.log" ] && ok "shell tests: without dash each test ran once under sh" || bad "shell tests under sh ran: $(cat "$ST/ran.log" "$ST/dash.log")"
+: >"$ST/ran.log"
+PATH=$ST/dashbin:$ST/bin sh "$SS" "$ST/t1.sh" "$ST/t3.sh" "$ST/t4.sh" >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 1 ] && [ "$(cut -d' ' -f1 "$ST/ran.log" | tr '\n' ' ')" = "t1 " ] && ok "shell tests: a failing test ends the step with status 1, and the tests after it do not run" || bad "shell tests failure: exit $st $(cat "$ST/ran.log")"
+PATH=$ST/bin sh "$SS" >"$W/out" 2>"$W/err"
+[ $? -eq 2 ] && ok "shell tests: no test named is a usage error" || bad "shell tests without arguments: $(cat "$W/out" "$W/err")"
+tf=$here/../../Taskfile.yml
+grep -qx '      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh' "$tf" && [ "$(grep -c 'contrib/node/test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/slot-shim\.test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/rustc-gate\.test\.sh' "$tf")" -eq 1 ] && ok "the gate runs the three shell tests through shell-tests.sh, each once" || bad "Taskfile: $(grep -n 'contrib/' "$tf" | tr '\n' ' ')"
+
+# 6z. Firefox on a node: a tool the node installs only when its config names it in EXTRA_TOOLS
+# (its line of EXTRA_ARCHIVE_PINS), with the packages it loads. A consumer's browser tests start
+# `firefox` by name, headless. The release archive of Mozilla is unpacked into
+# /usr/local/firefox-<release> and linked as /usr/local/bin/firefox; `check --canary` starts it
+# headless as the build user until it listens for WebDriver BiDi.
+FZ=/usr/local/firefox-159.0
+mkdir -p "$W/r0"
+fzpin=$(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P" | sed "s/^EXTRA_ARCHIVE_PINS='//; s/'\$//" | grep '^firefox ')
+[ "$fzpin" = 'firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox' ] && ok "the firefox pin: release 159.0, the SHA-256 of Mozilla's SHA256SUMS, one leading directory stripped, the binary firefox" || bad "firefox pin: '$fzpin'"
+for fz_bad in 'EXTRA_TOOLS=fire;fox' 'EXTRA_TOOLS=$(id)' 'EXTRA_TOOLS=a*' 'EXTRA_TOOLS=Firefox'; do
+  conf
+  echo "$fz_bad" >>"$W/node.conf"
+  run "$W/r0" check
+  [ $? -eq 2 ] && grep -q "EXTRA_TOOLS must be names" "$W/err" && ok "'$fz_bad' is refused by the config's form" || bad "'$fz_bad' is accepted ($(cat "$W/err"))"
+done
+conf
+echo 'EXTRA_TOOLS=firefox -x' >>"$W/node.conf"
+run "$W/r0" check
+[ $? -eq 2 ] && grep -q "EXTRA_TOOLS names '-x', which is no tool of provision.sh" "$W/err" && ok "'EXTRA_TOOLS=firefox -x' is refused: -x has no pin" || bad "'EXTRA_TOOLS=firefox -x' is accepted ($(cat "$W/err"))"
+conf
+echo 'EXTRA_TOOLS=firefox chrome' >>"$W/node.conf"
+run "$W/r0" check
+[ $? -eq 2 ] && grep -qx "node config: $W/node.conf: EXTRA_TOOLS names 'chrome', which is no tool of provision.sh (erlang elixir gleam odin firefox)" "$W/err" && ok "EXTRA_TOOLS with a name provision.sh has no pin for is refused, and the names it has are listed, firefox among them" || bad "unknown extra tool: $(cat "$W/out" "$W/err" | tail -3)"
+sh "$P" bundle "$W/node.conf" check >/dev/null 2>"$W/err"
+[ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'chrome'" "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with an unknown extra tool: $(cat "$W/err")"
+# One key names every optional tool: a config with the key EXTRA_ARCHIVES is refused.
+conf
+echo 'EXTRA_ARCHIVES=firefox' >>"$W/node.conf"
+run "$W/r0" check
+[ $? -eq 2 ] && grep -q 'unknown key EXTRA_ARCHIVES' "$W/err" && ok "a config with EXTRA_ARCHIVES is refused: unknown key" || bad "EXTRA_ARCHIVES is accepted: $(cat "$W/out" "$W/err" | tail -3)"
+FXR=$W/rfx
+mkdir -p "$FXR"
+echo 8 >"$FXR/.state-nproc"
+conf
+run "$FXR" apply
+run "$FXR" check
+[ $? -eq 0 ] && [ ! -e "$FXR$FZ" ] && [ ! -L "$FXR/usr/local/bin/firefox" ] && ! grep -q firefox "$W/out" && ok "without firefox in EXTRA_TOOLS a node has no firefox and check names none" || bad "firefox without the key: $(grep -i firefox "$W/out") $(ls "$FXR/usr/local" 2>&1 | tr '\n' ' ')"
+grep -qx 'gtk3' "$FXR/.state/packages" && bad "without firefox in EXTRA_TOOLS the packages of firefox are installed" || ok "without firefox in EXTRA_TOOLS the packages of firefox are not installed"
+echo 'EXTRA_TOOLS=firefox' >>"$W/node.conf"
+run "$FXR" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: archive:firefox: /usr/local/bin/firefox is 'missing', want a link to $FZ/firefox" "$W/out" && grep -qx 'drift: packages: not installed: gtk3 alsa-lib libX11-xcb dbus-libs xz' "$W/out" && ok "EXTRA_TOOLS=firefox: check names the link and the packages firefox loads" || bad "firefox drift: exit $st $(grep -i 'firefox\|packages' "$W/out")"
+: >"$FXR/.calls"
+run "$FXR" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'fetch https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz' "$FXR/.calls" && [ "$(readlink "$FXR/usr/local/bin/firefox")" = "$FZ/firefox" ] && ok "apply fetches the archive of Firefox 159.0 and links /usr/local/bin/firefox to $FZ/firefox" || bad "firefox apply: exit $st $(grep firefox "$FXR/.calls") '$(readlink "$FXR/usr/local/bin/firefox")' $(grep firefox "$W/err")"
+for p in gtk3 alsa-lib libX11-xcb dbus-libs xz; do grep -qx "$p" "$FXR/.state/packages" || bad "apply did not install $p"; done
+[ "$("$FXR$FZ/firefox" --version 2>&1)" = 'Mozilla Firefox 159.0' ] && ok "the stand-in answers as Firefox does: Mozilla Firefox 159.0" || bad "firefox stand-in: $("$FXR$FZ/firefox" --version 2>&1)"
+run "$FXR" check
+[ $? -eq 0 ] && ok "after apply: firefox and its packages, 0 drift" || bad "firefox after apply: $(cat "$W/out")"
+sh "$here/toolchains.sh" "$FXR" "$W/norust" 2>/dev/null | grep '^tool firefox' >"$W/out2"
+[ "$(cat "$W/out2")" = "tool firefox 159.0" ] && ok "toolchains.sh: one line, tool firefox 159.0" || bad "tool firefox line: '$(cat "$W/out2")'"
+mkdir -p "$W/fzp/usr/bin"
+printf '#!/bin/sh\n[ "$1" = --version ] && [ "${MOZ_HEADLESS:-}" = 1 ] && echo "Mozilla Firefox 158.0.1"\n' >"$W/fzp/usr/bin/firefox"
+chmod 755 "$W/fzp/usr/bin/firefox"
+[ "$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')" = "tool firefox 158.0.1" ] && ok "toolchains.sh: a workstation's firefox in /usr/bin, read headless" || bad "tool firefox of /usr/bin: '$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')'"
+printf '#!/bin/sh\nexit 1\n' >"$W/fzp/usr/bin/firefox"
+[ "$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')" = "tool firefox missing" ] && ok "toolchains.sh: a firefox that prints nothing is missing" || bad "tool firefox silent: '$(sh "$here/toolchains.sh" "$W/fzp" "$W/norust" 2>/dev/null | grep '^tool firefox')'"
+cp "$FXR$FZ/firefox" "$W/firefox.keep"
+printf '#!/bin/sh\necho "Mozilla Firefox 158.0"\n' >"$FXR$FZ/firefox"
+run "$FXR" check
+grep -qx "drift: archive:firefox: $FZ/firefox says 'Mozilla Firefox 158.0', want 159.0" "$W/out" && ok "check names a firefox of another release" || bad "firefox version drift: $(grep firefox "$W/out")"
+run "$FXR" apply
+run "$FXR" check
+[ $? -eq 0 ] && cmp -s "$W/firefox.keep" "$FXR$FZ/firefox" && ok "apply installs the pinned release again" || bad "firefox restore: $(cat "$W/out")"
+# The real branch of archive_fetch with an archive of the shape of Mozilla's: a .tar.xz with one
+# top directory, firefox/, which is stripped. curl is a stand-in that serves it.
+if command -v xz >/dev/null 2>&1; then
+  mkdir -p "$W/fzsrc/firefox" "$W/fzfetch"
+  printf '#!/bin/sh\necho "Mozilla Firefox 159.0"\n' >"$W/fzsrc/firefox/firefox"
+  chmod 755 "$W/fzsrc/firefox/firefox"
+  tar -cJf "$W/fzsrc.tar.xz" -C "$W/fzsrc" firefox
+  fztree=$(
+    eval "$(sed -n '/^archive_src() /p; /^archive_fetch() {$/,/^}$/p' "$P")"
+    fake_fetch() { false; }
+    curl() { cp "$W/fzsrc.tar.xz" "$2"; }
+    # shellcheck disable=SC2086
+    set -- $fzpin
+    fzsum=$(sha256sum "$W/fzsrc.tar.xz" | cut -d' ' -f1)
+    archive_fetch "$W/fzfetch" "$1" "$2" "$fzsum" "$4" "$5" "$6" 2>&1
+  )
+  [ "$fztree" = "$W/fzfetch/tree" ] && [ "$("$W/fzfetch/tree/firefox" --version 2>&1)" = 'Mozilla Firefox 159.0' ] && ok "the firefox pin through the real unpack: a .tar.xz, firefox/ is stripped" || bad "firefox unpack: '$fztree' $(find "$W/fzfetch" 2>&1 | head -5)"
+else
+  ok "the firefox pin through the real unpack: not run, no xz on this machine"
+fi
+# The canary: check --canary starts firefox as the build user in a new directory of the store's
+# tmp (its HOME, TMPDIR and profile), headless with a WebDriver BiDi port, waits for the line
+# `WebDriver BiDi listening on ws://...` on stderr, ends it and removes the directory. The
+# stand-in of apply prints that line and waits; the failures are stand-ins of this test.
+fzc() { NODE_TEST_FIREFOX_WAIT=2 NODE_TEST=1 NODE_ROOT=$FXR sh "$P" check "$W/node.conf" "$@" >"$W/out" 2>"$W/err"; }
+fzc
+! grep -q 'firefox' "$W/out" && ok "check without --canary starts no firefox" || bad "check alone: $(grep firefox "$W/out")"
+fzc --canary
+grep -qx 'canary: ok: firefox: firefox 159.0 started headless as the build user and listened for WebDriver BiDi (ws://127.0.0.1:9222)' "$W/out" && ! grep -q '^drift: firefox' "$W/out" && ok "check --canary: firefox starts headless and listens for WebDriver BiDi, one ok line" || bad "firefox canary: $(grep firefox "$W/out" "$W/err")"
+[ -z "$(ls -A "$FXR/srv/slot/tmp" 2>/dev/null | grep firefox)" ] && ok "the firefox canary leaves no directory in the store's tmp" || bad "firefox canary left: $(ls -A "$FXR/srv/slot/tmp")"
+cat >"$FXR$FZ/firefox" <<EOF
+#!/bin/sh
+[ "\$1" != --version ] || { echo "Mozilla Firefox 159.0"; exit 0; }
+echo "\$*" >"$W/fz-args"
+echo "\$HOME|\$TMPDIR|\${MOZ_HEADLESS:-}" >"$W/fz-env"
+pwd >"$W/fz-pwd"
+echo "*** You are running in headless mode." >&2
+echo "XPCOMGlueLoad error for file $FZ/libxul.so:" >&2
+exit 1
+EOF
+fzc --canary
+st=$?
+[ $st -eq 1 ] && grep -qx 'drift: firefox: canary: firefox exited with status 1 before it listened for WebDriver BiDi: XPCOMGlueLoad error for file /usr/local/firefox-159.0/libxul.so:' "$W/out" && ! grep -q '^canary: ok: firefox' "$W/out" && ok "check --canary: a firefox that exits before the BiDi line is drift with its first line that is no headless notice" || bad "firefox canary exit: exit $st $(grep firefox "$W/out" "$W/err")"
+case $(cat "$W/fz-args" 2>&1) in
+  "--headless --no-remote --remote-debugging-port 0 --profile $FXR/srv/slot/tmp/slot-firefox-canary."*/profile' about:blank') ok "the canary starts firefox headless, without remote, with a BiDi port and its own profile" ;;
+  *) bad "firefox canary arguments: $(cat "$W/fz-args" 2>&1)" ;;
+esac
+fzd=$(cat "$W/fz-pwd" 2>&1)
+case $fzd in
+  "$FXR"/srv/slot/tmp/slot-firefox-canary.*) [ ! -e "$fzd" ] && [ "$(cat "$W/fz-env")" = "$fzd/home|$fzd/tmp|1" ] && ok "the canary runs in a directory of the store's tmp with its HOME and TMPDIR there, and removes it" || bad "firefox canary directory: $fzd $(cat "$W/fz-env")" ;;
+  *) bad "firefox canary directory: $fzd" ;;
+esac
+printf '#!/bin/sh\n[ "$1" != --version ] || { echo "Mozilla Firefox 159.0"; exit 0; }\necho "*** You are running in headless mode." >&2\nexec sleep 30\n' >"$FXR$FZ/firefox"
+fzc --canary
+st=$?
+[ $st -eq 1 ] && grep -qxF 'drift: firefox: canary: no WebDriver BiDi line from firefox within 2 s: *** You are running in headless mode.' "$W/out" && ok "check --canary: a firefox that does not listen within the wait is drift" || bad "firefox canary wait: exit $st $(grep firefox "$W/out" "$W/err")"
+cp "$W/firefox.keep" "$FXR$FZ/firefox"
+conf
+fzc --canary
+! grep -q 'firefox' "$W/out" && ok "check --canary without firefox in EXTRA_TOOLS starts no firefox" || bad "canary without the key: $(grep firefox "$W/out")"
+grep '^EXTRA_TOOLS=' "$here/node.conf.example" | grep -qw firefox && ! grep -q '^EXTRA_ARCHIVES' "$here/node.conf.example" && ok "example: EXTRA_TOOLS names firefox, and no other key does" || bad "example firefox: $(grep 'EXTRA_TOOLS\|EXTRA_ARCHIVES' "$here/node.conf.example")"
+grep '^| `EXTRA_TOOLS` |' "$here/README.md" | grep -q '`firefox`' && ! grep -q 'EXTRA_ARCHIVES' "$here/README.md" && ok "README: the EXTRA_TOOLS row names firefox, and no EXTRA_ARCHIVES key is left" || bad "README: $(grep -n 'EXTRA_ARCHIVES\|^| `EXTRA_TOOLS`' "$here/README.md" | cut -c1-120)"
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.

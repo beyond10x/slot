@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-26T11:21:00Z",
+  "actor": "human:operator",
+  "artifact": "story:node-installs-its-toolchains-by-script",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "health_observation",
+    "source": "provision.sh check --canary as root on a node provisioned from the bare image by provision.sh apply alone: exit 0, 0 drift"
+  }
+}

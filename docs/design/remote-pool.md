@@ -68,8 +68,8 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
   binaries, never a dependency's artifacts. A build fetches after exit 0, a test run whatever its
   exit, so the binaries of a failed test run come back too (§ 5.3). Other files of `target/`
   stay on the host.
-- Before a cargo job the host fetches the crates of the mirror's `Cargo.lock` once and runs the
-  job offline (§ 5.8, `cargo_fetch.rs`).
+- Before a cargo job the host fetches the crates of the mirror's `Cargo.lock` once (§ 5.8,
+  `cargo_fetch.rs`).
 - Files a job writes into the tree (`Cargo.lock`, snapshots, formatted sources) stay in the mirror
   and are deleted by the next push. Commands that exist to write the tree stay local (§ 5.5).
 - `cargo run` would run the program on the host. It stays local (§ 5.4).
@@ -104,7 +104,8 @@ host, one view and one job log, and a host that starts, stops and cannot overspe
 | output | streamed line by line; the mirror path is rewritten to the client's repository path | `rewrite.rs:1-2`, `server/mod.rs:1627-1654`, `:1475-1494` |
 | fetch | after exit 0 only, each `--fetch PATH` is copied back with `rsync -a --mkpath`; `target/…` is read from the job's target directory, which the host reports in its `start` frame | `client.rs:194`, `:230-298`, `server/mod.rs:2143-2169` |
 | products | a cargo `build`/`rustc` (after exit 0) or `test`/`bench` (any exit) runs with `--message-format=json-render-diagnostics` unless the caller named a format; the client strips cargo's JSON lines from stdout, keeps the `compiler-artifact` paths of `path+` packages, and copies them with one `rsync -a --relative` into the local target directory | `artifacts.rs`, `client.rs` (`products_back`) |
-| fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch` (`--locked` when the job passes `--locked` or `--frozen`) when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository, then sets `CARGO_NET_OFFLINE=true`; a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
+| go products | a `go build -o PATH` or `go test -c -o PATH` whose path lies in the tree: after exit 0 the client copies the file with the same `rsync -a --relative` call, from the mirror to the same relative path; for a directory it lists the directory on the host before the job and after it (`rsync -d`, a sender without a destination) and copies the regular files that are new or whose size or mtime changed | `artifacts.rs` (`go_output`, `list`, `written`), `client.rs` (`go_back`) |
+| fetch once | a remote cargo job that builds: the host daemon runs `cargo fetch` (`--locked` when the job passes `--locked` or `--frozen`) when the mirror's `Cargo.lock` digest is new for that mirror, under a lock per repository; the job's environment is not changed (until 0.39.1 it got `CARGO_NET_OFFLINE=true`, § 5.8); a failed fetch sends a `fallback` frame and the client runs the job locally | `cargo_fetch.rs`, `server/mod.rs` (`fetch_once`) |
 | measure | one stderr line per sync: bytes sent (rsync `--stats`), seconds, the checkout's `HEAD` and its count of changed files | `sync.rs` |
 | fallback | when the sync fails, stalls (no byte read or written for `SLOT_SYNC_STALL`, 60 s) or runs past `SLOT_SYNC_LIMIT` (5 min), or ssh cannot be started, the job goes to the local daemon with one stderr line; a stalled rsync is killed with its ssh | `client.rs:200-207`, `sync.rs` |
 | lost connection | `slot: connection to daemon lost`, exit 3, whether or not the job had started; the host cancels the job | `client.rs:190-192`, `:683-686`, design.md § 16 |
@@ -513,6 +514,33 @@ fetch sends; a later fetch sends only files whose size or mtime changed.
 At 100 Mbit/s down the test binaries take about 6 s, a twelfth of the target directory. Debug info
 makes them larger *(not measured here; the 410 MB binary of § 2.2 had it)*.
 
+**What a go build wrote** (`artifacts.rs`: `go_output`, `list`, `written`). go prints no list of
+what it built, so the command line names it: the last `-o` of a `go build` or of a `go test`
+with `-c`, read against the job's working directory (after `-C`). The path is normalized without
+reading the disk and must lie below the repository's top; an absolute one counts only for a
+mirror at the same path, where both sides share it. The copy is the cargo products' transfer
+(`artifacts::fetch`), from the mirror instead of the target directory. `--fetch` was not reused:
+it reads `target/…` from the job's cargo target directory, which in a mirror below the workspace
+root is not where go wrote.
+
+`-o` may name a directory, and other files may lie in it. What the build wrote is known from two
+listings of that directory on the host, one after the sync and before the job, one after the
+job: a regular file that the first listing lacks, or has with another size or mtime, was
+written. The listing is an rsync sender without a destination (`rsync -d host:<dir>/`), which
+`slot shell` admits as it admits a fetch, so the host needs no new command. Way (b) above was
+rejected for cargo because cargo names its files; go does not. Both listings come from one
+machine, so no clock is compared across machines. rsync lists times to the second: a file
+written again with the same size in the second of its earlier mtime reads as not written. The
+top of the tree (`-o .`) is listed like any other directory. Only a directory needs the first
+listing: when it fails for a path that is not named as a directory, the path is listed again
+after the job and, when it is no directory, copied as one file. The copy goes into the
+directory of the file (or the directory `-o` names), created and resolved on the client, with
+the file names alone as rsync paths: `--relative` would send the directories on the way, and
+the receiver replaces one that is a symlink on the client with a directory (rsync 3.5 refuses
+to write through it even with `--keep-dirlinks`). A build without
+`-o`, `go test -c` without `-o` (its `<pkg>.test` stays in the working directory on the host)
+and every other go command make no listing and no copy.
+
 ### 5.3 `cargo test`
 
 The log and the exit code come back, and so do the test binaries, whatever the exit (§ 5.2): a
@@ -593,9 +621,8 @@ resolves under that lock, and one that downloads holds it for the whole download
    `test`, `bench`, `doc`, `rustc`, `nextest`, `llvm-cov`) sets `fetch_once` in its request.
    Commands that need the network themselves (`update`, `add`, `install`, `fetch`) do not.
 2. Before the job is queued, the host daemon finds the nearest `Cargo.lock` from the job's
-   directory up to the mirror root. None: the job runs as before, online.
-3. Its SHA-256 is compared with `<ws-root>/.cargo-fetch/<id>`. Equal: the job runs with
-   `CARGO_NET_OFFLINE=true`.
+   directory up to the mirror root. None: the job runs as before.
+3. Its SHA-256 is compared with `<ws-root>/.cargo-fetch/<id>`. Equal: the job runs.
 4. Different: the daemon takes a `flock` per repository key (`.repo-keys/<id>`, else the
    workspace id) in the same directory, compares again (another mirror's job may have fetched),
    runs `<cargo> [+toolchain] fetch` in that directory with the job's environment, and records
@@ -609,10 +636,26 @@ resolves under that lock, and one that downloads holds it for the whole download
    locally. Only a client that set `fetch_once` gets the frame, so an older client never sees it.
 6. Eviction of a mirror removes its digest.
 
-The fetch is network work, not compile work, so it takes no slot. Offline, a job still takes the
-package-cache lock while it resolves, but only for the moment it reads the cache. Not covered: a
-crate that cargo's cache cleaner removed after the digest was recorded fails the offline build;
-editing `Cargo.lock` (or a sync of a new one) fetches again.
+The fetch is network work, not compile work, so it takes no slot. After it a job still takes the
+package-cache lock while it resolves, but only for the moment it reads the cache: every crate
+is in the cargo home. Editing `Cargo.lock` (or a sync of a new one) fetches again.
+
+Until 0.39.1 the job also got `CARGO_NET_OFFLINE=true`, so that it could not download under the
+lock whatever the fetch had left out. The variable is gone: a compile cache keys every `CARGO_*`
+variable, and with it a cargo job shared no entry with cargo inside a generic job (measured on a
+node: 0.83 s, then 0.93 s for the same crate). Three ways to make the two agree were weighed:
+
+| way | judgement |
+|---|---|
+| no variable in either job | chosen: the fetch, not the variable, is what removed the wait; both job kinds then carry the same `CARGO_*` set |
+| the variable in generic jobs too | rejected: a generic job gets no fetch, and its script may run `cargo install` or `cargo update`, or build a workspace with a lock file of its own; offline, those fail |
+| `--offline` on the cargo command line instead | rejected: an option cannot be placed reliably for every command (`cargo rustc … -- …`, external subcommands such as `nextest` and `llvm-cov`, aliases), and it changes the command the job's record shows |
+
+What the variable guarded and no longer does: a crate that cargo's cache cleaner removed after
+the digest was recorded is downloaded by the job, under the lock, where the offline build
+failed; and a job whose `Cargo.lock` is out of date (the fetch updated the mirror's, the next
+sync restores the caller's) asks the registry's index each time. A caller's own
+`CARGO_NET_OFFLINE` reaches the job unchanged.
 
 Git dependencies come from the workstation (`git_deps.rs`). The fetch above runs on the node,
 which may hold no credential for a private forge, and only for a cargo command the client sends;

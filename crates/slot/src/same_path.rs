@@ -183,13 +183,34 @@ pub fn manifest_path(argv: &[String]) -> Option<String> {
     None
 }
 
-/// `target_directory` of `cargo metadata` output.
-fn target_of(json: &[u8]) -> Option<PathBuf> {
+/// Where a same-path job builds, and whether the job needs to be told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The directory, absolute unless the caller's variable is relative
+    /// to a relative working directory.
+    pub dir: PathBuf,
+    /// cargo resolves `dir` by itself in the same tree on the server:
+    /// `target` beside the workspace's root manifest, with no variable of
+    /// the caller and no cargo configuration that names another. The
+    /// server then exports no `CARGO_TARGET_DIR`: the compile cache keys
+    /// every `CARGO_*` variable, and this one would differ per tree.
+    pub default: bool,
+}
+
+/// `target_directory` of `cargo metadata` output, as a [`Target`]: the
+/// default when it is `target` in `workspace_root`.
+fn target_of(json: &[u8]) -> Option<Target> {
     let v: serde_json::Value = serde_json::from_slice(json).ok()?;
-    v.get("target_directory")?
+    let dir = v
+        .get("target_directory")?
         .as_str()
         .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
+        .filter(|p| p.is_absolute())?;
+    let default = v
+        .get("workspace_root")
+        .and_then(|r| r.as_str())
+        .is_some_and(|r| Path::new(r).join("target") == dir);
+    Some(Target { dir, default })
 }
 
 /// The target directory a same-path job builds into, the client's own:
@@ -197,14 +218,25 @@ fn target_of(json: &[u8]) -> Option<PathBuf> {
 /// command the one `cargo metadata` names for its manifest
 /// (`--manifest-path` included), else `target` beside the nearest lock
 /// file; `None` for any other command, which keeps cargo's default.
+///
+/// This is the one decision of the directory: the record, eviction and the
+/// products read it. [`Target::default`] says whether it is the directory
+/// cargo finds without being told: not with a variable of the caller, and
+/// not when `CARGO_BUILD_TARGET_DIR` or a `build.target-dir` of a cargo
+/// configuration moved it, since a configuration outside the tree (in the
+/// caller's home) does not exist on the server; nor the guess beside the
+/// lock file when `cargo metadata` fails.
 pub fn target_dir(
     argv: &[String],
     cwd: &Path,
     top: &Path,
     env_target: Option<&str>,
-) -> Option<PathBuf> {
+) -> Option<Target> {
     if let Some(t) = env_target.filter(|t| !t.is_empty()) {
-        return Some(cwd.join(t));
+        return Some(Target {
+            dir: cwd.join(t),
+            default: false,
+        });
     }
     if crate::toolchain::for_argv(argv, 1).name() != "rust" {
         return None;
@@ -232,12 +264,17 @@ pub fn target_dir(
     {
         return Some(t);
     }
+    // A guess: a cargo configuration, also one in the tree, may name
+    // another directory, so cargo is told this one.
     let from = manifest
         .as_deref()
         .map(|m| cwd.join(m))
         .and_then(|m| m.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| cwd.to_path_buf());
-    Some(crate::artifacts::local_target(&from, top, None))
+    Some(Target {
+        dir: crate::artifacts::local_target(&from, top, None),
+        default: false,
+    })
 }
 
 /// rsync filter options of a sync of `kind`.
@@ -348,18 +385,36 @@ mod tests {
         pkg(&top, "outer");
         pkg(&top.join("driver"), "driver");
         let build = v(&[cargo, "build"]);
+        // What cargo resolves by itself is the default; a directory the
+        // caller or a cargo configuration names is not.
+        let at = |dir: PathBuf, default: bool| Some(Target { dir, default });
         assert_eq!(
             target_dir(&build, &top, &top, None),
-            Some(top.join("target"))
+            at(top.join("target"), true)
+        );
+        assert_eq!(
+            target_dir(&build, &top.join("src"), &top, None),
+            at(top.join("target"), true),
+            "from a directory below the manifest"
         );
         assert_eq!(
             target_dir(&build, &top.join("src"), &top, Some("../out")),
-            Some(top.join("src/../out"))
+            at(top.join("src/../out"), false)
+        );
+        assert_eq!(
+            target_dir(&build, &top, &top, top.join("target").to_str()),
+            at(top.join("target"), false),
+            "the caller named it: exported, also when it is cargo's own"
+        );
+        assert_eq!(
+            target_dir(&build, &top, &top, Some("")),
+            at(top.join("target"), true),
+            "an empty variable names nothing"
         );
         let nested = v(&[cargo, "build", "--manifest-path", "driver/Cargo.toml"]);
         assert_eq!(
             target_dir(&nested, &top, &top, None),
-            Some(top.join("driver/target"))
+            at(top.join("driver/target"), true)
         );
         std::fs::create_dir_all(top.join(".cargo")).unwrap();
         std::fs::write(
@@ -369,7 +424,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             target_dir(&build, &top, &top, None),
-            Some(top.join("elsewhere"))
+            at(top.join("elsewhere"), false)
+        );
+        // Without a cargo that answers, `target` beside the lock file, a
+        // guess: a cargo configuration (here the one in the tree) may name
+        // another directory, so it is exported, not left to cargo.
+        std::fs::write(top.join("driver/Cargo.lock"), "").unwrap();
+        assert_eq!(
+            target_dir(
+                &v(&["/nonexistent/cargo", "build"]),
+                &top.join("driver/src"),
+                &top,
+                None
+            ),
+            at(top.join("driver/target"), false)
         );
         assert_eq!(target_dir(&v(&["sh", "run.sh"]), &top, &top, None), None);
         assert_eq!(

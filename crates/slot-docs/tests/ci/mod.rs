@@ -59,6 +59,10 @@ impl Step {
                 .strip_prefix(prefix.as_str())
         })
     }
+
+    fn contains(&self, text: &str) -> bool {
+        self.lines.iter().any(|l| l.contains(text))
+    }
 }
 
 /// The steps of every job, in order. Jobs sit at two spaces under `jobs:`, steps start
@@ -411,4 +415,305 @@ fn required_checks_keep_their_names_and_skip_from_inside() {
             step.lines.first()
         );
     }
+}
+
+const RELEASE: &str = ".github/workflows/release.yml";
+
+/// The targets every release carries an archive for, sorted: both architectures, each
+/// linked against glibc and as a static musl binary.
+const RELEASE_TARGETS: [&str; 4] = [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+];
+
+/// The condition of a step that only the musl targets of the package matrix run.
+const MUSL_ONLY: &str = "endsWith(matrix.target, '-musl')";
+
+/// The entries of the package matrix of `release.yml`: target and runner.
+fn release_matrix() -> Vec<(String, String)> {
+    let text = read(RELEASE);
+    let mut out = Vec::new();
+    let mut lines = text.lines().map(str::trim);
+    while let Some(line) = lines.next() {
+        if let Some(target) = line.strip_prefix("- target: ") {
+            let runner = lines
+                .next()
+                .and_then(|l| l.strip_prefix("runner: "))
+                .unwrap_or_else(|| panic!("release.yml: `runner:` follows `- target: {target}`"));
+            out.push((target.to_string(), runner.to_string()));
+        }
+    }
+    out
+}
+
+/// The steps of the job that builds one target of a release, in order.
+fn package_steps() -> Vec<Step> {
+    steps(RELEASE)
+        .into_iter()
+        .filter(|s| s.job == "package")
+        .collect()
+}
+
+/// The place of the one step of `steps` that holds `text`.
+fn place(steps: &[Step], text: &str) -> usize {
+    let found: Vec<usize> = (0..steps.len())
+        .filter(|i| steps[*i].contains(text))
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "release.yml, job package: one step holds `{text}`"
+    );
+    found[0]
+}
+
+/// A release builds, smoke-tests and packages four targets, and both targets of an
+/// architecture are built the same way: on that architecture's own runner, where the
+/// binary runs.
+#[test]
+fn the_release_builds_smoke_tests_and_packages_four_targets() {
+    let matrix = release_matrix();
+    let mut targets: Vec<&str> = matrix.iter().map(|(t, _)| t.as_str()).collect();
+    targets.sort_unstable();
+    assert_eq!(
+        targets, RELEASE_TARGETS,
+        "release.yml: the package matrix names every release target once"
+    );
+    for arch in ["x86_64", "aarch64"] {
+        let runners: std::collections::BTreeSet<&str> = matrix
+            .iter()
+            .filter(|(t, _)| t.starts_with(arch))
+            .map(|(_, r)| r.as_str())
+            .collect();
+        assert_eq!(
+            runners.len(),
+            1,
+            "release.yml: the {arch} targets are built on one runner: {runners:?}"
+        );
+    }
+
+    let steps = package_steps();
+    let install = steps
+        .iter()
+        .find(|s| {
+            s.value("uses")
+                .is_some_and(|u| u.starts_with("dtolnay/rust-toolchain@"))
+        })
+        .expect("release.yml, job package: installs a rustc");
+    assert!(
+        install.has("targets: ${{ matrix.target }}"),
+        "release.yml, job package: the rustc install adds the target of the matrix entry"
+    );
+    let build = place(
+        &steps,
+        r#"cargo build --locked --release --bin slot --target "$TARGET""#,
+    );
+    let smoke = place(&steps, r#"printed=$("$bin" --version | awk '{print $NF}')"#);
+    let package = place(&steps, r#"package="slot-$GITHUB_REF_NAME-$TARGET""#);
+    let upload = place(&steps, "name: release-${{ matrix.target }}");
+    assert!(
+        build <= smoke && smoke <= package && package < upload,
+        "release.yml, job package: build, smoke test, package, upload, in that order"
+    );
+    for i in [build, smoke, package, upload] {
+        let step = &steps[i];
+        assert_eq!(
+            step.value("if"),
+            None,
+            "release.yml, job package: every target runs {:?}",
+            step.lines.first()
+        );
+    }
+    for i in [build, smoke, package] {
+        assert!(
+            steps[i].has("TARGET: ${{ matrix.target }}"),
+            "release.yml, job package: {:?} reads the target of the matrix entry",
+            steps[i].lines.first()
+        );
+    }
+    assert!(
+        steps[smoke].contains(r#"[ "$printed" != "$GITHUB_REF_NAME" ]"#),
+        "release.yml, job package: the built binary answers the version of the tag"
+    );
+    assert!(
+        steps[package].contains(r#"tar -C dist -czf "dist/$package.tar.gz" "$package""#),
+        "release.yml, job package: the archive is slot-<version>-<target>.tar.gz"
+    );
+    assert!(
+        steps[upload].has("path: dist/*.tar.gz") && steps[upload].has("if-no-files-found: error"),
+        "release.yml, job package: the archive is uploaded, and a missing one fails the job"
+    );
+}
+
+/// A musl binary is proven static and runs in a container without glibc before it is
+/// packaged; the image is named by digest.
+#[test]
+fn the_release_proves_each_musl_binary_static_and_runs_it_in_alpine() {
+    let steps = package_steps();
+    let proofs: Vec<usize> = (0..steps.len())
+        .filter(|i| steps[*i].value("if") == Some(MUSL_ONLY))
+        .collect();
+    assert_eq!(
+        proofs.len(),
+        1,
+        "release.yml, job package: one step has `if: {MUSL_ONLY}`"
+    );
+    let proof = &steps[proofs[0]];
+    let build = place(
+        &steps,
+        r#"cargo build --locked --release --bin slot --target "$TARGET""#,
+    );
+    let package = place(&steps, r#"package="slot-$GITHUB_REF_NAME-$TARGET""#);
+    assert!(
+        build < proofs[0] && proofs[0] < package,
+        "release.yml, job package: the musl proof runs after the build and before the packaging"
+    );
+    assert!(
+        proof.has("TARGET: ${{ matrix.target }}"),
+        "release.yml: the musl proof reads the target of the matrix entry"
+    );
+    assert!(
+        proof.has(r#"sh .github/scripts/static-binary.sh "$bin""#),
+        "release.yml: the musl proof runs static-binary.sh on the built binary"
+    );
+    let image = proof
+        .value("ALPINE")
+        .expect("release.yml: the musl proof names its image in `ALPINE:`");
+    let image = image.split(" #").next().unwrap_or_default().trim();
+    let digest = image
+        .strip_prefix("docker.io/library/alpine@sha256:")
+        .unwrap_or_else(|| panic!("release.yml: the Alpine image is named by digest: `{image}`"));
+    assert!(
+        digest.len() == 64
+            && digest
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "release.yml: the Alpine digest is 64 hex digits: `{digest}`"
+    );
+    let run = proof
+        .lines
+        .iter()
+        .find_map(|l| {
+            let l = l.trim();
+            l.starts_with("printed=$(docker run ").then_some(l)
+        })
+        .expect("release.yml: the musl proof reads the output of `docker run`");
+    assert!(
+        run.contains(r#""$ALPINE""#) && run.contains("/slot --version"),
+        "release.yml: the musl proof runs `slot --version` in the Alpine image: `{run}`"
+    );
+    assert!(
+        proof.contains(r#"[ "$printed" != "$GITHUB_REF_NAME" ]"#),
+        "release.yml: the binary answers the version of the tag in Alpine"
+    );
+    for line in &proof.lines {
+        assert!(
+            !line.contains("alpine:"),
+            "release.yml: the musl proof names no image by tag: `{}`",
+            line.trim()
+        );
+    }
+}
+
+/// The bundle job fails when an archive of a release target is missing, and writes
+/// `SHA256SUMS` over every archive.
+#[test]
+fn the_release_bundle_requires_and_lists_an_archive_of_every_target() {
+    let steps: Vec<Step> = steps(RELEASE)
+        .into_iter()
+        .filter(|s| s.job == "bundle")
+        .collect();
+    let verify = steps
+        .iter()
+        .find(|s| s.contains("SHA256SUMS"))
+        .expect("release.yml, job bundle: a step writes SHA256SUMS");
+    let listed = verify
+        .lines
+        .iter()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("for target in ")
+                .and_then(|l| l.strip_suffix("; do"))
+        })
+        .expect("release.yml, job bundle: `for target in <targets>; do`");
+    let mut listed: Vec<&str> = listed.split_whitespace().collect();
+    listed.sort_unstable();
+    assert_eq!(
+        listed, RELEASE_TARGETS,
+        "release.yml, job bundle: the archive of every release target is required"
+    );
+    let mut built: Vec<String> = release_matrix().into_iter().map(|(t, _)| t).collect();
+    built.sort_unstable();
+    assert_eq!(
+        listed, built,
+        "release.yml: the bundle requires the targets the package matrix builds"
+    );
+    assert!(
+        verify.contains(r#"test -f "dist/slot-$GITHUB_REF_NAME-$target.tar.gz""#),
+        "release.yml, job bundle: a missing archive fails the job"
+    );
+    assert!(
+        verify.contains("sha256sum slot-*.tar.gz > SHA256SUMS"),
+        "release.yml, job bundle: SHA256SUMS lists every archive"
+    );
+}
+
+/// The install page tells a reader which archive a host takes: it names every target.
+#[test]
+fn the_install_page_names_every_release_target() {
+    let page = read("website/docs/getting-started.md");
+    for target in RELEASE_TARGETS {
+        assert!(
+            page.contains(&format!("`{target}`")),
+            "website/docs/getting-started.md names `{target}`"
+        );
+    }
+}
+
+/// `static-binary.sh` passes a binary that loads no shared library and refuses every
+/// other file. The test binary itself is the case: static when its target links the C
+/// library statically (a musl target), dynamic otherwise.
+#[test]
+fn the_static_check_passes_only_a_binary_that_loads_no_library() {
+    let script = root().join(".github/scripts/static-binary.sh");
+    let check = |file: &Path| {
+        Command::new("sh")
+            .arg(&script)
+            .arg(file)
+            .output()
+            .expect("run sh")
+    };
+    let this = std::env::current_exe().expect("the path of this test binary");
+    let out = check(&this);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if cfg!(target_feature = "crt-static") {
+        assert!(out.status.success(), "a static binary passes: {stderr}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("static: "),
+            "a static binary is named on standard output"
+        );
+    } else {
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "a binary that loads shared libraries is refused: {stderr}"
+        );
+        assert!(
+            stderr.contains("is not static") && stderr.contains("NEEDED"),
+            "the refusal shows the libraries the binary names: {stderr}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let text = dir.path().join("slot");
+    std::fs::write(&text, "#!/bin/sh\necho slot 0.0.0\n").expect("write a script");
+    let out = check(&text);
+    assert!(
+        !out.status.success(),
+        "a file that is no ELF binary is refused"
+    );
+    let out = check(&dir.path().join("missing"));
+    assert!(!out.status.success(), "a missing file is refused");
 }

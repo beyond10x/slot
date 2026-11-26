@@ -29,6 +29,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `BUILD_KEY` | provision | the workstation's build public key; it may only run `slot shell` |
 | `SETUP_KEY` | provision | a second public key, let in only by `apply --open`, for a login that sets the node up by hand |
 | `SLOT_VERSION` | both | the slot release installed on the node |
+| `SLOT_TARGET` | provision | which archive of that release the node installs: `x86_64-unknown-linux-gnu` (the default, the build against glibc) or `x86_64-unknown-linux-musl` (the static build); `slot --version` is the same for both, so `check` reads the build from the binary at each path and from the running daemon |
 | `MIRROR_DIRS` | provision | directories under `BUILD_HOME` that are bound from the instance store |
 | `GO_PRIVATE` | provision | `GOPRIVATE` and `GONOSUMDB` of jobs |
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
@@ -41,6 +42,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
+| `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
 | `NODE_SSH`, `NODE_HOST`, `NODE_RUN_DIR` | push | the ssh command, the node's name for `SLOT_HOST` and a checkout to run the check job from |
@@ -174,8 +176,9 @@ and so is an instance without a role. An allowed call, a container that does not
 that could test nothing (no token, no credentials, no running docker) are
 `drift: role: canary: ...`. The first run pulls the image. A refusal is about that one call:
 a role that reads parameters under one path only, or reads another service, passes it.
-`--canary` also times an aborted process, reads the load average and compiles one C file with
-`musl-gcc -static` (What check compares, below).
+`--canary` also times an aborted process, reads the load average, compiles one C file with
+`musl-gcc -static` and, with `firefox` in `EXTRA_TOOLS`, starts Firefox headless (What check
+compares, below).
 
 ## What check compares
 
@@ -190,8 +193,11 @@ The node uses its own `/usr` and `/etc`. Everything a job needs beyond the base 
 from `EXTRA_PACKAGES`, `RUST_TOOLCHAINS` or a pin.
 
 Packages that Amazon Linux 2023 lacks are not installed; a job that needs one is held by name:
-mingw cross compilers, `dash`, `mawk`, `erlang`, `elixir`, `odin` and `gh`. The config file does
+mingw cross compilers, `mawk`, `erlang`, `elixir`, `odin` and `gh`. The config file does
 not list them.
+
+Of these, `erlang`, `elixir` and `odin` are held only on a node whose config does not name them
+in `EXTRA_TOOLS`: a node that names them there gets them, and `gleam`, from pins (below).
 
 No credential goes to a node. `STORE/nodebin` is the first directory of a job's PATH, and each
 script in it prints one line on stderr and exits 255: `no-credentials` (the `GIT_ASKPASS` and
@@ -268,6 +274,22 @@ the unit. `check` names a running unit whose loaded definition or process enviro
 unit file's, one whose soft core limit is not 0, and a `slot-node` that runs another slot version
 than `SLOT_VERSION`.
 
+`SLOT_TARGET` names which archive of the release is installed:
+`slot-<SLOT_VERSION>-x86_64-unknown-linux-gnu.tar.gz`, the default and the one a node has
+installed so far, or `slot-<SLOT_VERSION>-x86_64-unknown-linux-musl.tar.gz`, the static build,
+which needs no glibc of the node. Either is checked against the line of its own name in the
+release's `SHA256SUMS`, so a release without the musl archive installs nothing (`failed: slot:
+download or checksum ...`). Both builds print the same `slot --version`, so a change of the key
+at one version is read from the binary: the build against glibc names a program interpreter and
+the static one none (`readelf -l`, from binutils, which the base package `gcc` requires; where
+`readelf` gives no answer, the build is not compared). `check` prints `drift: slot:<path>: is the
+build for <target>, config says <target>` for each of the three paths and `drift: running:
+slot-node.service: it runs the slot build for ...` for a daemon that still runs the other one;
+`apply` installs the archive of the key (`changed: slot: slot <version> (x86_64-unknown-linux-musl)
+installed at ...`) and restarts `slot-node` like after a version change: when no job runs, or
+through `apply --drain`. One node takes the musl build first, by `SLOT_TARGET` in its own config
+file; the default changes only after that node ran it under real jobs.
+
 Draining: a node that always has a job never gets that restart (one node: 10 runs of `apply` in
 29 minutes, 5 to 14 jobs each time). `apply --drain` (also `bundle CONF apply --drain`) starts it
 without an empty pool. With a restart of either unit pending and jobs in the pool, it reloads the
@@ -285,6 +307,12 @@ does, and without `--drain` nothing changes.
   happens there, with no daemon of the pool running (`pending: running: sccache-node restarts
   when slot-node does, at the end of its drain: ...` until then), and the marks of the drain go.
   A pending restart of `sccache-node` alone drains `slot-node` too: the gap is its only moment.
+  At the end of a drain the step also loads the core pattern (`sysctl -p
+  /etc/sysctl.d/60-slot-core.conf`) when `apply` would: the pattern is a pipe, the file is there,
+  `sccache-node` runs with the soft core limit 0 and `slot-node.service` starts with it
+  (`systemctl show -p LimitCORESoft`). So one `apply --drain` is enough; the journal of
+  `slot-node.service` has the line `slot-node: kernel.core_pattern is 'core' (sysctl -p ...)`,
+  or one that says which unit keeps the pipe. A start that ends no drain loads nothing.
 - The bound: `DRAIN_MAX` after the signal, a transient timer (`slot-node-drain.timer`) runs
   `provision.sh drain-bound`. If the daemon process that got the signal still runs (same main PID
   and start time), the unit restarts the hard way, which ends the jobs that still run, and the
@@ -314,7 +342,9 @@ Under the pattern `core` a process whose limit is not 0 writes such a file, so `
 pattern only when both units run with the soft limit 0. A unit that runs with another limit
 restarts when no job runs, and the same `apply` then loads the pattern. With a job running,
 `apply` writes the unit files and the sysctl file, prints `pending: running: ...` for each unit
-and `pending: core: ...`, and the pipe stays until an `apply` finds no job. `check` names a
+and `pending: core: ...`, and the pipe stays until an `apply` finds no job, or, after `apply
+--drain`, until the start of `slot-node.service` that ends the drain, which loads the pattern
+under the same condition (Draining, the gap). `check` names a
 pattern that is a pipe and a running unit whose soft core limit is not 0. A pattern that is
 neither a pipe nor `core` is the owner's choice and stays: with no `60-slot-core.conf` there,
 `apply` writes none, and `check` and `apply` say so in a `kept: core: ...` line; a
@@ -398,6 +428,23 @@ for each tool it finds (the list is below), and `push.sh check` compares those l
 `zstd` and `python3` are base packages. An older directory of a former pin stays until someone
 removes it. Other releases are not installed: a consumer fetches its own (`GOTOOLCHAIN=auto`).
 The pins: go 1.27.1 and node v22.23.3 (the `tar.gz`, not the `tar.xz`).
+
+Firefox is an archive a node installs only when its config names it in `EXTRA_TOOLS` (below):
+`firefox` there selects its line of `EXTRA_ARCHIVE_PINS` (the same form as `ARCHIVE_PINS`), and
+a name that has no pin is refused before anything runs. A consumer's browser tests start `firefox` by
+name, headless. The pin is Firefox 159.0, the release the workstation runs: Mozilla's archive
+`linux-x86_64/en-US/firefox-159.0.tar.xz` from `archive.mozilla.org`, its SHA-256 the line of
+that file in the release's `SHA256SUMS`. `apply` unpacks it into `/usr/local/firefox-159.0`
+and links `/usr/local/bin/firefox`; `check` reads `firefox --version` (`Mozilla Firefox 159.0`)
+with `MOZ_HEADLESS=1`. The libraries the browser loads beside its own come from the packages
+`gtk3`, `alsa-lib`, `libX11-xcb` and `dbus-libs` (and what `gtk3` requires), and `xz` unpacks
+the archive: `EXTRA_TOOL_PACKAGES` adds them to the packages of a node that names firefox.
+`check --canary` starts it as the build user in a new directory of `STORE/tmp` (its `HOME`,
+`TMPDIR` and profile), `--headless --no-remote --remote-debugging-port 0`, waits up to 30 s for
+`WebDriver BiDi listening on ws://...` on standard error, ends it and removes the directory:
+`canary: ok: firefox: ...`, or `drift: firefox: canary: ...` with the first line Firefox printed
+when it ended before that line or did not print it. On a node, from a job, the start reached
+that line after 406 ms. `toolchains.sh` prints `tool firefox <release>`.
 
 `GO_ROOT`: go takes its GOROOT from the real path of its binary, so on a node `go env GOROOT`
 answers `/usr/local/go-<version>`, and on a workstation with a distribution's go `/usr/lib/go`.
@@ -495,6 +542,29 @@ another release; its `c musl-gcc` line reads the wrapper in `/usr/local/bin` too
 pin's release builds a new directory and moves the link; the directory of the release before
 stays, like the one of make.
 
+`dash` is built on the node from the source of dash 0.5.12 (`DASH_PIN` in `provision.sh`), the
+release that is `sh` on the forge's runner image (`ubuntu-26.04`, package `dash 0.5.12-12ubuntu3`):
+Amazon Linux 2023 packages none, a node's `sh` is bash, and a shell test that passes under bash can
+fail under dash (a redirection of a command is applied by dash in the shell itself, so `readlink
+/proc/$$/fd/1 >file` reads the file's name there and the name of the shell's output under bash).
+Apply downloads upstream's release tarball, checks its SHA-256 before anything is unpacked (the
+site serves plain http only; the SHA-256 is also the one of the `dash_0.5.12.orig.tar.gz` of
+Ubuntu's and Debian's package pools), and the build user runs `./configure` and `/usr/bin/make`
+under `timeout 600`. Root installs the one binary in `/usr/local/dash-0.5.12/bin`, writes the
+tarball's SHA-256 beside it (`/usr/local/dash-0.5.12/.slot-sha256`) and links it as
+`/usr/local/bin/dash`. It is never linked as `sh`: a node's `sh` stays the distribution's, and a
+job that wants the forge's shell names `dash`. dash prints no version, so `check` reads the link,
+the SHA-256 file and the answer of `dash -c 'echo $((6 * 7))'` (`drift: dash: ...`); a link that
+alone drifts is set again without a download, and a real file at the link's name is left alone
+and reported as `failed`. On a node of 32 CPUs the download took 1.7 s, `configure` 1.8 s and
+`make` with one job 3.2 s. `toolchains.sh` prints `tool dash <release>`: on a node the release of
+the directory the link names (`missing` when that tree has no SHA-256 file), elsewhere the release
+the machine's package manager names for its package `dash` (pacman, dpkg or rpm, without the
+package revision), and no line on a machine without dash. So `push.sh check` names a workstation
+that has no dash, or another release, as drift. The gate of this repository uses it:
+`contrib/shell-tests.sh` runs the shell tests under dash where dash is on PATH (a directory with
+`sh` linked to dash goes first on PATH), under `sh` elsewhere, and its first line says which.
+
 `HOME_PINS` in `provision.sh` lists trees that jobs read by path in the build user's home. The ess
 releases 0.97.4, 0.98.0, 0.99.1 and 0.99.4 are in `~/.local/share/ess-versions/<version>/ess`
 (a repository that pins an ess release calls that path; the SHA-256 is the one of the release's
@@ -532,6 +602,71 @@ exists and is no symbolic link. `toolchains.sh` prints
 `tool groovy-all-<version> <16 hex digits of the jar's SHA-256>` for each version directory under
 that path that has the jar, so `push.sh check` reports a workstation without that candidate, or
 with another 2.4 release, as drift. The JDK comes from `EXTRA_PACKAGES`.
+sdkman's `current` link is made too: `~/.sdkman/candidates/groovy/current` names the version of
+the first groovy line (`2.4.10`, relative, as sdkman makes it), so a job that carries the
+workstation's `GROOVY_HOME=~/.sdkman/candidates/groovy/current` (named in `SLOT_ENV`) finds
+the tree. The build user writes it after the trees; a missing link, or one to another version,
+is `drift: home:groovy-current: ...`, and a directory or file at that path is left alone
+(`failed: ... is no symbolic link: not replaced`). `JAVA_HOME` gets no such link: a job that
+carries the workstation's `~/.sdkman/candidates/java/current` should not name it in `SLOT_ENV`;
+a node's `java` is `/usr/bin/java`, and its JDKs are under `/usr/lib/jvm`.
+
+`EXTRA_TOOLS` names tools that only some consumers need, space separated: `erlang`, `elixir`,
+`gleam`, `odin` and `firefox` (a consumer's tasks call `gleam`, `elixir`, `mix`, `erl` and `odin`
+by name, its browser tests start `firefox`, and Amazon Linux 2023 packages none of them). A node whose config has no `EXTRA_TOOLS` gets none of
+them and nothing of them is checked; a tool taken out of the key stays as it is. A name without a
+pin is refused, and so is `elixir` without `erlang`. Each tool is pinned in `provision.sh` by
+version and SHA-256, the download is checked before anything of it is unpacked, and each binary
+is a link in `/usr/local/bin`, which is on the PATH of every job:
+
+- `erlang`: Erlang/OTP 29.0.6 (`ERLANG_PIN`), built on the node from the source tarball of its
+  release; the SHA-256 is the one in the release's `SHA256.txt`. Upstream publishes no Linux
+  binary, and the builds of the Hex build site for Ubuntu did not serve on a node (glibc 2.34,
+  OpenSSL 3.5): the one for 22.04 starts and cannot load its crypto library (`undefined symbol:
+  EVP_sm4_cbc`), so `mix` fetches no package; the one for 24.04 asks for `GLIBC_2.38`. The build
+  is like the one of musl: the build user runs `./configure --prefix=/usr/local/erlang-29.0.6
+  --without-javac --without-odbc --without-wx --without-debugger --without-observer --without-et`,
+  `make -j4` and `make install` into a directory of the source tree, under `timeout 1800`, and
+  root copies that tree to `/usr/local/erlang-29.0.6`. `erl`, `erlc` and `escript` are links to
+  `lib/erlang/bin` of that tree. The build needs `gcc`, `gcc-c++`, `make`, `perl` and
+  `openssl-devel`, which are base packages, and `ncurses-devel`, which the node names in
+  `EXTRA_PACKAGES`: without it `check` says `drift: erlang: the build needs the package(s)
+  ncurses-devel, not installed: name them in EXTRA_PACKAGES`, and `apply` fetches nothing and
+  reports `failed`. A build that leaves no crypto library is refused. The build runs once: the
+  tree carries the mark `.slot-archive` (`erlang 29.0.6 <sha256 of the tarball>`), and `check`
+  reads the three links, the mark and the OTP release that `erl` answers (`drift: erlang: ...`).
+  Links that alone drift are set again without a download, a tree with another mark or release
+  is replaced whole, and a real file at a link's name is left alone and reported as `failed`. On
+  a node of 32 CPUs at a load of 10 to 21 the build took 11 to 12 s of `configure`, 79 s of
+  `make -j4` (58 s with 8 jobs) and 6 s of `make install`; the tree has 152 MiB, and the source
+  tree with its objects, in a temporary directory that apply removes, 724 MiB.
+- `elixir`: Elixir 1.20.4, the precompiled release for OTP 29 (`elixir-otp-29.zip`; the SHA-256
+  is the one of the release's `elixir-otp-29.zip.sha256sum`), in
+  `/usr/local/elixir-1.20.4-otp-29`, with `elixir`, `elixirc`, `mix` and `iex` linked. Its check
+  reads `Elixir 1.20.4 (compiled with Erlang/OTP 29)` from `elixir --version`, which runs `erl`:
+  an apply that could not install Erlang/OTP leaves elixir as it is and says so
+  (`failed: archive:elixir: left as it is: ...`).
+- `gleam`: Gleam 1.19.0, the static binary of its release (the SHA-256 is the one of the
+  release's `.sha256` file), in `/usr/local/gleam-1.19.0`.
+- `odin`: Odin dev-2026-09, the release archive for linux-amd64 with its `core`, `base` and
+  `vendor` libraries beside the binary, in `/usr/local/odin-dev-2026-09`. The release publishes
+  no checksum file: the SHA-256 is the digest of the archive as downloaded from the release on
+  two machines, equal to the digest in the release's asset list. `odin` links with the node's
+  `clang`, a base package. Its check reads the release from `odin version`
+  (`dev-2026-09-nightly:<commit>`).
+- `firefox`: Firefox 159.0 in `/usr/local/firefox-159.0`, with the packages it loads, and the
+  start that `check --canary` makes (above).
+
+`elixir`, `gleam`, `odin` and `firefox` are archive pins like go and node
+(`EXTRA_ARCHIVE_PINS`, drift lines `archive:elixir`, `archive:gleam`, `archive:odin`,
+`archive:firefox`). `toolchains.sh` prints one `tool` line for each of the other four on a
+machine that has it (firefox's line is above): `tool erlang 29.0.6` (the OTP release, which `erl`
+reads from its `releases/<major>/OTP_VERSION`), `tool elixir 1.20.4-otp-29`, `tool gleam 1.19.0`
+and `tool odin dev-2026-09-nightly:a2fb372`, so `push.sh check` names a release that differs
+between the workstation and the node, and a tool only one side has. Like the `helm` line, these
+four depend on the caller's PATH on a workstation, where the one PATH names first is read:
+compare them from a shell with the PATH a job gets. The `elixir` line is `missing` where no
+`erl` is on PATH.
 
 `push.sh check` runs `toolchains.sh` on the workstation and in one slot job on the node and
 compares the `rust` lines (toolchain name, rustc commit, digest of its targets and components),

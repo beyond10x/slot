@@ -3689,6 +3689,7 @@ fn node_build(f: &Fixture, ws: &str, tree: &Path, target: Option<&Path>, script:
             client_root: tree.to_string_lossy().into_owned(),
             same_path: true,
             target_dir: target.map_or_else(String::new, |t| t.to_string_lossy().into_owned()),
+            target_default: false,
         }),
         ..fake_build(&f.root, &f.root.join("unused"), script)
     }
@@ -3855,6 +3856,329 @@ fn a_target_directory_under_the_cache_root_is_not_known_to_eviction() {
         targets.into_keys().collect::<Vec<PathBuf>>(),
         [tree.join("target")]
     );
+}
+
+/// What a compile cache keys of a job's environment: its `CARGO_*`
+/// variables, sorted. `CARGO_MAKEFLAGS` names the jobserver and is no part
+/// of a key.
+const CARGO_VARS: &str = "env | grep '^CARGO_' | grep -v '^CARGO_MAKEFLAGS=' | LC_ALL=C sort";
+
+/// A `cargo` under `dir` whose `fetch` succeeds and whose every other
+/// subcommand prints [`CARGO_VARS`].
+fn printing_cargo(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cargo = bin.join("cargo");
+    if !cargo.exists() {
+        std::fs::write(
+            &cargo,
+            format!("#!/bin/sh\n[ \"$1\" = fetch ] && exit 0\n{CARGO_VARS}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    cargo.to_string_lossy().into_owned()
+}
+
+/// A job as a client sends it for a tree mirrored at its own path, with a
+/// `Cargo.lock`, so a cargo job gets its fetch first. `target` is the
+/// target directory the client names and whether cargo resolves it by
+/// itself; `env` is what the caller's environment adds.
+fn same_path_job(
+    tree: &Path,
+    id: &str,
+    argv: &[&str],
+    target: Option<(&Path, bool)>,
+    env: &[&str],
+) -> Request {
+    std::fs::create_dir_all(tree).unwrap();
+    std::fs::write(tree.join("Cargo.lock"), "version = 3\n").unwrap();
+    let argv: Vec<String> = argv.iter().map(|a| (*a).to_string()).collect();
+    Request {
+        fetch_once: crate::cargo_fetch::applies(&argv),
+        argv,
+        repo: "r".into(),
+        env: env.iter().map(|e| (*e).to_string()).collect(),
+        workspace: Some(Workspace {
+            id: id.into(),
+            rel_cwd: ".".into(),
+            client_root: tree.to_string_lossy().into_owned(),
+            same_path: true,
+            target_dir: target.map_or_else(String::new, |(t, _)| t.to_string_lossy().into_owned()),
+            target_default: target.is_some_and(|(_, default)| default),
+        }),
+        ..Request::default()
+    }
+}
+
+/// The compile cache keys every `CARGO_*` variable of a compiler's
+/// environment. A cargo job of a tree mirrored at its own path, cargo inside
+/// a generic job of that tree, and a cargo job of a second tree get the same
+/// ones, byte for byte: the daemon adds no `CARGO_TARGET_DIR` for the
+/// directory cargo resolves by itself, and no `CARGO_NET_OFFLINE`.
+#[test]
+fn a_cargo_job_a_generic_job_and_a_second_tree_get_the_same_cargo_variables() {
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+    });
+    let cargo = printing_cargo(&f.root);
+    let a = f.root.join("home/trees/a");
+    let b = f.root.join("home/trees/b");
+    let vars = |req: Request| {
+        let r = run(&f, req);
+        assert_eq!(r.code, 0, "{r:?}");
+        r.out
+    };
+    let own = |tree: &Path| tree.join("target");
+    let in_a = vars(same_path_job(
+        &a,
+        "a1",
+        &[&cargo, "build"],
+        Some((&own(&a), true)),
+        &[],
+    ));
+    let inner = format!("{cargo} build");
+    let generic = vars(same_path_job(&a, "a1", &["sh", "-c", &inner], None, &[]));
+    let in_b = vars(same_path_job(
+        &b,
+        "b1",
+        &[&cargo, "build"],
+        Some((&own(&b), true)),
+        &[],
+    ));
+    assert!(
+        !in_a.contains("CARGO_TARGET_DIR="),
+        "cargo resolves the directory by itself: {in_a}"
+    );
+    assert_eq!(in_a, generic, "a cargo job and cargo inside a generic job");
+    assert_eq!(in_a, in_b, "two trees");
+    // The record still names where each job built.
+    let recorded: Vec<Option<String>> = f
+        .server
+        .state()
+        .done
+        .iter()
+        .filter(|j| j.toolchain == "rust")
+        .map(|j| j.node_target_dir.clone())
+        .collect();
+    for t in [own(&a), own(&b)] {
+        assert!(
+            recorded.contains(&Some(t.to_string_lossy().into_owned())),
+            "{recorded:?}"
+        );
+    }
+}
+
+/// Where cargo resolves the directory by itself, no `CARGO_BUILD_TARGET_DIR`
+/// reaches the job either: the daemon's own environment (the base of a remote
+/// job) would move the build away from the recorded directory. The test puts
+/// it in the request, which the job's environment is built from the same way.
+#[test]
+fn a_default_target_directory_gets_no_cargo_build_target_dir() {
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+    });
+    let cargo = printing_cargo(&f.root);
+    let tree = f.root.join("home/trees/a");
+    let r = run(
+        &f,
+        same_path_job(
+            &tree,
+            "a1",
+            &[&cargo, "build"],
+            Some((&tree.join("target"), true)),
+            &["CARGO_BUILD_TARGET_DIR=/elsewhere"],
+        ),
+    );
+    assert_eq!(r.code, 0, "{r:?}");
+    assert!(
+        !r.out.contains("CARGO_BUILD_TARGET_DIR="),
+        "cargo resolves the directory by itself: {}",
+        r.out
+    );
+}
+
+/// A tree mirrored below the workspace root: a cargo job and cargo inside a
+/// generic job get the same `CARGO_*` variables too, with the target
+/// directory the daemon gives that workspace in both.
+#[test]
+fn in_a_mirror_below_the_workspace_root_both_job_kinds_get_the_same_cargo_variables() {
+    let f = start(2);
+    let cargo = printing_cargo(&f.root);
+    let mirror = f.root.join("ws/m1");
+    let job = |argv: &[&str]| {
+        let mut req = same_path_job(&mirror, "m1", argv, None, &[]);
+        if let Some(ws) = &mut req.workspace {
+            ws.same_path = false;
+            ws.client_root = "/client/r".into();
+        }
+        let r = run(&f, req);
+        assert_eq!(r.code, 0, "{r:?}");
+        r.out
+    };
+    let build = job(&[&cargo, "build"]);
+    let inner = format!("{cargo} build");
+    let generic = job(&["sh", "-c", &inner]);
+    assert_eq!(build, generic);
+    let target = format!(
+        "CARGO_TARGET_DIR={}",
+        f.root.join("cache/target/m1").display()
+    );
+    assert!(build.lines().any(|l| l == target), "{build}");
+}
+
+/// A caller that set `CARGO_TARGET_DIR` builds into that directory with the
+/// variable exported, a cargo job and a generic job alike, and a
+/// `CARGO_NET_OFFLINE` of the caller's own reaches the job as the caller
+/// set it.
+#[test]
+fn the_callers_own_target_directory_and_offline_setting_reach_the_job() {
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+    });
+    let cargo = printing_cargo(&f.root);
+    let tree = f.root.join("home/trees/a");
+    let named = f.root.join("home/targets/named");
+    let caller = &["CARGO_NET_OFFLINE=false"];
+    let build = same_path_job(
+        &tree,
+        "a1",
+        &[&cargo, "build"],
+        Some((&named, false)),
+        caller,
+    );
+    let r = run(&f, build);
+    assert_eq!(r.code, 0, "{r:?}");
+    let lines: Vec<&str> = r.out.lines().collect();
+    let target = format!("CARGO_TARGET_DIR={}", named.display());
+    assert!(lines.contains(&target.as_str()), "{lines:?}");
+    let offline: Vec<&&str> = lines
+        .iter()
+        .filter(|l| l.starts_with("CARGO_NET_OFFLINE="))
+        .collect();
+    assert_eq!(offline, [&"CARGO_NET_OFFLINE=false"], "the caller's own");
+    let inner = format!("{cargo} build");
+    let generic = run(
+        &f,
+        same_path_job(
+            &tree,
+            "a1",
+            &["sh", "-c", &inner],
+            Some((&named, false)),
+            caller,
+        ),
+    );
+    assert_eq!(generic.out, r.out, "{generic:?}");
+    let done = f.server.state().done;
+    assert_eq!(
+        done.iter()
+            .find(|j| j.toolchain == "rust")
+            .and_then(|j| j.node_target_dir.clone()),
+        Some(named.to_string_lossy().into_owned())
+    );
+}
+
+/// A job that gets no `CARGO_TARGET_DIR` is recorded and evicted as before:
+/// its record names the directory it built into, eviction knows that
+/// directory, deletes it when it is idle and free space is under the mark,
+/// and keeps the one a running job builds into.
+#[test]
+fn a_job_without_the_target_variable_is_recorded_and_evicted_as_before() {
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+    const GB: u64 = crate::admission::GB;
+    static FREE: AtomicU64 = AtomicU64::new(60 * GB);
+    #[allow(clippy::unnecessary_wraps, reason = "the type of Config::disk_free")]
+    fn free(_: &Path) -> Option<u64> {
+        Some(FREE.load(SeqCst))
+    }
+    let f = start_cfg(2, |c| {
+        c.same_path_roots = vec![c.ws_root.with_file_name("home")];
+        c.disk_free = Some(free);
+        c.evict = crate::evict::Settings {
+            floor: 40 * GB,
+            margin: 10 * GB,
+            min_idle: Duration::ZERO,
+            dry_run: false,
+        };
+    });
+    let home = f.root.join("home");
+    let idle_tree = home.join("trees/idle");
+    let used_tree = home.join("trees/used");
+    let (idle, used) = (idle_tree.join("target"), used_tree.join("target"));
+    // What a new client sends: the directory by name, and that cargo
+    // resolves it by itself.
+    let job = |ws: &str, tree: &Path, script: &str| {
+        let mut req = node_build(&f, ws, tree, Some(&tree.join("target")), script);
+        if let Some(w) = &mut req.workspace {
+            w.target_default = true;
+        }
+        req
+    };
+    // What cargo leaves in a target directory it made, and what the job
+    // saw of the variable.
+    let build = format!(
+        "echo \"${{CARGO_TARGET_DIR-none}}\" > seen; mkdir -p target/debug; \
+         echo '{}' > target/CACHEDIR.TAG; echo built > target/debug/blob",
+        crate::evict::CACHEDIR_SIGNATURE
+    );
+    for (ws, tree) in [("a1", &idle_tree), ("b1", &used_tree)] {
+        let r = run(&f, job(ws, tree, &build));
+        assert_eq!(r.code, 0, "{r:?}");
+        assert_eq!(
+            std::fs::read_to_string(tree.join("seen")).unwrap().trim(),
+            "none",
+            "no variable in the job"
+        );
+    }
+    let recorded: Vec<Option<String>> = f
+        .server
+        .state()
+        .done
+        .iter()
+        .map(|j| j.node_target_dir.clone())
+        .collect();
+    for t in [&idle, &used] {
+        assert!(
+            recorded.contains(&Some(t.to_string_lossy().into_owned())),
+            "{recorded:?}"
+        );
+    }
+    let known = || -> Vec<PathBuf> {
+        let g = f.server.inner.lock().unwrap();
+        let mut v: Vec<PathBuf> = g.targets.keys().cloned().collect();
+        v.sort();
+        v
+    };
+    assert_eq!(known(), [idle.clone(), used.clone()], "both are known");
+
+    // Both jobs ended long ago; a job of the second tree runs.
+    {
+        let mut g = f.server.inner.lock().unwrap();
+        g.targets.values_mut().for_each(|t| t.1 = 1);
+        g.ran_in.values_mut().for_each(|at| *at = 1);
+    }
+    let go = f.root.join("go-used");
+    let wait = format!("while [ ! -e {} ]; do sleep 0.02; done", go.display());
+    let (c, id) = submit(&f, job("b1", &used_tree, &wait));
+    wait_for_jobs(&f, "the job to run", || {
+        state_of(&f, id) == JobState::Running
+    });
+    FREE.store(30 * GB, SeqCst);
+    evict_view(put_evict_below(&f, r#"{"evict_below_gb":40}"#));
+    wait_for_jobs(&f, "the look under the mark", || {
+        !f.server.state().evict.last.is_empty()
+    });
+    let e = f.server.state().evict;
+    assert!(!idle.exists(), "idle and under the mark: {e:?}");
+    assert!(used.exists(), "a running job builds into it: {e:?}");
+    assert_eq!(
+        (e.last[0].path.as_str(), e.last[0].action.as_str()),
+        (idle.to_str().unwrap(), "deleted"),
+        "{e:?}"
+    );
+    std::fs::write(&go, "").unwrap();
+    assert_eq!(collect(c).code, 0);
 }
 
 /// `--evict-below 0` keeps eviction off, whatever `--min-free-disk` is: a

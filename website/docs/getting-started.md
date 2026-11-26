@@ -13,8 +13,8 @@ build commands with `slot`.
 ### From a release archive
 
 Each [release](https://github.com/beyond10x/slot/releases) carries one archive per target,
-`slot-<version>-<target>.tar.gz`, for `x86_64-unknown-linux-gnu` and
-`aarch64-unknown-linux-gnu`, plus `SHA256SUMS`. An archive holds a directory
+`slot-<version>-<target>.tar.gz`, plus `SHA256SUMS`;
+[which archive a host takes](#which-archive-a-host-takes) is below. An archive holds a directory
 `slot-<version>-<target>/` with the `slot` binary, `LICENSE` and `README.md`. The binary
 includes the web UI.
 
@@ -31,6 +31,19 @@ install -D -m 0755 "slot-$version-$target/slot" ~/.local/bin/slot
 
 The systemd unit below starts `~/.local/bin/slot`. If you install the binary elsewhere, change
 `ExecStart` in the unit.
+
+#### Which archive a host takes
+
+| target | the binary | for a host with |
+|---|---|---|
+| `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` | loads the host's glibc | a glibc as new as Ubuntu 22.04's, or newer |
+| `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` | static: loads no library | an older glibc, musl (Alpine) or no C library |
+
+`uname -m` prints the CPU (`x86_64` or `aarch64`) and `ldd --version` the host's C library. A gnu
+binary that asks for a newer glibc than the host has says `version 'GLIBC_…' not found`; the musl
+binary of the same release runs there. Where a gnu binary runs, take it: with musl's allocator
+the daemon is slower (a burst of 400 jobs on 16 slots ended at 75 jobs a second, against 86 for
+the gnu build). The musl archives are in every release after 0.39.1.
 
 ### With cargo
 

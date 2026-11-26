@@ -9,7 +9,9 @@
 conf_keys='STORE BUILD_USER BUILD_UID BUILD_HOME BUILD_KEY SETUP_KEY SLOT_VERSION MIRROR_DIRS
 GO_PRIVATE TOKENS MIN_FREE_DISK SCCACHE_GB TMP_GB DOCKER_GB EXTRA_PACKAGES DISK_MODEL NODE_NAME
 NODE_SSH PUSH_HOST NODE_HOST NODE_RUN_DIR RUST_TOOLCHAINS RUST_COMPONENTS RUST_TARGETS
-INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT'
+EXTRA_TOOLS
+INSTANCE_PROFILE CPU_LIMIT CPU_PRESSURE DRAIN_MAX RUN_LIMIT RUN_LIMIT_MAX GO_ROOT
+SLOT_TARGET'
 
 conf_fail() {
   echo "node config: $*" >&2
@@ -92,6 +94,7 @@ conf_read() {
   TMP_GB=${CONF_TMP_GB:-400}
   DOCKER_GB=${CONF_DOCKER_GB:-10}
   EXTRA_PACKAGES=${CONF_EXTRA_PACKAGES:-}
+  EXTRA_TOOLS=${CONF_EXTRA_TOOLS:-}
   DISK_MODEL=${CONF_DISK_MODEL:-Amazon EC2 NVMe Instance Storage}
   NODE_NAME=${CONF_NODE_NAME:-this node}
   NODE_SSH=${CONF_NODE_SSH:-}
@@ -108,6 +111,7 @@ conf_read() {
   RUN_LIMIT=${CONF_RUN_LIMIT:-10m}
   RUN_LIMIT_MAX=${CONF_RUN_LIMIT_MAX:-30m}
   GO_ROOT=${CONF_GO_ROOT:-}
+  SLOT_TARGET=${CONF_SLOT_TARGET:-x86_64-unknown-linux-gnu}
   conf_check_forms "$cf"
 }
 
@@ -236,6 +240,14 @@ conf_check_forms() {
     return 2
     ;;
   esac
+  # Which archive of the release a node installs: the build against glibc, or the static one.
+  case $SLOT_TARGET in
+    x86_64-unknown-linux-gnu | x86_64-unknown-linux-musl) ;;
+    *)
+      conf_fail "$1: SLOT_TARGET must be x86_64-unknown-linux-gnu or x86_64-unknown-linux-musl, not '$SLOT_TARGET'"
+      return 2
+      ;;
+  esac
   for k in BUILD_KEY SETUP_KEY; do
     eval "v=\${$k}"
     case $v in
@@ -255,6 +267,13 @@ conf_check_forms() {
   esac
   case $BUILD_USER in *[!a-z0-9_-]*)
     conf_fail "$1: BUILD_USER '$BUILD_USER' is not a user name"
+    return 2
+    ;;
+  esac
+  # EXTRA_TOOLS: names of tools that provision.sh has a pin for; provision.sh, which knows the
+  # pins, refuses a name it has none for.
+  case $EXTRA_TOOLS in *[!a-z0-9\ -]*)
+    conf_fail "$1: EXTRA_TOOLS must be names of lowercase letters, digits and dashes, separated by spaces"
     return 2
     ;;
   esac
