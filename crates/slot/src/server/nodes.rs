@@ -10,8 +10,14 @@
 //! The output of a node's job is read the same way, on request: the
 //! read-only `output` step of `slot shell`, every 2 s from the next chunk
 //! until the job ended ([`relay_output`]).
+//!
+//! A node's job that an answer shows ended for the first time is appended
+//! to `node-jobs.jsonl` beside `jobs.jsonl` ([`Remotes::with_log`]), with
+//! `node` set to the node's name and the id the node gave it, so `slot
+//! usage` counts the jobs the nodes ran.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead as _, Write as _};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -101,6 +107,37 @@ pub(super) struct Entry {
     pub(super) handed: Vec<i64>,
 }
 
+impl Entry {
+    /// Node `conf` before its first answer.
+    fn joining(conf: RemoteNode, cluster: &str) -> Self {
+        let mut row = Node {
+            state: NodeState::Joining,
+            ..Node::default()
+        };
+        configure(&mut row, &conf, cluster);
+        Self {
+            conf,
+            row,
+            misses: 0,
+            active: Vec::new(),
+            done: Vec::new(),
+            seen: false,
+            handed: Vec::new(),
+        }
+    }
+}
+
+/// The log of the jobs the nodes ran.
+#[derive(Debug, Default)]
+struct NodeLog {
+    /// `node-jobs.jsonl`; `None` logs nothing.
+    path: Option<std::path::PathBuf>,
+    /// The file, open to append, once a job was written.
+    file: Option<std::fs::File>,
+    /// Node, id and start of each job written that its node may list again.
+    logged: HashSet<(String, i64, i64)>,
+}
+
 /// The remote nodes of the host configuration.
 #[derive(Debug, Default)]
 pub struct Remotes {
@@ -109,6 +146,8 @@ pub struct Remotes {
     pub spill: crate::hostconfig::SpillConf,
     /// The file the nodes came from and its modification time when last read.
     file: Mutex<Option<(std::path::PathBuf, Option<std::time::SystemTime>)>>,
+    /// Where the jobs the nodes ran are logged.
+    log: Mutex<NodeLog>,
 }
 
 impl Remotes {
@@ -130,10 +169,11 @@ impl Remotes {
         r
     }
 
-    /// Reads the file again when it changed since the last read, and takes each
-    /// known node's new terms (deadline, price, place, machine type) into its
-    /// entry and its row. A node added to or removed from the file needs a
-    /// restart. A file that does not parse is reported and changes nothing.
+    /// Reads the file again when it changed since the last read: takes each
+    /// known node's new terms (ssh line, deadline, price, place, machine
+    /// type, spill) into its entry and its row, adds a node new in the file
+    /// (Joining) and drops a node taken out of it with its jobs. A file that
+    /// does not parse is reported and changes nothing.
     pub fn reread(&self, cluster: &str) {
         let mut file = self.file.lock().expect("file lock");
         let Some((path, seen)) = file.as_mut() else {
@@ -152,44 +192,118 @@ impl Remotes {
             }
         };
         let mut nodes = self.nodes.lock().expect("nodes lock");
-        for e in nodes.iter_mut() {
-            if let Some(c) = confs.iter().find(|c| c.name == e.conf.name) {
-                e.conf = c.clone();
+        let mut old: Vec<Entry> = std::mem::take(&mut *nodes);
+        for c in confs {
+            if let Some(i) = old.iter().position(|e| e.conf.name == c.name) {
+                let mut e = old.swap_remove(i);
+                e.conf = c;
                 configure(&mut e.row, &e.conf, cluster);
+                nodes.push(e);
+            } else {
+                eprintln!("slot: node {}: added", c.name);
+                nodes.push(Entry::joining(c, cluster));
             }
         }
+        for e in old {
+            eprintln!("slot: node {}: removed", e.conf.name);
+        }
+    }
+
+    /// Appends each node job that ended to `path` (`node-jobs.jsonl`) once:
+    /// the jobs already in the file are not written again, also after a
+    /// restart. A file that cannot be opened is reported, and nothing is
+    /// logged.
+    #[must_use]
+    pub fn with_log(self, path: &Path) -> Self {
+        let mut logged = HashSet::new();
+        if let Ok(f) = std::fs::File::open(path) {
+            for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+                if let Ok(j) = serde_json::from_str::<Job>(&line) {
+                    logged.insert((j.node, j.id, j.started_ms));
+                }
+            }
+        }
+        *self.log.lock().expect("log lock") = NodeLog {
+            path: Some(path.to_path_buf()),
+            file: None,
+            logged,
+        };
+        self
+    }
+
+    /// Writes each job of `done` that ended and is not in the log yet, and
+    /// keeps the keys of node `name` only for the jobs it still lists. The
+    /// file is opened at the first job it gets.
+    fn log_ended(&self, name: &str, done: &[Job]) {
+        let mut g = self.log.lock().expect("log lock");
+        let NodeLog { path, file, logged } = &mut *g;
+        let Some(path) = path.as_deref() else {
+            return;
+        };
+        for j in done.iter().filter(|j| j.ended_ms > 0) {
+            if !logged.insert((name.to_string(), j.id, j.started_ms)) {
+                continue;
+            }
+            if file.is_none() {
+                *file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .inspect_err(|e| eprintln!("slot: {}: {e}", path.display()))
+                    .ok();
+            }
+            if let Some(f) = file.as_mut()
+                && let Ok(line) = serde_json::to_string(j)
+                && let Err(e) = writeln!(f, "{line}")
+            {
+                eprintln!("slot: {}: {e}", path.display());
+            }
+        }
+        let listed: HashSet<(i64, i64)> = done.iter().map(|j| (j.id, j.started_ms)).collect();
+        logged.retain(|(n, id, start)| n != name || listed.contains(&(*id, *start)));
+    }
+
+    /// One poll of every node: rereads the file when it changed, asks each
+    /// node at once, and returns the jobs that are new or changed.
+    pub async fn poll(&self, cluster: &str, clock: fn() -> i64) -> Vec<Job> {
+        self.reread(cluster);
+        let asks: Vec<(String, Vec<String>)> = {
+            let g = self.nodes.lock().expect("nodes lock");
+            g.iter()
+                .map(|e| (e.conf.name.clone(), e.conf.state_command()))
+                .collect()
+        };
+        let answers =
+            futures_util::future::join_all(asks.into_iter().map(|(name, argv)| async move {
+                let outcome = ask(&argv, POLL_TIMEOUT).await;
+                (name, outcome)
+            }))
+            .await;
+        answers
+            .into_iter()
+            .flat_map(|(name, outcome)| self.record(&name, outcome, clock(), cluster))
+            .collect()
     }
 
     /// The nodes `confs`, each Joining.
     pub fn new(confs: Vec<RemoteNode>, cluster: &str) -> Self {
         let nodes = confs
             .into_iter()
-            .map(|conf| {
-                let mut row = Node {
-                    state: NodeState::Joining,
-                    ..Node::default()
-                };
-                configure(&mut row, &conf, cluster);
-                Entry {
-                    conf,
-                    row,
-                    misses: 0,
-                    active: Vec::new(),
-                    done: Vec::new(),
-                    seen: false,
-                    handed: Vec::new(),
-                }
-            })
+            .map(|conf| Entry::joining(conf, cluster))
             .collect();
         Self {
             nodes: Mutex::new(nodes),
             spill: crate::hostconfig::SpillConf::default(),
             file: Mutex::new(None),
+            log: Mutex::new(NodeLog::default()),
         }
     }
 
+    /// Whether no node can ever be polled: no node and no file to read
+    /// one from.
     fn is_empty(&self) -> bool {
-        self.nodes.lock().expect("nodes lock").is_empty()
+        self.file.lock().expect("file lock").is_none()
+            && self.nodes.lock().expect("nodes lock").is_empty()
     }
 
     /// One row per remote node.
@@ -211,18 +325,18 @@ impl Remotes {
         st.done.sort_by_key(|j| (j.ended_ms, j.id));
     }
 
-    /// Takes a poll's outcome for the node at `at`: the jobs that are new or
+    /// Takes a poll's outcome for node `name`: the jobs that are new or
     /// changed since the last answer (none on the first answer but the
     /// active ones).
     fn record(
         &self,
-        at: usize,
+        name: &str,
         outcome: Result<Answer, String>,
         now: i64,
         cluster: &str,
     ) -> Vec<Job> {
         let mut nodes = self.nodes.lock().expect("nodes lock");
-        let Some(e) = nodes.get_mut(at) else {
+        let Some(e) = nodes.iter_mut().find(|e| e.conf.name == name) else {
             return Vec::new();
         };
         match outcome {
@@ -273,6 +387,7 @@ impl Remotes {
                 };
                 let active = jobs(a.active);
                 let done = jobs(a.done);
+                self.log_ended(&name, &done);
                 let before: HashMap<i64, JobState> = e
                     .active
                     .iter()
@@ -478,8 +593,9 @@ impl Server {
         v
     }
 
-    /// Polls every remote node every [`POLL_EVERY`]; publishes each job of
-    /// a node that is new or changed.
+    /// Polls every remote node every [`POLL_EVERY`], with the file read
+    /// again when it changed; publishes each job of a node that is new or
+    /// changed. Runs while there is a file, also one that names no node yet.
     pub(super) async fn node_poll(self: Arc<Self>) {
         if self.remotes.is_empty() {
             return;
@@ -488,22 +604,8 @@ impl Server {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            self.remotes.reread(&self.host);
-            let argvs: Vec<Vec<String>> = {
-                let g = self.remotes.nodes.lock().expect("nodes lock");
-                g.iter().map(|e| e.conf.state_command()).collect()
-            };
-            let polls = argvs.into_iter().enumerate().map(|(i, argv)| {
-                let s = Arc::clone(&self);
-                tokio::spawn(async move {
-                    let outcome = ask(&argv, POLL_TIMEOUT).await;
-                    for job in s.remotes.record(i, outcome, now_ms(), &s.host) {
-                        s.send(&Event::Job { job });
-                    }
-                })
-            });
-            for p in polls.collect::<Vec<_>>() {
-                let _ = p.await;
+            for job in self.remotes.poll(&self.host, now_ms).await {
+                self.send(&Event::Job { job });
             }
         }
     }
@@ -555,7 +657,7 @@ mod tests {
         assert_eq!(rows[0].price_per_hour_cents, Some(250));
 
         let changed = r.record(
-            0,
+            "build-1",
             Ok(answer(
                 vec![job(7, JobState::Running)],
                 vec![job(5, JobState::Ok)],
@@ -586,7 +688,7 @@ mod tests {
 
         // The running job finished: published once.
         let changed = r.record(
-            0,
+            "build-1",
             Ok(answer(
                 vec![],
                 vec![job(5, JobState::Ok), job(7, JobState::Ok)],
@@ -597,14 +699,14 @@ mod tests {
         assert_eq!(changed.iter().map(|j| j.id).collect::<Vec<_>>(), [7]);
 
         for n in 1..=3 {
-            r.record(0, Err("timeout".into()), 30 + n, "endpoint");
+            r.record("build-1", Err("timeout".into()), 30 + n, "endpoint");
         }
         let row = &r.rows()[0];
         assert_eq!(
             (row.state, row.gone_reason, row.cpus),
             (NodeState::Gone, Some(GoneReason::Lost), 64)
         );
-        r.record(0, Ok(answer(vec![], vec![])), 40, "endpoint");
+        r.record("build-1", Ok(answer(vec![], vec![])), 40, "endpoint");
         assert_eq!(r.rows()[0].state, NodeState::Ready);
         assert_eq!(r.rows()[0].gone_reason, None);
     }
@@ -632,18 +734,172 @@ mod tests {
             r.rows()[0].deadline.as_deref(),
             Some("2031-02-03T00:00:00Z")
         );
-        r.record(0, Ok(answer(vec![], vec![])), 10, "endpoint");
+        r.record("build-1", Ok(answer(vec![], vec![])), 10, "endpoint");
         assert_eq!(
             r.rows()[0].deadline.as_deref(),
             Some("2031-02-03T00:00:00Z")
         );
     }
 
+    /// A stub node in `dir`: an executable named `name` that prints `answer`
+    /// whatever its arguments; the ssh line `<stub> <name>` reaches it.
+    fn stub(dir: &Path, name: &str, answer: &Answer) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+        let json = dir.join(format!("{name}.json"));
+        std::fs::write(&json, serde_json::to_string(answer).unwrap()).unwrap();
+        let exe = dir.join(name);
+        std::fs::write(&exe, format!("#!/bin/sh\nexec cat {}\n", json.display())).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        format!("[remote.{name}]\nssh = \"{} {name}\"\n", exe.display())
+    }
+
+    /// Writes `text` to `path` with a modification time `secs` ahead, so
+    /// a reread sees a change within the same second.
+    fn rewrite(path: &Path, text: &str, secs: u64) {
+        std::fs::write(path, text).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    fn empty_state() -> State {
+        serde_json::from_value(serde_json::json!({
+            "host": "h", "cores": 1, "tokens": 1, "free": 1, "active": [], "done": [],
+            "now_ms": 1, "toolchains": [],
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_node_added_to_the_file_is_polled_and_one_taken_out_is_dropped_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cluster.toml");
+        // The first node has no free slot: a job it could take goes nowhere.
+        let mut full = answer(vec![], vec![]);
+        full.node.as_mut().unwrap()["slots_in_use"] = 32.into();
+        let first = stub(dir.path(), "build-1", &full);
+        std::fs::write(&path, &first).unwrap();
+        let r = Remotes::load(Some(&path), "endpoint");
+        r.poll("endpoint", now_ms).await;
+        assert_eq!(r.rows().len(), 1);
+        assert_eq!(r.rows()[0].state, NodeState::Ready);
+
+        let busy = answer(
+            vec![job(7, JobState::Running), job(8, JobState::Running)],
+            vec![],
+        );
+        let second = stub(dir.path(), "build-2", &busy) + "spill = false\n";
+        rewrite(&path, &format!("{first}\n{second}"), 5);
+        let published = r.poll("endpoint", now_ms).await;
+        assert_eq!(
+            r.rows()
+                .iter()
+                .map(|n| n.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["build-1", "build-2"]
+        );
+        let mut st = empty_state();
+        r.merge_jobs(&mut st);
+        assert_eq!(
+            st.active
+                .iter()
+                .map(|j| (j.node.as_str(), j.id))
+                .collect::<Vec<_>>(),
+            [("build-2", 7), ("build-2", 8)]
+        );
+        assert_eq!(published.len(), 2, "{published:?}");
+        // The second node has room, but takes no job of this host.
+        assert!(!r.spills() || r.take(now_ms()).is_none());
+        assert!(!r.has_room(now_ms()));
+
+        rewrite(&path, &first, 10);
+        r.poll("endpoint", now_ms).await;
+        assert_eq!(
+            r.rows()
+                .iter()
+                .map(|n| n.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["build-1"]
+        );
+        let mut st = empty_state();
+        r.merge_jobs(&mut st);
+        assert!(st.active.is_empty() && st.done.is_empty(), "{st:?}");
+    }
+
+    #[test]
+    fn an_ended_node_job_is_logged_once_also_across_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("node-jobs.jsonl");
+        let lines = || -> Vec<(String, i64, bool)> {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| {
+                    let j: Job = serde_json::from_str(l).unwrap();
+                    (j.node, j.id, j.from_node)
+                })
+                .collect()
+        };
+        let r = remotes(FILE).with_log(&log);
+        r.record(
+            "build-1",
+            Ok(answer(
+                vec![job(7, JobState::Running)],
+                vec![job(5, JobState::Ok)],
+            )),
+            10,
+            "endpoint",
+        );
+        assert_eq!(lines(), [("build-1".to_string(), 5, true)]);
+        r.record(
+            "build-1",
+            Ok(answer(
+                vec![],
+                vec![job(5, JobState::Ok), job(7, JobState::Ok)],
+            )),
+            20,
+            "endpoint",
+        );
+        r.record(
+            "build-1",
+            Ok(answer(
+                vec![],
+                vec![job(5, JobState::Ok), job(7, JobState::Ok)],
+            )),
+            30,
+            "endpoint",
+        );
+        assert_eq!(
+            lines(),
+            [
+                ("build-1".to_string(), 5, true),
+                ("build-1".to_string(), 7, true)
+            ]
+        );
+        // A restart reads the file: the jobs the node still lists are not
+        // written again.
+        let again = remotes(FILE).with_log(&log);
+        again.record(
+            "build-1",
+            Ok(answer(
+                vec![],
+                vec![job(5, JobState::Ok), job(7, JobState::Ok)],
+            )),
+            40,
+            "endpoint",
+        );
+        assert_eq!(lines().len(), 2);
+    }
+
     #[test]
     fn a_node_job_keeps_the_id_its_node_gave_it() {
         let r = remotes(FILE);
         let changed = r.record(
-            0,
+            "build-1",
             Ok(answer(
                 vec![job(7, JobState::Running)],
                 vec![job(5, JobState::Ok)],
@@ -677,7 +933,7 @@ mod tests {
     fn state_gets_the_remote_jobs() {
         let r = remotes(FILE);
         r.record(
-            0,
+            "build-1",
             Ok(answer(
                 vec![job(7, JobState::Running)],
                 vec![job(5, JobState::Ok)],
@@ -708,7 +964,7 @@ mod tests {
         row["poweroff_at"] = "2029-12-31T23:00:00Z".into();
         row["deadline"] = "2000-01-01T00:00:00Z".into();
         row["ended_hour"] = serde_json::json!({"ok": 7566, "test": 3, "infra": 2});
-        r.record(0, Ok(a), 10, "endpoint");
+        r.record("build-1", Ok(a), 10, "endpoint");
         let n = &r.rows()[0];
         assert_eq!(n.booted_at.as_deref(), Some("2029-12-31T20:00:00Z"));
         assert_eq!(n.poweroff_at.as_deref(), Some("2029-12-31T23:00:00Z"));
@@ -722,7 +978,7 @@ mod tests {
         let r = remotes(FILE);
         let mut a = answer(vec![], vec![]);
         a.node.as_mut().unwrap()["slots_in_use"] = 99.into();
-        r.record(0, Ok(a), 10, "endpoint");
+        r.record("build-1", Ok(a), 10, "endpoint");
         assert_eq!(r.rows()[0].slots_in_use, 0);
     }
 

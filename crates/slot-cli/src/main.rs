@@ -96,6 +96,7 @@ fn main() -> ExitCode {
         }
         Cmd::Usage(args) => usage(&args),
         Cmd::Cache(slot::cli::CacheCmd::Refused(args)) => cache_refused(&args),
+        Cmd::Nodes(cmd) => nodes(&cmd),
         Cmd::Hook(slot::cli::HookCmd::ClaudePreToolUse) => return slot::hook::run(),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
@@ -358,10 +359,85 @@ fn usage(args: &slot::cli::UsageArgs) -> Result<i32> {
     Ok(0)
 }
 
+/// `slot nodes …`. `route` exits 3 when no node matches.
+fn nodes(cmd: &slot::cli::NodesCmd) -> Result<i32> {
+    use slot::cli::NodesCmd;
+    use slot::hostconfig;
+    let file = |f: &std::path::Path| -> Result<std::path::PathBuf> {
+        if f.as_os_str() == "off" {
+            anyhow::bail!("no host configuration file (--cluster-file off)");
+        }
+        Ok(f.to_path_buf())
+    };
+    let read = |path: &std::path::Path| -> Result<String> {
+        match std::fs::read_to_string(path) {
+            Ok(t) => Ok(t),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(anyhow::anyhow!("{}: {e}", path.display())),
+        }
+    };
+    match cmd {
+        NodesCmd::Route(a) => {
+            let path = file(&a.cluster_file)?;
+            let dir = match &a.dir {
+                Some(d) => d.clone(),
+                None => std::env::current_dir()?,
+            };
+            let routed = read(&path)
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|text| hostconfig::route_in(&text, &dir));
+            match routed {
+                Ok(lines) => {
+                    print!("{lines}");
+                    Ok(0)
+                }
+                Err(e) => {
+                    eprintln!("slot: {}: {e}", path.display());
+                    Ok(3)
+                }
+            }
+        }
+        NodesCmd::List(a) => {
+            let path = file(&a.cluster_file)?;
+            let reg = hostconfig::parse_registry(&read(&path)?)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let rows = slot::status::fetch_nodes(&a.http).unwrap_or_default();
+            print!("{}", hostconfig::render_list(&reg, &rows));
+            Ok(0)
+        }
+        NodesCmd::Add(a) => {
+            let path = file(&a.cluster_file)?;
+            let new = hostconfig::NewNode {
+                name: a.name.clone(),
+                ssh: a.ssh.clone(),
+                slot_path: a.slot_path.clone(),
+                deadline: a.deadline.clone(),
+                price_per_hour_cents: a.price_per_hour_cents,
+                spill: a.spill,
+                repositories: a.repository.clone(),
+                default: a.default,
+            };
+            let text = hostconfig::add(&read(&path)?, &new)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            hostconfig::write(&path, &text).with_context(|| path.display().to_string())?;
+            eprintln!("slot: node {} added to {}", a.name, path.display());
+            Ok(0)
+        }
+        NodesCmd::Remove(a) => {
+            let path = file(&a.cluster_file)?;
+            let text = hostconfig::remove(&read(&path)?, &a.name)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            hostconfig::write(&path, &text).with_context(|| path.display().to_string())?;
+            eprintln!("slot: node {} removed from {}", a.name, path.display());
+            Ok(0)
+        }
+    }
+}
+
 fn cache_refused(args: &slot::cli::CacheRefusedArgs) -> Result<i32> {
     let since = slot::usage::parse_since(&args.since).map_err(anyhow::Error::msg)?;
     let by: slot::usage::By = args.by.parse().map_err(anyhow::Error::msg)?;
-    if by == slot::usage::By::Session {
+    if matches!(by, slot::usage::By::Session | slot::usage::By::Node) {
         anyhow::bail!("--by {}: repo or project", args.by);
     }
     let now = std::time::SystemTime::now()
