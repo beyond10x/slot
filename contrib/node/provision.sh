@@ -172,8 +172,9 @@ chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ad
 aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep
 groovy 2.4.10 1c4dff3b6edf9a8ced3bca658ee1857cee90cfed1ee3474a2790045033c317a9 https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-binary/2.4.10/groovy-binary-2.4.10.zip zip1 .sdkman/candidates/groovy/2.4.10 embeddable/groovy-all-2.4.10.jar'
 # Tools a node gets only when its config names them in EXTRA_TOOLS (erlang, elixir, gleam, odin,
-# firefox): a consumer's tasks call gleam, elixir, mix, erl and odin by name, its browser tests
-# start firefox by name, and Amazon Linux 2023 packages none of them. A node without the key gets
+# firefox, jq): a consumer's tasks call gleam, elixir, mix, erl and odin by name, its browser tests
+# start firefox by name, and Amazon Linux 2023 packages none of them; a consumer pins jq at a
+# release the distribution's package is not. A node without the key gets
 # none. The names are erlang and the first field of each line of EXTRA_ARCHIVE_PINS.
 # erlang: Erlang/OTP, built on the node from the source tarball of its release (p_erlang): name,
 # version, SHA-256, URL. The SHA-256 is the one the release publishes in its SHA256.txt. Upstream
@@ -201,11 +202,17 @@ ERLANG_BUILD_PACKAGES='gcc gcc-c++ make perl openssl-devel ncurses-devel'
 # workstation runs; its SHA-256 is the line of that file in the release's SHA256SUMS on
 # archive.mozilla.org. It is a .tar.xz (xz unpacks it); the libraries its binaries need beside
 # their own come from gtk3, alsa-lib, libX11-xcb and dbus-libs (and what gtk3 requires); the
-# newest symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19.
+# newest symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19. jq is the static binary
+# of its release for linux-amd64 (the release a consumer pins in its tools, and the one its CI
+# installs): a single file, so its strip field is `bin`, and the downloaded file is the binary. Its
+# SHA-256 is the line of jq-linux-amd64 in the release's sha256sum.txt, equal to the digest of the
+# file as downloaded. `jq --version` prints `jq-1.8.2`. The distribution's jq (EXTRA_PACKAGES)
+# stays in /usr/bin, after /usr/local/bin on a job's PATH.
 EXTRA_ARCHIVE_PINS='elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip zip bin/elixir bin/elixirc bin/mix bin/iex
 gleam 1.19.0 6083148cb404460810afe35e7878527e58fd2512dd79a76b47d59723815753be https://github.com/gleam-lang/gleam/releases/download/v1.19.0/gleam-v1.19.0-x86_64-unknown-linux-musl.tar.gz 0 gleam
 odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 https://github.com/odin-lang/Odin/releases/download/dev-2026-09/odin-linux-amd64-dev-2026-09.tar.gz 1 odin
-firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox'
+firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox
+jq 1.8.2 b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64 bin jq'
 # The packages a tool of EXTRA_TOOLS loads at run time, one line per tool: the name, then the
 # packages, installed with the base packages on a node that names the tool.
 EXTRA_TOOL_PACKAGES='firefox gtk3 alsa-lib libX11-xcb dbus-libs xz'
@@ -243,6 +250,8 @@ METRICS_URL=http://127.0.0.1:7411/metrics
 # after a boot, and the name of the transient timer that is its bound.
 DRAIN_DIR=/run/slot-node
 DRAIN_UNIT=slot-node-drain
+# The config file of the node's dockerd (DOCKER_CONTAINERD_STORE).
+DOCKER_JSON=/etc/docker/daemon.json
 # The packages of the tools that EXTRA_TOOLS names (EXTRA_TOOL_PACKAGES).
 extra_tool_packages() {
   echo "$EXTRA_TOOL_PACKAGES" | while read -r ep_n ep_p; do
@@ -703,6 +712,21 @@ q_jobs_left() {
       END { if (ok) print n + 0 }'
   fi
 }
+# The image store of the node's dockerd, from `docker info` as root, 30 s at most: `containerd`
+# when dockerd keeps its images in containerd's image store (its DriverStatus names the driver
+# type io.containerd.snapshotter.v1, its storage driver is then `overlayfs`), else its storage
+# driver (`overlay2`). Nothing printed: docker gave no answer. NODE_TEST=1: the file docker-store.
+q_docker_store() {
+  if [ -n "$T" ]; then
+    cat "$S/docker-store" 2>/dev/null
+  else
+    qd_v=$(timeout 30 docker info --format '{{.Driver}} {{json .DriverStatus}}' 2>/dev/null </dev/null) || return 0
+    case $qd_v in
+      *io.containerd.snapshotter*) echo containerd ;;
+      ?*) echo "${qd_v%% *}" ;;
+    esac
+  fi
+}
 # The value of key $1 in the answer $2: `off` for null, the number as the daemon wrote it, `?`
 # for anything else (a string, a negative number, a cut-off object). Nothing printed: no such key.
 # Reads the answers about the CPU limit and about the run-time limit.
@@ -758,6 +782,10 @@ a_start() {
     fi
     st_touch active "$1"
     [ "$1" = slot-imds-containers.service ] && : >"$S/imds-containers"
+    # Like dockerd, which reads daemon.json when it starts: the image store `docker info` names.
+    if [ "$1" = docker.service ]; then
+      if docker_json_on "$R$DOCKER_JSON"; then echo containerd; else echo overlay2; fi >"$S/docker-store"
+    fi
     # A unit of a package (docker.service) has no file under /etc/systemd/system.
     [ -f "$R/etc/systemd/system/$1" ] || return 0
     mkdir -p "$S/running" "$S/loaded" "$S/procenv" "$S/running-version" "$S/procgroups" "$S/core-limit" "$S/mainpid"
@@ -2289,6 +2317,9 @@ archive_fetch() {
       elif [ "$fn" = elixir ]; then
         # Like elixir: the line of the Erlang system first, then its own with the OTP major.
         printf '#!/bin/sh\necho "Erlang/OTP %s [stand-in]"\necho\necho "Elixir %s (compiled with Erlang/OTP %s)"\n' "${fv##*-otp-}" "${fv%%-otp-*}" "${fv##*-otp-}" >"$fd/tree/$b"
+      elif [ "$fn" = jq ]; then
+        # Like jq: `--version` prints `jq-<version>`.
+        printf '#!/bin/sh\necho jq-%s\n' "$fv" >"$fd/tree/$b"
       elif [ "$fn" = odin ]; then
         # Like odin: no `--version`; `version` prints the release with the commit of the build.
         printf '#!/bin/sh\n[ "$*" = version ] || exit 1\necho "odin version %s-nightly:0000000"\n' "$fv" >"$fd/tree/$b"
@@ -2313,6 +2344,11 @@ archive_fetch() {
     # A zip with its files at the top (elixir). unzip restores no owner and no set-id bit.
     (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && unzip -q archive -d tree) || return 0
+  elif [ "$fk" = bin ]; then
+    # The download is the binary itself (jq): it becomes the one binary of the tree.
+    xb=$(archive_src "$1")
+    (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir -p "tree/$(dirname "$xb")" && mv archive "tree/$xb") || return 0
   else
     (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xf archive -C tree --strip-components="$fk" --no-same-owner) || return 0
@@ -2335,6 +2371,7 @@ archive_version() {
     go) as_user "$2" version ;;
     elixir) as_user "$2" --version | sed -n 's/^Elixir \([^ ]*\) (compiled with Erlang\/OTP \([0-9]*\)).*/\1-otp-\2/p' ;;
     odin) as_user "$2" version | head -n 1 | awk '{ print $NF }' | sed 's/-nightly:.*//' ;;
+    jq) as_user "$2" --version | sed 's/^jq-//' ;;
     helm) as_user "$2" version --template '{{.Version}}' ;;
     yarn) as_user env YARN_IGNORE_PATH=1 "$2" --version ;;
     firefox) as_user env MOZ_HEADLESS=1 "$2" --version ;;
@@ -3558,6 +3595,101 @@ p_docker_rule() {
   fi
 }
 
+# DOCKER_CONTAINERD_STORE=on: dockerd keeps its images in containerd's image store. With the
+# classic store the default builder of buildx (the `docker` driver) refuses `--output
+# type=docker,dest=<file>`; with containerd's store it writes the tar, and `docker build` still
+# loads the image as before. The switch is the key "containerd-snapshotter": true in the object
+# "features" of daemon.json, merged into the file the node has, every other key kept. dockerd reads
+# the file when it starts: the restart waits for the jobs (p_services). Images of the old store
+# are not visible after it. The node may have no jq: the text is read and merged with awk, and
+# dockerd checks the result before it is written (`dockerd --validate`, Docker Engine 23.0 and
+# later).
+#
+# docker_json_on FILE: the JSON text of FILE turns the containerd image store on.
+docker_json_on() {
+  [ -f "$1" ] || return 1
+  awk 'BEGIN { RS = "\001"; w = "[[:space:]]*" }
+    { s = s $0 }
+    END { exit !(s ~ ("\"features\"" w ":" w "\\{[^}]*\"containerd-snapshotter\"" w ":" w "true")) }' "$1"
+}
+# The JSON text on stdin with the feature on, on stdout: an empty file or an empty object becomes
+# the object with "features" alone; a feature that is false becomes true; an object "features"
+# gets the key; an object without "features" gets it as its first key. Status 3: the text is no
+# JSON object, and nothing is printed.
+docker_json_merge() {
+  awk 'BEGIN { RS = "\001"; w = "[[:space:]]*" }
+    { s = s $0 }
+    END {
+      on = "\"containerd-snapshotter\": true"
+      f = "\"features\"" w ":" w "\\{"
+      if (s ~ ("^" w "$") || s ~ ("^" w "\\{" w "\\}" w "$")) {
+        printf "{\n  \"features\": {\n    %s\n  }\n}\n", on
+        exit 0
+      }
+      if (s !~ ("^" w "\\{") || s !~ ("\\}" w "$")) exit 3
+      if (match(s, f "[^}]*\"containerd-snapshotter\"" w ":" w "false")) {
+        m = substr(s, RSTART, RLENGTH)
+        sub(/false$/, "true", m)
+        printf "%s%s%s", substr(s, 1, RSTART - 1), m, substr(s, RSTART + RLENGTH)
+      } else if (match(s, f "[^}]*\"containerd-snapshotter\"" w ":" w "true")) {
+        printf "%s", s
+      } else if (match(s, f w "\\}")) {
+        printf "%s\"features\": {%s}%s", substr(s, 1, RSTART - 1), on, substr(s, RSTART + RLENGTH)
+      } else if (match(s, f)) {
+        printf "%s%s%s, %s", substr(s, 1, RSTART - 1), substr(s, RSTART, RLENGTH), on, substr(s, RSTART + RLENGTH)
+      } else {
+        match(s, /\{/)
+        printf "%s{\n  \"features\": {%s},%s", substr(s, 1, RSTART - 1), on, substr(s, RSTART + 1)
+      }
+    }'
+}
+p_docker_store() {
+  [ "$DOCKER_CONTAINERD_STORE" = on ] || return 0
+  docker_json_on "$R$DOCKER_JSON" && return 0
+  drift docker-store "$DOCKER_JSON does not turn on the containerd image store (\"features\": {\"containerd-snapshotter\": true})"
+  fixing || return 0
+  if ! no_link "$DOCKER_JSON"; then
+    failed docker-store "$DOCKER_JSON has a symbolic link in it; not written"
+    return 0
+  fi
+  ds_in=/dev/null
+  [ ! -f "$R$DOCKER_JSON" ] || ds_in=$R$DOCKER_JSON
+  ds_t=$(mktemp) || {
+    failed docker-store "no temporary file"
+    return 0
+  }
+  if ! docker_json_merge <"$ds_in" >"$ds_t" || ! docker_json_on "$ds_t"; then
+    rm -f "$ds_t"
+    failed docker-store "$DOCKER_JSON is not a JSON object: not changed"
+    return 0
+  fi
+  if [ -z "$T" ] && command -v dockerd >/dev/null 2>&1; then
+    if ! ds_e=$(dockerd --validate --config-file "$ds_t" 2>&1 </dev/null); then
+      rm -f "$ds_t"
+      failed docker-store "dockerd --validate refuses $DOCKER_JSON with the feature merged in ($(echo "$ds_e" | tail -n 1)): not changed"
+      return 0
+    fi
+  fi
+  mkdir -p "$(dirname "$R$DOCKER_JSON")"
+  [ ! -f "$R$DOCKER_JSON" ] || cp -p "$R$DOCKER_JSON" "$R$DOCKER_JSON.slot-prev"
+  if cp "$ds_t" "$R$DOCKER_JSON.slot-new" && chmod 644 "$R$DOCKER_JSON.slot-new" &&
+    a_chown root:root "$R$DOCKER_JSON.slot-new" && mv "$R$DOCKER_JSON.slot-new" "$R$DOCKER_JSON"; then
+    changed docker-store "$DOCKER_JSON turns on the containerd image store; its other keys are kept"
+  else
+    failed docker-store "$DOCKER_JSON not written"
+  fi
+  rm -f "$ds_t"
+}
+# Why the running dockerd must restart: DOCKER_CONTAINERD_STORE=on and `docker info` names another
+# store than containerd's. Nothing printed: no reason, or docker gave no answer.
+docker_why() {
+  [ "$DOCKER_CONTAINERD_STORE" = on ] || return 0
+  q_active docker.service || return 0
+  dw_s=$(q_docker_store)
+  [ -n "$dw_s" ] && [ "$dw_s" != containerd ] || return 0
+  echo "docker info names the image store '$dw_s', not containerd's"
+}
+
 # Why the running process of $1 is not what its unit file and the config say; nothing when it is.
 stale_reason() {
   sr_want=$(unit_defs "$1")
@@ -3640,8 +3772,9 @@ unit_why() {
 #
 # The marks, files of root in DRAIN_DIR: `drain`, with the main process that got the signal
 # (q_main_id), the time of the bound in seconds since the epoch, and on its second line the
-# reason; `sccache-restart`, with the reason of a restart of sccache-node.service that waits.
-# The drain runs while the main process of slot-node.service is the one of the mark.
+# reason; `sccache-restart` and `docker-restart`, each with the reason of a restart of
+# sccache-node.service or docker.service that waits. The drain runs while the main process of
+# slot-node.service is the one of the mark.
 #
 # drain_read: dr_id, dr_until and dr_why from the mark, and draining=1 while the drain runs.
 drain_read() {
@@ -3659,19 +3792,25 @@ drain_read() {
   return 0
 }
 # Starts a drain: the mark, the bound, then the signal. Without the bound nothing is signalled,
-# and a signal that fails leaves neither mark nor bound. why_sn and why_sc are the reasons of the
-# two units, j the jobs counted.
+# and a signal that fails leaves neither mark nor bound. why_sn, why_sc and why_dk are the reasons
+# of slot-node, sccache-node and docker, j the jobs counted.
 drain_start() {
   ds_id=$(q_main_id slot-node.service)
   if [ -z "$ds_id" ]; then
     failed drain "slot-node.service has no main process: nothing was signalled"
     return 0
   fi
-  ds_why=${why_sn:-sccache-node.service restarts: $why_sc}
+  if [ -n "$why_sn" ]; then
+    ds_why=$why_sn
+  elif [ -n "$why_sc" ]; then
+    ds_why="sccache-node.service restarts: $why_sc"
+  else
+    ds_why="docker.service restarts: $why_dk"
+  fi
   ds_s=$(conf_seconds "$DRAIN_MAX")
   ds_until=$(($(q_now) + ds_s))
   a_daemon_reload
-  rm -f "$R$DRAIN_DIR/sccache-restart"
+  rm -f "$R$DRAIN_DIR/sccache-restart" "$R$DRAIN_DIR/docker-restart"
   if ! { mkdir -p "$R$DRAIN_DIR" && printf '%s %s\n%s\n' "$ds_id" "$ds_until" "$ds_why" >"$R$DRAIN_DIR/drain.new" &&
     mv "$R$DRAIN_DIR/drain.new" "$R$DRAIN_DIR/drain"; }; then
     failed drain "$DRAIN_DIR/drain could not be written: slot-node.service was not signalled"
@@ -3683,29 +3822,35 @@ drain_start() {
     return 0
   fi
   [ -z "$why_sc" ] || echo "$why_sc" >"$R$DRAIN_DIR/sccache-restart"
+  [ -z "$why_dk" ] || echo "$why_dk" >"$R$DRAIN_DIR/docker-restart"
   if ! a_signal_main slot-node.service; then
     a_drain_disarm
-    rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart"
+    rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart" "$R$DRAIN_DIR/docker-restart"
     failed drain "systemctl kill --kill-whom=main --signal=TERM slot-node.service failed: nothing drains"
     return 0
   fi
   [ -z "$why_sc" ] || echo "pending: running: sccache-node restarts when slot-node does, at the end of its drain: $why_sc" >&2
+  [ -z "$why_dk" ] || echo "pending: running: docker restarts when slot-node does, at the end of its drain: $why_dk" >&2
   echo "draining: slot-node: ${j:-?} job(s), restart by $(utc_of "$ds_until")"
 }
-# The step before each start of slot-node.service (mode start-pre, the unit's ExecStartPre): no
-# daemon of the pool runs now, whoever started the unit. A restart of sccache-node.service that
-# waited happens here, and the drain is over: its mark and its bound go. The lines go to the
-# journal of the unit.
-gap_step() {
-  if [ -f "$R$DRAIN_DIR/sccache-restart" ]; then
-    gs_why=$(head -n 1 "$R$DRAIN_DIR/sccache-restart")
-    rm -f "$R$DRAIN_DIR/sccache-restart"
-    if a_restart sccache-node.service; then
-      echo "slot-node: sccache-node.service restarted before slot-node.service starts: $gs_why"
-    else
-      echo "slot-node: systemctl restart sccache-node.service failed before the start of slot-node.service: the next apply restarts it ($gs_why)"
-    fi
+# gap_restart MARK UNIT: the restart of UNIT whose mark MARK is in DRAIN_DIR, and the mark goes.
+gap_restart() {
+  [ -f "$R$DRAIN_DIR/$1" ] || return 0
+  gr_why=$(head -n 1 "$R$DRAIN_DIR/$1")
+  rm -f "$R$DRAIN_DIR/$1"
+  if a_restart "$2"; then
+    echo "slot-node: $2 restarted before slot-node.service starts: $gr_why"
+  else
+    echo "slot-node: systemctl restart $2 failed before the start of slot-node.service: the next apply restarts it ($gr_why)"
   fi
+}
+# The step before each start of slot-node.service (mode start-pre, the unit's ExecStartPre): no
+# daemon of the pool runs now, whoever started the unit. A restart of sccache-node.service or of
+# docker.service that waited happens here (no job of the pool uses either now), and the drain is
+# over: its mark and its bound go. The lines go to the journal of the unit.
+gap_step() {
+  gap_restart sccache-restart sccache-node.service
+  gap_restart docker-restart docker.service
   if [ -f "$R$DRAIN_DIR/drain" ]; then
     rm -f "$R$DRAIN_DIR/drain"
     a_drain_disarm
@@ -3762,7 +3907,7 @@ drain_bound() {
     echo "slot-node: slot-node.service is not active after its drain: starting it"
     a_start slot-node.service || echo "slot-node: systemctl start slot-node.service failed"
   fi
-  rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart"
+  rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart" "$R$DRAIN_DIR/docker-restart"
   return 0
 }
 
@@ -3780,7 +3925,7 @@ p_services() {
     fi
   done
   # While slot-node.service drains nothing is signalled and nothing restarts: one line says how
-  # far the drain is. A restart of sccache-node that became due meanwhile gets its mark.
+  # far the drain is. A restart of sccache-node or docker that became due meanwhile gets its mark.
   drain_read
   if [ -n "$draining" ]; then
     dr_n=$(q_jobs_left)
@@ -3794,13 +3939,18 @@ p_services() {
         echo "pending: running: sccache-node restarts when slot-node does, at the end of its drain: $why_sc" >&2
       fi
     fi
+    why_dk=$(docker_why)
+    if [ -n "$why_dk" ] && docker_json_on "$R$DOCKER_JSON"; then
+      echo "$why_dk" >"$R$DRAIN_DIR/docker-restart"
+      echo "pending: running: docker restarts when slot-node does, at the end of its drain: $why_dk" >&2
+    fi
     echo "draining: slot-node: ${dr_n:-?} job(s), restart by $dr_t"
     return 0
   fi
-  if [ -e "$R$DRAIN_DIR/drain" ] || [ -e "$R$DRAIN_DIR/sccache-restart" ]; then
+  if [ -e "$R$DRAIN_DIR/drain" ] || [ -e "$R$DRAIN_DIR/sccache-restart" ] || [ -e "$R$DRAIN_DIR/docker-restart" ]; then
     drift drain "the mark of a drain that is over is still in $DRAIN_DIR (apply removes it)"
     if fixing; then
-      rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart"
+      rm -f "$R$DRAIN_DIR/drain" "$R$DRAIN_DIR/sccache-restart" "$R$DRAIN_DIR/docker-restart"
       a_drain_disarm
       changed drain "the mark of a drain that is over removed"
     fi
@@ -3823,8 +3973,15 @@ p_services() {
       *) why_sn=$why ;;
     esac
   done
+  # dockerd with another image store than the config wants: its restart ends the containers of
+  # the jobs, so it waits for them like the two units. A dockerd started in this run read the file
+  # already; one whose daemon.json this run could not merge is not restarted.
+  why_dk=
+  case " $started " in *" docker.service "*) ;; *) why_dk=$(docker_why) ;; esac
+  [ -z "$why_dk" ] || drift running "docker.service: $why_dk"
   fixing || return 0
-  [ -n "$why_sc$why_sn" ] || return 0
+  docker_json_on "$R$DOCKER_JSON" || why_dk=
+  [ -n "$why_sc$why_sn$why_dk" ] || return 0
   j=0
   if q_active slot-node.service; then
     case " $started " in
@@ -3833,8 +3990,9 @@ p_services() {
     esac
   fi
   if [ "${j:-1}" = 0 ]; then
-    for u in sccache-node.service slot-node.service; do
+    for u in docker.service sccache-node.service slot-node.service; do
       case $u in
+        docker.service) why=$why_dk ;;
         sccache-node.service) why=$why_sc ;;
         *) why=$why_sn ;;
       esac
@@ -3851,6 +4009,7 @@ p_services() {
   fi
   [ -z "$why_sc" ] || echo "pending: running: sccache-node restarts when no job runs ($j now): $why_sc" >&2
   [ -z "$why_sn" ] || echo "pending: running: slot-node restarts when no job runs ($j now): $why_sn" >&2
+  [ -z "$why_dk" ] || echo "pending: running: docker restarts when no job runs ($j now): $why_dk" >&2
   return 0
 }
 
@@ -4070,6 +4229,7 @@ case $mode in
     p_core
     p_role
     p_docker
+    p_docker_store
     p_slot
     [ -n "$imds_open" ] || p_rust
     [ -n "$imds_open" ] || p_tools

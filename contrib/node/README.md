@@ -35,6 +35,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `TOKENS` | provision | slots of the node's pool; default: the CPUs found |
 | `MIN_FREE_DISK`, `SCCACHE_GB`, `TMP_GB` | provision | disk floor, compile cache size, job tmp size (GB) |
 | `DOCKER_GB` | provision | what docker may store on the root disk before the prune timer removes what no job uses (GB, default 10, at least 1) |
+| `DOCKER_CONTAINERD_STORE` | provision | `on`: dockerd keeps its images in containerd's image store, so that `docker buildx build --output type=docker,dest=<file>` writes a tar with the default builder (`node.conf.example` has `on`); `off` or absent: `/etc/docker/daemon.json` and the store are left as they are. Images of the old store are not visible after the switch (What check compares, below) |
 | `CPU_LIMIT`, `CPU_PRESSURE` | provision | the CPU limit of the node's pool: the busy CPUs from which a queued job is held (from 1, one decimal; default 80 % of the CPUs found; `off` for no limit) and the percent of CPU pressure from which it is held as well (over 0, at most 100; default 20; `off`) |
 | `RUN_LIMIT`, `RUN_LIMIT_MAX` | provision | the run-time limit of the node's pool: how long a job runs before the daemon ends it (a duration: seconds, or a number with `s`, `m` or `h`; default `10m`; `off` for no limit) and the most a job names with `slot --timeout` (default `30m`; not shorter than `RUN_LIMIT`) |
 | `DRAIN_MAX` | provision | the bound of a drain started by `apply --drain`: after it the unit restarts with the jobs that still run (a duration from `1m` to `24h`, default `30m`) |
@@ -42,7 +43,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
-| `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
+| `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads), `jq` (a pinned release ahead of the package); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
 | `CLANG_VERSION` | provision | the major release of the `clang` on a job's PATH (`20`): the packages `clang<major>` and `clang<major>-libs`, and `clang`, `clang++` and `clang-cpp` in `/usr/local/bin` as links to `/usr/bin/clang-<major>` and the like; digits only; empty: the distribution's `clang` is left alone. Taken out of the config, the links stay as they are |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
@@ -265,6 +266,36 @@ docker stores on the root disk (`/var/lib/docker`). `slot-docker-prune.timer` ru
 
 The node holds no registry credential, so a job pulls public images only.
 
+`DOCKER_CONTAINERD_STORE=on` turns on containerd's image store. With the classic store the
+default buildx builder (driver `docker`) refuses an image written to a file: `ERROR: Docker
+exporter is not supported for the docker driver. Switch to a different driver, or turn on the
+containerd image store, and try again.` (buildx 0.12.2, BuildKit 0.12.6). A CI runner's docker
+builds the same command. With containerd's store the default builder writes the tar, and `docker
+build` still loads its image into docker as before (a `docker-container` default builder would
+not). It needs Docker Engine 24.0 or later; Amazon Linux 2023 packages docker 25.0 (25.0.16 and
+containerd 2.3.5 in release 2023.12).
+
+- `check` names `drift: docker-store: /etc/docker/daemon.json does not turn on the containerd
+  image store ("features": {"containerd-snapshotter": true})`, and `drift: running:
+  docker.service: docker info names the image store 'overlay2', not containerd's` while dockerd
+  runs the classic store (`docker info` as root: its `DriverStatus` names the driver type
+  `io.containerd.snapshotter.v1` with containerd's store).
+- `apply` merges that key into the object `features` of `/etc/docker/daemon.json` and keeps
+  every other key (the file before is `daemon.json.slot-prev`). The node may have no `jq`: the
+  text is merged with `awk`, and `dockerd --validate` checks the result before it is written.
+  A file that is no JSON object is left alone (`failed: docker-store: ...`). A second `apply`
+  changes nothing.
+- dockerd reads the file when it starts, and its restart ends the containers of the jobs: it
+  waits for them like a restart of `slot-node`. With no job in the pool `apply` restarts docker
+  (`changed: running: docker.service restarted: ...`); with jobs it prints `pending: running:
+  docker restarts when no job runs (<n> now): ...`, and `apply --drain` makes it happen in the
+  gap before `slot-node` starts again (the mark `docker-restart`, Draining below). On a bare node
+  the file is written before docker first starts, and nothing restarts.
+- Images, containers and volumes of the old store are not visible after the switch, and a job
+  pulls or builds its images again. Their files stay under `/var/lib/docker` and count toward
+  `DOCKER_GB` until they are removed: `docker system prune -af --volumes` before the switch (with
+  no job in the pool) removes them; the prune timer does not see them afterwards.
+
 A running unit follows its file. `sccache-node.service` and `slot-node.service` restart when
 `apply` rewrote the unit's file or finds its process started from another definition, and
 `slot-node.service` also when its `slot serve` arguments or the slot binary changed. Both wait for
@@ -308,6 +339,8 @@ does, and without `--drain` nothing changes.
   happens there, with no daemon of the pool running (`pending: running: sccache-node restarts
   when slot-node does, at the end of its drain: ...` until then), and the marks of the drain go.
   A pending restart of `sccache-node` alone drains `slot-node` too: the gap is its only moment.
+  A pending restart of `docker.service` (`DOCKER_CONTAINERD_STORE`) waits for the gap the same
+  way (`pending: running: docker restarts when slot-node does, at the end of its drain: ...`).
   At the end of a drain the step also loads the core pattern (`sysctl -p
   /etc/sysctl.d/60-slot-core.conf`) when `apply` would: the pattern is a pipe, the file is there,
   `sccache-node` runs with the soft core limit 0 and `slot-node.service` starts with it
@@ -325,7 +358,7 @@ does, and without `--drain` nothing changes.
   and neither `ok` line. `apply`, with `--drain` or without, prints the `draining:` line again
   and sends no second signal. The jobs left are read from the daemon's `/metrics`.
 - The marks are files of root in `/run/slot-node` (`drain`: the daemon process, the time of the
-  bound, the reason; `sccache-restart`). After the restart nothing of the drain is left; a mark
+  bound, the reason; `sccache-restart`; `docker-restart`). After the restart nothing of the drain is left; a mark
   that outlived its drain is one `drift: drain:` line, and `apply` removes it.
 
 Core dumps: a bare node has `kernel.core_pattern` as a pipe to `systemd-coredump`, and the kernel
@@ -613,8 +646,9 @@ carries the workstation's `~/.sdkman/candidates/java/current` should not name it
 a node's `java` is `/usr/bin/java`, and its JDKs are under `/usr/lib/jvm`.
 
 `EXTRA_TOOLS` names tools that only some consumers need, space separated: `erlang`, `elixir`,
-`gleam`, `odin` and `firefox` (a consumer's tasks call `gleam`, `elixir`, `mix`, `erl` and `odin`
-by name, its browser tests start `firefox`, and Amazon Linux 2023 packages none of them). A node whose config has no `EXTRA_TOOLS` gets none of
+`gleam`, `odin`, `firefox` and `jq` (a consumer's tasks call `gleam`, `elixir`, `mix`, `erl` and
+`odin` by name, its browser tests start `firefox`, and Amazon Linux 2023 packages none of them; a
+consumer pins `jq` at a release the package is not). A node whose config has no `EXTRA_TOOLS` gets none of
 them and nothing of them is checked; a tool taken out of the key stays as it is. A name without a
 pin is refused, and so is `elixir` without `erlang`. Each tool is pinned in `provision.sh` by
 version and SHA-256, the download is checked before anything of it is unpacked, and each binary
@@ -658,11 +692,17 @@ is a link in `/usr/local/bin`, which is on the PATH of every job:
   (`dev-2026-09-nightly:<commit>`).
 - `firefox`: Firefox 159.0 in `/usr/local/firefox-159.0`, with the packages it loads, and the
   start that `check --canary` makes (above).
+- `jq`: jq 1.8.2, the static binary `jq-linux-amd64` of its release (the SHA-256 is its line in
+  the release's `sha256sum.txt`), in `/usr/local/jq-1.8.2/jq`. The download is the binary
+  itself (strip field `bin`: no tar, no unzip). Its check reads `jq-1.8.2` from `jq --version`.
+  A job's PATH has `/usr/local/bin` ahead of `/usr/bin`, so the pin wins over the package `jq`
+  of `EXTRA_PACKAGES`. A consumer that pins another release needs that release's line here: the
+  pin is in `provision.sh`, the config names the tool.
 
-`elixir`, `gleam`, `odin` and `firefox` are archive pins like go and node
+`elixir`, `gleam`, `odin`, `firefox` and `jq` are archive pins like go and node
 (`EXTRA_ARCHIVE_PINS`, drift lines `archive:elixir`, `archive:gleam`, `archive:odin`,
-`archive:firefox`). `toolchains.sh` prints one `tool` line for each of the other four on a
-machine that has it (firefox's line is above): `tool erlang 29.0.6` (the OTP release, which `erl`
+`archive:firefox`, `archive:jq`). `toolchains.sh` prints one `tool` line for each of the other
+four on a machine that has it (firefox's line is above; jq has none): `tool erlang 29.0.6` (the OTP release, which `erl`
 reads from its `releases/<major>/OTP_VERSION`), `tool elixir 1.20.4-otp-29`, `tool gleam 1.19.0`
 and `tool odin dev-2026-09-nightly:a2fb372`, so `push.sh check` names a release that differs
 between the workstation and the node, and a tool only one side has. Like the `helm` line, these

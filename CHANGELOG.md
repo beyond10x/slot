@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Node provisioning: `EXTRA_TOOLS=jq` installs jq 1.8.2, pinned in `provision.sh` by version
+  and the SHA-256 of `jq-linux-amd64` from the release's `sha256sum.txt`, into
+  `/usr/local/jq-1.8.2` with a link in `/usr/local/bin`, ahead of the packaged `/usr/bin/jq` on
+  a job's PATH. Before, `EXTRA_TOOLS` took only `erlang`, `elixir`, `gleam`, `odin` and
+  `firefox`, and a node had the distribution's jq at best. A pin line of `EXTRA_ARCHIVE_PINS`
+  may now have the strip field `bin`: the download, once its SHA-256 matches, is the binary.
+- Node provisioning: the config key `DOCKER_CONTAINERD_STORE=on` turns on containerd's image
+  store of a node's dockerd, so that `docker buildx build --output type=docker,dest=<file>`
+  writes a tar with the default builder (driver `docker`), as on a CI runner; before, buildx
+  refused it (`Docker exporter is not supported for the docker driver`). `provision.sh apply`
+  merges `"features": {"containerd-snapshotter": true}` into `/etc/docker/daemon.json` with `awk`
+  (the node may have no `jq`), keeps every other key, checks the result with `dockerd --validate`
+  and leaves a file that is no JSON object alone; a second `apply` changes nothing. `check` names
+  a file without the key and a dockerd whose `docker info` names another store. The restart of
+  docker waits for the jobs: at once with none, in the gap before `slot-node` starts again with
+  `apply --drain` (the mark `docker-restart`), else a `pending:` line. `off` or absent leaves the
+  file and the store alone; `node.conf.example` has `on`. Images of the old store are not
+  visible after the switch (`contrib/node/README.md`).
 - A `.slot.toml` `trees` entry follows the variable a gate reads its sibling from:
   `trees = ["${SPECS_DIR:-../../specs}"]`. An entry may use `${NAME}`, `${NAME:-default}` (the
   default when unset or empty) and a leading `~/` (the client's home); nothing else is expanded,
