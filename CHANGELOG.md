@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.42.0 — 2026-11-27
+
 - Remote mode: an allow list of remotes, `$XDG_CONFIG_HOME/slot/remote-allow-origins` (or the
   absolute path `allow_origins_file` of the host configuration names). When the file exists, a
   tree reaches a node only when one of its own git remotes matches a line (a shell pattern, as an
