@@ -19,8 +19,12 @@
 //!
 //! `trees` lists sibling trees a remote job needs beside its own
 //! (`trees = ["../../specs", "../driver"]`): paths relative to the
-//! repository top, or absolute. In same-path remote mode each is synced to
-//! its own path on the node before the job (`crate::extra_trees`).
+//! repository top, or absolute. An entry may use `${NAME}`,
+//! `${NAME:-default}` and a leading `~/` (`trees =
+//! ["${SPECS_DIR:-../../specs}"]`), expanded with the variables the job
+//! takes to the node; nothing else is expanded (`crate::extra_trees::expand`).
+//! In same-path remote mode each is synced to its own path on the node
+//! before the job (`crate::extra_trees`).
 
 use std::path::Path;
 

@@ -299,7 +299,12 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     // is refused keeps the job here; one that is missing ends a remote job
     // (`remote`), and a local one names it so no node takes it.
     let declared = match (&never, top.as_deref()) {
-        (None, Some(top)) => crate::extra_trees::check(top, same_path_root().as_deref()),
+        (None, Some(top)) => crate::extra_trees::check(
+            top,
+            same_path_root().as_deref(),
+            &node_vars(argv, s),
+            std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+        ),
         _ => Ok(Vec::new()),
     };
     let never = never.or_else(|| match &declared {
@@ -601,6 +606,26 @@ pub fn fetch_source(path: &str, mirror: &str, target_dir: &str) -> Result<String
 /// any other tree goes to the workspace root.
 fn keeps_path(s: &Settings, top: &Path) -> bool {
     s.same_path && same_path::applies(top, same_path_root().as_deref())
+}
+
+/// The variables of this process that a job of `argv` takes to a node
+/// ([`toolchain::remote_env`]): what its toolchain admits and `SLOT_ENV`
+/// names, without the ones that look like a credential. A `trees` entry
+/// of `.slot.toml` expands with these, so the tree synced is the one the
+/// job reads there.
+fn node_vars(argv: &[String], s: &Settings) -> std::collections::HashMap<String, String> {
+    let tc = toolchain::for_argv(argv, 1);
+    let (sent, _) = toolchain::remote_env(
+        std::env::vars(),
+        |k| tc.client_env(k),
+        |k| s.extra_env.contains(k),
+    );
+    sent.into_iter()
+        .filter_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 /// `SLOT_REMOTE_SAME_PATH_ROOT`, by default this home.
