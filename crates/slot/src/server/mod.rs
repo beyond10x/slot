@@ -2042,6 +2042,11 @@ impl Server {
                 from_node: false,
                 sync_ms: req.workspace.as_ref().and(req.sync_ms),
                 sync_bytes: req.workspace.as_ref().and(req.sync_bytes),
+                extra_trees: if req.workspace.is_some() {
+                    req.extra_trees.clone()
+                } else {
+                    Vec::new()
+                },
                 back_ms: None,
                 compile_ms: None,
                 test_ms: None,

@@ -156,7 +156,8 @@ per line, `#` starts a comment. Its path is `never_sync_file` in the host config
 
 A job is never synced when one of these lies under a listed prefix: its working directory, its
 checkout's root, its checkout's git directories (a linked worktree's are in its main
-repository), or a tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`). The
+repository), a tree an argument names (`--manifest-path`, `-C`, `--dir`, `--directory`), or a
+tree `.slot.toml` declares ([Sibling trees](#sibling-trees)). The
 same holds for a tree that is `/`, the home directory or a directory above it. A prefix matches
 whole path components (`/srv/work/a` does not hold `/srv/work/ab`), on the paths as written and
 with their symlinks resolved.
@@ -598,7 +599,42 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
 
 With `--sandbox`, the tree and the target directory are bound writable at their own paths; the
 git directory is read-only. Files the command names outside the tree are not synced: a job that
-reads them fails on the server.
+reads them fails on the server, unless `.slot.toml` declares their tree (below).
+
+### Sibling trees
+
+A gate that reads a checkout beside its own (`../../specs`), or a build that runs
+`cargo build --manifest-path ../driver/Cargo.toml`, needs that tree on the server too. Declare it
+in `.slot.toml` at the repository root:
+
+```toml
+trees = ["../../specs", "../driver"]
+```
+
+Each entry is a path relative to the repository's root (the worktree's root in a linked
+worktree), or an absolute path. In same-path mode the client syncs each declared tree to its own
+path on the server before the job, the same way as the job's tree: files git does not ignore,
+without its `target/`, within the same stall and time bounds, and its git directory beside it so
+that `git` reads work there. The job's record names them (`extra_trees`) and `slot status` shows
+them under the job as `trees: …`.
+
+- The server gets each tree as it is on this machine, uncommitted files included. It reaches none
+  of the tree's remotes: a `git fetch` in the job fails there for want of credentials. Fetch here
+  before the job, or keep such a gate here with `--here`.
+- Each declared tree passes the checks of the job's own tree: it lies under the same-path root,
+  is one repository's work tree or a plain folder, and neither it, its git directory nor a git
+  dependency of its lock files is on the [never-sync list](#trees-that-never-leave-this-machine). It is
+  also refused when one of its own remotes matches an `origin:` pattern of the list or of
+  `remote-deny-origins`. A refused tree keeps the job on this machine's daemon with the rule and
+  the tree as its reason (`never sync: /srv/u/specs (declared tree /srv/u/specs)`); nothing is
+  synced.
+- A declared tree that does not exist, or is no directory, ends a remote job:
+  ``slot: remote build on <host> did not start (declared tree /srv/u/specs does not exist
+  (.slot.toml `trees`)); the job did not run``, exit 3. A local job runs, and carries that line
+  as its reason, so no node takes it.
+- Without `SLOT_REMOTE_SAME_PATH=1` a tree is mirrored under `<ws-root>/<id>`, where a relative
+  path to a sibling leads nowhere: a job whose `.slot.toml` declares trees does not start there
+  (exit 3) and says so.
 
 ## Tests that need local services
 
