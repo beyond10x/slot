@@ -17,6 +17,7 @@ mod go_products;
 mod node_view;
 mod node_wait;
 mod phases;
+mod return_sync;
 mod safety;
 
 /// Files of the test repository and their size: 2 MiB that do not compress.
@@ -140,6 +141,10 @@ fn remote_command(
         .env_remove("SLOT_SPILLED")
         .env_remove("SLOT_PHASES_FILE")
         .env_remove("CARGO_TARGET_DIR")
+        // A host wrapper's mark and the switch of the caller's shell would
+        // decide the return sync of every test.
+        .env_remove("SLOT_SHIM_PID")
+        .env_remove("SLOT_RETURN_SYNC")
         .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
         .env("XDG_CONFIG_HOME", d.dir.path().join("config"))
         .env("SLOT_CLUSTER_FILE", "off")
@@ -527,6 +532,8 @@ fn remote_cargo_env(
         .env_remove("SLOT_JOB")
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET")
+        .env_remove("SLOT_SHIM_PID")
+        .env_remove("SLOT_RETURN_SYNC")
         .env_remove("CARGO_NET_OFFLINE")
         // A forge runner sets CARGO_TERM_COLOR=always; the job gets it and
         // cargo would colour the lines this test reads.
@@ -974,6 +981,8 @@ fn a_same_path_cargo_build_uses_the_clients_target_dir() {
             .env_remove("SLOT_JOB")
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env_remove("SLOT_SHIM_PID")
+            .env_remove("SLOT_RETURN_SYNC")
             .env_remove("CARGO_BUILD_TARGET")
             .stdin(Stdio::null());
         if let Some(t) = target {

@@ -108,6 +108,8 @@ current directory.
    default `<state-dir>/cache` on the server.
 6. **Output.** Paths under the server's mirror in the output are rewritten to the local
    repository path, so `file:line` in compiler errors points at local files.
+7. **Return.** What the job wrote in its tree comes back, and what it deleted there is deleted
+   here (see [What the job wrote or deleted comes back](#what-the-job-wrote-or-deleted-comes-back)).
 
 `SLOT_WSROOT` on the workstation must name the directory the server daemon uses as `--ws-root`.
 The defaults agree: `.local/state/slot/ws` relative to the remote home directory, and
@@ -585,6 +587,41 @@ machine could not fetch, and `slot: git dependencies not copied to <host>: …` 
 failed (a server with an older slot answers no probe); the job then runs on the server as before.
 The server needs this release of slot for `slot shell` to admit the probe (`slot __cargo-git`)
 and the copy.
+
+## What the job wrote or deleted comes back
+
+After a job on the server, the tree here holds what the job left in its tree there, so a
+generator that writes and removes files gives the same tree as on this machine:
+
+- **Listed twice.** The client lists the job's tree on the server after the sync and again after
+  the job, with an rsync that `slot shell` admits as a fetch. The times are the server's own and
+  are only compared with each other.
+- **Written.** A file or directory that is new after the job, or whose size or time changed,
+  comes back (`rsync -a --checksum --update`), also under a directory `.gitignore` names. A file
+  here that is newer than the server's stays.
+- **Deleted.** A regular file that was in the tree before the job and is missing after it is
+  deleted here when this machine's file is still the one the server had: it has the size and
+  modification time it had when the sync sent it, or the size and modification time (to the
+  second) of the server's file before the job, as a file that came back from an earlier job has.
+  A directory the job removed is removed here when it is empty after that.
+- **Kept.** A file the job deleted that changed here since the sync, or that was never sent and
+  is not the server's copy, is kept, and so is anything a symbolic link of this tree leads to;
+  each is named on a line of its own: `slot: return sync: kept notes.txt: changed here since the
+  sync`.
+- **Never touched.** Nothing under `.git`, `target` or `node_modules` is listed, copied or
+  deleted, and no path that is a symbolic link here is written.
+- **One line.** `slot: return sync from buildbox: 3 back, 1 deleted, 0 kept`: files that came
+  back, files and directories deleted, files kept.
+
+The return sync runs after every job that ran, whatever its exit code; a job that did not start
+(exit 3) gets none. When a listing fails, for example on a server whose `slot shell` refuses it,
+the client prints `slot: return sync skipped: could not list the tree on <host> before the job
+(…)` and leaves the tree as it is; the job's exit code does not change.
+
+`SLOT_RETURN_SYNC=0` turns it off. A wrapper script in front of `slot` that did a return sync of
+its own and exports `SLOT_SHIM_PID` keeps it: then the client does none, so the two do not run
+twice, unless `SLOT_RETURN_SYNC=1` is set. Such a wrapper's return sync never deleted a file;
+remove it from the wrapper and set `SLOT_RETURN_SYNC=1`.
 
 ## Fetch build output back
 

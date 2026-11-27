@@ -61,13 +61,19 @@ fn marking(marker: &Path) -> String {
 
 /// The environment of a call that waits `wait` for the server's daemon and
 /// has neither the opt-in to run here nor a daemon that handed it over.
-fn waiting(wait: &str) -> [(&str, &str); 3] {
+/// No return sync: [`no_socket`] counts every ssh call, and the return
+/// sync's listings would take the turns meant for the proxy step.
+fn waiting(wait: &str) -> [(&str, &str); 4] {
     [
         ("SLOT_NODE_WAIT", wait),
         ("SLOT_REMOTE_FALLBACK", ""),
         ("SLOT_SPILLED", ""),
+        NO_RETURN_SYNC,
     ]
 }
+
+/// The client's return sync off.
+const NO_RETURN_SYNC: (&str, &str) = ("SLOT_RETURN_SYNC", "0");
 
 #[test]
 fn a_job_sent_while_the_servers_daemon_is_away_runs_once_when_it_answers() {
@@ -211,6 +217,7 @@ fn a_job_a_daemon_handed_to_the_server_does_not_wait_for_its_daemon() {
             ("SLOT_NODE_WAIT", "2s"),
             ("SLOT_REMOTE_FALLBACK", "local"),
             ("SLOT_SPILLED", "1"),
+            NO_RETURN_SYNC,
             ("SLOT_PHASES_FILE", phases.to_str().unwrap()),
         ],
     );
@@ -242,6 +249,7 @@ fn a_job_a_wrapper_marks_spilled_waits_for_the_servers_daemon_and_runs_once() {
             ("SLOT_NODE_WAIT", "30s"),
             ("SLOT_REMOTE_FALLBACK", ""),
             ("SLOT_SPILLED", "1"),
+            NO_RETURN_SYNC,
         ],
     );
     let err = String::from_utf8_lossy(&out.stderr);
@@ -282,6 +290,7 @@ fn a_job_a_wrapper_marks_spilled_ends_after_the_wait_and_ran_nowhere() {
             ("SLOT_NODE_WAIT", "2s"),
             ("SLOT_REMOTE_FALLBACK", "local"),
             ("SLOT_SPILLED", "1"),
+            NO_RETURN_SYNC,
         ],
     );
     let err = String::from_utf8_lossy(&out.stderr);

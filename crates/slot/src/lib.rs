@@ -34,6 +34,7 @@ pub mod project;
 pub mod proto;
 pub mod refused;
 pub mod repo_config;
+pub mod return_sync;
 pub mod rewrite;
 pub mod run_limit;
 pub mod same_path;

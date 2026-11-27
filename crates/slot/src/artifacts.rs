@@ -428,7 +428,10 @@ pub struct Source<'a> {
 
 /// Runs `rsync`, bounded like a sync; how it ended and what it printed on
 /// stdout.
-fn bounded(mut rsync: Command, bounds: &crate::sync::Bounds) -> Result<(ExitStatus, String)> {
+pub(crate) fn bounded(
+    mut rsync: Command,
+    bounds: &crate::sync::Bounds,
+) -> Result<(ExitStatus, String)> {
     rsync
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
