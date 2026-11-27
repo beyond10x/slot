@@ -36,21 +36,32 @@ pub fn default_path() -> PathBuf {
 /// `cluster` (`None`: no file is read), else [`default_path`]. An error when
 /// the file exists and does not parse, or names a relative path.
 pub fn path_from(cluster: Option<&Path>) -> Result<PathBuf, String> {
+    file_from(cluster, "never_sync_file", default_path)
+}
+
+/// The path the key `key` of the host configuration file at `cluster`
+/// names (`None`: no file is read), else `default()`. An error when the
+/// file exists and does not parse, or the key names a relative path.
+pub fn file_from(
+    cluster: Option<&Path>,
+    key: &str,
+    default: impl FnOnce() -> PathBuf,
+) -> Result<PathBuf, String> {
     let Some(cluster) = cluster else {
-        return Ok(default_path());
+        return Ok(default());
     };
     let text = match std::fs::read_to_string(cluster) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default_path()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(default()),
         Err(e) => return Err(format!("{}: {e}", cluster.display())),
     };
     let table: toml::Table = toml::from_str(&text)
         .map_err(|e| format!("{}: {}", cluster.display(), first_line(&e.to_string())))?;
-    match table.get("never_sync_file") {
-        None => Ok(default_path()),
+    match table.get(key) {
+        None => Ok(default()),
         Some(toml::Value::String(p)) if Path::new(p).is_absolute() => Ok(PathBuf::from(p)),
         Some(v) => Err(format!(
-            "{}: never_sync_file = {v:?}: name an absolute path",
+            "{}: {key} = {v:?}: name an absolute path",
             cluster.display()
         )),
     }

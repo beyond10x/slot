@@ -149,6 +149,7 @@ types:
       - {name: remote, type: "Map<slot.cluster.NodeName, slot.hostconfig.RemoteNodeTable>"}
       - {name: spill_after_s, type: Optional<Integer>, summary: "Seconds a job waits in the local queue before it may go to a node; 0 when absent."}
       - {name: never_sync_file, type: Optional<String>, summary: "The never-sync list of remote mode, an absolute path."}
+      - {name: allow_origins_file, type: Optional<String>, summary: "The allow list of remote mode, an absolute path: a tree reaches a node only when one of its remotes matches a line."}
       - {name: default_node, type: Optional<slot.cluster.NodeName>, summary: "The node of every repository no `[remote.<name>]` entry lists."}
 
 entities:

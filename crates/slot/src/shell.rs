@@ -18,6 +18,13 @@
 //!   the endpoint's poll;
 //! - `slot output <id> [<from>]`, read-only: the kept output of one job,
 //!   for the endpoint's page;
+//! - `slot forget <path>`, read-write: removes one tree that reached this
+//!   node, a workspace mirror `<ws-root>/<id>` or a tree below a
+//!   `--same-path-root`, with the workspace root's records of it, and
+//!   prints what it removed and the bytes freed. Refused: `..`, a root
+//!   itself, any other path, a symbolic link at or below the root, and a
+//!   tree a queued or running job of the daemon (read from `--http`) uses;
+//!   `slot nodes forget` runs it;
 //! - `slot proxy`, `slot cancel <id>` and `slot __siblings <ws-root> <id>
 //!   <key> [<tree>]`, run by this binary whatever path the client named; the
 //!   workspace root must be this server's;
@@ -104,6 +111,9 @@ pub enum Plan {
     /// Print the wanted entries of the account's cargo git database that
     /// lack their revision, by name only (`git_deps::node_answer`).
     CargoGit(Vec<crate::git_deps::Wanted>),
+    /// Remove a tree that reached this node: a workspace mirror
+    /// `<ws-root>/<id>` or a tree below a same-path root ([`forget`]).
+    Forget(PathBuf),
 }
 
 /// The directories a client's paths may name.
@@ -269,6 +279,7 @@ pub fn plan(line: &str, home: &Path, roots: &Roots<'_>) -> Result<Plan, String> 
                     path,
                 })
             }
+            [f, path] if f == "forget" => forget_path(home, path, roots).map(Plan::Forget),
             [c, words @ ..] if c == "__cargo-git" && !words.is_empty() => {
                 crate::git_deps::parse_words(words)
                     .map(Plan::CargoGit)
@@ -278,6 +289,175 @@ pub fn plan(line: &str, home: &Path, roots: &Roots<'_>) -> Result<Plan, String> 
         },
         _ => Err(format!("`{prog}` is not a remote step")),
     }
+}
+
+/// The tree the `forget` step may remove: `path` made absolute against
+/// `home`, either a workspace mirror (`<ws-root>/<id>`) or a path below a
+/// same-path root, written absolute. Refused: `..`, a root itself, any
+/// other path, and a path with a symbolic link at or below its root.
+fn forget_path(home: &Path, path: &str, roots: &Roots<'_>) -> Result<PathBuf, String> {
+    let p = absolute(home, path)?;
+    let ws = absolute(home, &roots.ws.to_string_lossy())?;
+    let mut same_roots = Vec::new();
+    for r in roots.same_path {
+        same_roots.push(absolute(home, &r.to_string_lossy())?);
+    }
+    if p == ws || same_roots.contains(&p) {
+        return Err(format!("`{path}` is a root itself: name one tree below it"));
+    }
+    let mirror = p.parent() == Some(ws.as_path())
+        && p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::mirror::valid_id);
+    let base = if mirror {
+        Some(ws.clone())
+    } else if Path::new(path).is_absolute() {
+        same_roots.into_iter().find(|r| p.starts_with(r))
+    } else {
+        None
+    };
+    let Some(base) = base else {
+        return Err(format!(
+            "`{path}` is outside the roots: only a mirror `{}/<id>` or a tree below a --same-path-root is removed",
+            ws.display()
+        ));
+    };
+    for a in p.ancestors().take_while(|a| *a != base) {
+        if std::fs::symlink_metadata(a).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("`{}` is a symbolic link", a.display()));
+        }
+    }
+    Ok(p)
+}
+
+/// What a queued or running job of the node daemon works in: its id and
+/// its directories (its working directory and its declared trees).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Busy {
+    /// Job id on this node.
+    pub id: i64,
+    /// Its directories.
+    pub dirs: Vec<PathBuf>,
+}
+
+/// The queued and running jobs of `/api/state` (`state`), this daemon's
+/// own: their working directories and declared trees.
+pub fn busy_of(state: &str) -> Result<Vec<Busy>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(state).map_err(|e| format!("/api/state: {e}"))?;
+    let active = v
+        .get("active")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("/api/state has no `active`")?;
+    Ok(active
+        .iter()
+        .filter(|j| {
+            !j.get("from_node")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .map(|j| {
+            let id = j.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let cwd = j.get("cwd").and_then(serde_json::Value::as_str);
+            let extra = j
+                .get("extra_trees")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str);
+            let dirs = cwd
+                .into_iter()
+                .chain(extra)
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .collect();
+            Busy { id, dirs }
+        })
+        .collect())
+}
+
+/// Removes the tree at `path` (checked by the `forget` step's plan) unless
+/// a job of `busy` uses it: a directory of the job, the tree of the
+/// workspace mirror it works in, or the same-path tree the workspace root
+/// links to for it, is `path`, lies under it or holds it. For a mirror its
+/// records in the workspace root `ws` go too; for a same-path tree, every
+/// link of the workspace root to it or below it. Returns one line for each
+/// thing removed, the tree's with the bytes freed.
+pub fn forget(path: &Path, ws: &Path, busy: &[Busy]) -> Result<Vec<String>, String> {
+    let path = crate::never_sync::lexical(path);
+    let ws = &crate::never_sync::lexical(ws);
+    for job in busy {
+        for d in &job.dirs {
+            let d = crate::never_sync::lexical(d);
+            // The synced tree the directory lies in: its mirror, or the
+            // same-path tree the workspace root links to.
+            let mut trees = Vec::new();
+            if let Ok(rel) = d.strip_prefix(ws)
+                && let Some(first) = rel.components().next()
+            {
+                trees.push(ws.join(first));
+            }
+            if let Some(id) = crate::mirror::linked_id(ws, &d)
+                && let Ok(to) = std::fs::read_link(ws.join(id))
+            {
+                trees.push(crate::never_sync::lexical(&to));
+            }
+            // A directory above the path (a local job in the account's
+            // home) does not hold it; a synced tree above it does.
+            if d.starts_with(&path)
+                || trees
+                    .iter()
+                    .any(|t| t.starts_with(&path) || path.starts_with(t))
+            {
+                return Err(format!(
+                    "{} is used by job {}; nothing removed",
+                    path.display(),
+                    job.id
+                ));
+            }
+        }
+    }
+    let m = std::fs::symlink_metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !m.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    let bytes = crate::evict::dir_size(&path);
+    std::fs::remove_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut lines = vec![format!("removed {} ({bytes} bytes freed)", path.display())];
+    let forget_id = |id: &str| {
+        crate::mirror::forget(ws, id);
+        crate::cargo_fetch::forget(ws, id);
+    };
+    if path.parent() == Some(ws.as_path()) {
+        if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
+            forget_id(id);
+        }
+        return Ok(lines);
+    }
+    for e in std::fs::read_dir(ws).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Ok(to) = std::fs::read_link(e.path()) else {
+            continue;
+        };
+        if crate::mirror::valid_id(&name)
+            && crate::never_sync::lexical(&to).starts_with(&path)
+            && std::fs::remove_file(e.path()).is_ok()
+        {
+            forget_id(&name);
+            lines.push(format!("removed {} (its link)", e.path().display()));
+        }
+    }
+    Ok(lines)
+}
+
+/// The `forget` step: the node daemon's queued and running jobs, read from
+/// its web address `http`, then [`forget`]. A daemon that does not answer
+/// is an error: which trees its jobs use is not known.
+pub fn forget_step(http: &str, path: &Path, ws: &Path) -> Result<Vec<String>, String> {
+    let state = crate::status::get(http, "/api/state").map_err(|e| {
+        format!("which trees jobs use is not known, the daemon at {http} does not answer ({e:#}); nothing removed")
+    })?;
+    forget(path, ws, &busy_of(&state)?)
 }
 
 /// `path`, absolute and under one of `roots`, the tree of a same-path
@@ -849,6 +1029,152 @@ mod tests {
             p("slot __siblings .local/state/slot/ws 0123abcd 00ff /srv/u/trees/r/a").is_err(),
             "no root: no same-path sibling step"
         );
+    }
+
+    #[test]
+    fn the_forget_step_takes_a_mirror_or_a_same_path_tree_only() {
+        let roots = [PathBuf::from("/srv/u/trees")];
+        let same = |l: &str| plan_with(l, &roots);
+        let mirror = PathBuf::from("/srv/u/.local/state/slot/ws/0123abcd");
+        assert_eq!(
+            same("slot forget .local/state/slot/ws/0123abcd"),
+            Ok(Plan::Forget(mirror.clone()))
+        );
+        assert_eq!(
+            same(&format!("slot forget {}", mirror.display())),
+            Ok(Plan::Forget(mirror))
+        );
+        assert_eq!(
+            same("/srv/u/bin/slot forget '/srv/u/trees/r/a b'"),
+            Ok(Plan::Forget(PathBuf::from("/srv/u/trees/r/a b")))
+        );
+        for (bad, why) in [
+            ("slot forget /srv/u/trees/r/../x", "`..`"),
+            ("slot forget /srv/u/trees", "root itself"),
+            ("slot forget /srv/u/trees/", "root itself"),
+            ("slot forget .local/state/slot/ws", "root itself"),
+            ("slot forget .local/state/slot/ws/0123abcd/src", "outside"),
+            ("slot forget .local/state/slot/ws/.repo-keys", "outside"),
+            ("slot forget trees/r/a", "outside"),
+            ("slot forget /srv/u/.ssh", "outside"),
+            ("slot forget /", "outside"),
+            ("slot forget", "not a remote step"),
+            (
+                "slot forget /srv/u/trees/a /srv/u/trees/b",
+                "not a remote step",
+            ),
+        ] {
+            let got = same(bad);
+            assert!(
+                got.as_ref().is_err_and(|e| e.contains(why)),
+                "{bad}: {got:?}"
+            );
+        }
+        assert!(
+            p("slot forget /srv/u/trees/r/a").is_err(),
+            "no root: no same-path tree"
+        );
+    }
+
+    #[test]
+    fn the_forget_step_refuses_a_link_at_or_below_the_root() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().canonicalize().unwrap();
+        let trees = home.join("trees");
+        let ws = home.join("ws");
+        std::fs::create_dir_all(trees.join("real/sub")).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        std::os::unix::fs::symlink(trees.join("real"), trees.join("link")).unwrap();
+        std::os::unix::fs::symlink(trees.join("real"), ws.join("00aa")).unwrap();
+        let same = [trees.clone()];
+        let roots = Roots {
+            ws: &ws,
+            cache: &home.join("cache"),
+            same_path: &same,
+            cargo_git_db: &home.join(".cargo/git/db"),
+        };
+        let p = |l: &str| plan(l, &home, &roots);
+        for bad in [trees.join("link"), trees.join("link/sub"), ws.join("00aa")] {
+            let got = p(&format!("slot forget {}", bad.display()));
+            assert!(
+                got.as_ref().is_err_and(|e| e.contains("symbolic link")),
+                "{}: {got:?}",
+                bad.display()
+            );
+        }
+        let real = trees.join("real/sub");
+        assert_eq!(
+            p(&format!("slot forget {}", real.display())),
+            Ok(Plan::Forget(real))
+        );
+    }
+
+    fn job(id: i64, dirs: &[&Path]) -> Busy {
+        Busy {
+            id,
+            dirs: dirs.iter().map(|d| d.to_path_buf()).collect(),
+        }
+    }
+
+    #[test]
+    fn forget_removes_a_tree_no_job_uses_and_says_what_it_freed() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        let mirror = ws.join("00aa");
+        std::fs::create_dir_all(mirror.join("src")).unwrap();
+        std::fs::write(mirror.join("src/lib.rs"), vec![b'x'; 8192]).unwrap();
+        let tree = root.join("trees/r/a");
+        std::fs::create_dir_all(tree.join("crates/x")).unwrap();
+        std::os::unix::fs::symlink(&tree, ws.join("00bb")).unwrap();
+
+        let busy = [job(7, &[&mirror.join("src")])];
+        let e = forget(&mirror, &ws, &busy).unwrap_err();
+        assert!(e.contains("used by job 7"), "{e}");
+        let busy = [job(8, &[&tree.join("crates/x")])];
+        for path in [tree.clone(), tree.join("crates"), root.join("trees")] {
+            let e = forget(&path, &ws, &busy).unwrap_err();
+            assert!(e.contains("used by job 8"), "{}: {e}", path.display());
+        }
+        let declared = [job(9, &[&root.join("elsewhere"), &tree])];
+        assert!(forget(&tree, &ws, &declared).is_err(), "a declared tree");
+        let home_job = [job(10, &[&root])];
+        assert!(
+            forget(&mirror, &ws, &home_job).is_ok(),
+            "a job above the tree does not hold it"
+        );
+        assert!(!mirror.exists());
+
+        let lines = forget(&tree, &ws, &[]).unwrap();
+        assert!(!tree.exists() && !ws.join("00bb").is_symlink());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with(&format!("removed {} (", tree.display())));
+        assert!(lines[1].contains("00bb (its link)"), "{lines:?}");
+        assert!(forget(&tree, &ws, &[]).is_err(), "nothing there");
+    }
+
+    #[test]
+    fn the_jobs_a_state_answer_names_are_its_own_queued_and_running_ones() {
+        let state = r#"{"active":[
+            {"id":3,"cwd":"/w/a","extra_trees":["/w/specs"]},
+            {"id":4,"cwd":"/x","from_node":true},
+            {"id":5,"cwd":""}
+        ],"done":[{"id":1,"cwd":"/w/old"}]}"#;
+        assert_eq!(
+            busy_of(state).unwrap(),
+            [
+                Busy {
+                    id: 3,
+                    dirs: vec![PathBuf::from("/w/a"), PathBuf::from("/w/specs")],
+                },
+                Busy {
+                    id: 5,
+                    dirs: vec![],
+                },
+            ]
+        );
+        assert!(busy_of("{}").is_err());
+        assert!(busy_of("not json").is_err());
     }
 
     #[test]

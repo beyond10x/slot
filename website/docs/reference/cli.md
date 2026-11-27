@@ -384,6 +384,20 @@ slot nodes remove [OPTIONS] <NAME>
 - `<NAME>`: Node name
 - `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
 
+#### `slot nodes forget`
+
+Remove a tree that reached a node: run the node's `forget` step (`<ssh> <slot_path> forget <path>`) and print what it removed and the bytes freed.
+
+PATH is a workspace mirror on the node (`<ws-root>/<id>`) or a tree below one of its same-path roots, as the node sees it. The node refuses `..`, a root itself, any other path, a symbolic link at or below the root, and a tree a queued or running job of its daemon uses (exit 126 or 1, with the reason).
+
+```text
+slot nodes forget [OPTIONS] <NAME> <PATH>
+```
+
+- `<NAME>`: Node name, as the host configuration file names it
+- `<PATH>`: The tree on the node
+- `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
+
 ### `slot hook`
 
 Agent hooks: refuse a build command that would run outside the pool
