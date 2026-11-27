@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Node provisioning: the config key `DOCKER_CONTAINERD_STORE=on` turns on containerd's image
+  store of a node's dockerd, so that `docker buildx build --output type=docker,dest=<file>`
+  writes a tar with the default builder (driver `docker`), as on a CI runner; before, buildx
+  refused it (`Docker exporter is not supported for the docker driver`). `provision.sh apply`
+  merges `"features": {"containerd-snapshotter": true}` into `/etc/docker/daemon.json` with `awk`
+  (the node may have no `jq`), keeps every other key, checks the result with `dockerd --validate`
+  and leaves a file that is no JSON object alone; a second `apply` changes nothing. `check` names
+  a file without the key and a dockerd whose `docker info` names another store. The restart of
+  docker waits for the jobs: at once with none, in the gap before `slot-node` starts again with
+  `apply --drain` (the mark `docker-restart`), else a `pending:` line. `off` or absent leaves the
+  file and the store alone; `node.conf.example` has `on`. Images of the old store are not
+  visible after the switch (`contrib/node/README.md`).
 - Node provisioning: the config key `CLANG_VERSION` (a major such as `22`) makes the `clang` on
   a job's PATH that packaged major instead of the distribution's default (clang 15 on Amazon
   Linux 2023, whose JSON syntax tree a consumer could not read). `provision.sh` installs the

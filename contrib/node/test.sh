@@ -4278,6 +4278,111 @@ st2=$?
 grep -qx 'CLANG_VERSION=20' "$here/node.conf.example" && ok "example: CLANG_VERSION=20" || bad "example: $(grep CLANG "$here/node.conf.example")"
 grep '^| `CLANG_VERSION` |' "$here/README.md" | grep -q 'links stay' && ok "README: a CLANG_VERSION row that says the links stay when the key is taken out" || bad "README CLANG_VERSION row: $(grep '^| `CLANG_VERSION`' "$here/README.md")"
 
+# 6zb. DOCKER_CONTAINERD_STORE=on: dockerd keeps its images in containerd's image store, so that
+# `docker buildx build --output type=docker,dest=<file>` writes a tar with the default builder (the
+# `docker` driver refuses that exporter without that store). apply merges
+# "features": {"containerd-snapshotter": true} into /etc/docker/daemon.json and keeps every other
+# key; check reads the file and the store that `docker info` names. The restart of docker waits for
+# the jobs: at once with none, at the end of a drain with `apply --drain`, else a pending line.
+# Under NODE_TEST=1 the file docker-store is what `docker info` names; a start of docker.service
+# makes it `containerd` when the file turns the feature on, else `overlay2`.
+DJ=/etc/docker/daemon.json
+dslines() { cat "$W/out" "$W/err" | grep -i 'docker' | head -8; }
+for bad_ds in 'DOCKER_CONTAINERD_STORE=yes' 'DOCKER_CONTAINERD_STORE=On' 'DOCKER_CONTAINERD_STORE=on off' 'DOCKER_CONTAINERD_STORE=$(id)'; do
+  conf
+  echo "$bad_ds" >>"$W/node.conf"
+  run "$W/r0" check
+  [ $? -eq 2 ] && grep -q "DOCKER_CONTAINERD_STORE must be on or off, not '${bad_ds#*=}'" "$W/err" && ok "$bad_ds is refused" || bad "$bad_ds is accepted ($(cat "$W/err"))"
+done
+DS=$W/rds
+mkdir -p "$DS/etc/docker"
+# A node from before the key, with a daemon.json of its own (another key, and features without
+# the image store).
+printf '{\n  "log-driver": "journald",\n  "features": {\n    "buildkit": true\n  }\n}\n' >"$DS$DJ"
+cp "$DS$DJ" "$W/daemon.json.before"
+conf
+run "$DS" apply
+mkdir -p "$DS/.state"
+echo 0 >"$DS/.state/jobs"
+run "$DS" check
+st=$?
+[ $st -eq 0 ] && cmp -s "$DS$DJ" "$W/daemon.json.before" && [ "$(cat "$DS/.state/docker-store" 2>&1)" = overlay2 ] && ok "without DOCKER_CONTAINERD_STORE: daemon.json is left as it is, the store is overlay2, 0 drift" || bad "no key: check exit $st $(dslines) store '$(cat "$DS/.state/docker-store" 2>&1)'"
+conf
+echo 'DOCKER_CONTAINERD_STORE=off' >>"$W/node.conf"
+run "$DS" check
+! grep -q "docker-store\|docker.service" "$W/out" && ok "DOCKER_CONTAINERD_STORE=off: nothing of the store is checked" || bad "off: $(dslines)"
+# Red first: the key on, the file without the feature.
+conf
+echo 'DOCKER_CONTAINERD_STORE=on' >>"$W/node.conf"
+run "$DS" check
+st=$?
+[ $st -eq 1 ] && grep -qx "drift: docker-store: $DJ does not turn on the containerd image store (\"features\": {\"containerd-snapshotter\": true})" "$W/out" && ok "check names a daemon.json without the containerd image store" || bad "check, feature off: exit $st $(dslines)"
+grep -qx "drift: running: docker.service: docker info names the image store 'overlay2', not containerd's" "$W/out" && ok "check names the store that docker info reads: overlay2" || bad "check, store: $(dslines)"
+# apply with jobs running: the file is merged, docker waits.
+echo 2 >"$DS/.state/jobs"
+: >"$DS/.calls"
+run "$DS" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "changed: docker-store: $DJ turns on the containerd image store; its other keys are kept" "$W/out" && ok "apply merges the feature into daemon.json" || bad "apply, merge: exit $st $(dslines)"
+[ "$(grep -c '"containerd-snapshotter": true' "$DS$DJ")" -eq 1 ] && grep -q '"log-driver": "journald"' "$DS$DJ" && grep -q '"buildkit": true' "$DS$DJ" && ok "daemon.json has the feature once and keeps log-driver and buildkit" || bad "merged daemon.json: $(cat "$DS$DJ")"
+cmp -s "$DS$DJ.slot-prev" "$W/daemon.json.before" && ok "the file before the merge is kept as daemon.json.slot-prev" || bad "no copy of the old daemon.json: $(cat "$DS$DJ.slot-prev" 2>&1)"
+! grep -q 'systemctl restart docker.service' "$DS/.calls" && grep -qx "pending: running: docker restarts when no job runs (2 now): docker info names the image store 'overlay2', not containerd's" "$W/err" && ok "with 2 jobs running docker is not restarted: a pending line" || bad "apply with jobs: $(cat "$DS/.calls" | grep docker) $(dslines)"
+cp "$DS$DJ" "$W/daemon.json.merged"
+: >"$DS/.calls"
+run "$DS" apply
+st=$?
+[ $st -eq 0 ] && cmp -s "$DS$DJ" "$W/daemon.json.merged" && ! grep -q 'docker-store' "$W/out" && grep -q '^pending: running: docker restarts when no job runs' "$W/err" && ok "a second apply changes nothing in daemon.json; the restart is still pending" || bad "second apply: exit $st $(dslines) $(cat "$DS$DJ")"
+run "$DS" check
+[ $? -eq 1 ] && ! grep -q '^drift: docker-store' "$W/out" && grep -q '^drift: running: docker.service: ' "$W/out" && grep -qx '1 drift' "$W/out" && ok "after the merge check has one line: the store docker still runs with" || bad "check after the merge: $(cat "$W/out")"
+# apply --drain: the restart of docker waits for the gap before slot-node starts again.
+: >"$DS/.calls"
+NODE_TEST=1 NODE_ROOT=$DS sh "$P" apply "$W/node.conf" --drain >"$W/out" 2>"$W/err"
+st=$?
+[ $st -eq 0 ] && grep -q '^draining: slot-node: 2 job(s), restart by ' "$W/out" && [ -s "$DS/run/slot-node/docker-restart" ] && ! grep -q 'systemctl restart docker.service' "$DS/.calls" && grep -q '^pending: running: docker restarts when slot-node does, at the end of its drain: ' "$W/err" && ok "apply --drain with jobs: slot-node drains, docker's restart has its mark and waits" || bad "drain: exit $st $(grep docker "$DS/.calls") $(cat "$W/out" "$W/err" | head -5)"
+run "$DS" check
+[ $? -eq 1 ] && grep -q "^drift: drain: slot-node.service drains for its restart (docker.service restarts: docker info names the image store 'overlay2', not containerd's): 2 job(s) left" "$W/out" && ok "check during the drain names docker's restart as its reason" || bad "check during the drain: $(cat "$W/out")"
+: >"$DS/.calls"
+NODE_TEST=1 NODE_ROOT=$DS sh "$P" start-pre "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -qx 'systemctl restart docker.service' "$DS/.calls" && grep -qx "slot-node: docker.service restarted before slot-node.service starts: docker info names the image store 'overlay2', not containerd's" "$W/out" && [ ! -e "$DS/run/slot-node/docker-restart" ] && [ "$(cat "$DS/.state/docker-store")" = containerd ] && ok "the step before slot-node starts restarts docker, which then runs containerd's image store" || bad "start-pre: $(cat "$DS/.calls") $(cat "$W/out" "$W/err")"
+echo 0 >"$DS/.state/jobs"
+run "$DS" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "after the restart in the gap: 0 drift" || bad "after the gap: $(cat "$W/out")"
+# With no job in the pool apply restarts docker at once.
+echo overlay2 >"$DS/.state/docker-store"
+: >"$DS/.calls"
+run "$DS" apply
+st=$?
+[ $st -eq 0 ] && grep -qx 'systemctl restart docker.service' "$DS/.calls" && grep -qx "changed: running: docker.service restarted: docker info names the image store 'overlay2', not containerd's" "$W/out" && [ "$(cat "$DS/.state/docker-store")" = containerd ] && ok "no job running: apply restarts docker at once" || bad "apply, no jobs: exit $st $(grep docker "$DS/.calls") $(dslines)"
+run "$DS" check
+[ $? -eq 0 ] && ok "after that restart: 0 drift" || bad "after the restart: $(cat "$W/out")"
+# A bare node with the key: the file is written before docker starts, and one apply is enough.
+DN=$W/rdn
+mkdir -p "$DN"
+run "$DN" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "changed: docker-store: $DJ turns on the containerd image store; its other keys are kept" "$W/out" && [ "$(cat "$DN/.state/docker-store")" = containerd ] && ! grep -q 'systemctl restart docker.service' "$DN/.calls" && ok "a bare node: daemon.json is written and docker starts with containerd's store, no restart" || bad "bare node: exit $st $(dslines)"
+run "$DN" check
+[ $? -eq 0 ] && ok "a bare node with the key: 0 drift after one apply" || bad "bare node check: $(cat "$W/out")"
+# The merge, one form of the file at a time.
+dsmerge() {
+  printf '%b' "$1" >"$DN$DJ"
+  run "$DN" apply
+}
+for form in '' '{}' '{ }\n' '{"features": {}}' '{"features": {"containerd-snapshotter": false}, "debug": true}' '{"debug": true}'; do
+  dsmerge "$form"
+  printf '%b' "$form" >"$W/form"
+  [ "$(grep -c '"containerd-snapshotter": true' "$DN$DJ")" -eq 1 ] && ! grep -q 'false' "$DN$DJ" && grep -q '^changed: docker-store: ' "$W/out" && ok "daemon.json '$(tr '\n' ' ' <"$W/form")' gets the feature once" || bad "merge of '$form': $(cat "$DN$DJ") $(dslines)"
+  case $form in *debug*) grep -q '"debug": true' "$DN$DJ" && ok "  and keeps debug" || bad "debug lost: $(cat "$DN$DJ")" ;; esac
+  command -v jq >/dev/null 2>&1 || continue
+  jq -e '.features["containerd-snapshotter"] == true' "$DN$DJ" >/dev/null 2>&1 && ok "  jq reads it as JSON with the feature on" || bad "  not JSON with the feature: $(cat "$DN$DJ")"
+done
+dsmerge '[1, 2]\n'
+st=$?
+[ $st -eq 1 ] && grep -q "^failed: docker-store: $DJ is not a JSON object: not changed" "$W/err" && [ "$(cat "$DN$DJ")" = '[1, 2]' ] && ok "a daemon.json that is no JSON object is left alone and reported" || bad "no object: exit $st $(cat "$DN$DJ") $(dslines)"
+grep -qx 'DOCKER_CONTAINERD_STORE=on' "$here/node.conf.example" && ok "example: DOCKER_CONTAINERD_STORE=on" || bad "example: $(grep DOCKER_CONTAINERD "$here/node.conf.example")"
+grep '^| `DOCKER_CONTAINERD_STORE` |' "$here/README.md" | grep -q 'not visible' && ok "README: a DOCKER_CONTAINERD_STORE row that says the old images are not visible after the switch" || bad "README row: $(grep '^| `DOCKER_CONTAINERD_STORE`' "$here/README.md")"
+conf
+
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no
 # addresses but loopback and the metadata service.
 leaks=$(grep -nE '/home/[a-z]|\b(i|vol|subnet|sg|vpc|ami)-0?[0-9a-f]{8,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}|\b[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b' \
