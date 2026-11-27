@@ -170,6 +170,7 @@ pub fn refusal(tree: &Path, root: Option<&Path>) -> Option<String> {
                     never_sync::REASON_PREFIX
                 )),
             })
+            .or_else(|| crate::allow_origins::refusal(Some(tree)))
     } else {
         Some(match root {
             Some(r) => format!(

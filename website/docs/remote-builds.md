@@ -244,6 +244,59 @@ daemon handed to a node.
 
 With both files naming nothing no lock file is read.
 
+### Only trees with an allowed remote
+
+The deny lists name what someone thought of in advance: a repository without a remote matches no
+`origin:` pattern. An allow list turns that around. When `$XDG_CONFIG_HOME/slot/remote-allow-origins`
+exists (`allow_origins_file` in the host configuration names another absolute path), a tree goes
+to a node only when one of its own remotes (`remote.<name>.url` of the repository's own
+configuration) matches a line, and no `origin:` pattern of the deny lists matches one of its
+remotes:
+
+```text
+# the forges whose repositories may be built on a node
+*git.example.org[:/]team/*
+origin:https://forge.example/org/*
+```
+
+One shell pattern per line, matched as an `origin:` pattern is (an `origin:` before it is
+allowed, ` #` starts a comment), against each remote URL as written, normalised and bare, without
+a lookup: `url.<base>.insteadOf` and ssh aliases are not resolved. A repository with no remote, a
+folder without git and a repository whose remotes the list does not name run in this machine's
+pool with the reason `never sync: no allowed remote (<tree>)`:
+
+```text
+slot: never sync: no allowed remote (/srv/work/private): the tree is not synced to buildbox; running on this machine
+```
+
+The client checks the job's own tree, with or without `SLOT_HOST`, the tree of a job the daemon
+hands to a node, and every tree `.slot.toml` declares ([Sibling trees](#sibling-trees)); a declared
+tree that is refused keeps the whole job here (`never sync: no allowed remote (declared tree
+/srv/u/specs)`). An empty file allows nothing. A file that cannot be read keeps every job here.
+Without the file nothing changes.
+
+### Remove a tree from a node
+
+A tree that reached a node by mistake is removed there with one command:
+
+```console
+$ slot nodes forget build-1 /srv/u/src/private
+removed /srv/u/src/private (48213504 bytes freed)
+removed /srv/u/.local/state/slot/ws/3fa2c1d09b7e4a11 (its link)
+```
+
+It runs the node's `forget` step through the node's `ssh` line and `slot_path` from the host
+configuration file (`--cluster-file`, as for the other `slot nodes` commands). The path is the
+tree as the node sees it: a workspace mirror `<ws-root>/<id>`, or a tree below one of the node's
+`--same-path-root` directories. The node removes the tree and its records in the workspace root
+(for a same-path tree, the workspace root's links to it), and prints each with the bytes freed.
+It refuses, with exit 126 and `slot shell: refused: …`, a path with `..`, a root itself, any
+other path, and a path with a symbolic link at or below its root. It refuses with exit 1 a tree
+a queued or running job of its daemon uses (the job's working directory or a declared tree in
+it, or the synced tree that holds them), and any tree while its daemon does not answer on
+`--http`, since it cannot tell which trees are in use. The target directory a mirror built into
+stays; the cache removes it as it removes any other.
+
 ## ssh options
 
 By default `slot` calls ssh with a shared control connection, so the sync and the run reuse one
@@ -852,7 +905,9 @@ symbolic link, and `-l`, `-L`, `-k`, `-K`, `-R`, `--copy-unsafe-links`, `--safe-
 `--force`, `--inplace` and every `--delete…` option are refused for it) and the read-only `state` step (`slot state`: the server daemon's own row of
 `/api/nodes` and its jobs, read from `--http`, for the
 [node poll](#show-the-server-in-the-web-view)) and the read-only `output` step (`slot output <id>
-[<from>]`: the kept output of one job from its chunk `<from>` on, read from `--http`). Anything else
+[<from>]`: the kept output of one job from its chunk `<from>` on, read from `--http`) and the
+`forget` step (`slot forget <path>`: removes one mirror or same-path tree, [Remove a tree from a
+node](#remove-a-tree-from-a-node)). Anything else
 exits 126 with `slot shell: refused: …`. rsync options that name another file or program (`-e`,
 `--rsync-path`, `--log-file`, `--files-from`, `-T`, `--write-batch`) are refused, and
 `--copy-dest` is taken only as `../<id>`, a sibling mirror in the workspace root. Also refused:

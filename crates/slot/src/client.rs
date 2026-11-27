@@ -291,14 +291,16 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
     let mut req = new_request(argv, s, repo, checkout);
     // The never-sync list holds whatever `SLOT_HOST` says: its reason also
     // keeps the daemon from handing the job to a node. So does a git
-    // dependency of the checkout on a deny list.
+    // dependency of the checkout on a deny list, and, when the host has an
+    // allow list, a tree none of whose remotes it names.
     let never = never_sync::of_job(&never_sync::Job {
         cwd: &cwd,
         top: top.as_deref(),
         git_dirs: &git_dirs,
         argv,
     })
-    .or_else(|| crate::git_deps::of_job(top.as_deref(), &cwd));
+    .or_else(|| crate::git_deps::of_job(top.as_deref(), &cwd))
+    .or_else(|| crate::allow_origins::of_job(top.as_deref(), &cwd));
     // The sibling trees `.slot.toml` declares pass the same rules: one that
     // is refused keeps the job here; one that is missing ends a remote job
     // (`remote`), and a local one names it so no node takes it.

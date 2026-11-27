@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Remote mode: an allow list of remotes, `$XDG_CONFIG_HOME/slot/remote-allow-origins` (or the
+  absolute path `allow_origins_file` of the host configuration names). When the file exists, a
+  tree reaches a node only when one of its own git remotes matches a line (a shell pattern, as an
+  `origin:` pattern of the deny lists matches) and no `origin:` deny pattern matches one of its
+  remotes. A repository with no remote, a folder without git and a repository whose remotes the
+  list does not name run in this machine's pool with `local_reason` `never sync: no allowed
+  remote (<tree>)`. The client checks the job's own tree, with or without `SLOT_HOST`, a job the
+  daemon hands to a node, and every tree `.slot.toml` declares; a declared tree that is refused
+  keeps the whole job here. Before, only the deny lists applied, and a repository without a remote
+  matched none of their `origin:` patterns, so it was synced. Without the file nothing changes.
+- `slot nodes forget <node> <path>` removes a tree that reached a node: it runs the node's new
+  `forget` step of `slot shell`, which removes a workspace mirror `<ws-root>/<id>` or a tree below
+  a `--same-path-root` with the workspace root's records of it, and prints what it removed and the
+  bytes freed. The step refuses `..`, a root itself, any other path and a symbolic link at or
+  below the root (exit 126), and a tree a queued or running job of the node's daemon uses, or any
+  tree while that daemon does not answer on `--http` (exit 1). Before, removing a tree from a node
+  needed a login of its own, since `slot shell` admitted no delete.
+
 ## 0.41.1 — 2026-11-27
 
 - Remote mode: a job a wrapper sends with `SLOT_SPILLED=1` beside `SLOT_HOST` waits for a node

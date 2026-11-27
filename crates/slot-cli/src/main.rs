@@ -275,6 +275,20 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             siblings(&ws, &id, &key)
         }
         Ok(Plan::CargoGit(wanted)) => cargo_git(&wanted),
+        Ok(Plan::Forget(path)) => {
+            match slot::shell::forget_step(&args.http, &path, &home.join(&ws)) {
+                Ok(lines) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("slot shell: forget: {e}");
+                    1
+                }
+            }
+        }
         Err(e) => {
             eprintln!("slot shell: refused: {e}");
             126
@@ -449,6 +463,26 @@ fn nodes(cmd: &slot::cli::NodesCmd) -> Result<i32> {
             hostconfig::write(&path, &text).with_context(|| path.display().to_string())?;
             eprintln!("slot: node {} removed from {}", a.name, path.display());
             Ok(0)
+        }
+        NodesCmd::Forget(a) => {
+            let path = file(&a.cluster_file)?;
+            let reg = hostconfig::parse_registry(&read(&path)?)
+                .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+            let node = reg
+                .nodes
+                .iter()
+                .find(|n| n.name == a.name)
+                .ok_or_else(|| anyhow::anyhow!("{}: no node {}", path.display(), a.name))?;
+            let argv = node.forget_command(&a.path).map_err(anyhow::Error::msg)?;
+            let (prog, rest) = argv
+                .split_first()
+                .ok_or_else(|| anyhow::anyhow!("node {}: empty ssh line", a.name))?;
+            let st = std::process::Command::new(prog)
+                .args(rest)
+                .stdin(std::process::Stdio::null())
+                .status()
+                .with_context(|| prog.clone())?;
+            Ok(st.code().unwrap_or(1))
         }
     }
 }

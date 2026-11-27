@@ -4,9 +4,9 @@
 //! this module uses `[remote.<name>]`, the remote nodes the daemon polls,
 //! and the routing keys `repositories` and `default_node` that `slot nodes
 //! route` reads; `[node]`, `[provider.*]` and `[template.*]` are accepted
-//! and not yet used. The client reads `never_sync_file` from it
-//! (`never_sync.rs`). `slot nodes add` and `remove` edit it in place
-//! ([`add`], [`remove`]).
+//! and not yet used. The client reads `never_sync_file` (`never_sync.rs`)
+//! and `allow_origins_file` (`allow_origins.rs`) from it. `slot nodes add`
+//! and `remove` edit it in place ([`add`], [`remove`]).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,10 @@ pub struct ClusterFile {
     /// path; `$XDG_CONFIG_HOME/slot/remote-deny` when absent.
     #[serde(default)]
     pub never_sync_file: Option<String>,
+    /// The allow list of remote mode (`allow_origins.rs`), an absolute
+    /// path; `$XDG_CONFIG_HOME/slot/remote-allow-origins` when absent.
+    #[serde(default)]
+    pub allow_origins_file: Option<String>,
     /// The node of every repository no `[remote.<name>]` entry lists.
     #[serde(default)]
     pub default_node: Option<String>,
@@ -146,6 +150,31 @@ impl RemoteNode {
         argv.pop();
         argv.extend(["output".to_string(), id.to_string(), from.to_string()]);
         argv
+    }
+
+    /// The command that runs the `forget` step on the node for `path`,
+    /// quoted for the node's forced command, which splits words as a shell
+    /// does: a path of letters, digits and `/._-` as it is, any other in
+    /// single quotes. An error for a path with a single quote or a control
+    /// character, which no quoting carries.
+    pub fn forget_command(&self, path: &str) -> Result<Vec<String>, String> {
+        if path.is_empty() || path.chars().any(|c| c == '\'' || c.is_control()) {
+            return Err(format!(
+                "`{path}`: a path with a quote or a control character cannot be sent"
+            ));
+        }
+        let plain = path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c));
+        let mut argv = self.state_command();
+        argv.pop();
+        argv.push("forget".to_string());
+        argv.push(if plain {
+            path.to_string()
+        } else {
+            format!("'{path}'")
+        });
+        Ok(argv)
     }
 }
 
@@ -554,6 +583,26 @@ ssh = "ssh build-2.example"
             nodes[1].output_command(7, 12),
             ["ssh", "build-2.example", "slot", "output", "7", "12"]
         );
+        assert_eq!(
+            nodes[1].forget_command("/srv/u/src/a-b_c.d"),
+            Ok(vec![
+                "ssh".to_string(),
+                "build-2.example".into(),
+                "slot".into(),
+                "forget".into(),
+                "/srv/u/src/a-b_c.d".into()
+            ])
+        );
+        let quoted = nodes[1].forget_command("/srv/u/a b*").unwrap();
+        assert_eq!(quoted.last().map(String::as_str), Some("'/srv/u/a b*'"));
+        assert_eq!(
+            crate::shell::split(&quoted[3..].join(" ")).unwrap(),
+            ["forget", "/srv/u/a b*"],
+            "the node's forced command reads the path back"
+        );
+        for bad in ["", "/srv/u/it's", "/srv/u/a\nb"] {
+            assert!(nodes[1].forget_command(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

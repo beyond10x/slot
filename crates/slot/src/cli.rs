@@ -855,6 +855,28 @@ pub enum NodesCmd {
     /// Deregister a node: take its entry out. Its repositories then go to
     /// `default_node`; removing the default node clears `default_node`.
     Remove(NodeRemoveArgs),
+    /// Remove a tree that reached a node: run the node's `forget` step
+    /// (`<ssh> <slot_path> forget <path>`) and print what it removed and
+    /// the bytes freed.
+    ///
+    /// PATH is a workspace mirror on the node (`<ws-root>/<id>`) or a tree
+    /// below one of its same-path roots, as the node sees it. The node
+    /// refuses `..`, a root itself, any other path, a symbolic link at or
+    /// below the root, and a tree a queued or running job of its daemon
+    /// uses (exit 126 or 1, with the reason).
+    Forget(NodeForgetArgs),
+}
+
+/// `slot nodes forget` arguments.
+#[derive(Debug, Clone, Args)]
+pub struct NodeForgetArgs {
+    /// Node name, as the host configuration file names it.
+    pub name: String,
+    /// The tree on the node.
+    pub path: String,
+    /// The host configuration file.
+    #[arg(long, env = "SLOT_CLUSTER_FILE", default_value_os_t = crate::hostconfig::default_path())]
+    pub cluster_file: PathBuf,
 }
 
 /// `slot nodes list` arguments.
@@ -1072,6 +1094,18 @@ mod tests {
         assert_eq!(add.spill, Some(false));
         assert_eq!(add.repository, ["repo-a", "repo-b"]);
         assert!(add.default);
+        let Cmd::Nodes(NodesCmd::Forget(f)) =
+            parse(&["nodes", "forget", "build-2", "/srv/u/src/private"])
+                .unwrap()
+                .command
+        else {
+            panic!("not nodes forget")
+        };
+        assert_eq!(
+            (f.name.as_str(), f.path.as_str()),
+            ("build-2", "/srv/u/src/private")
+        );
+        assert!(parse(&["nodes", "forget", "build-2"]).is_err(), "no path");
         for args in [
             &["node", "--test", "a.test.ts"][..],
             &["node", "tools/ux.mjs", "gate"],

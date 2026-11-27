@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::{Daemon, SLOT};
 
+mod allow_origins;
 mod extra_trees;
 mod fresh;
 mod git_deps;

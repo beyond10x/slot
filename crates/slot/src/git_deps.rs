@@ -575,7 +575,7 @@ enum Rule {
 
 /// `line` without a comment: from a `#` that starts the line or follows
 /// white space.
-fn uncommented(line: &str) -> &str {
+pub(crate) fn uncommented(line: &str) -> &str {
     let t = line.trim();
     if t.starts_with('#') {
         return "";
@@ -944,11 +944,25 @@ pub fn denied<'a>(
 /// each as a URL the forms take apart: a local path made a `file` URL
 /// against `dir`. None when `dir` is no checkout.
 pub fn remote_urls(dir: &Path) -> Vec<String> {
+    remote_urls_in(dir, &[])
+}
+
+/// [`remote_urls`] from the repository's own configuration only
+/// (`git config --local`): a `remote.<name>.url` of the user's or the
+/// system's configuration, or of a file the repository's includes, is no
+/// remote of the checkout.
+pub fn local_remote_urls(dir: &Path) -> Vec<String> {
+    remote_urls_in(dir, &["--local"])
+}
+
+fn remote_urls_in(dir: &Path, scope: &[&str]) -> Vec<String> {
     let Ok(out) = Command::new("git")
         .env("LC_ALL", "C")
         .arg("-C")
         .arg(dir)
-        .args(["config", "--get-regexp", r"^remote\..*\.url$"])
+        .arg("config")
+        .args(scope)
+        .args(["--get-regexp", r"^remote\..*\.url$"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
