@@ -940,6 +940,62 @@ pub fn denied<'a>(
         .map(|s| format!("{REASON_PREFIX}{}", s.url))
 }
 
+/// The URLs of the remotes of the checkout at `dir` (`remote.<name>.url`),
+/// each as a URL the forms take apart: a local path made a `file` URL
+/// against `dir`. None when `dir` is no checkout.
+pub fn remote_urls(dir: &Path) -> Vec<String> {
+    let Ok(out) = Command::new("git")
+        .env("LC_ALL", "C")
+        .arg("-C")
+        .arg(dir)
+        .args(["config", "--get-regexp", r"^remote\..*\.url$"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(_, url)| url.trim()))
+        .filter(|u| !u.is_empty())
+        .map(|u| {
+            // git's scp-like form has a `:` before any `/`; a URL has `://`.
+            let scp = u
+                .split_once(':')
+                .is_some_and(|(h, _)| !h.is_empty() && !h.contains('/'));
+            if u.contains("://") || scp {
+                u.to_string()
+            } else {
+                format!("file://{}", never_sync::lexical(&dir.join(u)).display())
+            }
+        })
+        .collect()
+}
+
+/// Why the checkout at `dir` may not leave this machine for one of its own
+/// remotes: the first whose forms (with git's rewrite and an ssh alias
+/// resolved, as for a git dependency) `lists` deny, or that cannot be
+/// determined, as `never sync: origin <url>`; a problem of the lists. `None`
+/// when the lists name nothing.
+pub fn remote_denied(dir: &Path, lists: &DenyLists, lk: &Lookup) -> Option<String> {
+    if let Some(p) = lists.problem() {
+        return Some(format!("{}{p}", never_sync::REASON_PREFIX));
+    }
+    if lists.is_empty() {
+        return None;
+    }
+    remote_urls(dir).into_iter().find_map(|url| {
+        let s = Source {
+            url: url.clone(),
+            rev: String::new(),
+            name: String::new(),
+        };
+        let denied = resolved_forms(&s, dir, lk).is_none_or(|f| lists.denies_forms(&f));
+        denied.then(|| format!("{}origin {url}", never_sync::REASON_PREFIX))
+    })
+}
+
 /// The origin list's path: `remote-deny-origins` in slot's configuration
 /// directory.
 pub fn origins_path() -> PathBuf {
@@ -1660,6 +1716,67 @@ mod tests {
             dirs: vec![dir.to_path_buf()],
             ..Locks::default()
         }
+    }
+
+    /// A checkout's own remotes against the lists: an `origin:` pattern in
+    /// any form, a local path remote under a listed prefix, nothing while
+    /// the lists name nothing.
+    #[test]
+    fn a_checkouts_own_remote_on_a_list_keeps_it_here() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let dir = root.join("specs");
+        std::fs::create_dir(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(ok.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "git@git.example.org:team/specs.git",
+        ]);
+        git(&["remote", "add", "local", "../forge/specs"]);
+        assert_eq!(
+            remote_urls(&dir),
+            [
+                "git@git.example.org:team/specs.git".to_string(),
+                format!("file://{}", root.join("forge/specs").display()),
+            ]
+        );
+        let lk = Lookup {
+            ssh: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf 'hostname %s\\n' \"$2\"".into(),
+                "ssh".into(),
+            ],
+            ..lookup(&root)
+        };
+        let origin = DenyLists::parse(["origin:https://git.example.org/team/*\n"]);
+        assert_eq!(
+            remote_denied(&dir, &origin, &lk),
+            Some("never sync: origin git@git.example.org:team/specs.git".into())
+        );
+        let path = DenyLists::parse([format!("{}\n", root.join("forge").display()).as_str()]);
+        assert_eq!(
+            remote_denied(&dir, &path, &lk),
+            Some(format!(
+                "never sync: origin file://{}",
+                root.join("forge/specs").display()
+            ))
+        );
+        let other = DenyLists::parse(["origin:*other.example.org*\n"]);
+        assert_eq!(remote_denied(&dir, &other, &lk), None);
+        assert_eq!(remote_denied(&dir, &DenyLists::default(), &lk), None);
+        assert_eq!(remote_denied(&root, &origin, &lk), None, "no checkout");
     }
 
     #[test]

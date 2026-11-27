@@ -434,18 +434,20 @@ fn run_watched(rsync: &mut Command, b: &Bounds, deadline: Instant) -> Result<Str
 }
 
 /// Syncs `e` to its own path on the server, for a same-path job, within
-/// `b`. A git directory is shared by every worktree of its repository: one
-/// sync of it runs at a time on this machine.
+/// `b`. A git directory is shared by every worktree of its repository, and
+/// a sibling tree a `.slot.toml` declares by every job that declares it:
+/// one sync of a path runs at a time on this machine.
 pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()> {
-    let _lock = match e.kind {
-        same_path::Kind::Git => crate::paths::runtime_dir()
-            .map(|dir| {
-                let id = format!("git{}", mirror::digest16(&e.path.to_string_lossy()));
-                lock_workspace(&dir, r.host, &id, b.limit)
-            })
-            .transpose()?,
-        same_path::Kind::Tree => None,
+    let kind = match e.kind {
+        same_path::Kind::Git => "git",
+        same_path::Kind::Tree => "tree",
     };
+    let _lock = crate::paths::runtime_dir()
+        .map(|dir| {
+            let id = format!("{kind}{}", mirror::digest16(&e.path.to_string_lossy()));
+            lock_workspace(&dir, r.host, &id, b.limit)
+        })
+        .transpose()?;
     let deadline = Instant::now() + b.limit;
     let filters: Vec<String> = same_path::filters(e.kind)
         .iter()

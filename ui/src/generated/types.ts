@@ -217,6 +217,13 @@ sync_ms?: number,
  */
 sync_bytes?: number, 
 /**
+ * A remote job: the sibling trees its repository's `.slot.toml`
+ * declares (`trees`), each synced to its own path on the node before
+ * the job. Absent when there were none, and from an older client or
+ * daemon.
+ */
+extra_trees?: Array<string>, 
+/**
  * A remote job: milliseconds its client took to copy the cargo
  * products and the `--fetch` paths back after the job ended. Absent
  * when nothing was copied back, and from a client that does not say.
