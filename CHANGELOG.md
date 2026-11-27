@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.43.0 — 2026-11-27
+
 - Remote mode: the return sync is the client's. After a job that ran on a node, the client lists
   the job's tree there before and after the job and copies back what is new or changed
   (`rsync -a --checksum --update`; nothing under `.git`, `target` or `node_modules`, no path

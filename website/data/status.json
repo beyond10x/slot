@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-27",
-  "source": "CHANGELOG.md 0.1.0 to 0.42.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.43.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -387,6 +387,13 @@
       "status": "shipped",
       "detail": "With remote-allow-origins a tree reaches a node only when one of its remotes is on the list; slot nodes forget removes a tree that reached a node (0.42.0).",
       "href": "/docs/remote-builds#only-trees-with-an-allowed-remote"
+    },
+    {
+      "area": "Remote",
+      "label": "Deletes come back from a node",
+      "status": "shipped",
+      "detail": "After a node job the client copies back what the job wrote and deletes here what it deleted, unless the file changed here since the sync (0.43.0).",
+      "href": "/docs/remote-builds#what-the-job-wrote-or-deleted-comes-back"
     }
   ]
 }
