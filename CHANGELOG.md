@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.41.1 — 2026-11-27
+
 - Remote mode: a job a wrapper sends with `SLOT_SPILLED=1` beside `SLOT_HOST` waits for a node
   whose daemon drains or restarts, as any other remote job does since 0.39.0, and runs there once
   it answers. Before, the client took `SLOT_SPILLED` alone for a job this machine's daemon had
