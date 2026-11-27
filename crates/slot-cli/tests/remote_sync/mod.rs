@@ -136,6 +136,8 @@ fn remote_command(
     c.args(argv)
         .env_remove("SLOT_REMOTE_SAME_PATH")
         .env_remove("SLOT_NODE_WAIT")
+        .env_remove("SLOT_SPILLED")
+        .env_remove("SLOT_PHASES_FILE")
         .env_remove("CARGO_TARGET_DIR")
         .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
         .env("XDG_CONFIG_HOME", d.dir.path().join("config"))

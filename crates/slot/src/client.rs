@@ -132,7 +132,8 @@ pub struct Settings {
     pub no_products: bool,
     /// `SLOT_NODE_WAIT`: how long a job waits for a server whose daemon
     /// does not answer, and how often it is sent again. No wait for a job
-    /// this machine's daemon handed to a node (`SLOT_SPILLED`).
+    /// this machine's daemon handed to a node (`SLOT_SPILLED` with
+    /// `SLOT_PHASES_FILE`); a wrapper's `SLOT_SPILLED` alone waits.
     pub node_wait: NodeWait,
 }
 
@@ -191,13 +192,13 @@ fn duration_of(name: &str, value: Option<&str>, default: Duration) -> Duration {
 
 /// The bound of [`NodeWait`] from the value of [`NODE_WAIT_ENV`]: a
 /// duration as the other settings take it, and `0` for no wait. A job this
-/// machine's daemon handed to a node (`spilled`,
-/// [`crate::server::spill::SPILLED_ENV`]) does not wait, whatever the
+/// machine's daemon handed to a node (`handed`,
+/// [`crate::server::spill::handed`]) does not wait, whatever the
 /// value: its client ends with [`crate::server::spill::INFRA_EXIT`] and the
 /// daemon queues the job here again, and a wait would count as the job's
 /// run time here.
-fn node_wait_of(value: Option<&str>, spilled: bool) -> Duration {
-    if spilled {
+fn node_wait_of(value: Option<&str>, handed: bool) -> Duration {
+    if handed {
         return Duration::ZERO;
     }
     match value {
@@ -262,9 +263,12 @@ impl Settings {
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
             },
             node_wait: NodeWait {
+                // Only the daemon's own client of a handed job skips the
+                // wait: `SLOT_SPILLED` alone is a wrapper's, whose job has
+                // no daemon to queue it again.
                 bound: node_wait_of(
                     var(NODE_WAIT_ENV).as_deref(),
-                    var(crate::server::spill::SPILLED_ENV).is_some(),
+                    crate::server::spill::handed(),
                 ),
                 poll: NODE_POLL,
             },
