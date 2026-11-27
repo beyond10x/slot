@@ -10,9 +10,15 @@
 //! reason as its `local_reason` and nothing is synced. A declared tree that
 //! does not exist ends a remote job (exit 3) with its path.
 //!
+//! An entry may name its path through a variable the gate reads too
+//! (`${SPECS_DIR:-../../specs}`), expanded with the variables the job takes
+//! to the node ([`expand`]).
+//!
 //! The node gets each tree as it is on this machine. Its remotes are not
 //! reached from the node: a `git fetch` there fails without credentials.
 
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use crate::never_sync;
@@ -31,34 +37,109 @@ pub enum Problem {
 }
 
 /// The trees `declared` relative to the repository top `top` (an absolute
-/// entry stays), canonicalised, in order and without repeats. An error
-/// names the first one that does not exist, cannot be read or is no
-/// directory.
-pub fn resolve(top: &Path, declared: &[String]) -> Result<Vec<PathBuf>, String> {
+/// entry stays), each entry expanded first ([`expand`]) with the job's
+/// variables `vars` and the client's home `home`; canonicalised, in order
+/// and without repeats. An error names the first one that does not expand,
+/// does not exist, cannot be read or is no directory, with its entry when
+/// that differs from the path.
+pub fn resolve<S: BuildHasher>(
+    top: &Path,
+    declared: &[String],
+    vars: &HashMap<String, String, S>,
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
     let mut out: Vec<PathBuf> = Vec::new();
     for d in declared {
-        let p = never_sync::lexical(&top.join(d));
+        let expanded = expand(d, vars, home)?;
+        let p = never_sync::lexical(&top.join(&expanded));
+        let named = if expanded == *d {
+            p.display().to_string()
+        } else {
+            format!("{} (`{d}`)", p.display())
+        };
         let real = p.canonicalize().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
-                    "declared tree {} does not exist ({} `trees`)",
-                    p.display(),
+                    "declared tree {named} does not exist ({} `trees`)",
                     repo_config::FILE
                 )
             } else {
-                format!("declared tree {} cannot be read: {e}", p.display())
+                format!("declared tree {named} cannot be read: {e}")
             }
         })?;
         if !real.is_dir() {
             return Err(format!(
-                "declared tree {} is not a directory ({} `trees`)",
-                p.display(),
+                "declared tree {named} is not a directory ({} `trees`)",
                 repo_config::FILE
             ));
         }
         if !out.contains(&real) {
             out.push(real);
         }
+    }
+    Ok(out)
+}
+
+/// The entry `entry` of `trees` with a leading `~/` replaced by the home
+/// `home`, and each `${NAME}` and `${NAME:-default}` by the value of `NAME`
+/// in `vars` (`default` when it is unset or empty, as in POSIX sh). Nothing
+/// else is expanded: `$NAME` without braces, a `~` elsewhere and the text
+/// of a default stay as they are. An error names the entry: an unset
+/// `${NAME}` without a default, a `${` that is not one of the two forms, a
+/// `~/` without a home, an entry that expands to nothing.
+pub fn expand<S: BuildHasher>(
+    entry: &str,
+    vars: &HashMap<String, String, S>,
+    home: Option<&Path>,
+) -> Result<String, String> {
+    let bad = |why: String| {
+        format!(
+            "declared tree `{entry}`: {why} ({} `trees`)",
+            repo_config::FILE
+        )
+    };
+    let mut out = String::new();
+    let mut rest = entry;
+    if let Some(after) = entry.strip_prefix("~/") {
+        let home = home.ok_or_else(|| bad("there is no home for `~/`".into()))?;
+        out.push_str(&home.to_string_lossy());
+        out.push('/');
+        rest = after;
+    }
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        let inner = &rest[at + 2..];
+        let end = inner
+            .find('}')
+            .ok_or_else(|| bad("a `${` is not closed".into()))?;
+        let (name, default) = match inner[..end].split_once(":-") {
+            Some((n, d)) => (n, Some(d)),
+            None => (&inner[..end], None),
+        };
+        let valid = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(bad(format!(
+                "`${{{}}}` is neither `${{NAME}}` nor `${{NAME:-default}}`",
+                &inner[..end]
+            )));
+        }
+        match (vars.get(name).filter(|v| !v.is_empty()), default) {
+            (Some(v), _) => out.push_str(v),
+            (None, Some(d)) => out.push_str(d),
+            (None, None) if vars.contains_key(name) => {}
+            (None, None) => {
+                return Err(bad(format!(
+                    "{name} is not set in the job's environment (a node gets the variables \
+                     its toolchain sends and those SLOT_ENV names)"
+                )));
+            }
+        }
+        rest = &inner[end + 1..];
+    }
+    out.push_str(rest);
+    if out.is_empty() {
+        return Err(bad("it expands to an empty path".into()));
     }
     Ok(out)
 }
@@ -101,15 +182,21 @@ pub fn refusal(tree: &Path, root: Option<&Path>) -> Option<String> {
     Some(format!("{why} (declared tree {})", tree.display()))
 }
 
-/// The declared trees of the checkout at `top`, each checked
-/// ([`refusal`]) against the same-path root `root`. A `.slot.toml` that
-/// does not parse declares none (the client reports it where it reads
+/// The declared trees of the checkout at `top`, expanded with the job's
+/// variables `vars` and the client's home `home` ([`resolve`]), each
+/// checked ([`refusal`]) against the same-path root `root`. A `.slot.toml`
+/// that does not parse declares none (the client reports it where it reads
 /// `local`).
-pub fn check(top: &Path, root: Option<&Path>) -> Result<Vec<PathBuf>, Problem> {
+pub fn check<S: BuildHasher>(
+    top: &Path,
+    root: Option<&Path>,
+    vars: &HashMap<String, String, S>,
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, Problem> {
     let Ok(config) = RepoConfig::load(top) else {
         return Ok(Vec::new());
     };
-    let trees = resolve(top, &config.trees).map_err(Problem::Missing)?;
+    let trees = resolve(top, &config.trees, vars, home).map_err(Problem::Missing)?;
     for t in &trees {
         if let Some(why) = refusal(t, root) {
             return Err(Problem::Refused(why));
@@ -131,15 +218,83 @@ mod tests {
         std::fs::create_dir_all(root.join("specs")).unwrap();
         std::fs::write(root.join("file"), "").unwrap();
         let abs = root.join("specs").display().to_string();
-        let got = resolve(&top, &["../../specs".into(), abs]).unwrap();
+        let none = HashMap::new();
+        let got = resolve(&top, &["../../specs".into(), abs], &none, None).unwrap();
         assert_eq!(got, [root.join("specs")]);
-        let e = resolve(&top, &["../nope".into()]).unwrap_err();
+        let e = resolve(&top, &["../nope".into()], &none, None).unwrap_err();
         assert!(
             e.contains(&format!("{} does not exist", root.join("g/nope").display())),
             "{e}"
         );
-        let e = resolve(&top, &["../../file".into()]).unwrap_err();
+        let e = resolve(&top, &["../../file".into()], &none, None).unwrap_err();
         assert!(e.contains("is not a directory"), "{e}");
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn an_entry_follows_the_variable_its_default_and_the_home() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let top = root.join("app");
+        std::fs::create_dir_all(&top).unwrap();
+        std::fs::create_dir_all(root.join("specs")).unwrap();
+        std::fs::create_dir_all(root.join("checkout/specs")).unwrap();
+        let entry = ["${SPECS_DIR:-../specs}".to_string()];
+        let other = root.join("checkout/specs");
+        let want = vec![other.clone()];
+        let set = vars(&[("SPECS_DIR", other.to_str().unwrap())]);
+        assert_eq!(resolve(&top, &entry, &set, None).unwrap(), want);
+        assert_eq!(
+            resolve(&top, &entry, &vars(&[]), None).unwrap(),
+            [root.join("specs")]
+        );
+        assert_eq!(
+            resolve(&top, &entry, &vars(&[("SPECS_DIR", "")]), None).unwrap(),
+            [root.join("specs")]
+        );
+        let rel = vars(&[("SPECS_DIR", "../checkout/specs")]);
+        assert_eq!(resolve(&top, &entry, &rel, None).unwrap(), want);
+        assert_eq!(
+            resolve(&top, &["~/checkout/specs".into()], &vars(&[]), Some(&root)).unwrap(),
+            want
+        );
+        let e = resolve(&top, &["${SPECS_DIR}".into()], &vars(&[]), None).unwrap_err();
+        assert!(e.contains("SPECS_DIR is not set"), "{e}");
+        assert!(e.contains("${SPECS_DIR}"), "{e}");
+        let e = resolve(&top, &entry, &vars(&[("SPECS_DIR", "/nope")]), None).unwrap_err();
+        assert!(
+            e.contains("declared tree /nope (`${SPECS_DIR:-../specs}`) does not exist"),
+            "{e}"
+        );
+        let e = resolve(&top, &["~/specs".into()], &vars(&[]), None).unwrap_err();
+        assert!(e.contains("no home"), "{e}");
+    }
+
+    #[test]
+    fn only_braced_variables_and_a_leading_tilde_are_expanded() {
+        let home = Path::new("/h");
+        let v = vars(&[("A", "x"), ("E", "")]);
+        let ok = |s: &str| expand(s, &v, Some(home)).unwrap();
+        assert_eq!(ok("$A/b"), "$A/b");
+        assert_eq!(ok("a/~/b"), "a/~/b");
+        assert_eq!(ok("~"), "~");
+        assert_eq!(ok("~/${A}/y"), "/h/x/y");
+        assert_eq!(ok("${A}${A:-d}"), "xx");
+        assert_eq!(ok("${E:-d}/${B:-../s}"), "d/../s");
+        assert_eq!(ok("${B:-~/s}"), "~/s");
+        assert_eq!(ok("${E}x"), "x");
+        for bad in ["${A", "${}", "${1A}", "${A-x}", "${A:=x}", "${A B}"] {
+            let e = expand(bad, &v, Some(home)).unwrap_err();
+            assert!(e.contains(bad), "{bad}: {e}");
+        }
+        let e = expand("${E}", &v, Some(home)).unwrap_err();
+        assert!(e.contains("empty"), "{e}");
     }
 
     #[test]

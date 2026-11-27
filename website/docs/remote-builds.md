@@ -612,7 +612,23 @@ trees = ["../../specs", "../driver"]
 ```
 
 Each entry is a path relative to the repository's root (the worktree's root in a linked
-worktree), or an absolute path. In same-path mode the client syncs each declared tree to its own
+worktree), or an absolute path. In a linked worktree elsewhere on disk `../../specs` may lead
+nowhere; a gate that finds its sibling through a variable declares the tree through the same one:
+
+```toml
+trees = ["${SPECS_DIR:-../../specs}"]
+```
+
+An entry may use `${NAME}` and `${NAME:-default}` (the default when `NAME` is unset or empty, as
+in POSIX sh), and a leading `~/` for the home directory; a relative result is relative to the
+repository's root. Nothing else is expanded: `$NAME` without braces, a `~` elsewhere and the text
+of a default are taken as they are, and `${NAME-default}` or `${NAME:=default}` is an error. The
+variables are those the job takes to the server: the ones its [toolchain](toolchains.md) sends
+and the names in `SLOT_ENV` ([environment](reference/environment.md)). So the tree synced is the
+one the job reads there; run `SLOT_ENV=SPECS_DIR slot task check`, or the entry and the job on
+the server both get the default. An unset `${NAME}` without a default is a missing tree (below) that names the variable.
+
+In same-path mode the client syncs each declared tree to its own
 path on the server before the job, the same way as the job's tree: files git does not ignore,
 without its `target/`, within the same stall and time bounds, and its git directory beside it so
 that `git` reads work there. The job's record names them (`extra_trees`) and `slot status` shows
@@ -630,8 +646,9 @@ them under the job as `trees: …`.
   synced.
 - A declared tree that does not exist, or is no directory, ends a remote job:
   ``slot: remote build on <host> did not start (declared tree /srv/u/specs does not exist
-  (.slot.toml `trees`)); the job did not run``, exit 3. A local job runs, and carries that line
-  as its reason, so no node takes it.
+  (.slot.toml `trees`)); the job did not run``, exit 3. An entry with a variable is named beside
+  its path (``declared tree /srv/u/specs (`${SPECS_DIR:-../../specs}`) does not exist``). A local
+  job runs, and carries that line as its reason, so no node takes it.
 - Without `SLOT_REMOTE_SAME_PATH=1` a tree is mirrored under `<ws-root>/<id>`, where a relative
   path to a sibling leads nowhere: a job whose `.slot.toml` declares trees does not start there
   (exit 3) and says so.

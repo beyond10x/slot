@@ -20,6 +20,16 @@
   `apply --drain` (the mark `docker-restart`), else a `pending:` line. `off` or absent leaves the
   file and the store alone; `node.conf.example` has `on`. Images of the old store are not
   visible after the switch (`contrib/node/README.md`).
+- A `.slot.toml` `trees` entry follows the variable a gate reads its sibling from:
+  `trees = ["${SPECS_DIR:-../../specs}"]`. An entry may use `${NAME}`, `${NAME:-default}` (the
+  default when unset or empty) and a leading `~/` (the client's home); nothing else is expanded,
+  and `$NAME` without braces stays as it is. The variables are those the job takes to the node
+  (its toolchain's and `SLOT_ENV`'s), so the tree synced is the one the job reads there. An
+  unset `${NAME}` without a default is a missing tree that names the variable, and a missing
+  tree's line names its entry beside the path. Before, a managed worktree elsewhere on disk that
+  set `SPECS_DIR` to the checkout still declared `../../specs`, and the remote job ended with
+  exit 3.
+
 - The host configuration file is the one registry of build nodes. A `[remote.<name>]` entry
   takes `repositories = ["<name>", …]` (repository names as `slot status` prints them) and the
   file takes `default_node = "<name>"`. `slot nodes route [<dir>]` prints the node a job in
