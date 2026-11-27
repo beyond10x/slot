@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
-  "asOf": "2026-11-26",
-  "source": "CHANGELOG.md 0.1.0 to 0.40.0 and docs/design.md sections 10 to 26",
+  "asOf": "2026-11-27",
+  "source": "CHANGELOG.md 0.1.0 to 0.41.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -366,6 +366,20 @@
       "status": "shipped",
       "detail": "Every release has musl archives for x86_64 and aarch64 beside the gnu ones; they load no library and run on an older glibc or on Alpine (0.40.0).",
       "href": "/docs/getting-started#which-archive-a-host-takes"
+    },
+    {
+      "area": "Remote",
+      "label": "One registry of build nodes",
+      "status": "shipped",
+      "detail": "cluster.toml lists every build node and the repositories each takes; slot nodes route names a job's node, status, the web view and slot usage show every node's jobs, and a node added to or removed from the file is picked up without a restart (0.41.0).",
+      "href": "/docs/remote-builds#one-registry-of-build-nodes"
+    },
+    {
+      "area": "Remote",
+      "label": "Sibling trees go with a job",
+      "status": "shipped",
+      "detail": "A repository's .slot.toml trees lists the sibling checkouts its gate reads; a remote job syncs each to the node under the deny rules of its own tree (0.41.0).",
+      "href": "/docs/remote-builds#sibling-trees"
     }
   ]
 }
