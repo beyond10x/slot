@@ -444,6 +444,7 @@ mod tests {
             from_node: false,
             sync_ms: None,
             sync_bytes: None,
+            extra_trees: Vec::new(),
             back_ms: None,
             compile_ms: None,
             test_ms: None,

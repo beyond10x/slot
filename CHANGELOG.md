@@ -27,6 +27,22 @@
   handed to a node counts once, by this host's record: the node's row of it (same node, command
   and directory, started there while it ran here) is left out. Before, `slot usage` read only
   this host's log, and no job a node ran for a caller that named it was counted.
+- A remote job takes the sibling trees its repository's `.slot.toml` declares:
+  `trees = ["../../specs", "../driver"]`, paths relative to the repository's root or absolute.
+  In same-path mode the client syncs each to its own path on the node before the job, with its
+  git directory, under the bounds of the job's own tree, so a gate that reads a sibling checkout
+  or builds `--manifest-path ../driver/Cargo.toml` runs on a node instead of with `--here`. Each
+  declared tree passes the checks of the job's tree (same-path root, one work tree, the
+  never-sync list for it, its git directory and its lock files' git dependencies) and the
+  `origin:` patterns against its own remotes; a refused one keeps the job here with the rule and
+  `(declared tree <path>)` as its reason, and nothing is synced. A declared tree that does not
+  exist ends a remote job with exit 3 and its path; without same-path mode a job that declares
+  trees does not start (exit 3). The node gets each tree as it is here: a `git fetch` there
+  fails. The job's record names the trees (`extra_trees`) and `slot status` shows them as
+  `trees: …`. A same-path sync of a tree beside the job's own now takes a lock per path, as a
+  git directory's did, so two jobs that share a sibling do not rsync into it at once.
+
+>>>>>>> 6b30b427f2111fbcc0dc9acea627ae21910c54db
 - Node provisioning: the config key `CLANG_VERSION` (a major such as `22`) makes the `clang` on
   a job's PATH that packaged major instead of the distribution's default (clang 15 on Amazon
   Linux 2023, whose JSON syntax tree a consumer could not read). `provision.sh` installs the

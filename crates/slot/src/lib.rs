@@ -16,6 +16,7 @@ pub mod cli;
 pub mod client;
 pub mod cpu_limit;
 pub mod evict;
+pub mod extra_trees;
 pub mod gate;
 pub mod git_deps;
 pub mod hook;

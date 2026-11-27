@@ -615,6 +615,10 @@ fn line(j: &Job, now: i64) -> String {
         s.push_str("\n  local: ");
         s.push_str(&j.local_reason);
     }
+    if !j.extra_trees.is_empty() {
+        s.push_str("\n       trees: ");
+        s.push_str(&j.extra_trees.join(", "));
+    }
     if !j.wait_reason.is_empty() {
         s.push_str("\n       waiting: ");
         s.push_str(&j.wait_reason);
@@ -857,6 +861,7 @@ mod tests {
             from_node: false,
             sync_ms: None,
             sync_bytes: None,
+            extra_trees: Vec::new(),
             back_ms: None,
             compile_ms: None,
             test_ms: None,
@@ -1525,6 +1530,27 @@ mod tests {
         v.as_object_mut().unwrap().remove("local_reason");
         let j: Job = serde_json::from_value(v).unwrap();
         assert_eq!(j.local_reason, "");
+    }
+
+    #[test]
+    fn a_remote_job_names_the_sibling_trees_it_took() {
+        let mut j = job(8, JobState::Running, 1);
+        j.extra_trees = vec!["/w/specs".into(), "/w/driver".into()];
+        let out = line(&j, 40_000);
+        assert_eq!(
+            out.lines().nth(1),
+            Some("       trees: /w/specs, /w/driver"),
+            "{out}"
+        );
+        assert_eq!(
+            line(&job(9, JobState::Running, 1), 40_000).lines().count(),
+            1
+        );
+        // A record without the field reads as none.
+        let mut v = serde_json::to_value(&j).unwrap();
+        v.as_object_mut().unwrap().remove("extra_trees");
+        let back: Job = serde_json::from_value(v).unwrap();
+        assert_eq!(back.extra_trees, Vec::<String>::new());
     }
 
     #[test]

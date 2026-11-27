@@ -86,6 +86,11 @@ pub struct Request {
     /// A remote request: bytes that sync sent; the record's `sync_bytes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_bytes: Option<u64>,
+    /// A remote request: the sibling trees the client synced beside the
+    /// job's own (`crate::extra_trees`); the record's `extra_trees`. A
+    /// daemon that predates it ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_trees: Vec<String>,
     /// Adds what the client measured after the job ended to the record of
     /// an ended remote job, in place of running `argv`. A daemon that
     /// predates it answers "empty command".
