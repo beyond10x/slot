@@ -717,3 +717,222 @@ fn the_static_check_passes_only_a_binary_that_loads_no_library() {
     let out = check(&dir.path().join("missing"));
     assert!(!out.status.success(), "a missing file is refused");
 }
+
+/// The parent of the home directories. The tests build every path under it from this, so
+/// this public source names no home path itself.
+const HOMES: &str = "/home";
+
+/// The release build step's lines that set `RUSTFLAGS`: from `export RUSTFLAGS=` to the
+/// line before the cargo build.
+fn release_rustflags_lines() -> Vec<String> {
+    let steps = package_steps();
+    let build = &steps[place(
+        &steps,
+        r#"cargo build --locked --release --bin slot --target "$TARGET""#,
+    )];
+    let lines: Vec<String> = build
+        .lines
+        .iter()
+        .map(|l| l.trim().to_string())
+        .skip_while(|l| !l.starts_with("export RUSTFLAGS="))
+        .take_while(|l| !l.starts_with("cargo build "))
+        .collect();
+    assert!(
+        !lines.is_empty(),
+        "release.yml, job package: the build step sets `export RUSTFLAGS=` before `cargo build`"
+    );
+    lines
+}
+
+/// What the release build step sets `RUSTFLAGS` to, for one `HOME` and `CARGO_HOME`, run in
+/// `dir`.
+fn release_rustflags(dir: &Path, home: &str, cargo_home: Option<&str>) -> String {
+    let mut script = release_rustflags_lines().join("\n");
+    script.push_str("\nprintf '%s' \"$RUSTFLAGS\"\n");
+    let mut cmd = Command::new("bash");
+    cmd.arg("-euc")
+        .arg(&script)
+        .current_dir(dir)
+        .env("HOME", home)
+        .env("PWD", dir)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_HOME");
+    if let Some(c) = cargo_home {
+        cmd.env("CARGO_HOME", c);
+    }
+    let out = cmd.output().expect("run bash");
+    assert!(
+        out.status.success(),
+        "the RUSTFLAGS lines of release.yml fail: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("RUSTFLAGS is UTF-8")
+}
+
+/// A release binary names no path of the build machine's home: the build remaps the home,
+/// a cargo home outside it and the checkout to paths outside `/home`, and the checkout's
+/// remap comes last, so rustc (which applies the last matching remap) names a source file
+/// of the workspace `/src/…` even when the checkout lies under the home.
+#[test]
+fn the_release_build_remaps_the_home_and_the_checkout() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checkout = dir.path().canonicalize().expect("canonical tempdir");
+    let pwd = checkout.to_str().expect("UTF-8 tempdir");
+    let runner = format!("{HOMES}/runner");
+    let runner_cargo = format!("{runner}/.cargo");
+    let remaps = |flags: &str| -> Vec<(String, String)> {
+        flags
+            .split_whitespace()
+            .map(|f| {
+                let pair = f
+                    .strip_prefix("--remap-path-prefix=")
+                    .unwrap_or_else(|| panic!("RUSTFLAGS holds only remaps: `{f}`"));
+                let (from, to) = pair
+                    .rsplit_once('=')
+                    .unwrap_or_else(|| panic!("a remap is FROM=TO: `{f}`"));
+                (from.to_string(), to.to_string())
+            })
+            .collect()
+    };
+
+    for (cargo_home, extra) in [
+        (None, None),
+        (Some(runner_cargo.as_str()), None),
+        (Some("/opt/cargo"), Some("/opt/cargo")),
+    ] {
+        let flags = release_rustflags(&checkout, &runner, cargo_home);
+        let pairs = remaps(&flags);
+        let from: Vec<&str> = pairs.iter().map(|(f, _)| f.as_str()).collect();
+        assert!(
+            from.contains(&runner.as_str()),
+            "the runner's home is remapped (CARGO_HOME {cargo_home:?}): {flags}"
+        );
+        assert_eq!(
+            from.last(),
+            Some(&pwd),
+            "the checkout's remap comes last (CARGO_HOME {cargo_home:?}): {flags}"
+        );
+        assert_eq!(
+            extra.is_some_and(|e| from.contains(&e)),
+            extra.is_some(),
+            "a CARGO_HOME outside the home is remapped too, one inside is not again: {flags}"
+        );
+        for (_, to) in &pairs {
+            assert!(
+                !to.starts_with(HOMES) && to.starts_with('/'),
+                "a remap names an absolute path outside /home: `{to}` in {flags}"
+            );
+        }
+    }
+}
+
+/// After the build, every release binary is checked for a path of a home directory, on
+/// every target, before it is packaged.
+#[test]
+fn the_release_checks_every_binary_for_a_home_path_before_packaging() {
+    let steps = package_steps();
+    let build = place(
+        &steps,
+        r#"cargo build --locked --release --bin slot --target "$TARGET""#,
+    );
+    let check = place(&steps, r#"sh .github/scripts/no-home-path.sh "$bin""#);
+    let package = place(&steps, r#"package="slot-$GITHUB_REF_NAME-$TARGET""#);
+    assert!(
+        build <= check && check < package,
+        "release.yml, job package: the home-path check runs after the build, before packaging"
+    );
+    assert_eq!(
+        steps[check].value("if"),
+        None,
+        "release.yml, job package: every target is checked for a home path"
+    );
+    let lines: Vec<&str> = steps[check].lines.iter().map(|l| l.trim()).collect();
+    let at = lines
+        .iter()
+        .position(|l| l.starts_with("sh .github/scripts/no-home-path.sh"))
+        .expect("the check line");
+    if build == check {
+        let built = lines
+            .iter()
+            .position(|l| l.starts_with("cargo build "))
+            .expect("the build line");
+        assert!(built < at, "the check runs after `cargo build` in its step");
+    }
+    assert!(
+        lines[at].contains("::error::"),
+        "release.yml: a binary that names a home path fails the step with `::error::`: `{}`",
+        lines[at]
+    );
+}
+
+/// `no-home-path.sh` refuses a file that holds `/home/` or the caller's `$HOME/`, and
+/// passes one that holds neither.
+#[test]
+fn the_home_path_check_refuses_a_file_that_names_a_home_directory() {
+    let script = root().join(".github/scripts/no-home-path.sh");
+    let runner = format!("{HOMES}/runner");
+    let someone = format!("{HOMES}/someone/x");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let check = |name: &str, bytes: &[u8], home: &str| {
+        let file = dir.path().join(name);
+        std::fs::write(&file, bytes).expect("write a case");
+        Command::new("sh")
+            .arg(&script)
+            .arg(&file)
+            .env("HOME", home)
+            .output()
+            .expect("run sh")
+    };
+
+    let out = check(
+        "under-home",
+        format!("\x7fELF\0src/lib.rs\0{someone}\0tail").as_bytes(),
+        "/var/lib/builder",
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a file with {someone} is refused: {stderr}"
+    );
+    assert!(
+        stderr.contains(&someone),
+        "the refusal shows the path it found: {stderr}"
+    );
+
+    let out = check(
+        "callers-home",
+        b"\x7fELF\0/var/lib/builder/.cargo/registry/src/a.rs\0",
+        "/var/lib/builder",
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a file with a path under $HOME outside /home is refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let clean =
+        b"\x7fELF\0/src/crates/slot/src/lib.rs\0/cargo-home/.cargo/registry/a.rs\0/homeless\0";
+    for home in [runner.as_str(), "/", ""] {
+        let out = check("clean", clean, home);
+        assert!(
+            out.status.success(),
+            "a file with no home path passes with HOME={home:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("no home path: "),
+            "a passing file is named on standard output"
+        );
+    }
+
+    let out = check("ignored", b"", &runner);
+    assert!(out.status.success(), "an empty file passes");
+    let out = Command::new("sh")
+        .arg(&script)
+        .arg(dir.path().join("missing"))
+        .output()
+        .expect("run sh");
+    assert!(!out.status.success(), "a missing file is refused");
+}

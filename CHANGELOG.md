@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.41.1 — 2026-11-27
+
 - Remote mode: a job a wrapper sends with `SLOT_SPILLED=1` beside `SLOT_HOST` waits for a node
   whose daemon drains or restarts, as any other remote job does since 0.39.0, and runs there once
   it answers. Before, the client took `SLOT_SPILLED` alone for a job this machine's daemon had
@@ -12,6 +14,13 @@
   prints `slot shell: daemon not answering: connect <socket>: <error>` and exits with 75 (it was
   `slot shell: connect …` and 3); any other failure keeps exit 3. A started job is still never
   sent again, and exit 3 still means the job did not run.
+- Release binaries carry no path of the build machine's home: the release build remaps the
+  home, a cargo home outside it and the checkout with `--remap-path-prefix` (to `/cargo-home`,
+  `/cargo` and `/src`), and `.github/scripts/no-home-path.sh` fails the build of a target whose
+  binary still names `/home/` or the runner's home. The 0.41.0 binaries named the runner's home
+  in the source paths of their panic locations, and the release asset scan of Gates refused
+  them; now it passes.
+
 ## 0.41.0 — 2026-11-27
 
 - Node provisioning: `EXTRA_TOOLS=jq` installs jq 1.8.2, pinned in `provision.sh` by version
