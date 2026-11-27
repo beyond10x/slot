@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-27",
-  "source": "CHANGELOG.md 0.1.0 to 0.41.1 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.42.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -380,6 +380,13 @@
       "status": "shipped",
       "detail": "A repository's .slot.toml trees lists the sibling checkouts its gate reads; a remote job syncs each to the node under the deny rules of its own tree (0.41.0).",
       "href": "/docs/remote-builds#sibling-trees"
+    },
+    {
+      "area": "Remote",
+      "label": "Only allowed remotes reach a node",
+      "status": "shipped",
+      "detail": "With remote-allow-origins a tree reaches a node only when one of its remotes is on the list; slot nodes forget removes a tree that reached a node (0.42.0).",
+      "href": "/docs/remote-builds#only-trees-with-an-allowed-remote"
     }
   ]
 }

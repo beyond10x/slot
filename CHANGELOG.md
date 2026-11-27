@@ -16,6 +16,8 @@
   keeps its own return sync and the client does none, unless `SLOT_RETURN_SYNC=1`; remove the
   wrapper's return sync and set `SLOT_RETURN_SYNC=1`. A node whose `slot shell` refuses the
   listing costs one line, `slot: return sync skipped: …`, and the job's exit code stays.
+## 0.42.0 — 2026-11-27
+
 - Remote mode: an allow list of remotes, `$XDG_CONFIG_HOME/slot/remote-allow-origins` (or the
   absolute path `allow_origins_file` of the host configuration names). When the file exists, a
   tree reaches a node only when one of its own git remotes matches a line (a shell pattern, as an
