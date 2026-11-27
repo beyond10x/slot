@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- A `.slot.toml` `trees` entry follows the variable a gate reads its sibling from:
+  `trees = ["${SPECS_DIR:-../../specs}"]`. An entry may use `${NAME}`, `${NAME:-default}` (the
+  default when unset or empty) and a leading `~/` (the client's home); nothing else is expanded,
+  and `$NAME` without braces stays as it is. The variables are those the job takes to the node
+  (its toolchain's and `SLOT_ENV`'s), so the tree synced is the one the job reads there. An
+  unset `${NAME}` without a default is a missing tree that names the variable, and a missing
+  tree's line names its entry beside the path. Before, a managed worktree elsewhere on disk that
+  set `SPECS_DIR` to the checkout still declared `../../specs`, and the remote job ended with
+  exit 3.
+
 - A remote job takes the sibling trees its repository's `.slot.toml` declares:
   `trees = ["../../specs", "../driver"]`, paths relative to the repository's root or absolute.
   In same-path mode the client syncs each to its own path on the node before the job, with its

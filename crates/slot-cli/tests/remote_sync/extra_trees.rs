@@ -146,6 +146,50 @@ fn a_declared_tree_on_the_never_sync_list_keeps_the_job_here() {
     assert_eq!(ssh_calls(&root), "", "ssh ran");
 }
 
+/// An entry `${SPECS_DIR:-../nope}` follows the variable to a checkout
+/// outside its default path when the job's environment carries it to the
+/// node (`SLOT_ENV`), and the job there reads it. Set here but not sent, the
+/// variable is not the job's: the default applies and the remote job ends
+/// with exit 3, naming the entry.
+#[test]
+fn a_declared_tree_follows_the_variable_the_job_carries() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let (a, _) = with_sibling(&root);
+    let specs = root.join("checkouts/specs");
+    std::fs::create_dir_all(specs.parent().unwrap()).unwrap();
+    std::fs::rename(root.join("specs"), &specs).unwrap();
+    std::fs::write(
+        a.join(".slot.toml"),
+        "trees = [\"${SPECS_DIR:-../nope}\"]\n",
+    )
+    .unwrap();
+    let (d, ssh) = node(&root);
+    let dir = specs.display().to_string();
+    let argv = ["sh", "-c", "cat \"$SPECS_DIR/spec.txt\""];
+    let env = [
+        ("SLOT_REMOTE_SAME_PATH", "1"),
+        ("SPECS_DIR", dir.as_str()),
+        ("SLOT_ENV", "SPECS_DIR"),
+    ];
+    let out = remote_call_env(&d, &ssh, &a, &argv, &env);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "the spec\n", "{err}");
+    let log = ssh_calls(&root);
+    assert_eq!(synced_to(&log, &specs).len(), 1, "not synced: {log}");
+
+    let out = remote_call_env(&d, &ssh, &a, &["echo", "ran"], &env[..2]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{err}");
+    assert!(
+        err.contains(&root.join("nope").display().to_string()),
+        "{err}"
+    );
+    assert!(err.contains("${SPECS_DIR:-../nope}"), "{err}");
+}
+
 /// A declared tree that does not exist ends the remote job with exit 3 and
 /// its path; nothing is synced and the job does not run.
 #[test]
