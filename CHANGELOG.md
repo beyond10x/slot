@@ -2,18 +2,6 @@
 
 ## Unreleased
 
-## 0.41.1 — 2026-11-27
-
-- Remote mode: a job a wrapper sends with `SLOT_SPILLED=1` beside `SLOT_HOST` waits for a node
-  whose daemon drains or restarts, as any other remote job does since 0.39.0, and runs there once
-  it answers. Before, the client took `SLOT_SPILLED` alone for a job this machine's daemon had
-  handed to the node and skipped the wait: while the node's daemon drained, every such job ended
-  at once with `slot: connection to daemon lost` and exit 3. Only the daemon's own client
-  (`SLOT_SPILLED` with `SLOT_PHASES_FILE`) still ends at once, and its daemon queues the job here
-  again. The proxy step of the node's `slot shell` whose daemon socket is missing or refuses now
-  prints `slot shell: daemon not answering: connect <socket>: <error>` and exits with 75 (it was
-  `slot shell: connect …` and 3); any other failure keeps exit 3. A started job is still never
-  sent again, and exit 3 still means the job did not run.
 - Remote mode: an allow list of remotes, `$XDG_CONFIG_HOME/slot/remote-allow-origins` (or the
   absolute path `allow_origins_file` of the host configuration names). When the file exists, a
   tree reaches a node only when one of its own git remotes matches a line (a shell pattern, as an
@@ -31,6 +19,19 @@
   below the root (exit 126), and a tree a queued or running job of the node's daemon uses, or any
   tree while that daemon does not answer on `--http` (exit 1). Before, removing a tree from a node
   needed a login of its own, since `slot shell` admitted no delete.
+
+## 0.41.1 — 2026-11-27
+
+- Remote mode: a job a wrapper sends with `SLOT_SPILLED=1` beside `SLOT_HOST` waits for a node
+  whose daemon drains or restarts, as any other remote job does since 0.39.0, and runs there once
+  it answers. Before, the client took `SLOT_SPILLED` alone for a job this machine's daemon had
+  handed to the node and skipped the wait: while the node's daemon drained, every such job ended
+  at once with `slot: connection to daemon lost` and exit 3. Only the daemon's own client
+  (`SLOT_SPILLED` with `SLOT_PHASES_FILE`) still ends at once, and its daemon queues the job here
+  again. The proxy step of the node's `slot shell` whose daemon socket is missing or refuses now
+  prints `slot shell: daemon not answering: connect <socket>: <error>` and exits with 75 (it was
+  `slot shell: connect …` and 3); any other failure keeps exit 3. A started job is still never
+  sent again, and exit 3 still means the job did not run.
 - Release binaries carry no path of the build machine's home: the release build remaps the
   home, a cargo home outside it and the checkout with `--remap-path-prefix` (to `/cargo-home`,
   `/cargo` and `/src`), and `.github/scripts/no-home-path.sh` fails the build of a target whose
