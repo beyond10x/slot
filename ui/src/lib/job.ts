@@ -22,7 +22,7 @@ export const idLabel = (j: Named): string => String(jobId(j));
 /** The build node a job runs or ran on; empty for this host (`local`, or no node in an older job log line). */
 export const remoteNode = (j: { node?: string }): string => (j.node && j.node !== 'local' ? j.node : '');
 
-/** The job named in words: `7089 on build-1d` for a node's own job, the id alone for this daemon's. */
+/** The job named in words: `7089 on build-1` for a node's own job, the id alone for this daemon's. */
 export const jobName = (j: Named): string => (j.from_node ? `${jobId(j)} on ${j.node}` : String(jobId(j)));
 
 export const isActive = (s: JobState): boolean => s === 'queued' || s === 'running';

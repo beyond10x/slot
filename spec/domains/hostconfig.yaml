@@ -131,7 +131,13 @@ types:
       - {name: price_per_hour_cents, type: Optional<Integer>}
       - {name: location, type: Optional<String>}
       - {name: machine_type, type: Optional<String>}
+      - {name: spill, type: Optional<Boolean>, summary: "`false`: the endpoint never hands a queued local job to the node; `true` when absent."}
+      - {name: repositories, type: List<String>, summary: "Repositories whose jobs go to the node (`slot node route`), by the name `slot status` shows: the directory of the checkout's common git directory, without `.git`. A repository is listed under one node at most."}
 
+  # The file is the one registry of the endpoint's build nodes: the daemon, `slot status`, the web
+  # view and `slot usage` read their nodes from it, and a host wrapper sources
+  # `slot node route` instead of naming a node of its own. The daemon reads it again at the next
+  # poll after it changed: a node new in the file joins, a node taken out of it is dropped.
   - name: slot.hostconfig.ClusterFile
     kind: struct
     naming:
@@ -141,6 +147,9 @@ types:
       - {name: provider, type: "Map<slot.hostconfig.ProviderName, slot.hostconfig.ProviderTable>"}
       - {name: template, type: "Map<slot.hostconfig.TemplateName, slot.hostconfig.TemplateTable>"}
       - {name: remote, type: "Map<slot.cluster.NodeName, slot.hostconfig.RemoteNodeTable>"}
+      - {name: spill_after_s, type: Optional<Integer>, summary: "Seconds a job waits in the local queue before it may go to a node; 0 when absent."}
+      - {name: never_sync_file, type: Optional<String>, summary: "The never-sync list of remote mode, an absolute path."}
+      - {name: default_node, type: Optional<slot.cluster.NodeName>, summary: "The node of every repository no `[remote.<name>]` entry lists."}
 
 entities:
   - name: slot.hostconfig.HostConfig

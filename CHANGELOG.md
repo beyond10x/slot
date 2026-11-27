@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- The host configuration file is the one registry of build nodes. A `[remote.<name>]` entry
+  takes `repositories = ["<name>", …]` (repository names as `slot status` prints them) and the
+  file takes `default_node = "<name>"`. `slot node route [<dir>]` prints the node a job in
+  `<dir>` goes to as shell assignments (`SLOT_HOST`, `SLOT_SSH`, `SLOT_REMOTE`, `SLOT_NODE_END`
+  for the deadline in Unix seconds, and an `export` line): the entry that lists the repository,
+  else `default_node`; it reads only the file and exits 3 with one line naming it when no node
+  matches. A wrapper in front of `slot` sources it instead of a node list of its own: before, a
+  wrapper's own repository-to-node map sent a whole day of jobs to a node the file did not name,
+  and the daemon never polled it, so its jobs showed nowhere. `slot node list` prints each node
+  with its state, spill, default and repositories; `slot node add <name> --ssh <cmd> …` and
+  `slot node remove <name>` write and take out an entry and keep the rest of the file (comments
+  and order) as it was. The daemon now adds a node new in the file and drops a node taken out of
+  it at the next poll after the change, without a restart, also when the file named no node at
+  the start; before, only a known node's terms were read again. A repository listed under two
+  nodes is refused. `slot node` with any other arguments still runs Node.js as a build
+  (`slot node --test`, `slot node build.js`).
 - Node provisioning: the config key `CLANG_VERSION` (a major such as `22`) makes the `clang` on
   a job's PATH that packaged major instead of the distribution's default (clang 15 on Amazon
   Linux 2023, whose JSON syntax tree a consumer could not read). `provision.sh` installs the

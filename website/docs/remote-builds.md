@@ -641,12 +641,74 @@ server reports them), and `GET /api/state` and the job events carry its jobs wit
 node's job is named by its node and its id together, since the id may repeat a local one
 (`slot status` prints `#7089 on build-1d`). The output of a node's job is
 `GET /api/jobs/<id>/output?node=<name>`: the daemon reads it from the node with `<ssh> <slot_path>
-output <id> <from>` every 2 s until the job ended. The deadline and price are read again when the file
-changes, at the next poll. A node is
+output <id> <from>` every 2 s until the job ended. The file is read again when it changes, at the
+next poll, without a restart: a node's new terms (ssh line, deadline, price, `spill`) are taken
+in, a node new in the file joins, and a node taken out of it is dropped with its jobs. A node is
 `Joining` until its first answer; a poll that fails or takes longer than 4 s is missed, and after
 three misses in a row the node is `Gone` (reason `Lost`) with its last row; the next answer makes
 it `Ready` again. A key of the file that the shape does not declare is refused, and the daemon
 then polls no node.
+
+## One registry of build nodes
+
+The host configuration file is the one list of a host's build nodes: the daemon, `slot
+status`, the web view and `slot usage` read their nodes from it. A node a job can run on is a
+`[remote.<name>]` entry; a node that is not one is polled by nobody, and its jobs appear
+nowhere. Two keys route a repository's jobs:
+
+```toml
+default_node = "build-1"
+
+[remote.build-1]
+ssh = "ssh -o BatchMode=yes build-1.example"
+repositories = ["repo-a"]
+
+[remote.build-2]
+ssh = "ssh -o BatchMode=yes build-2.example"
+spill = false
+repositories = ["repo-b", "repo-c"]
+```
+
+- `repositories`: the repositories whose jobs go to the node, by the name `slot status`
+  prints (the directory of the checkout's common git directory, without `.git`; a linked
+  worktree has its main repository's name). A repository is listed under one node at most.
+- `default_node`: the node of every repository no entry lists.
+
+`slot node` reads and writes the file (`--cluster-file`, else `SLOT_CLUSTER_FILE`, else
+`$XDG_CONFIG_HOME/slot/cluster.toml`, the file the daemon reads):
+
+- `slot node list` prints each node: name, state as the daemon sees it (`-` when the daemon
+  does not answer), spill, whether it is the default, and its repositories.
+- `slot node route [<dir>]` prints the node a job in `<dir>` (default: the working directory)
+  goes to, as shell assignments. It reads only the file: no daemon and no network.
+
+  ```sh
+  $ slot node route ~/src/repo-b
+  SLOT_HOST=build-2.example
+  SLOT_SSH='ssh -o BatchMode=yes'
+  SLOT_REMOTE=slot
+  SLOT_NODE_END=1893499200
+  export SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END
+  ```
+
+  `SLOT_HOST` is the last word of the entry's `ssh` line, `SLOT_SSH` the words before it,
+  `SLOT_REMOTE` its `slot_path` (`slot` when absent) and `SLOT_NODE_END` its `deadline` in Unix
+  seconds (left out, with its name in the `export` line, without a deadline). With no entry
+  for the repository and no `default_node`, or a `default_node` without an entry, it prints
+  one line naming the file and exits 3. A wrapper in front of `slot` sources it and names no
+  node of its own: `eval "$(slot node route)" && exec slot "$@"`.
+- `slot node add <name> --ssh <cmd> [--slot-path <path>] [--deadline <rfc3339>]
+  [--price-per-hour-cents <n>] [--spill true|false] [--repository <name>]… [--default]` writes
+  the entry at the end of the file. A repository listed under another node moves to the new
+  one; `--default` makes it `default_node`.
+- `slot node remove <name>` takes the entry out; its repositories then go to `default_node`,
+  and removing the default node clears `default_node`.
+
+`add` and `remove` keep the rest of the file as it was, comments and order included, and refuse
+a file that does not parse. The daemon takes the change in at its next poll, within 5 s.
+
+`slot node` with any other arguments is a build command that runs Node.js, as before:
+`slot node --test`, `slot node build.js`. `slot run node list` runs a script named `list`.
 
 ## Hand queued jobs to a node
 
