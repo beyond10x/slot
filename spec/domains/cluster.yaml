@@ -26,7 +26,7 @@ types:
     kind: newtype
     of: String
     naming:
-      summary: The name of a node, unique in its cluster (for example the name given to `slot node add`).
+      summary: The name of a node, unique in its cluster (for example the name given to `slot nodes add`).
 
   - name: slot.cluster.WorktreeId
     kind: newtype
@@ -1141,7 +1141,7 @@ views:
       - {name: topology, type: slot.cluster.Topology}
       - {name: state, type: slot.cluster.Cluster.State}
 
-  # The node list of `slot node list`, `GET /api/nodes` and the cluster view of the web UI: each
+  # The node list of `slot nodes list`, `GET /api/nodes` and the cluster view of the web UI: each
   # node's specs, lifetime and load.
   - name: slot.cluster.NodeList
     source: slot.cluster.Node

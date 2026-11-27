@@ -5,7 +5,7 @@ import { usageRows, usageUrl } from '../lib/usage.ts';
 import type { UsageLine, UsageWindow } from '../lib/usage.ts';
 
 const windows: [UsageWindow, string][] = [['today', 'today'], ['24h', 'last 24 h'], ['7d', 'last 7 days']];
-const groups: [By, string][] = [['project', 'project'], ['repo', 'repository'], ['session', 'session']];
+const groups: [By, string][] = [['project', 'project'], ['repo', 'repository'], ['session', 'session'], ['node', 'node']];
 
 const win = ref<UsageWindow>('today');
 const by = ref<By>('project');

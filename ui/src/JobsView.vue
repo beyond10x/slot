@@ -99,7 +99,7 @@ watchEffect(() => {
         </div>
       </section>
       <section>
-        <SectionHead text="Share of the pool on this host: slot time (run time × slots held) and CPU per project, repository or session; jobs of build nodes are not counted" />
+        <SectionHead text="Share of the pool on this host and its build nodes: slot time (run time × slots held) and CPU per project, repository, session or node" />
         <UsageTable />
       </section>
     </div>

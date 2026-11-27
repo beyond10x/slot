@@ -723,10 +723,17 @@ team-b                         189    26.2  23.6%   21.1  23.6%      60s
   jobs hold slots while they wait on something else (a cluster, a network call).
 - **wait p50** is the median queue wait of the group's jobs.
 
-`--by project` (default), `--by repo` or `--by session`; `--since 90m`, `24h` (default) or `7d`;
+`--by project` (default), `--by repo`, `--by session` or `--by node` (the build node a job ran
+on: `local` for this host's own); `--since 90m`, `24h` (default) or `7d`;
 `--json` for the whole answer. A job logged before jobs carried a project is grouped by the
 project of its directory now, or by its repository name when the directory is gone. The same data
 is `GET /api/usage?from=<ms>&to=<ms>&by=project` and the **Share of the pool** table in the web UI.
+
+The jobs the build nodes of the host configuration file ran count too: when a poll shows that a
+node's job ended, the daemon appends it once to `<state-dir>/node-jobs.jsonl`, with `node` set
+to the node's name and the id the node gave it ([Remote builds](remote-builds.md#one-registry-of-build-nodes)).
+A job this daemon handed to a node counts once, by this host's record of it: the node's row of
+it (same node, command and directory, started there while it ran here) is left out.
 
 ## Web UI
 

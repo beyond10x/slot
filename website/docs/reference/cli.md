@@ -288,7 +288,7 @@ slot sessions [OPTIONS]
 
 ### `slot usage`
 
-Show how the pool was shared: slot time, CPU time and queue wait per project, repository or session, from the job log
+Show how the pool was shared: slot time, CPU time and queue wait per project, repository, session or build node, from the job log and the log of the jobs the build nodes ran
 
 ```text
 slot usage [OPTIONS]
@@ -296,7 +296,7 @@ slot usage [OPTIONS]
 
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 - `--since`: Window ending now: a number followed by m, h or d (default `24h`)
-- `--by`: Group by project (the namespace of the repository's remote), repo or session (default `project`)
+- `--by`: Group by project (the namespace of the repository's remote), repo, session or node (the build node a job ran on: `local` for this host's own) (default `project`)
 - `--top`: Rows to print (default `15`)
 - `--json`: Print JSON instead of text (default `false`)
 
@@ -322,6 +322,67 @@ slot cache refused [OPTIONS]
 - `--since`: Window ending now: a number followed by m, h or d (default `24h`)
 - `--by`: Group by repo or project (the namespace of the repository's remote) (default `repo`)
 - `--json`: Print JSON instead of text (default `false`)
+
+### `slot nodes`
+
+The build nodes of this host: the `[remote.<name>]` entries of the host configuration file, and which node a repository's jobs go to
+
+```text
+slot nodes [OPTIONS] <COMMAND>
+```
+
+#### `slot nodes list`
+
+List the registered nodes: name, state as the daemon sees it (when it answers), whether it takes queued local jobs (spill), whether it is the default node, and the repositories routed to it
+
+```text
+slot nodes list [OPTIONS]
+```
+
+- `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
+- `--http`: The daemon's web address, for each node's state (env `SLOT_HTTP`, default `127.0.0.1:7411`)
+
+#### `slot nodes route`
+
+Print the node a job in DIR goes to, as shell assignments of `SLOT_NODE` (the entry's name), `SLOT_HOST`, `SLOT_SSH`, `SLOT_REMOTE` and `SLOT_NODE_END` (the node's deadline, Unix seconds; empty without one, so an earlier value is cleared) and an `export` line of all five, for `eval "$(slot nodes route)"`.
+
+The node is the entry whose `repositories` lists the repository of DIR (the name `slot status` shows), else `default_node`. Reads only the file: no daemon and no network. Exits 3 with one line naming the file when no entry matches or the matched name has no entry.
+
+```text
+slot nodes route [OPTIONS] [DIR]
+```
+
+- `<DIR>`: A directory of the checkout; the working directory when absent
+- `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
+
+#### `slot nodes add`
+
+Register a node: write its `[remote.<name>]` entry. A repository listed under another node moves to this one. The rest of the file stays as it was; a file that does not parse is refused
+
+```text
+slot nodes add [OPTIONS] --ssh <SSH> <NAME>
+```
+
+- `<NAME>`: Node name: lower-case letters, digits and `-`
+- `--ssh`: The ssh command line that reaches the node, host last (`ssh -o BatchMode=yes build-1`)
+- `--slot-path`: Path of `slot` on the node; `slot` when absent
+- `--deadline`: End of the node's lease, RFC 3339
+- `--price-per-hour-cents`: Price per hour, cents
+- `--spill`: `false`: the daemon never hands a queued local job to the node
+- `--repository`: A repository whose jobs go to the node; repeat for more
+- `--default`: Make the node `default_node`: the node of every repository no entry lists (default `false`)
+- `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
+
+#### `slot nodes remove`
+
+Deregister a node: take its entry out. Its repositories then go to `default_node`; removing the default node clears `default_node`
+
+```text
+slot nodes remove [OPTIONS] <NAME>
+```
+
+- `<NAME>`: Node name
+- `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
 
 ### `slot hook`
 

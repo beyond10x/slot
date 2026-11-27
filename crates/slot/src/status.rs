@@ -75,6 +75,12 @@ pub fn fetch_usage(addr: &str, since_ms: i64, by: crate::usage::By) -> Result<cr
     serde_json::from_str(&body).with_context(|| format!("{addr}: /api/usage"))
 }
 
+/// Reads `GET /api/nodes` from the daemon's web address.
+pub fn fetch_nodes(addr: &str) -> Result<Vec<crate::types::Node>> {
+    let body = request(addr, "GET", "/api/nodes", None)?;
+    serde_json::from_str(&body).with_context(|| format!("{addr}: /api/nodes"))
+}
+
 /// Reads `GET /api/state` from the daemon's web address.
 pub fn fetch(addr: &str) -> Result<State> {
     let body = request(addr, "GET", "/api/state", None)?;

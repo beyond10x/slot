@@ -1,4 +1,4 @@
-// Usage of the pool per project, repository or session (`GET api/usage`).
+// Usage of the pool per project, repository, session or build node (`GET api/usage`).
 import type { By, Usage, UsageRow } from '../generated/types.ts';
 
 export type UsageWindow = 'today' | '24h' | '7d';
