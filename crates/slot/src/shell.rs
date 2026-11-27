@@ -51,6 +51,25 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// The start of the one line the proxy step prints when the daemon's
+/// socket is missing or refuses: the daemon drains, restarts or died.
+pub const DAEMON_AWAY: &str = "slot shell: daemon not answering:";
+
+/// The exit status of the proxy step in that case (sysexits'
+/// `EX_TEMPFAIL`): not 255, which ssh keeps for a failure of its own, and
+/// not 3, which the step keeps for any other failure.
+pub const DAEMON_AWAY_EXIT: i32 = 75;
+
+/// Whether a failed connect to the daemon's socket means the daemon is
+/// away for a while: the socket is missing (a draining daemon removed it,
+/// a restarting one has not bound it yet) or nothing listens on it.
+pub fn daemon_away(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+    )
+}
+
 /// What `slot shell` runs for one connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {

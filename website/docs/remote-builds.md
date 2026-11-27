@@ -285,7 +285,14 @@ sent to the server after a sync that did not finish.
 A server can be reached while its daemon takes no job: a daemon that was told to stop removes its
 socket and lets its running and queued jobs end before it starts again, and a daemon that
 reloads drops a job it had queued. `ssh <host> slot proxy` then ends before the job's process
-started. The job waits: `slot` prints once
+started. When the daemon's socket is missing or refuses the connection, the server's
+[`slot shell`](#restrict-the-key-to-slot) says so in one line and exits with 75:
+
+```text
+slot shell: daemon not answering: connect /run/user/1000/slot.sock: No such file or directory (os error 2)
+```
+
+The job waits: `slot` prints once
 
 ```text
 slot: waiting for buildbox: its daemon does not answer (a restart or a drain); the job is sent again when it answers
@@ -310,7 +317,13 @@ Four calls are never sent again:
 - one the workstation's daemon handed to the node ([Hand queued jobs to a
   node](#hand-queued-jobs-to-a-node)): it does not wait, whatever `SLOT_NODE_WAIT` says. Its
   client ends with exit 3 at once and the daemon queues the job on the workstation again. A wait
-  would count as the job's run time there.
+  would count as the job's run time there. That client is known by `SLOT_SPILLED` together with
+  `SLOT_PHASES_FILE`, which the daemon sets both. `SLOT_SPILLED` alone, set by a wrapper beside
+  `SLOT_HOST` so that a failed start never runs on the workstation, waits like any other call:
+  up to 0.40.0 its job ended with exit 3 at once while the node's daemon drained.
+
+While a job waits, `slot status` on the workstation does not list it: the waiting call is not a
+job of the workstation's daemon, and the node's daemon does not answer.
 
 ## Target directories on the server
 

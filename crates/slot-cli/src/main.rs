@@ -219,10 +219,24 @@ fn shell(args: &slot::cli::ShellArgs) -> i32 {
             eprintln!("slot shell: rsync: {e}");
             127
         }
-        Ok(Plan::Proxy) => proxy(&args.socket).unwrap_or_else(|e| {
-            eprintln!("slot shell: {e:#}");
-            3
-        }),
+        Ok(Plan::Proxy) => match UnixStream::connect(&args.socket) {
+            Err(e) if slot::shell::daemon_away(&e) => {
+                eprintln!(
+                    "{} connect {}: {e}",
+                    slot::shell::DAEMON_AWAY,
+                    args.socket.display()
+                );
+                slot::shell::DAEMON_AWAY_EXIT
+            }
+            Err(e) => {
+                eprintln!("slot shell: connect {}: {e}", args.socket.display());
+                3
+            }
+            Ok(c) => bridge(&c).unwrap_or_else(|e| {
+                eprintln!("slot shell: {e:#}");
+                3
+            }),
+        },
         Ok(Plan::Cancel(id)) => {
             let mut s = Settings::from_env();
             s.host = None;
@@ -319,6 +333,11 @@ fn tokio_runtime() -> Result<slot::server::Runtime> {
 
 fn proxy(socket: &std::path::Path) -> Result<i32> {
     let c = UnixStream::connect(socket).with_context(|| format!("connect {}", socket.display()))?;
+    bridge(&c)
+}
+
+/// Copies stdin to the daemon's connection `c` and its answer to stdout.
+fn bridge(c: &UnixStream) -> Result<i32> {
     let mut up = c.try_clone()?;
     let down = c.try_clone()?;
     let t = std::thread::spawn(move || {
