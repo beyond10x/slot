@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.41.0 — 2026-11-27
+
 - Node provisioning: `EXTRA_TOOLS=jq` installs jq 1.8.2, pinned in `provision.sh` by version
   and the SHA-256 of `jq-linux-amd64` from the release's `sha256sum.txt`, into
   `/usr/local/jq-1.8.2` with a link in `/usr/local/bin`, ahead of the packaged `/usr/bin/jq` on
