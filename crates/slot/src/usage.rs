@@ -1,5 +1,6 @@
 //! Usage of the pool over a window: slot time, CPU time and queue wait per
-//! project, repository or session, from the job log.
+//! project, repository, session or node, from the job log and the log of
+//! the jobs the build nodes ran (`node-jobs.jsonl`).
 //!
 //! Slot time is run time × slots held, clipped to the window: the share of
 //! the pool a group took. CPU time is the job's measured CPU seconds; it can
@@ -25,6 +26,8 @@ pub enum By {
     Repo,
     /// The agent session that submitted the job.
     Session,
+    /// The node the job ran on: `local` for this host's own jobs.
+    Node,
 }
 
 impl std::str::FromStr for By {
@@ -34,7 +37,10 @@ impl std::str::FromStr for By {
             "project" => Ok(Self::Project),
             "repo" => Ok(Self::Repo),
             "session" => Ok(Self::Session),
-            _ => Err(format!("unknown grouping {s:?}: project, repo or session")),
+            "node" => Ok(Self::Node),
+            _ => Err(format!(
+                "unknown grouping {s:?}: project, repo, session or node"
+            )),
         }
     }
 }
@@ -108,6 +114,8 @@ pub fn key_of(job: &Job, by: By, project: &mut dyn FnMut(&str) -> String) -> Str
 fn group(job: &Job, by: By, project: &mut dyn FnMut(&str) -> String) -> (String, bool) {
     match by {
         By::Session => return (job.session.clone(), false),
+        By::Node if job.node.is_empty() => return (crate::types::LOCAL_NODE.to_string(), false),
+        By::Node => return (job.node.clone(), false),
         By::Project if !job.project.is_empty() => return (job.project.clone(), false),
         By::Project => {
             let resolved = project(&job.cwd);
@@ -160,6 +168,53 @@ fn charged_s(job: &Job, end: i64, run_ms: i64) -> f64 {
     }
 }
 
+/// The jobs of a job log: lines that do not parse are skipped.
+fn jobs(log: impl BufRead) -> impl Iterator<Item = Job> {
+    log.lines()
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Job>(&line).ok())
+}
+
+/// How far apart the clocks of this host and a node, and the start of a
+/// handed job here and on its node, may be for the two to be one job.
+const HANDED_SKEW_MS: i64 = 60_000;
+
+/// Whether node job `n` is the node's row of a job this host handed to it
+/// (`h`, this host's record): same node, command and directory (a handed
+/// job runs at the same path), started on the node while it ran here.
+fn same_handed(h: &Job, n: &Job) -> bool {
+    !h.from_node
+        && h.node == n.node
+        && h.argv == n.argv
+        && h.cwd == n.cwd
+        && n.started_ms >= h.started_ms - HANDED_SKEW_MS
+        && (h.ended_ms <= 0 || n.started_ms <= h.ended_ms + HANDED_SKEW_MS)
+}
+
+/// Aggregates this host's job log `log` and the node log `nodes`
+/// (`node-jobs.jsonl`: jobs the nodes ran, as they reported them) over
+/// `[from_ms, to_ms)`, as [`aggregate`] does. A node job that is the node's
+/// row of a job this host handed to it is left out: this host's record
+/// counts it.
+pub fn aggregate_logs(
+    log: impl BufRead,
+    nodes: impl BufRead,
+    from_ms: i64,
+    to_ms: i64,
+    by: By,
+    project: &mut dyn FnMut(&str) -> String,
+) -> Usage {
+    let host: Vec<Job> = jobs(log).collect();
+    let handed: Vec<&Job> = host
+        .iter()
+        .filter(|j| !j.from_node && !j.node.is_empty() && j.node != crate::types::LOCAL_NODE)
+        .collect();
+    let node_jobs: Vec<Job> = jobs(nodes)
+        .filter(|n| !handed.iter().any(|h| same_handed(h, n)))
+        .collect();
+    aggregate_jobs(host.iter().chain(&node_jobs), from_ms, to_ms, by, project)
+}
+
 /// Aggregates the job log `log` over `[from_ms, to_ms)`. Lines that do not
 /// parse and jobs that never started are skipped; a running job (no end) is
 /// counted up to `to_ms`.
@@ -170,13 +225,20 @@ pub fn aggregate(
     by: By,
     project: &mut dyn FnMut(&str) -> String,
 ) -> Usage {
+    let all: Vec<Job> = jobs(log).collect();
+    aggregate_jobs(all.iter(), from_ms, to_ms, by, project)
+}
+
+fn aggregate_jobs<'a>(
+    all: impl Iterator<Item = &'a Job>,
+    from_ms: i64,
+    to_ms: i64,
+    by: By,
+    project: &mut dyn FnMut(&str) -> String,
+) -> Usage {
     let mut groups: HashMap<String, Acc> = HashMap::new();
     let mut total = Acc::default();
-    for line in log.lines() {
-        let Ok(line) = line else { break };
-        let Ok(job) = serde_json::from_str::<Job>(&line) else {
-            continue;
-        };
+    for job in all {
         if job.started_ms <= 0 {
             continue;
         }
@@ -190,8 +252,8 @@ pub fn aggregate(
         if run_ms == 0 && !started_in {
             continue;
         }
-        let slot_s = charged_s(&job, end, run_ms);
-        let (key, unverified) = group(&job, by, project);
+        let slot_s = charged_s(job, end, run_ms);
+        let (key, unverified) = group(job, by, project);
         for acc in [groups.entry(key.clone()).or_default(), &mut total] {
             acc.row.slot_s += slot_s;
             if started_in {
@@ -287,6 +349,7 @@ pub fn render(u: &Usage, top: usize) -> String {
         By::Project => "project",
         By::Repo => "repo",
         By::Session => "session",
+        By::Node => "node",
     };
     let t = &u.total;
     let mut out = format!(
@@ -493,6 +556,64 @@ mod tests {
             &mut none,
         );
         assert!((u.rows[0].slot_s - 20.0).abs() < 1e-9, "{u:?}");
+    }
+
+    /// `--by node` reads this host's log and the node log: a job a node ran
+    /// for a caller that named it counts once, under the node; a job this
+    /// daemon handed to a node counts once, by this host's record of it.
+    #[test]
+    fn by_node_counts_node_jobs_and_a_handed_job_once() {
+        let on = |line: String, node: &str, from_node: bool| {
+            let mut j: Job = serde_json::from_str(&line).unwrap();
+            j.node = node.into();
+            j.from_node = from_node;
+            serde_json::to_string(&j).unwrap()
+        };
+        let host = [
+            on(
+                job(1, "api", "p", "s", 2, (0, 1_000, 11_000), 1.0),
+                "local",
+                false,
+            ),
+            job(2, "api", "p", "s", 1, (0, 1_000, 2_000), 0.0),
+            on(
+                job(3, "web", "p", "s", 4, (0, 2_000, 30_000), 0.5),
+                "build-2",
+                false,
+            ),
+        ]
+        .join("\n");
+        let nodes = [
+            on(
+                job(40, "cli", "p", "s", 8, (0, 5_000, 15_000), 70.0),
+                "build-1",
+                true,
+            ),
+            // The node's own row of job 3: started on the node after the sync.
+            on(
+                job(41, "web", "p", "s", 4, (0, 3_000, 29_000), 90.0),
+                "build-2",
+                true,
+            ),
+        ]
+        .join("\n");
+        let u = aggregate_logs(
+            host.as_bytes(),
+            nodes.as_bytes(),
+            0,
+            60_000,
+            By::Node,
+            &mut none,
+        );
+        let got: Vec<(&str, u32)> = u.rows.iter().map(|r| (r.key.as_str(), r.jobs)).collect();
+        assert_eq!(got, [("build-2", 1), ("build-1", 1), ("local", 2)], "{u:?}");
+        assert_eq!(u.total.jobs, 4);
+        let text = render(&u, 10);
+        assert!(text.contains("by node"), "{text}");
+        assert_eq!("node".parse::<By>(), Ok(By::Node));
+        // Without the node log, only this host's jobs.
+        let alone = aggregate_logs(host.as_bytes(), &b""[..], 0, 60_000, By::Node, &mut none);
+        assert_eq!(alone.total.jobs, 3);
     }
 
     #[test]

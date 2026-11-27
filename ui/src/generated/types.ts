@@ -637,7 +637,7 @@ tokens_unaccounted_since_ms: number,
  */
 shares?: SharesView, };
 
-export type By = "project" | "repo" | "session";
+export type By = "project" | "repo" | "session" | "node";
 
 export type UsageRow = { 
 /**

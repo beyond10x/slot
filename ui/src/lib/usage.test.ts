@@ -82,3 +82,10 @@ test('an older daemon cannot verify repository or project keys', () => {
   assert.deepEqual(usageRows({ ...u, by: 'repo' }, 5).map((r) => r.label), ['Unverified · old-path', 'Repository unknown']);
   assert.equal(usageRows(u, 5)[0].label, 'Unverified · old-path');
 });
+
+test('grouped by node, each row is named by its node', () => {
+  const u = usage([row('local', 0.6), row('build-1', 0.4)]);
+  const rows = usageRows({ ...u, by: 'node' }, 5);
+  assert.deepEqual(rows.map((r) => r.label), ['local', 'build-1']);
+  assert.ok(usageUrl('24h', 'node', new Date(0)).endsWith('&by=node'));
+});

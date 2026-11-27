@@ -454,7 +454,7 @@ fn node(cmd: &slot::cli::NodeCmd) -> Result<i32> {
 fn cache_refused(args: &slot::cli::CacheRefusedArgs) -> Result<i32> {
     let since = slot::usage::parse_since(&args.since).map_err(anyhow::Error::msg)?;
     let by: slot::usage::By = args.by.parse().map_err(anyhow::Error::msg)?;
-    if by == slot::usage::By::Session {
+    if matches!(by, slot::usage::By::Session | slot::usage::By::Node) {
         anyhow::bail!("--by {}: repo or project", args.by);
     }
     let now = std::time::SystemTime::now()

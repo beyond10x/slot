@@ -18,6 +18,14 @@
   the start; before, only a known node's terms were read again. A repository listed under two
   nodes is refused. `slot node` with any other arguments still runs Node.js as a build
   (`slot node --test`, `slot node build.js`).
+- `slot usage` counts the jobs the build nodes ran. When a poll shows a node's job ended for the
+  first time, the daemon appends it to `node-jobs.jsonl` beside `jobs.jsonl`, once, also across
+  a restart, with `node` set to the node's name and the id the node gave it. `slot usage` and
+  `GET /api/usage` read both files and group by node with `--by node` (`by=node`; `local` for
+  this host's own jobs); the web view's usage table has a **node** grouping. A job this daemon
+  handed to a node counts once, by this host's record: the node's row of it (same node, command
+  and directory, started there while it ran here) is left out. Before, `slot usage` read only
+  this host's log, and no job a node ran for a caller that named it was counted.
 - Node provisioning: the config key `CLANG_VERSION` (a major such as `22`) makes the `clang` on
   a job's PATH that packaged major instead of the distribution's default (clang 15 on Amazon
   Linux 2023, whose JSON syntax tree a consumer could not read). `provision.sh` installs the

@@ -144,7 +144,8 @@ pub enum Cmd {
     /// List agent sessions that build outside the pool, with their commands.
     Sessions(SessionsArgs),
     /// Show how the pool was shared: slot time, CPU time and queue wait per
-    /// project, repository or session, from the job log.
+    /// project, repository, session or build node, from the job log and the
+    /// log of the jobs the build nodes ran.
     Usage(UsageArgs),
     /// The compile cache: what the sccache servers did, from the counters
     /// the daemon records once a minute.
@@ -784,7 +785,8 @@ pub struct UsageArgs {
     /// Window ending now: a number followed by m, h or d.
     #[arg(long, default_value = "24h")]
     pub since: String,
-    /// Group by project (the namespace of the repository's remote), repo or session.
+    /// Group by project (the namespace of the repository's remote), repo, session or
+    /// node (the build node a job ran on: `local` for this host's own).
     #[arg(long, default_value = "project")]
     pub by: String,
     /// Rows to print.

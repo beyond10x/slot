@@ -288,7 +288,7 @@ slot sessions [OPTIONS]
 
 ### `slot usage`
 
-Show how the pool was shared: slot time, CPU time and queue wait per project, repository or session, from the job log
+Show how the pool was shared: slot time, CPU time and queue wait per project, repository, session or build node, from the job log and the log of the jobs the build nodes ran
 
 ```text
 slot usage [OPTIONS]
@@ -296,7 +296,7 @@ slot usage [OPTIONS]
 
 - `--http`: The daemon's web address (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 - `--since`: Window ending now: a number followed by m, h or d (default `24h`)
-- `--by`: Group by project (the namespace of the repository's remote), repo or session (default `project`)
+- `--by`: Group by project (the namespace of the repository's remote), repo, session or node (the build node a job ran on: `local` for this host's own) (default `project`)
 - `--top`: Rows to print (default `15`)
 - `--json`: Print JSON instead of text (default `false`)
 

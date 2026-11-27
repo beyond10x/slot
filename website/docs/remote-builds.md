@@ -707,6 +707,12 @@ repositories = ["repo-b", "repo-c"]
 `add` and `remove` keep the rest of the file as it was, comments and order included, and refuse
 a file that does not parse. The daemon takes the change in at its next poll, within 5 s.
 
+When a poll shows a node's job ended for the first time, the daemon appends it to
+`node-jobs.jsonl` in its state directory, beside `jobs.jsonl`, once (also across a restart),
+with `node` set to the node's name and the id the node gave it. `slot usage` and
+`GET /api/usage` read both files; `slot usage --by node` and the **node** grouping of the web
+view's usage table show each node's share, `local` for this host's own jobs.
+
 `slot node` with any other arguments is a build command that runs Node.js, as before:
 `slot node --test`, `slot node build.js`. `slot run node list` runs a script named `list`.
 
