@@ -92,8 +92,16 @@ jobs:
         run: |
           set -euo pipefail
           (cd ui && pnpm install --frozen-lockfile && pnpm build)
+          # The binary names no path of the runner's home (source paths of panic locations).
+          # rustc applies the last remap that matches, so the checkout's comes last.
+          export RUSTFLAGS="--remap-path-prefix=$HOME=/cargo-home --remap-path-prefix=$PWD=/src"
+          case ${CARGO_HOME:-} in
+            "" | "$HOME" | "$HOME"/*) ;;
+            *) RUSTFLAGS="--remap-path-prefix=$CARGO_HOME=/cargo $RUSTFLAGS" ;;
+          esac
           cargo build --locked --release --bin slot --target "$TARGET"
           bin="target/$TARGET/release/slot"
+          sh .github/scripts/no-home-path.sh "$bin" || { echo "::error::the $TARGET binary names a path of the build machine's home" >&2; exit 1; }
           printed=$("$bin" --version | awk '{print $NF}')
           if [ "$printed" != "$GITHUB_REF_NAME" ]; then
             echo "::error::the built binary reports $printed, but the release tag is $GITHUB_REF_NAME" >&2

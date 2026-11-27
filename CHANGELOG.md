@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.41.1 — 2026-11-27
+
 - Remote mode: a job a wrapper sends with `SLOT_SPILLED=1` beside `SLOT_HOST` waits for a node
   whose daemon drains or restarts, as any other remote job does since 0.39.0, and runs there once
   it answers. Before, the client took `SLOT_SPILLED` alone for a job this machine's daemon had
@@ -29,6 +31,12 @@
   below the root (exit 126), and a tree a queued or running job of the node's daemon uses, or any
   tree while that daemon does not answer on `--http` (exit 1). Before, removing a tree from a node
   needed a login of its own, since `slot shell` admitted no delete.
+- Release binaries carry no path of the build machine's home: the release build remaps the
+  home, a cargo home outside it and the checkout with `--remap-path-prefix` (to `/cargo-home`,
+  `/cargo` and `/src`), and `.github/scripts/no-home-path.sh` fails the build of a target whose
+  binary still names `/home/` or the runner's home. The 0.41.0 binaries named the runner's home
+  in the source paths of their panic locations, and the release asset scan of Gates refused
+  them; now it passes.
 
 ## 0.41.0 — 2026-11-27
 
