@@ -42,7 +42,6 @@
   `trees: …`. A same-path sync of a tree beside the job's own now takes a lock per path, as a
   git directory's did, so two jobs that share a sibling do not rsync into it at once.
 
->>>>>>> 6b30b427f2111fbcc0dc9acea627ae21910c54db
 - Node provisioning: the config key `CLANG_VERSION` (a major such as `22`) makes the `clang` on
   a job's PATH that packaged major instead of the distribution's default (clang 15 on Amazon
   Linux 2023, whose JSON syntax tree a consumer could not read). `provision.sh` installs the
