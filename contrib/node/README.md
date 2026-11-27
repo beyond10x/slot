@@ -43,7 +43,7 @@ missing required key, an unknown key or a malformed value stops both scripts wit
 | `STORE`, `DISK_MODEL`, `NODE_NAME` | provision | instance store mount (default `/srv/slot`), its disk model, the name in messages and in the node's instance profile (`slot-node-<NODE_NAME>`) |
 | `INSTANCE_PROFILE` | provision | the instance profile jobs may have docker under, when it is not `slot-node-<NODE_NAME>`; `none` for a node outside EC2 |
 | `EXTRA_PACKAGES` | provision | dnf packages besides the base set: JDKs, maven, llvm, database and browser libraries and the like (`node.conf.example`) |
-| `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
+| `EXTRA_TOOLS` | provision | tools installed from pins only on a node that names them: `erlang`, `elixir` (only beside `erlang`), `gleam`, `odin`, `firefox` (with the packages it loads), `jq` (a pinned release ahead of the package); a name with no pin is refused; empty: none of them is installed or checked. `erlang` is built from source and needs `ncurses-devel` in `EXTRA_PACKAGES` |
 | `CLANG_VERSION` | provision | the major release of the `clang` on a job's PATH (`20`): the packages `clang<major>` and `clang<major>-libs`, and `clang`, `clang++` and `clang-cpp` in `/usr/local/bin` as links to `/usr/bin/clang-<major>` and the like; digits only; empty: the distribution's `clang` is left alone. Taken out of the config, the links stay as they are |
 | `RUST_TOOLCHAINS` | provision | exact rustup toolchain names, space separated (`1.99.1 stable`); empty: rust is left alone |
 | `RUST_COMPONENTS`, `RUST_TARGETS` | provision | components (default `clippy rustfmt`) and targets (default none): a bare name goes to every toolchain, `<toolchain>:<name>,<name>` to that toolchain only (`1.97:x86_64-unknown-linux-musl`, `1.99.1:rust-src`); a prefix must be a word of `RUST_TOOLCHAINS`; `apply` removes from a toolchain every non-host target, and every clippy, rustfmt, rust-src or llvm-tools component, that no entry names for it (with `RUST_TARGETS` empty, all non-host targets); `check` names each one and compares the lists with the workstation's per toolchain |
@@ -646,8 +646,9 @@ carries the workstation's `~/.sdkman/candidates/java/current` should not name it
 a node's `java` is `/usr/bin/java`, and its JDKs are under `/usr/lib/jvm`.
 
 `EXTRA_TOOLS` names tools that only some consumers need, space separated: `erlang`, `elixir`,
-`gleam`, `odin` and `firefox` (a consumer's tasks call `gleam`, `elixir`, `mix`, `erl` and `odin`
-by name, its browser tests start `firefox`, and Amazon Linux 2023 packages none of them). A node whose config has no `EXTRA_TOOLS` gets none of
+`gleam`, `odin`, `firefox` and `jq` (a consumer's tasks call `gleam`, `elixir`, `mix`, `erl` and
+`odin` by name, its browser tests start `firefox`, and Amazon Linux 2023 packages none of them; a
+consumer pins `jq` at a release the package is not). A node whose config has no `EXTRA_TOOLS` gets none of
 them and nothing of them is checked; a tool taken out of the key stays as it is. A name without a
 pin is refused, and so is `elixir` without `erlang`. Each tool is pinned in `provision.sh` by
 version and SHA-256, the download is checked before anything of it is unpacked, and each binary
@@ -691,11 +692,17 @@ is a link in `/usr/local/bin`, which is on the PATH of every job:
   (`dev-2026-09-nightly:<commit>`).
 - `firefox`: Firefox 159.0 in `/usr/local/firefox-159.0`, with the packages it loads, and the
   start that `check --canary` makes (above).
+- `jq`: jq 1.8.2, the static binary `jq-linux-amd64` of its release (the SHA-256 is its line in
+  the release's `sha256sum.txt`), in `/usr/local/jq-1.8.2/jq`. The download is the binary
+  itself (strip field `bin`: no tar, no unzip). Its check reads `jq-1.8.2` from `jq --version`.
+  A job's PATH has `/usr/local/bin` ahead of `/usr/bin`, so the pin wins over the package `jq`
+  of `EXTRA_PACKAGES`. A consumer that pins another release needs that release's line here: the
+  pin is in `provision.sh`, the config names the tool.
 
-`elixir`, `gleam`, `odin` and `firefox` are archive pins like go and node
+`elixir`, `gleam`, `odin`, `firefox` and `jq` are archive pins like go and node
 (`EXTRA_ARCHIVE_PINS`, drift lines `archive:elixir`, `archive:gleam`, `archive:odin`,
-`archive:firefox`). `toolchains.sh` prints one `tool` line for each of the other four on a
-machine that has it (firefox's line is above): `tool erlang 29.0.6` (the OTP release, which `erl`
+`archive:firefox`, `archive:jq`). `toolchains.sh` prints one `tool` line for each of the other
+four on a machine that has it (firefox's line is above; jq has none): `tool erlang 29.0.6` (the OTP release, which `erl`
 reads from its `releases/<major>/OTP_VERSION`), `tool elixir 1.20.4-otp-29`, `tool gleam 1.19.0`
 and `tool odin dev-2026-09-nightly:a2fb372`, so `push.sh check` names a release that differs
 between the workstation and the node, and a tool only one side has. Like the `helm` line, these

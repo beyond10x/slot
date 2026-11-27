@@ -172,8 +172,9 @@ chrome-headless-shell 151.0.7922.34 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ad
 aep 0.80.0 9277f3977397b540767497917bdb9666719249364901c466939343d1787d502a https://github.com/beyond10x/aep/releases/download/0.80.0/aep-0.80.0-x86_64-unknown-linux-gnu.tar.gz 1 .cache/sdc/aep/0.80.0/x86_64-unknown-linux-gnu aep
 groovy 2.4.10 1c4dff3b6edf9a8ced3bca658ee1857cee90cfed1ee3474a2790045033c317a9 https://repo1.maven.org/maven2/org/codehaus/groovy/groovy-binary/2.4.10/groovy-binary-2.4.10.zip zip1 .sdkman/candidates/groovy/2.4.10 embeddable/groovy-all-2.4.10.jar'
 # Tools a node gets only when its config names them in EXTRA_TOOLS (erlang, elixir, gleam, odin,
-# firefox): a consumer's tasks call gleam, elixir, mix, erl and odin by name, its browser tests
-# start firefox by name, and Amazon Linux 2023 packages none of them. A node without the key gets
+# firefox, jq): a consumer's tasks call gleam, elixir, mix, erl and odin by name, its browser tests
+# start firefox by name, and Amazon Linux 2023 packages none of them; a consumer pins jq at a
+# release the distribution's package is not. A node without the key gets
 # none. The names are erlang and the first field of each line of EXTRA_ARCHIVE_PINS.
 # erlang: Erlang/OTP, built on the node from the source tarball of its release (p_erlang): name,
 # version, SHA-256, URL. The SHA-256 is the one the release publishes in its SHA256.txt. Upstream
@@ -201,11 +202,17 @@ ERLANG_BUILD_PACKAGES='gcc gcc-c++ make perl openssl-devel ncurses-devel'
 # workstation runs; its SHA-256 is the line of that file in the release's SHA256SUMS on
 # archive.mozilla.org. It is a .tar.xz (xz unpacks it); the libraries its binaries need beside
 # their own come from gtk3, alsa-lib, libX11-xcb and dbus-libs (and what gtk3 requires); the
-# newest symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19.
+# newest symbol versions they ask for are GLIBC_2.17 and GLIBCXX_3.4.19. jq is the static binary
+# of its release for linux-amd64 (the release a consumer pins in its tools, and the one its CI
+# installs): a single file, so its strip field is `bin`, and the downloaded file is the binary. Its
+# SHA-256 is the line of jq-linux-amd64 in the release's sha256sum.txt, equal to the digest of the
+# file as downloaded. `jq --version` prints `jq-1.8.2`. The distribution's jq (EXTRA_PACKAGES)
+# stays in /usr/bin, after /usr/local/bin on a job's PATH.
 EXTRA_ARCHIVE_PINS='elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 https://github.com/elixir-lang/elixir/releases/download/v1.20.4/elixir-otp-29.zip zip bin/elixir bin/elixirc bin/mix bin/iex
 gleam 1.19.0 6083148cb404460810afe35e7878527e58fd2512dd79a76b47d59723815753be https://github.com/gleam-lang/gleam/releases/download/v1.19.0/gleam-v1.19.0-x86_64-unknown-linux-musl.tar.gz 0 gleam
 odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 https://github.com/odin-lang/Odin/releases/download/dev-2026-09/odin-linux-amd64-dev-2026-09.tar.gz 1 odin
-firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox'
+firefox 159.0 54536fcd120af484d4c56272a5a1cf4af57b9c713d1a3b1e775da192dd541fcd https://archive.mozilla.org/pub/firefox/releases/159.0/linux-x86_64/en-US/firefox-159.0.tar.xz 1 firefox
+jq 1.8.2 b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64 bin jq'
 # The packages a tool of EXTRA_TOOLS loads at run time, one line per tool: the name, then the
 # packages, installed with the base packages on a node that names the tool.
 EXTRA_TOOL_PACKAGES='firefox gtk3 alsa-lib libX11-xcb dbus-libs xz'
@@ -2310,6 +2317,9 @@ archive_fetch() {
       elif [ "$fn" = elixir ]; then
         # Like elixir: the line of the Erlang system first, then its own with the OTP major.
         printf '#!/bin/sh\necho "Erlang/OTP %s [stand-in]"\necho\necho "Elixir %s (compiled with Erlang/OTP %s)"\n' "${fv##*-otp-}" "${fv%%-otp-*}" "${fv##*-otp-}" >"$fd/tree/$b"
+      elif [ "$fn" = jq ]; then
+        # Like jq: `--version` prints `jq-<version>`.
+        printf '#!/bin/sh\necho jq-%s\n' "$fv" >"$fd/tree/$b"
       elif [ "$fn" = odin ]; then
         # Like odin: no `--version`; `version` prints the release with the commit of the build.
         printf '#!/bin/sh\n[ "$*" = version ] || exit 1\necho "odin version %s-nightly:0000000"\n' "$fv" >"$fd/tree/$b"
@@ -2334,6 +2344,11 @@ archive_fetch() {
     # A zip with its files at the top (elixir). unzip restores no owner and no set-id bit.
     (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && unzip -q archive -d tree) || return 0
+  elif [ "$fk" = bin ]; then
+    # The download is the binary itself (jq): it becomes the one binary of the tree.
+    xb=$(archive_src "$1")
+    (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
+      mkdir -p "tree/$(dirname "$xb")" && mv archive "tree/$xb") || return 0
   else
     (cd "$fd" && curl -fsSLo archive "$fu" && echo "$fs  archive" | sha256sum -c --strict - >/dev/null &&
       mkdir tree && tar -xf archive -C tree --strip-components="$fk" --no-same-owner) || return 0
@@ -2356,6 +2371,7 @@ archive_version() {
     go) as_user "$2" version ;;
     elixir) as_user "$2" --version | sed -n 's/^Elixir \([^ ]*\) (compiled with Erlang\/OTP \([0-9]*\)).*/\1-otp-\2/p' ;;
     odin) as_user "$2" version | head -n 1 | awk '{ print $NF }' | sed 's/-nightly:.*//' ;;
+    jq) as_user "$2" --version | sed 's/^jq-//' ;;
     helm) as_user "$2" version --template '{{.Version}}' ;;
     yarn) as_user env YARN_IGNORE_PATH=1 "$2" --version ;;
     firefox) as_user env MOZ_HEADLESS=1 "$2" --version ;;

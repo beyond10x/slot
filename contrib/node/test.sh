@@ -1086,7 +1086,7 @@ xconf() {
   [ -z "${2:-}" ] || echo "EXTRA_PACKAGES=$2" >>"$W/node.conf"
 }
 [ "$(sed -n "s/^ERLANG_PIN='\(.*\)'\$/\1/p" "$P")" = "erlang 29.0.6 $otp_sha $otp_url" ] && ok "the erlang pin: OTP 29.0.6, the SHA-256 its release publishes for the source tarball" || bad "erlang pin: $(grep '^ERLANG_PIN' "$P")"
-[ "$(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P" | sed "s/^EXTRA_ARCHIVE_PINS='//; s/'\$//" | grep -v '^firefox ')" = "elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 $elixir_url zip bin/elixir bin/elixirc bin/mix bin/iex
+[ "$(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P" | sed "s/^EXTRA_ARCHIVE_PINS='//; s/'\$//" | grep -v '^firefox \|^jq ')" = "elixir 1.20.4-otp-29 7863c546cda13fecc949e562e326042451dacf8fd8698a36783cb71eeb223b46 $elixir_url zip bin/elixir bin/elixirc bin/mix bin/iex
 gleam 1.19.0 6083148cb404460810afe35e7878527e58fd2512dd79a76b47d59723815753be $gleam_url 0 gleam
 odin dev-2026-09 167c3e1d7056419dad2e04bb3bd98715b7ff286d4c125f3c5a5ee337c6254283 $odin_url 1 odin" ] && ok "the elixir, gleam and odin pins: the release archives with their SHA-256 (elixir the one built for OTP 29, a zip)" || bad "extra archive pins: $(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P")"
 RX=$W/rx
@@ -1094,7 +1094,7 @@ mkdir -p "$RX"
 # The key names tools this script has a pin for; elixir runs on erl.
 xconf 'erlang rebar3'
 run "$RX" check
-[ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'rebar3', which is no tool of provision.sh (erlang elixir gleam odin firefox)" "$W/err" && ok "EXTRA_TOOLS with a name that has no pin is refused" || bad "EXTRA_TOOLS=erlang rebar3: $(cat "$W/out" "$W/err")"
+[ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'rebar3', which is no tool of provision.sh (erlang elixir gleam odin firefox jq)" "$W/err" && ok "EXTRA_TOOLS with a name that has no pin is refused" || bad "EXTRA_TOOLS=erlang rebar3: $(cat "$W/out" "$W/err")"
 sh "$P" bundle "$W/node.conf" check >"$W/out" 2>"$W/err"
 [ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'rebar3'" "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with an unknown EXTRA_TOOLS name: $(head -2 "$W/err")"
 xconf 'elixir gleam'
@@ -4046,7 +4046,7 @@ run "$W/r0" check
 conf
 echo 'EXTRA_TOOLS=firefox chrome' >>"$W/node.conf"
 run "$W/r0" check
-[ $? -eq 2 ] && grep -qx "node config: $W/node.conf: EXTRA_TOOLS names 'chrome', which is no tool of provision.sh (erlang elixir gleam odin firefox)" "$W/err" && ok "EXTRA_TOOLS with a name provision.sh has no pin for is refused, and the names it has are listed, firefox among them" || bad "unknown extra tool: $(cat "$W/out" "$W/err" | tail -3)"
+[ $? -eq 2 ] && grep -qx "node config: $W/node.conf: EXTRA_TOOLS names 'chrome', which is no tool of provision.sh (erlang elixir gleam odin firefox jq)" "$W/err" && ok "EXTRA_TOOLS with a name provision.sh has no pin for is refused, and the names it has are listed, firefox among them" || bad "unknown extra tool: $(cat "$W/out" "$W/err" | tail -3)"
 sh "$P" bundle "$W/node.conf" check >/dev/null 2>"$W/err"
 [ $? -eq 2 ] && grep -q "EXTRA_TOOLS names 'chrome'" "$W/err" && ok "a bundle of such a config is refused too" || bad "bundle with an unknown extra tool: $(cat "$W/err")"
 # One key names every optional tool: a config with the key EXTRA_ARCHIVES is refused.
@@ -4381,6 +4381,56 @@ st=$?
 [ $st -eq 1 ] && grep -q "^failed: docker-store: $DJ is not a JSON object: not changed" "$W/err" && [ "$(cat "$DN$DJ")" = '[1, 2]' ] && ok "a daemon.json that is no JSON object is left alone and reported" || bad "no object: exit $st $(cat "$DN$DJ") $(dslines)"
 grep -qx 'DOCKER_CONTAINERD_STORE=on' "$here/node.conf.example" && ok "example: DOCKER_CONTAINERD_STORE=on" || bad "example: $(grep DOCKER_CONTAINERD "$here/node.conf.example")"
 grep '^| `DOCKER_CONTAINERD_STORE` |' "$here/README.md" | grep -q 'not visible' && ok "README: a DOCKER_CONTAINERD_STORE row that says the old images are not visible after the switch" || bad "README row: $(grep '^| `DOCKER_CONTAINERD_STORE`' "$here/README.md")"
+conf
+
+# 6zc. jq at a pinned release (EXTRA_TOOLS=jq): a consumer pins jq by version and SHA-256 in its
+# tools and reads it by name. The node installs the static binary of that release (a single file,
+# strip field `bin`) into /usr/local/jq-<version> and links it into /usr/local/bin, which the PATH
+# of a job has ahead of /usr/bin, where the distribution's jq lives. The pin is a line of
+# EXTRA_ARCHIVE_PINS; a config without the name installs nothing of it.
+jq_url=https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64
+jq_sha=b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f
+JD=/usr/local/jq-1.8.2
+jqlines() { cat "$W/out" "$W/err" | grep 'jq' | head -6; }
+[ "$(sed -n "/^EXTRA_ARCHIVE_PINS='/,/'\$/p" "$P" | sed "s/^EXTRA_ARCHIVE_PINS='//; s/'\$//" | grep '^jq ')" = "jq 1.8.2 $jq_sha $jq_url bin jq" ] && ok "the jq pin: release 1.8.2, the SHA-256 of jq-linux-amd64 in the release's sha256sum.txt" || bad "jq pin: $(grep '^jq ' "$P")"
+RJ=$W/rjq
+mkdir -p "$RJ"
+conf
+run "$RJ" apply
+run "$RJ" check
+[ $? -eq 0 ] && [ ! -e "$RJ/usr/local/bin/jq" ] && [ ! -e "$RJ$JD" ] && ok "a config without jq in EXTRA_TOOLS installs no jq" || bad "jq without the key: $(jqlines)"
+conf
+echo 'EXTRA_TOOLS=jq' >>"$W/node.conf"
+run "$RJ" check
+[ $? -eq 1 ] && grep -qx "drift: archive:jq: /usr/local/bin/jq is 'missing', want a link to $JD/jq" "$W/out" && grep -qx "drift: archive:jq: $JD/jq says 'missing', want 1.8.2" "$W/out" && ok "EXTRA_TOOLS=jq: check names the missing link and binary" || bad "jq check: $(jqlines)"
+: >"$RJ/.calls"
+run "$RJ" apply
+st=$?
+[ $st -eq 0 ] && grep -qx "changed: archive:jq: jq 1.8.2 installed in $JD, linked in /usr/local/bin" "$W/out" && grep -qx "fetch $jq_url" "$RJ/.calls" && ok "apply fetches the pinned jq and installs it" || bad "jq apply: exit $st $(jqlines)"
+[ "$(readlink "$RJ/usr/local/bin/jq")" = "$JD/jq" ] && [ "$("$RJ$JD/jq" --version)" = jq-1.8.2 ] && ok "/usr/local/bin/jq is a link to the pinned binary, which answers jq-1.8.2" || bad "jq link: '$(readlink "$RJ/usr/local/bin/jq")'"
+jq_path=$(sed -n 's/^Environment=PATH=\([^ ]*\).*/\1/p' "$RJ/etc/systemd/system/slot-node.service")
+case :$jq_path: in
+  *:/usr/local/bin:*/usr/bin:*) ok "a job's PATH has /usr/local/bin ahead of /usr/bin: the pinned jq wins over a packaged one" ;;
+  *) bad "slot-node PATH: $jq_path" ;;
+esac
+run "$RJ" check
+[ $? -eq 0 ] && grep -q '^0 drift$' "$W/out" && ok "EXTRA_TOOLS=jq: 0 drift after one apply" || bad "jq check after apply: $(cat "$W/out")"
+# Through the real download branch: a served file whose SHA-256 is not the pin's is refused and
+# never runs; one with the pin's SHA-256 becomes the binary, without tar or unzip.
+mkdir -p "$W/jqbin"
+printf '#!/bin/sh\necho "$*" >>"%s/jq-curl.log"\nout=\nwhile [ $# -gt 0 ]; do case $1 in -fsSLo) out=$2; shift ;; -*) ;; *) [ -n "$out" ] || out=${1##*/} ;; esac; shift; done\nprintf "#!/bin/sh\\ntouch %s/jq-ran\\necho jq-1.8.2\\n" >"$out"\n' "$W" "$W" >"$W/jqbin/curl"
+printf '#!/bin/sh\necho "$*" >>"%s/jq-tar.log"\nexit 1\n' "$W" >"$W/jqbin/tar"
+chmod 755 "$W/jqbin/curl" "$W/jqbin/tar"
+RK=$W/rjq2
+mkdir -p "$RK"
+rm -f "$W/jq-ran"
+NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_ROOT=$RK PATH=$W/jqbin:$PATH sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -q "^failed: archive:jq: download or checksum of jq 1.8.2" "$W/err" && grep -q -- "-fsSLo archive $jq_url" "$W/jq-curl.log" && [ ! -e "$W/jq-ran" ] && [ ! -e "$RK/usr/local/bin/jq" ] && ok "real download, wrong SHA-256: jq fails, nothing of it runs or is linked" || bad "jq wrong SHA-256: $(jqlines) $(grep jq "$W/jq-curl.log")"
+jq_served=$(printf '#!/bin/sh\ntouch %s/jq-ran\necho jq-1.8.2\n' "$W" | sha256sum | cut -d' ' -f1)
+: >"$W/jq-tar.log"
+NODE_TEST_EXTRA_ARCHIVE_PINS="jq 1.8.2 $jq_served $jq_url bin jq" NODE_TEST=1 NODE_TEST_REAL_FETCH=1 NODE_ROOT=$RK PATH=$W/jqbin:$PATH sh "$P" apply "$W/node.conf" >"$W/out" 2>"$W/err"
+grep -qx "changed: archive:jq: jq 1.8.2 installed in $JD, linked in /usr/local/bin" "$W/out" && [ "$(readlink "$RK/usr/local/bin/jq")" = "$JD/jq" ] && [ -x "$RK$JD/jq" ] && [ ! -s "$W/jq-tar.log" ] && ok "real download, the pin's SHA-256: the file is the binary, executable, linked; no tar runs on it" || bad "jq matching SHA-256: $(jqlines) tar: $(cat "$W/jq-tar.log")"
+grep '^| `EXTRA_TOOLS` |' "$here/README.md" | grep -q '`jq`' && ok "README: EXTRA_TOOLS names jq" || bad "README EXTRA_TOOLS row: $(grep '^| `EXTRA_TOOLS`' "$here/README.md")"
 conf
 
 # 7. Nothing private in the repository's node files: no home of a real user, no cloud ids, no

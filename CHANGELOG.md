@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Node provisioning: `EXTRA_TOOLS=jq` installs jq 1.8.2, pinned in `provision.sh` by version
+  and the SHA-256 of `jq-linux-amd64` from the release's `sha256sum.txt`, into
+  `/usr/local/jq-1.8.2` with a link in `/usr/local/bin`, ahead of the packaged `/usr/bin/jq` on
+  a job's PATH. Before, `EXTRA_TOOLS` took only `erlang`, `elixir`, `gleam`, `odin` and
+  `firefox`, and a node had the distribution's jq at best. A pin line of `EXTRA_ARCHIVE_PINS`
+  may now have the strip field `bin`: the download, once its SHA-256 matches, is the binary.
 - Node provisioning: the config key `DOCKER_CONTAINERD_STORE=on` turns on containerd's image
   store of a node's dockerd, so that `docker buildx build --output type=docker,dest=<file>`
   writes a tar with the default builder (driver `docker`), as on a CI runner; before, buildx
