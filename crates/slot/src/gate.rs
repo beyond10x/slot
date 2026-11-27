@@ -208,6 +208,7 @@ pub fn daemon_request(dir: &Path, id: &str, client: Request, exe: &Path) -> Requ
         // A gated job runs on this machine, never synced.
         sync_ms: None,
         sync_bytes: None,
+        extra_trees: Vec::new(),
         amend: None,
         // The sandboxed client runs the command and waits for it: a hold
         // without a client would keep its slots for nothing.

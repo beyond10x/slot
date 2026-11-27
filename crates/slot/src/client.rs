@@ -295,8 +295,23 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         argv,
     })
     .or_else(|| crate::git_deps::of_job(top.as_deref(), &cwd));
+    // The sibling trees `.slot.toml` declares pass the same rules: one that
+    // is refused keeps the job here; one that is missing ends a remote job
+    // (`remote`), and a local one names it so no node takes it.
+    let declared = match (&never, top.as_deref()) {
+        (None, Some(top)) => crate::extra_trees::check(top, same_path_root().as_deref()),
+        _ => Ok(Vec::new()),
+    };
+    let never = never.or_else(|| match &declared {
+        Err(crate::extra_trees::Problem::Refused(why)) => Some(why.clone()),
+        _ => None,
+    });
     if let Some(reason) = &never {
         req.local_reason.clone_from(reason);
+    } else if let Err(crate::extra_trees::Problem::Missing(why)) = &declared
+        && req.local_reason.is_empty()
+    {
+        req.local_reason.clone_from(why);
     }
     if let Some(dir) = crate::gate::dir_from_env() {
         local_fields(&mut req, &cwd);
@@ -353,7 +368,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         // The tree is synced once; the request is sent until the server's
         // daemon answers, each time with a collector of its own.
         let mut collector = None;
-        let sent = remote(host, top.as_deref(), &cwd, &mut req, s).and_then(|()| {
+        let sent = remote(host, top.as_deref(), &cwd, &declared, &mut req, s).and_then(|()| {
             // After the sync, which may delete below the path, and before
             // the job: what the path holds on the node without this job.
             if let (Some(g), Some(top)) = (&go, top.as_deref()) {
@@ -446,6 +461,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         req.fetch_once = false;
         req.sync_ms = None;
         req.sync_bytes = None;
+        req.extra_trees.clear();
         req.local_reason = sync_failed(&why);
         local_fields(&mut req, &cwd);
         return submit_local(&s.socket, &req, &Waits::of(s));
@@ -788,6 +804,7 @@ fn record_phases(host: &str, s: &Settings, req: &Request, argv: &[String], back_
     let report = crate::phases::Report {
         sync_ms: req.sync_ms,
         sync_bytes: req.sync_bytes,
+        extra_trees: req.extra_trees.clone(),
         back_ms,
         node_target_dir: (cargo && !target.is_empty()).then_some(target),
         seeded_from: if cargo {
@@ -1200,19 +1217,36 @@ fn local(socket: &Path) -> Result<Conn> {
     })
 }
 
-/// Syncs what a same-path job needs beside its tree at `top`: the git
-/// directories (a failed sync is reported, and the job runs without
+/// Syncs what a same-path job needs beside its tree at `top`: the sibling
+/// trees `.slot.toml` declares (`trees`; a failed sync is the caller's
+/// error, as the job's own tree's is), the git directories of the tree and
+/// of each sibling (a failed sync is reported, and the job runs without
 /// them), and the working directory when the tree's sync left it out (a
 /// failed sync is the caller's error: the job could not start there).
 fn same_path_extras(
     top: &Path,
     cwd: &Path,
     excludes: &[&str],
+    trees: &[PathBuf],
     r: &sync::Remote<'_>,
     s: &Settings,
 ) -> Result<()> {
     use same_path::{Extra, Kind};
-    for path in same_path::git_dirs(top) {
+    let mut git_dirs = same_path::git_dirs(top);
+    for tree in trees {
+        let e = Extra {
+            path: tree.clone(),
+            kind: Kind::Tree,
+        };
+        sync::sync_extra(&e, r, &s.sync)
+            .with_context(|| format!("sync of the declared tree {}", tree.display()))?;
+        for g in same_path::git_dirs(tree) {
+            if !git_dirs.contains(&g) {
+                git_dirs.push(g);
+            }
+        }
+    }
+    for path in git_dirs {
         let e = Extra {
             path,
             kind: Kind::Git,
@@ -1235,12 +1269,15 @@ fn same_path_extras(
     Ok(())
 }
 
-/// Syncs the tree at `top` to `host` and makes `req` the request of a job
-/// that runs in it there. The connection is the caller's ([`proxy`]).
+/// Syncs the tree at `top` to `host`, with the sibling trees `.slot.toml`
+/// declares (`declared`, checked by [`crate::extra_trees::check`]), and
+/// makes `req` the request of a job that runs in it there. The connection
+/// is the caller's ([`proxy`]).
 fn remote(
     host: &str,
     top: Option<&Path>,
     cwd: &Path,
+    declared: &Result<Vec<PathBuf>, crate::extra_trees::Problem>,
     req: &mut Request,
     s: &Settings,
 ) -> Result<()> {
@@ -1248,8 +1285,23 @@ fn remote(
     if let Some(why) = same_path::tree_refusal(top, same_path_root().as_deref()) {
         return Err(anyhow!(why));
     }
+    let extra = match declared {
+        Ok(trees) => trees.as_slice(),
+        Err(
+            crate::extra_trees::Problem::Missing(why) | crate::extra_trees::Problem::Refused(why),
+        ) => {
+            return Err(anyhow!("{why}"));
+        }
+    };
     let id = workspace_id(top);
     let same_path = keeps_path(s, top);
+    if !same_path && !extra.is_empty() {
+        return Err(anyhow!(
+            "{} declares trees, which keep their paths only in same-path mode ({}=1); nothing is synced",
+            repo_config::FILE,
+            crate::server::spill::SAME_PATH_ENV
+        ));
+    }
     let rel = cwd
         .strip_prefix(top)
         .unwrap_or(Path::new(""))
@@ -1270,7 +1322,11 @@ fn remote(
     // whether cargo finds that directory by itself, so the server need not
     // export it.
     let job_target = if same_path {
-        same_path_extras(top, cwd, tc.sync_excludes(), &target, s)?;
+        same_path_extras(top, cwd, tc.sync_excludes(), extra, &target, s)?;
+        req.extra_trees = extra
+            .iter()
+            .map(|t| t.to_string_lossy().into_owned())
+            .collect();
         same_path::target_dir(
             &req.argv,
             cwd,

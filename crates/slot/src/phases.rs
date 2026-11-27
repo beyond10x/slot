@@ -139,6 +139,9 @@ pub struct Report {
     /// The record's `sync_bytes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_bytes: Option<u64>,
+    /// The record's `extra_trees`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_trees: Vec<String>,
     /// The record's `back_ms`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub back_ms: Option<u64>,
@@ -173,6 +176,9 @@ impl Report {
         take(&self.sync_ms, &mut job.sync_ms);
         take(&self.sync_bytes, &mut job.sync_bytes);
         take(&self.back_ms, &mut job.back_ms);
+        if !self.extra_trees.is_empty() {
+            job.extra_trees.clone_from(&self.extra_trees);
+        }
         if self.node_target_dir.is_some() {
             job.node_target_dir.clone_from(&self.node_target_dir);
         }
@@ -298,6 +304,7 @@ mod tests {
         let r = Report {
             sync_ms: Some(1_200),
             sync_bytes: Some(4_096),
+            extra_trees: vec!["/srv/acct/specs".into()],
             back_ms: Some(300),
             node_target_dir: Some("/srv/acct/target".into()),
             seeded_from: Some(SEED_KEPT.into()),
@@ -312,6 +319,7 @@ mod tests {
         );
         assert_eq!(job.node_target_dir.as_deref(), Some("/srv/acct/target"));
         assert_eq!(job.seeded_from.as_deref(), Some("kept"));
+        assert_eq!(job.extra_trees, ["/srv/acct/specs"]);
 
         let a: Amended = serde_json::from_str(r#"{"amend":4,"back_ms":900}"#).unwrap();
         assert_eq!(

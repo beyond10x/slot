@@ -16,6 +16,11 @@
 //! `warm` is what `slot warm` builds after a merge to `main`: a command,
 //! split at whitespace (`warm = "task warm"`), or `false` for no warm-up.
 //! Without it the warm-up is [`DEFAULT_WARM`].
+//!
+//! `trees` lists sibling trees a remote job needs beside its own
+//! (`trees = ["../../specs", "../driver"]`): paths relative to the
+//! repository top, or absolute. In same-path remote mode each is synced to
+//! its own path on the node before the job (`crate::extra_trees`).
 
 use std::path::Path;
 
@@ -42,6 +47,9 @@ pub struct RepoConfig {
     /// The warm-up after a merge to `main` (`slot warm`).
     #[serde(default)]
     pub warm: Option<Warm>,
+    /// Sibling trees a remote job takes along (`crate::extra_trees`).
+    #[serde(default)]
+    pub trees: Vec<String>,
 }
 
 /// The `warm` entry: on or off, or the command.
@@ -143,6 +151,14 @@ mod tests {
             assert_eq!(RepoConfig::parse(off).unwrap().warm_argv(), None, "{off}");
         }
         assert!(RepoConfig::parse("warm = 3").is_err());
+    }
+
+    #[test]
+    fn trees_name_sibling_checkouts() {
+        let c = RepoConfig::parse(r#"trees = ["../../specs", "/srv/driver"]"#).unwrap();
+        assert_eq!(c.trees, ["../../specs", "/srv/driver"]);
+        assert_eq!(RepoConfig::default().trees, Vec::<String>::new());
+        assert!(RepoConfig::parse(r#"trees = "../specs""#).is_err());
     }
 
     #[test]

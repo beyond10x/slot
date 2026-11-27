@@ -214,6 +214,12 @@ pub struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub sync_bytes: Option<u64>,
+    /// A remote job: the sibling trees its repository's `.slot.toml`
+    /// declares (`trees`), each synced to its own path on the node before
+    /// the job. Absent when there were none, and from an older client or
+    /// daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_trees: Vec<String>,
     /// A remote job: milliseconds its client took to copy the cargo
     /// products and the `--fetch` paths back after the job ended. Absent
     /// when nothing was copied back, and from a client that does not say.

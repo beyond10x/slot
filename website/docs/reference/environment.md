@@ -151,15 +151,16 @@ unknown, never 0.
 
 | field | job | value |
 |---|---|---|
-| `sync_ms` | remote | milliseconds the client took to send the tree to the node, git directories and a same-path working directory included |
+| `sync_ms` | remote | milliseconds the client took to send the tree to the node, git directories, a same-path working directory and the declared sibling trees included |
 | `sync_bytes` | remote | bytes that sync sent, as rsync counted them |
+| `extra_trees` | remote, same-path | the sibling trees the repository's `.slot.toml` declares (`trees`), each synced to its own path on the node before the job ([Sibling trees](../remote-builds.md#sibling-trees)); absent when there were none |
 | `back_ms` | remote | milliseconds the client took to copy the cargo products and the `--fetch` paths back after the job ended; absent when nothing came back |
 | `compile_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the start to the first test binary, as the job's output shows it: cargo's `Running …` or `Doc-tests …` line, nextest's `Starting N tests across …` line or cargo's JSON `build-finished` message; the whole run when no test binary ran |
 | `test_ms` | cargo `test`, `nextest`, `bench` | milliseconds from the first test binary to the end; absent when no test binary ran |
 | `node_target_dir` | remote cargo | the target directory the job built into on the node |
 | `seeded_from` | remote cargo | what that directory held when the job queued: the workspace id of the sibling it was seeded from by a copy (reflink, or a byte copy with `slot serve --seed-copy copy`), `kept` (the build of an earlier job of the same tree) or `empty` |
 
-A node's record gets `sync_ms` and `sync_bytes` with the job's request. `back_ms` is measured
+A node's record gets `sync_ms`, `sync_bytes` and `extra_trees` with the job's request. `back_ms` is measured
 after the job ended: the client sends it to the node in a second request, and the node appends
 it to its job log as a line of its own, `{"amend":<id>,"back_ms":<ms>}`, which a reader of job
 lines skips and the daemon applies to job `<id>` when it reads the log back. For a job the daemon
