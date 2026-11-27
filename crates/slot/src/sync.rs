@@ -131,6 +131,9 @@ pub struct Synced {
     /// Symlinks synced whose target lies outside the tree: they go as
     /// links, never as the file they point to.
     pub outside_links: usize,
+    /// The regular files the sync sent, each with its size and time here
+    /// when it was listed: the return sync deletes only such a copy.
+    pub sent: crate::return_sync::Sent,
 }
 
 /// What the checkout held when it was synced, as git sees it.
@@ -562,11 +565,17 @@ pub fn leaves_tree(root: &Path, name: &Path, target: &Path) -> bool {
 }
 
 /// Lists what a sync of `src` with `filters` would send, with the rsync it
-/// runs (`--list-only`, nothing is copied), and counts the symlinks whose
-/// target lies outside `src`. Refuses, before any byte is sent, when that
+/// runs (`--list-only`, nothing is copied), counts the symlinks whose
+/// target lies outside `src` and names the regular files it would send,
+/// relative to `src`. Refuses, before any byte is sent, when that
 /// rsync would send the file such a link points to in place of the link (a
 /// wrapper on `PATH` that adds `--copy-links` or `--copy-unsafe-links`).
-pub fn preflight(src: &Path, filters: &[String], b: &Bounds, deadline: Instant) -> Result<usize> {
+pub fn preflight(
+    src: &Path,
+    filters: &[String],
+    b: &Bounds,
+    deadline: Instant,
+) -> Result<(usize, Vec<String>)> {
     let mut rsync = Command::new("rsync");
     rsync
         .args(["-a", "-8", "--list-only"])
@@ -574,6 +583,7 @@ pub fn preflight(src: &Path, filters: &[String], b: &Bounds, deadline: Instant) 
         .arg(format!("{}/", src.display()));
     let out = run_watched(&mut rsync, b, deadline)?;
     let mut outside = 0;
+    let mut files = Vec::new();
     let mut followed = Vec::new();
     for line in out.lines() {
         let Some((kind, rest)) = list_entry(line) else {
@@ -591,10 +601,13 @@ pub fn preflight(src: &Path, filters: &[String], b: &Bounds, deadline: Instant) 
             continue;
         }
         let p = src.join(rest);
-        if p.symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-            && std::fs::read_link(&p).is_ok_and(|t| leaves_tree(src, Path::new(rest), &t))
-        {
+        let link = p
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink());
+        if kind == '-' && !link {
+            files.push(rest.to_string());
+        }
+        if link && std::fs::read_link(&p).is_ok_and(|t| leaves_tree(src, Path::new(rest), &t)) {
             followed.push(rest.to_string());
         }
     }
@@ -608,7 +621,7 @@ pub fn preflight(src: &Path, filters: &[String], b: &Bounds, deadline: Instant) 
             if followed.len() > 1 { ", …" } else { "" },
         );
     }
-    Ok(outside)
+    Ok((outside, files))
 }
 
 /// Syncs the checkout at `top` to mirror `id` on the server, with the
@@ -637,7 +650,10 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         .to_string(),
     ];
     filters.extend(excludes.iter().map(|x| format!("--exclude={x}")));
-    let outside_links = preflight(top, &filters, b, deadline)?;
+    let (outside_links, files) = preflight(top, &filters, b, deadline)?;
+    // Stamped before rsync reads them: a file changed after this reads as
+    // changed here, never as the copy that was sent.
+    let sent = crate::return_sync::Sent::record(top, files);
     let key = mirror::repo_key(top);
     let siblings = ask_siblings(r, top, id, &key, b.stall.min(b.limit));
     let mut rsync = Command::new("rsync");
@@ -669,6 +685,7 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         waited: t0.duration_since(asked),
         sources,
         outside_links,
+        sent,
     })
 }
 
@@ -809,6 +826,7 @@ mod tests {
                 changed: 3,
             },
             outside_links: 0,
+            sent: crate::return_sync::Sent::default(),
         };
         assert_eq!(
             s.line("node"),
@@ -916,7 +934,8 @@ mod tests {
         std::os::unix::fs::symlink("../../secret", tree.join("out/ignored")).unwrap();
         let filters = ["--filter=:- .gitignore".to_string()];
         let b = Bounds::default();
-        let n = preflight(&tree, &filters, &b, Instant::now() + b.limit).unwrap();
+        let (n, files) = preflight(&tree, &filters, &b, Instant::now() + b.limit).unwrap();
+        assert_eq!(files, [".gitignore", "sub/x"]);
         assert_eq!(n, 2, "abs and sub/up; inside stays inside, out/ is ignored");
     }
 

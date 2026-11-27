@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Remote mode: the return sync is the client's. After a job that ran on a node, the client lists
+  the job's tree there before and after the job and copies back what is new or changed
+  (`rsync -a --checksum --update`; nothing under `.git`, `target` or `node_modules`, no path
+  that is a symbolic link here, and a file here newer than the node's stays). A regular file the
+  job deleted is now deleted here too, when this machine's file still has the size and
+  modification time it had when the sync sent it, or those of the node's copy before the job; a
+  directory the job removed is removed here when it is then empty. A file that changed here since
+  the sync is kept and named on a line `slot: return sync: kept <path>: …`, and one line counts
+  it all: `slot: return sync from <host>: 3 back, 1 deleted, 0 kept`. Before, a host wrapper in
+  front of `slot` copied back what a job wrote and never deleted: a generator that removes stale
+  files left them here. `SLOT_RETURN_SYNC=0` turns it off. A wrapper that exports `SLOT_SHIM_PID`
+  keeps its own return sync and the client does none, unless `SLOT_RETURN_SYNC=1`; remove the
+  wrapper's return sync and set `SLOT_RETURN_SYNC=1`. A node whose `slot shell` refuses the
+  listing costs one line, `slot: return sync skipped: …`, and the job's exit code stays.
 - Remote mode: an allow list of remotes, `$XDG_CONFIG_HOME/slot/remote-allow-origins` (or the
   absolute path `allow_origins_file` of the host configuration names). When the file exists, a
   tree reaches a node only when one of its own git remotes matches a line (a shell pattern, as an

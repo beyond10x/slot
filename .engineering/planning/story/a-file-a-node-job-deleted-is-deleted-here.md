@@ -2,12 +2,15 @@
 format: aep.planning-md/3
 id: story:a-file-a-node-job-deleted-is-deleted-here
 kind: story
-status: draft
+status: active
 title: A file a node job deleted is deleted here too, when this copy is the one that was sent
 relations:
 - serves: vision:O6
 - informed_by: story:builds-spread-over-two-nodes
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-11-27T20:13:32Z", actor: "human:operator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-11-27T20:13:32Z", actor: "human:operator", revision: 4}
 ---
 ## Outcome
 

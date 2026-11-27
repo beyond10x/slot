@@ -70,9 +70,12 @@ fn go_module(root: &Path) -> PathBuf {
 }
 
 /// A remote job from `cwd`, with `env` added to the caller's environment.
+/// Without the return sync: these tests count the listings and fetches of
+/// a go build's output ([`senders`]) and fail one of them on purpose.
 fn remote_job(d: &Daemon, ssh: &Path, cwd: &Path, argv: &[&str], env: &[(&str, &str)]) -> Output {
     remote_command(d, ssh, cwd, argv, &[])
         .env_remove("SLOT_NO_PRODUCTS")
+        .env("SLOT_RETURN_SYNC", "0")
         .envs(env.iter().copied())
         .output()
         .unwrap()

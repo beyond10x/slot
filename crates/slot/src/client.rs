@@ -31,6 +31,7 @@ use crate::never_sync;
 use crate::paths;
 use crate::proto::{Frame, Request, Workspace};
 use crate::repo_config::{self, RepoConfig};
+use crate::return_sync;
 use crate::same_path;
 use crate::sync;
 use crate::toolchain;
@@ -135,6 +136,9 @@ pub struct Settings {
     /// this machine's daemon handed to a node (`SLOT_SPILLED` with
     /// `SLOT_PHASES_FILE`); a wrapper's `SLOT_SPILLED` alone waits.
     pub node_wait: NodeWait,
+    /// `SLOT_RETURN_SYNC`, and `SLOT_SHIM_PID` of a host wrapper: whether a
+    /// remote job's changes to its tree come back ([`return_sync::wanted`]).
+    pub return_sync: bool,
 }
 
 /// Names how long a job sent to a server waits for the server's daemon.
@@ -210,8 +214,8 @@ fn node_wait_of(value: Option<&str>, handed: bool) -> Duration {
 impl Settings {
     /// Reads `SLOT_HOST`, `SLOT_SSH`, `SLOT_WSROOT`, `SLOT_REMOTE`,
     /// `SLOT_ENV`, `SLOT_SOCKET`, `SLOT_LOCAL_FALLBACK`, `SLOT_SYNC_STALL`,
-    /// `SLOT_SYNC_LIMIT`, `SLOT_REMOTE_SAME_PATH`, `SLOT_NO_PRODUCTS` and
-    /// `SLOT_NODE_WAIT`.
+    /// `SLOT_SYNC_LIMIT`, `SLOT_REMOTE_SAME_PATH`, `SLOT_NO_PRODUCTS`,
+    /// `SLOT_NODE_WAIT`, `SLOT_RETURN_SYNC` and `SLOT_SHIM_PID`.
     pub fn from_env() -> Self {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let ssh = var("SLOT_SSH").map_or_else(
@@ -272,6 +276,10 @@ impl Settings {
                 ),
                 poll: NODE_POLL,
             },
+            return_sync: return_sync::wanted(
+                var(return_sync::ENV).as_deref(),
+                var(return_sync::WRAPPER_ENV).as_deref(),
+            ),
         }
     }
 }
@@ -376,10 +384,24 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
             (go, None)
         };
         let mut go_before = None;
+        // The tree on the node before the job, and what the sync sent: the
+        // return sync compares both with what the job left.
+        let mut back_before = None;
+        let mut sent_files = return_sync::Sent::default();
         // The tree is synced once; the request is sent until the server's
         // daemon answers, each time with a collector of its own.
         let mut collector = None;
-        let sent = remote(host, top.as_deref(), &cwd, &declared, &mut req, s).and_then(|()| {
+        let sent = remote(host, top.as_deref(), &cwd, &declared, &mut req, s).and_then(|files| {
+            sent_files = files;
+            if let Some(top) = top.as_deref().filter(|_| s.return_sync && !s.warm) {
+                let tree = mirror_path(top, &req, s);
+                let node = artifacts::Source {
+                    host,
+                    ssh: &s.ssh,
+                    target: &tree,
+                };
+                back_before = Some(return_sync::list(&node, &s.sync));
+            }
             // After the sync, which may delete below the path, and before
             // the job: what the path holds on the node without this job.
             if let (Some(g), Some(top)) = (&go, top.as_deref()) {
@@ -407,6 +429,7 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
             Ok(ended) => {
                 let ran = matches!(ended, Ended::Exit(_));
                 let mut code = ended.code();
+                let job_code = code;
                 let back = Instant::now();
                 let mut came_back = false;
                 if let (Some(p), Some(col), Some(top)) = (&plan, &collector, top.as_deref())
@@ -428,6 +451,20 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                         target: &tree,
                     };
                     code = go_back(&src, top, s, g, before);
+                }
+                // A job that exits 3 may not have run: its tree is left as it is.
+                if let (Some(before), Some(top)) = (&back_before, top.as_deref())
+                    && ran
+                    && job_code != crate::server::spill::INFRA_EXIT
+                {
+                    came_back = true;
+                    let tree = mirror_path(top, &req, s);
+                    let node = artifacts::Source {
+                        host,
+                        ssh: &s.ssh,
+                        target: &tree,
+                    };
+                    return_sync::back(&node, top, before, &sent_files, &s.sync);
                 }
                 let skipped = skipped
                     .as_ref()
@@ -1302,8 +1339,8 @@ fn same_path_extras(
 
 /// Syncs the tree at `top` to `host`, with the sibling trees `.slot.toml`
 /// declares (`declared`, checked by [`crate::extra_trees::check`]), and
-/// makes `req` the request of a job that runs in it there. The connection
-/// is the caller's ([`proxy`]).
+/// makes `req` the request of a job that runs in it there; the files the
+/// sync sent. The connection is the caller's ([`proxy`]).
 fn remote(
     host: &str,
     top: Option<&Path>,
@@ -1311,7 +1348,7 @@ fn remote(
     declared: &Result<Vec<PathBuf>, crate::extra_trees::Problem>,
     req: &mut Request,
     s: &Settings,
-) -> Result<()> {
+) -> Result<return_sync::Sent> {
     let top = top.ok_or_else(|| anyhow!("remote mode needs a git repository"))?;
     if let Some(why) = same_path::tree_refusal(top, same_path_root().as_deref()) {
         return Err(anyhow!(why));
@@ -1406,7 +1443,7 @@ fn remote(
         target_dir,
         target_default,
     });
-    Ok(())
+    Ok(synced.sent)
 }
 
 /// Whole milliseconds of `d`.
