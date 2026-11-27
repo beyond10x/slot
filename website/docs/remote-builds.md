@@ -674,34 +674,36 @@ repositories = ["repo-b", "repo-c"]
   worktree has its main repository's name). A repository is listed under one node at most.
 - `default_node`: the node of every repository no entry lists.
 
-`slot node` reads and writes the file (`--cluster-file`, else `SLOT_CLUSTER_FILE`, else
+`slot nodes` reads and writes the file (`--cluster-file`, else `SLOT_CLUSTER_FILE`, else
 `$XDG_CONFIG_HOME/slot/cluster.toml`, the file the daemon reads):
 
-- `slot node list` prints each node: name, state as the daemon sees it (`-` when the daemon
+- `slot nodes list` prints each node: name, state as the daemon sees it (`-` when the daemon
   does not answer), spill, whether it is the default, and its repositories.
-- `slot node route [<dir>]` prints the node a job in `<dir>` (default: the working directory)
+- `slot nodes route [<dir>]` prints the node a job in `<dir>` (default: the working directory)
   goes to, as shell assignments. It reads only the file: no daemon and no network.
 
   ```sh
-  $ slot node route ~/src/repo-b
+  $ slot nodes route ~/src/repo-b
+  SLOT_NODE=build-2
   SLOT_HOST=build-2.example
   SLOT_SSH='ssh -o BatchMode=yes'
   SLOT_REMOTE=slot
-  SLOT_NODE_END=1893499200
-  export SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END
+  SLOT_NODE_END=
+  export SLOT_NODE SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END
   ```
 
-  `SLOT_HOST` is the last word of the entry's `ssh` line, `SLOT_SSH` the words before it,
-  `SLOT_REMOTE` its `slot_path` (`slot` when absent) and `SLOT_NODE_END` its `deadline` in Unix
-  seconds (left out, with its name in the `export` line, without a deadline). With no entry
+  `SLOT_NODE` is the entry's name, `SLOT_HOST` the last word of its `ssh` line, `SLOT_SSH` the
+  words before it, `SLOT_REMOTE` its `slot_path` (`slot` when absent) and `SLOT_NODE_END` its
+  `deadline` in Unix seconds, empty without a deadline, so a value from an earlier `eval` does
+  not stay set. With no entry
   for the repository and no `default_node`, or a `default_node` without an entry, it prints
   one line naming the file and exits 3. A wrapper in front of `slot` sources it and names no
-  node of its own: `eval "$(slot node route)" && exec slot "$@"`.
-- `slot node add <name> --ssh <cmd> [--slot-path <path>] [--deadline <rfc3339>]
+  node of its own: `eval "$(slot nodes route)" && exec slot "$@"`.
+- `slot nodes add <name> --ssh <cmd> [--slot-path <path>] [--deadline <rfc3339>]
   [--price-per-hour-cents <n>] [--spill true|false] [--repository <name>]… [--default]` writes
   the entry at the end of the file. A repository listed under another node moves to the new
-  one; `--default` makes it `default_node`.
-- `slot node remove <name>` takes the entry out; its repositories then go to `default_node`,
+  one (a node left without repositories loses the key); `--default` makes it `default_node`.
+- `slot nodes remove <name>` takes the entry out; its repositories then go to `default_node`,
   and removing the default node clears `default_node`.
 
 `add` and `remove` keep the rest of the file as it was, comments and order included, and refuse
@@ -712,9 +714,6 @@ When a poll shows a node's job ended for the first time, the daemon appends it t
 with `node` set to the node's name and the id the node gave it. `slot usage` and
 `GET /api/usage` read both files; `slot usage --by node` and the **node** grouping of the web
 view's usage table show each node's share, `local` for this host's own jobs.
-
-`slot node` with any other arguments is a build command that runs Node.js, as before:
-`slot node --test`, `slot node build.js`. `slot run node list` runs a script named `list`.
 
 ## Hand queued jobs to a node
 

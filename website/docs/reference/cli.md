@@ -323,47 +323,44 @@ slot cache refused [OPTIONS]
 - `--by`: Group by repo or project (the namespace of the repository's remote) (default `repo`)
 - `--json`: Print JSON instead of text (default `false`)
 
-### `slot node`
+### `slot nodes`
 
-The build nodes of this host: the `[remote.<name>]` entries of the host configuration file, and which node a repository's jobs go to.
-
-Any other `slot node …` command line (`slot node --test`, `slot node build.js`) is a build command that runs Node.js, as before.
+The build nodes of this host: the `[remote.<name>]` entries of the host configuration file, and which node a repository's jobs go to
 
 ```text
-slot node [OPTIONS]
-       slot node <COMMAND>
+slot nodes [OPTIONS] <COMMAND>
 ```
 
-#### `slot node list`
+#### `slot nodes list`
 
 List the registered nodes: name, state as the daemon sees it (when it answers), whether it takes queued local jobs (spill), whether it is the default node, and the repositories routed to it
 
 ```text
-slot node list [OPTIONS]
+slot nodes list [OPTIONS]
 ```
 
 - `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
 - `--http`: The daemon's web address, for each node's state (env `SLOT_HTTP`, default `127.0.0.1:7411`)
 
-#### `slot node route`
+#### `slot nodes route`
 
-Print the node a job in DIR goes to, as shell assignments of `SLOT_HOST`, `SLOT_SSH`, `SLOT_REMOTE` and `SLOT_NODE_END` (the node's deadline, Unix seconds; left out without one) and an `export` line, for `eval "$(slot node route)"`.
+Print the node a job in DIR goes to, as shell assignments of `SLOT_NODE` (the entry's name), `SLOT_HOST`, `SLOT_SSH`, `SLOT_REMOTE` and `SLOT_NODE_END` (the node's deadline, Unix seconds; empty without one, so an earlier value is cleared) and an `export` line of all five, for `eval "$(slot nodes route)"`.
 
 The node is the entry whose `repositories` lists the repository of DIR (the name `slot status` shows), else `default_node`. Reads only the file: no daemon and no network. Exits 3 with one line naming the file when no entry matches or the matched name has no entry.
 
 ```text
-slot node route [OPTIONS] [DIR]
+slot nodes route [OPTIONS] [DIR]
 ```
 
 - `<DIR>`: A directory of the checkout; the working directory when absent
 - `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
 
-#### `slot node add`
+#### `slot nodes add`
 
 Register a node: write its `[remote.<name>]` entry. A repository listed under another node moves to this one. The rest of the file stays as it was; a file that does not parse is refused
 
 ```text
-slot node add [OPTIONS] --ssh <SSH> <NAME>
+slot nodes add [OPTIONS] --ssh <SSH> <NAME>
 ```
 
 - `<NAME>`: Node name: lower-case letters, digits and `-`
@@ -376,12 +373,12 @@ slot node add [OPTIONS] --ssh <SSH> <NAME>
 - `--default`: Make the node `default_node`: the node of every repository no entry lists (default `false`)
 - `--cluster-file`: The host configuration file (env `SLOT_CLUSTER_FILE`)
 
-#### `slot node remove`
+#### `slot nodes remove`
 
 Deregister a node: take its entry out. Its repositories then go to `default_node`; removing the default node clears `default_node`
 
 ```text
-slot node remove [OPTIONS] <NAME>
+slot nodes remove [OPTIONS] <NAME>
 ```
 
 - `<NAME>`: Node name

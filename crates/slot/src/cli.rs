@@ -153,10 +153,8 @@ pub enum Cmd {
     Cache(CacheCmd),
     /// The build nodes of this host: the `[remote.<name>]` entries of the
     /// host configuration file, and which node a repository's jobs go to.
-    ///
-    /// Any other `slot node …` command line (`slot node --test`, `slot node
-    /// build.js`) is a build command that runs Node.js, as before.
-    Node(NodeArgs),
+    #[command(subcommand)]
+    Nodes(NodesCmd),
     /// Agent hooks: refuse a build command that would run outside the pool.
     #[command(subcommand)]
     Hook(HookCmd),
@@ -829,39 +827,21 @@ pub struct CacheRefusedArgs {
     pub json: bool,
 }
 
-/// `slot node` arguments: a subcommand, or the arguments of a Node.js build
-/// command.
-#[derive(Debug, Clone, Args)]
-#[command(args_conflicts_with_subcommands = true)]
-pub struct NodeArgs {
-    /// What to do with the registry of build nodes.
-    #[command(subcommand)]
-    pub cmd: Option<NodeCmd>,
-    /// The arguments of `node` when they name no subcommand: `slot node
-    /// build.js` runs `node build.js` as a build.
-    #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        hide = true,
-        value_name = "ARGS"
-    )]
-    pub script: Vec<String>,
-}
-
-/// `slot node` subcommands. Each reads or writes the host configuration
+/// `slot nodes` subcommands. Each reads or writes the host configuration
 /// file (`--cluster-file`, else `SLOT_CLUSTER_FILE`, else
 /// `$XDG_CONFIG_HOME/slot/cluster.toml`), the file the daemon reads; the
 /// daemon takes a change in at its next poll, within 5 s.
 #[derive(Debug, Clone, Subcommand)]
-pub enum NodeCmd {
+pub enum NodesCmd {
     /// List the registered nodes: name, state as the daemon sees it (when
     /// it answers), whether it takes queued local jobs (spill), whether it
     /// is the default node, and the repositories routed to it.
     List(NodeListArgs),
     /// Print the node a job in DIR goes to, as shell assignments of
-    /// `SLOT_HOST`, `SLOT_SSH`, `SLOT_REMOTE` and `SLOT_NODE_END` (the
-    /// node's deadline, Unix seconds; left out without one) and an
-    /// `export` line, for `eval "$(slot node route)"`.
+    /// `SLOT_NODE` (the entry's name), `SLOT_HOST`, `SLOT_SSH`,
+    /// `SLOT_REMOTE` and `SLOT_NODE_END` (the node's deadline, Unix
+    /// seconds; empty without one, so an earlier value is cleared) and an
+    /// `export` line of all five, for `eval "$(slot nodes route)"`.
     ///
     /// The node is the entry whose `repositories` lists the repository of
     /// DIR (the name `slot status` shows), else `default_node`. Reads only
@@ -877,7 +857,7 @@ pub enum NodeCmd {
     Remove(NodeRemoveArgs),
 }
 
-/// `slot node list` arguments.
+/// `slot nodes list` arguments.
 #[derive(Debug, Clone, Args)]
 pub struct NodeListArgs {
     /// The host configuration file.
@@ -888,7 +868,7 @@ pub struct NodeListArgs {
     pub http: String,
 }
 
-/// `slot node route` arguments.
+/// `slot nodes route` arguments.
 #[derive(Debug, Clone, Args)]
 pub struct NodeRouteArgs {
     /// A directory of the checkout; the working directory when absent.
@@ -898,7 +878,7 @@ pub struct NodeRouteArgs {
     pub cluster_file: PathBuf,
 }
 
-/// `slot node add` arguments.
+/// `slot nodes add` arguments.
 #[derive(Debug, Clone, Args)]
 pub struct NodeAddArgs {
     /// Node name: lower-case letters, digits and `-`.
@@ -931,7 +911,7 @@ pub struct NodeAddArgs {
     pub cluster_file: PathBuf,
 }
 
-/// `slot node remove` arguments.
+/// `slot nodes remove` arguments.
 #[derive(Debug, Clone, Args)]
 pub struct NodeRemoveArgs {
     /// Node name.
@@ -1063,15 +1043,14 @@ mod tests {
     }
 
     #[test]
-    fn node_takes_its_subcommands_and_runs_any_other_node_command_as_a_build() {
-        let Cmd::Node(a) = parse(&["node", "route", "/w/repo"]).unwrap().command else {
-            panic!("not node")
+    fn nodes_takes_its_subcommands_and_node_is_always_a_build() {
+        let Cmd::Nodes(NodesCmd::Route(r)) = parse(&["nodes", "route", "/w/repo"]).unwrap().command
+        else {
+            panic!("not nodes route")
         };
-        assert!(
-            matches!(a.cmd, Some(NodeCmd::Route(ref r)) if r.dir.as_deref() == Some(std::path::Path::new("/w/repo")))
-        );
-        let Cmd::Node(a) = parse(&[
-            "node",
+        assert_eq!(r.dir.as_deref(), Some(std::path::Path::new("/w/repo")));
+        let Cmd::Nodes(NodesCmd::Add(add)) = parse(&[
+            "nodes",
             "add",
             "build-2",
             "--ssh",
@@ -1087,28 +1066,23 @@ mod tests {
         .unwrap()
         .command
         else {
-            panic!("not node")
-        };
-        let Some(NodeCmd::Add(add)) = a.cmd else {
-            panic!("not add")
+            panic!("not nodes add")
         };
         assert_eq!(add.name, "build-2");
         assert_eq!(add.spill, Some(false));
         assert_eq!(add.repository, ["repo-a", "repo-b"]);
         assert!(add.default);
-        for (args, script) in [
-            (
-                &["node", "--test", "a.test.ts"][..],
-                &["--test", "a.test.ts"][..],
-            ),
-            (&["node", "tools/ux.mjs", "gate"], &["tools/ux.mjs", "gate"]),
-            (&["--tokens", "2", "node", "build.js"], &["build.js"]),
+        for args in [
+            &["node", "--test", "a.test.ts"][..],
+            &["node", "tools/ux.mjs", "gate"],
+            &["node", "list"],
+            &["node", "route"],
+            &["--tokens", "2", "node", "build.js"],
         ] {
-            let Cmd::Node(a) = parse(args).unwrap().command else {
-                panic!("not node: {args:?}")
+            let Cmd::External(argv) = parse(args).unwrap().command else {
+                panic!("not a build: {args:?}")
             };
-            assert!(a.cmd.is_none(), "{args:?}");
-            assert_eq!(a.script, script, "{args:?}");
+            assert_eq!(argv[0], "node", "{args:?}");
         }
     }
 

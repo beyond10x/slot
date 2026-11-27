@@ -1,5 +1,5 @@
 type: ess-http/1
-specification: {system: slot, version: v1, source_digest: "sha256:00f287e635d02d2f503ba51b95cd44bb79c03369f2e02644678026dee5916262"}
+specification: {system: slot, version: v1, source_digest: "sha256:aa7de0c2e683c20311077ec431be01c46bee32331b73772c1ce373dfefacc434"}
 servers:
   slot-daemon:
     - {url: /, description: The daemon's own port on the local machine}

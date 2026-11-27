@@ -96,24 +96,7 @@ fn main() -> ExitCode {
         }
         Cmd::Usage(args) => usage(&args),
         Cmd::Cache(slot::cli::CacheCmd::Refused(args)) => cache_refused(&args),
-        Cmd::Node(args) => {
-            if let Some(cmd) = &args.cmd {
-                node(cmd)
-            } else {
-                let argv: Vec<String> = std::iter::once("node".to_string())
-                    .chain(args.script)
-                    .collect();
-                Ok(build(
-                    &argv,
-                    cli.local,
-                    &cli.fetch,
-                    cli.tokens,
-                    cli.priority,
-                    cli.timeout,
-                    cli.here,
-                ))
-            }
-        }
+        Cmd::Nodes(cmd) => nodes(&cmd),
         Cmd::Hook(slot::cli::HookCmd::ClaudePreToolUse) => return slot::hook::run(),
         Cmd::External(argv) => {
             let argv: Vec<String> = argv
@@ -376,9 +359,9 @@ fn usage(args: &slot::cli::UsageArgs) -> Result<i32> {
     Ok(0)
 }
 
-/// `slot node …`. `route` exits 3 when no node matches.
-fn node(cmd: &slot::cli::NodeCmd) -> Result<i32> {
-    use slot::cli::NodeCmd;
+/// `slot nodes …`. `route` exits 3 when no node matches.
+fn nodes(cmd: &slot::cli::NodesCmd) -> Result<i32> {
+    use slot::cli::NodesCmd;
     use slot::hostconfig;
     let file = |f: &std::path::Path| -> Result<std::path::PathBuf> {
         if f.as_os_str() == "off" {
@@ -394,7 +377,7 @@ fn node(cmd: &slot::cli::NodeCmd) -> Result<i32> {
         }
     };
     match cmd {
-        NodeCmd::Route(a) => {
+        NodesCmd::Route(a) => {
             let path = file(&a.cluster_file)?;
             let dir = match &a.dir {
                 Some(d) => d.clone(),
@@ -414,7 +397,7 @@ fn node(cmd: &slot::cli::NodeCmd) -> Result<i32> {
                 }
             }
         }
-        NodeCmd::List(a) => {
+        NodesCmd::List(a) => {
             let path = file(&a.cluster_file)?;
             let reg = hostconfig::parse_registry(&read(&path)?)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
@@ -422,7 +405,7 @@ fn node(cmd: &slot::cli::NodeCmd) -> Result<i32> {
             print!("{}", hostconfig::render_list(&reg, &rows));
             Ok(0)
         }
-        NodeCmd::Add(a) => {
+        NodesCmd::Add(a) => {
             let path = file(&a.cluster_file)?;
             let new = hostconfig::NewNode {
                 name: a.name.clone(),
@@ -440,7 +423,7 @@ fn node(cmd: &slot::cli::NodeCmd) -> Result<i32> {
             eprintln!("slot: node {} added to {}", a.name, path.display());
             Ok(0)
         }
-        NodeCmd::Remove(a) => {
+        NodesCmd::Remove(a) => {
             let path = file(&a.cluster_file)?;
             let text = hostconfig::remove(&read(&path)?, &a.name)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;

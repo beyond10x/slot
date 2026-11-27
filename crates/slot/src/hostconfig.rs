@@ -2,10 +2,10 @@
 //! specification): the one registry of a host's build nodes. The daemon
 //! reads it at start and again at each poll after it changed. Of its tables
 //! this module uses `[remote.<name>]`, the remote nodes the daemon polls,
-//! and the routing keys `repositories` and `default_node` that `slot node
+//! and the routing keys `repositories` and `default_node` that `slot nodes
 //! route` reads; `[node]`, `[provider.*]` and `[template.*]` are accepted
 //! and not yet used. The client reads `never_sync_file` from it
-//! (`never_sync.rs`). `slot node add` and `remove` edit it in place
+//! (`never_sync.rs`). `slot nodes add` and `remove` edit it in place
 //! ([`add`], [`remove`]).
 
 use std::collections::BTreeMap;
@@ -71,7 +71,7 @@ pub struct RemoteNodeTable {
     /// when absent.
     #[serde(default)]
     pub spill: Option<bool>,
-    /// Repositories whose jobs go to the node (`slot node route`), by the
+    /// Repositories whose jobs go to the node (`slot nodes route`), by the
     /// name `slot status` shows.
     #[serde(default)]
     pub repositories: Vec<String>,
@@ -261,11 +261,12 @@ fn sh_quote(word: &str) -> String {
 }
 
 /// What a client needs to send a job to `node`, as shell assignments for
-/// `eval`: `SLOT_HOST` (the last word of its ssh line), `SLOT_SSH` (the
-/// words before it), `SLOT_REMOTE` (`slot` on the node), `SLOT_NODE_END`
-/// (its deadline, Unix seconds; left out without one), then an `export`
-/// line. Refused for an ssh line without a word before the host, or with a
-/// word a client could not split again.
+/// `eval`: `SLOT_NODE` (the entry's name), `SLOT_HOST` (the last word of
+/// its ssh line), `SLOT_SSH` (the words before it), `SLOT_REMOTE` (`slot`
+/// on the node), `SLOT_NODE_END` (its deadline, Unix seconds; empty without
+/// one, so a value of an earlier `eval` is cleared), then an `export` line
+/// of all five. Refused for an ssh line without a word before the host, or
+/// with a word a client could not split again.
 pub fn assignments(node: &RemoteNode) -> Result<String, String> {
     use std::fmt::Write as _;
     let name = &node.name;
@@ -278,24 +279,24 @@ pub fn assignments(node: &RemoteNode) -> Result<String, String> {
         return Err(format!("[remote.{name}] ssh: the word `{w}` holds a space"));
     }
     let remote = node.table.slot_path.as_deref().unwrap_or("slot");
-    let mut out = format!(
-        "SLOT_HOST={}\nSLOT_SSH={}\nSLOT_REMOTE={}\n",
-        sh_quote(host),
-        sh_quote(&ssh.join(" ")),
-        sh_quote(remote)
-    );
-    let mut names = "SLOT_HOST SLOT_SSH SLOT_REMOTE".to_string();
-    if let Some(d) = &node.table.deadline {
-        let end = time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339)
-            .map_err(|_| format!("[remote.{name}] deadline: `{d}` is not RFC 3339"))?;
-        let _ = writeln!(out, "SLOT_NODE_END={}", end.unix_timestamp());
-        names += " SLOT_NODE_END";
-    }
-    let _ = writeln!(out, "export {names}");
+    let end = match &node.table.deadline {
+        Some(d) => time::OffsetDateTime::parse(d, &time::format_description::well_known::Rfc3339)
+            .map_err(|_| format!("[remote.{name}] deadline: `{d}` is not RFC 3339"))?
+            .unix_timestamp()
+            .to_string(),
+        None => String::new(),
+    };
+    let mut out = String::new();
+    let _ = writeln!(out, "SLOT_NODE={}", sh_quote(name));
+    let _ = writeln!(out, "SLOT_HOST={}", sh_quote(host));
+    let _ = writeln!(out, "SLOT_SSH={}", sh_quote(&ssh.join(" ")));
+    let _ = writeln!(out, "SLOT_REMOTE={}", sh_quote(remote));
+    let _ = writeln!(out, "SLOT_NODE_END={end}");
+    out += "export SLOT_NODE SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END\n";
     Ok(out)
 }
 
-/// `slot node route`: the assignments of the node a job in `dir` goes to,
+/// `slot nodes route`: the assignments of the node a job in `dir` goes to,
 /// by the file's text. The repository is the one `slot status` names: the
 /// directory of the checkout's common git directory.
 pub fn route_in(text: &str, dir: &Path) -> Result<String, String> {
@@ -304,7 +305,7 @@ pub fn route_in(text: &str, dir: &Path) -> Result<String, String> {
     route(&reg, repo.as_deref()).and_then(assignments)
 }
 
-/// `slot node list`: one line per registered node with its state in the
+/// `slot nodes list`: one line per registered node with its state in the
 /// daemon's `rows` (`-` when the daemon did not answer or does not show
 /// it yet), whether it takes queued local jobs, whether it is the default,
 /// and its repositories.
@@ -356,7 +357,7 @@ pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
     })
 }
 
-/// A node `slot node add` writes.
+/// A node `slot nodes add` writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewNode {
     /// Node name.
@@ -398,6 +399,20 @@ fn remote_table(doc: &mut toml_edit::DocumentMut) -> Result<&mut dyn toml_edit::
         .ok_or_else(|| "remote: not a table".to_string())
 }
 
+/// Takes out each node's `repositories = []`: a node without repositories
+/// has no key.
+fn drop_empty_repositories(remote: &mut dyn toml_edit::TableLike) {
+    for (_, item) in remote.iter_mut() {
+        if let Some(t) = item.as_table_like_mut()
+            && t.get("repositories")
+                .and_then(toml_edit::Item::as_array)
+                .is_some_and(toml_edit::Array::is_empty)
+        {
+            t.remove("repositories");
+        }
+    }
+}
+
 /// `text` with the node `n` added as a `[remote.<name>]` entry at the end,
 /// each repository of `n` taken out of the entry that listed it, and
 /// `default_node` set when `n.default`. The rest of the text stays as it
@@ -432,6 +447,7 @@ pub fn add(text: &str, n: &NewNode) -> Result<String, String> {
             });
         }
     }
+    drop_empty_repositories(remote);
     let mut t = toml_edit::Table::new();
     t.insert("ssh", toml_edit::value(n.ssh.as_str()));
     if let Some(p) = &n.slot_path {
@@ -467,7 +483,9 @@ pub fn remove(text: &str, name: &str) -> Result<String, String> {
     if !reg.nodes.iter().any(|x| x.name == name) {
         return Err(format!("no node `{name}` is registered"));
     }
-    remote_table(&mut doc)?.remove(name);
+    let remote = remote_table(&mut doc)?;
+    remote.remove(name);
+    drop_empty_repositories(remote);
     if reg.default_node.as_deref() == Some(name) {
         doc.remove("default_node");
     }
@@ -584,13 +602,13 @@ repositories = ["repo-b", "repo-c"]
         assert_eq!(route(&reg, None).unwrap().name, "build-1");
         assert_eq!(
             assignments(route(&reg, Some("repo-b")).unwrap()).unwrap(),
-            "SLOT_HOST=build-2.example\nSLOT_SSH=ssh\nSLOT_REMOTE=/opt/slot/bin/slot\n\
-             SLOT_NODE_END=1893499200\nexport SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END\n"
+            "SLOT_NODE=build-2\nSLOT_HOST=build-2.example\nSLOT_SSH=ssh\nSLOT_REMOTE=/opt/slot/bin/slot\n\
+             SLOT_NODE_END=1893499200\nexport SLOT_NODE SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END\n"
         );
         assert_eq!(
             assignments(route(&reg, Some("repo-a")).unwrap()).unwrap(),
-            "SLOT_HOST=build-1.example\nSLOT_SSH='ssh -o BatchMode=yes'\nSLOT_REMOTE=slot\n\
-             export SLOT_HOST SLOT_SSH SLOT_REMOTE\n"
+            "SLOT_NODE=build-1\nSLOT_HOST=build-1.example\nSLOT_SSH='ssh -o BatchMode=yes'\nSLOT_REMOTE=slot\n\
+             SLOT_NODE_END=\nexport SLOT_NODE SLOT_HOST SLOT_SSH SLOT_REMOTE SLOT_NODE_END\n"
         );
 
         let no_default =
@@ -604,7 +622,7 @@ repositories = ["repo-b", "repo-c"]
         assert!(e.contains("repo-a"), "{e}");
     }
 
-    /// `slot node route` in a checkout: a linked worktree of `repo-b` goes
+    /// `slot nodes route` in a checkout: a linked worktree of `repo-b` goes
     /// to the node that lists `repo-b`, another repository and a directory
     /// outside git to the default node, and nothing matches without one.
     #[test]
@@ -647,17 +665,17 @@ repositories = ["repo-b", "repo-c"]
         assert!(
             route_in(ROUTED, &wt)
                 .unwrap()
-                .starts_with("SLOT_HOST=build-2.example\n")
+                .starts_with("SLOT_NODE=build-2\nSLOT_HOST=build-2.example\n")
         );
         assert!(
             route_in(ROUTED, &other)
                 .unwrap()
-                .starts_with("SLOT_HOST=build-1.example\n")
+                .starts_with("SLOT_NODE=build-1\nSLOT_HOST=build-1.example\n")
         );
         assert!(
             route_in(ROUTED, &plain)
                 .unwrap()
-                .starts_with("SLOT_HOST=build-1.example\n")
+                .starts_with("SLOT_NODE=build-1\nSLOT_HOST=build-1.example\n")
         );
         let bare = ROUTED.replace("default_node = \"build-1\"\n", "");
         assert!(route_in(&bare, &other).unwrap_err().contains("`other`"));
@@ -748,6 +766,25 @@ repositories = ["repo-b", "repo-c"]
         let reg = parse_registry(&added).unwrap();
         assert_eq!(route(&reg, Some("repo-b")).unwrap().name, "build-3");
         assert_eq!(reg.nodes[1].table.repositories, ["repo-c"]);
+        // The only repository of a node moves: its key goes, not `[]`.
+        let moved = add(
+            ROUTED,
+            &NewNode {
+                name: "build-3".into(),
+                ssh: "ssh build-3.example".into(),
+                repositories: vec!["repo-a".into()],
+                ..NewNode::default()
+            },
+        )
+        .unwrap();
+        assert!(!moved.contains("repositories = []"), "{moved}");
+        assert_eq!(
+            moved.matches("repositories").count(),
+            2,
+            "build-2 and build-3: {moved}"
+        );
+        let back = remove(&moved, "build-3").unwrap();
+        assert_eq!(back, ROUTED.replace("repositories = [\"repo-a\"]\n", ""));
 
         let removed = remove(ROUTED, "build-1").unwrap();
         let reg = parse_registry(&removed).unwrap();
