@@ -319,6 +319,7 @@ pub fn render(r: &Refused) -> String {
         By::Project => "project",
         By::Repo => "repo",
         By::Session => "session",
+        By::Node => "node",
     };
     let mut out = format!(
         "compiler calls in the last {}, by {by}: {} with calls, {} no job explains\n",

@@ -98,21 +98,18 @@ async fn usage(
         Err(e) => return (StatusCode::BAD_REQUEST, format!("slot: {e}\n")).into_response(),
     };
     let path = s.cfg.state_dir.join("jobs.jsonl");
+    let node_path = s.cfg.state_dir.join("node-jobs.jsonl");
     let titles = s.inner.lock().expect("server lock").titles.clone();
     let built = tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(&path).ok();
-        let mut resolve = |cwd: &str| crate::project::resolve(std::path::Path::new(cwd));
-        let mut u = match file {
-            Some(f) => {
-                crate::usage::aggregate(std::io::BufReader::new(f), from, to, by, &mut resolve)
+        let read = |p: &std::path::Path| -> Box<dyn std::io::BufRead> {
+            match std::fs::File::open(p) {
+                Ok(f) => Box::new(std::io::BufReader::new(f)),
+                Err(_) => Box::new(std::io::empty()),
             }
-            None => crate::usage::Usage {
-                from_ms: from,
-                to_ms: to,
-                by,
-                ..Default::default()
-            },
         };
+        let mut resolve = |cwd: &str| crate::project::resolve(std::path::Path::new(cwd));
+        let mut u =
+            crate::usage::aggregate_logs(read(&path), read(&node_path), from, to, by, &mut resolve);
         if by == crate::usage::By::Session {
             for r in &mut u.rows {
                 r.title = titles.get(&r.key).cloned().unwrap_or_default();

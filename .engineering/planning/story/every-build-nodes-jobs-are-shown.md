@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: story:every-build-nodes-jobs-are-shown
 kind: story
-status: draft
+status: archived
 title: slot status and the web view list the jobs of every build node, also one that gets no hand-off
 relations:
 - serves: vision:O2
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "archived", at: "2026-11-27T11:08:59Z", actor: "human:operator", revision: 2}
 ---
 ## Outcome
 

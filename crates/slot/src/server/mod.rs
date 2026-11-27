@@ -752,7 +752,8 @@ impl Server {
         let sccache_watch = cfg.sccache_watch;
         let upgrade_hold = cfg.upgrade_hold;
         let evict_settings = cfg.evict;
-        let remotes = nodes::Remotes::load(cfg.cluster_file.as_deref(), &host);
+        let remotes = nodes::Remotes::load(cfg.cluster_file.as_deref(), &host)
+            .with_log(&cfg.state_dir.join("node-jobs.jsonl"));
         let server = Arc::new(Self {
             cfg,
             pool,

@@ -12,6 +12,31 @@
   set `SPECS_DIR` to the checkout still declared `../../specs`, and the remote job ended with
   exit 3.
 
+- The host configuration file is the one registry of build nodes. A `[remote.<name>]` entry
+  takes `repositories = ["<name>", …]` (repository names as `slot status` prints them) and the
+  file takes `default_node = "<name>"`. `slot nodes route [<dir>]` prints the node a job in
+  `<dir>` goes to as shell assignments (`SLOT_NODE` for the entry's name, `SLOT_HOST`,
+  `SLOT_SSH`, `SLOT_REMOTE`, `SLOT_NODE_END` for the deadline in Unix seconds, empty without
+  one, and an `export` line of all five): the entry that lists the repository,
+  else `default_node`; it reads only the file and exits 3 with one line naming it when no node
+  matches. A wrapper in front of `slot` sources it instead of a node list of its own: before, a
+  wrapper's own repository-to-node map sent a whole day of jobs to a node the file did not name,
+  and the daemon never polled it, so its jobs showed nowhere. `slot nodes list` prints each node
+  with its state, spill, default and repositories; `slot nodes add <name> --ssh <cmd> …` and
+  `slot nodes remove <name>` write and take out an entry and keep the rest of the file (comments
+  and order) as it was; a node a move leaves without repositories loses the key. The daemon now
+  adds a node new in the file and drops a node taken out of it at the next poll after the
+  change, without a restart, also when the file named no node at the start; before, only a known
+  node's terms were read again. A repository listed under two nodes is refused. `slot node …`
+  still runs Node.js as a build.
+- `slot usage` counts the jobs the build nodes ran. When a poll shows a node's job ended for the
+  first time, the daemon appends it to `node-jobs.jsonl` beside `jobs.jsonl`, once, also across
+  a restart, with `node` set to the node's name and the id the node gave it. `slot usage` and
+  `GET /api/usage` read both files and group by node with `--by node` (`by=node`; `local` for
+  this host's own jobs); the web view's usage table has a **node** grouping. A job this daemon
+  handed to a node counts once, by this host's record: the node's row of it (same node, command
+  and directory, started there while it ran here) is left out. Before, `slot usage` read only
+  this host's log, and no job a node ran for a caller that named it was counted.
 - A remote job takes the sibling trees its repository's `.slot.toml` declares:
   `trees = ["../../specs", "../driver"]`, paths relative to the repository's root or absolute.
   In same-path mode the client syncs each to its own path on the node before the job, with its

@@ -27,6 +27,7 @@ sha2 = "0.11"
 signal-hook = "0.3"
 tempfile = "3"
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+toml_edit = { version = "0.24", default-features = false, features = ["parse", "display"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal", "process"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
