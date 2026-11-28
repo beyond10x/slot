@@ -1,7 +1,7 @@
 {
   "format": "b10x-status/1",
   "asOf": "2026-11-27",
-  "source": "CHANGELOG.md 0.1.0 to 0.43.0 and docs/design.md sections 10 to 26",
+  "source": "CHANGELOG.md 0.1.0 to 0.44.0 and docs/design.md sections 10 to 26",
   "items": [
     {
       "area": "Pool",
@@ -394,6 +394,13 @@
       "status": "shipped",
       "detail": "After a node job the client copies back what the job wrote and deletes here what it deleted, unless the file changed here since the sync (0.43.0).",
       "href": "/docs/remote-builds#what-the-job-wrote-or-deleted-comes-back"
+    },
+    {
+      "area": "Remote",
+      "label": "Node mode ships in the release",
+      "status": "shipped",
+      "detail": "The node-mode wrapper, its helpers and the build node's provisioning scripts are in the release archive under contrib/; the client's sync filters replace a host rsync wrapper (0.44.0).",
+      "href": "/docs/agent-integration#build-nodes-the-node-mode-wrapper"
     }
   ]
 }
