@@ -60,11 +60,20 @@ service or a runner farm plays the same contract. The local daemon `provides` `j
 `run_limit: named_maximum`, `queue_order: priority`, `placement: remote_only_when_asked` and
 `toolchain_parity: checked_before_remote`; the node daemon provides it with `placement: local`;
 the compile cache server provides `compile_cache`, which the local daemon needs. slot's ESS
-domain `slot.pool` (`spec/domains/pool.yaml`) is the binding's side of `job_runner`. The
-systemd units generated from this file do not yet equal `contrib/slot.service` and the node's
-unit; the differences went to cloudspec as eight generator gaps (`${home}` in a command, claims
-as cgroup ceilings, the stop and kill mode, a system unit with a build user, a template unit per
-node, a pass-through in the binding) and are in progress there.
+domain `slot.pool` (`spec/domains/pool.yaml`) is the binding's side of `job_runner`.
+
+State on cloudspec `59129eb`: `cloudspec generate systemd` writes slot's units from this file.
+For the workstation: `slot-daemon.service` (a user unit, `CPUWeight=20` from `priority: {cpu:
+background}`, `KillMode=mixed` and `TimeoutStopSec=2h` from `stop`, reload by `SIGHUP` in place),
+`toolchain-refresh@.service` (a template, one instance per build node, from `per: build-node`)
+and `sccache.service`. For a build node: `node-daemon.service` (a system unit with `User=`, a
+privileged pre-start step, `LimitNOFILE=65536`, `KillMode=control-group`). `systemd-analyze
+verify` accepts each. `task architecture` checks the file, generates both scopes into
+`target/architecture/` and compares the workstation's units key by key with
+`contrib/slot.service` and `contrib/slot-toolchains-refresh@.service` (`contrib/unit-keys.sh`):
+equal except `Type=exec`, which the generator writes. The node's unit is written by
+`contrib/node/provision.sh` from the node's config file and is not compared: its user, home and
+`serve` options come from that file.
 
 ## 3. Gaps in cloudspec
 

@@ -59,7 +59,7 @@ tasks:
     desc: Run the complete offline repository gate.
     cmds:
       - rustc --version
-      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/slot-wrapper.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh
+      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/slot-wrapper.test.sh contrib/rustc-gate.test.sh contrib/unit-keys.test.sh contrib/node/test.sh
       - task: ui-check
       - task: ui
       - task: ui-ux
@@ -82,12 +82,17 @@ tasks:
       - ess ui check --path ui/slot.ui.yaml --model . --hosts ui/slot.hosts
 
   architecture:
-    desc: Check slot's cloudspec architecture (docs/design/cloudspec/slot.architecture.yaml) with the cloudspec CLI on PATH, built from cloudspec f573374 or later.
+    desc: Check slot's cloudspec architecture (docs/design/cloudspec/slot.architecture.yaml), generate the workstation's systemd units from it and compare them with contrib/, with the cloudspec CLI on PATH, built from cloudspec 59129eb or later.
     preconditions:
       - sh: command -v cloudspec
         msg: "cloudspec is not on PATH: cargo install --locked --git https://github.com/beyond10x/cloudspec cloudspec"
     cmds:
       - cloudspec check --json docs/design/cloudspec/slot.architecture.yaml
+      - rm -rf target/architecture
+      - cloudspec generate systemd --from docs/design/cloudspec/slot.architecture.yaml --scope workstation --out target/architecture/workstation
+      - cloudspec generate systemd --from docs/design/cloudspec/slot.architecture.yaml --scope build-node --out target/architecture/build-node
+      - sh contrib/unit-keys.sh contrib/slot.service target/architecture/workstation/user/slot-daemon.service
+      - sh contrib/unit-keys.sh contrib/slot-toolchains-refresh@.service target/architecture/workstation/user/toolchain-refresh@.service
 
   install:
     desc: Build the UI and install slot into ~/.local/bin.

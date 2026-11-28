@@ -16,12 +16,17 @@ parts:
     block: workloads
     kind: process
     in: workstation
-    command: ["${home}/.local/bin/slot", serve, --tokens, "40", --min-free-disk, "40"]
+    command: ["${home}/.local/bin/slot", serve]
     environment:
-      PATH: ${home}/.cargo/bin:${home}/.local/bin:/usr/local/bin:/usr/bin:/bin
+      PATH: ${home}/.cargo/bin:${home}/.local/bin:${home}/go/bin:/usr/local/bin:/usr/bin:/bin
     run_as:
       user: deployer
     isolation: none
+    priority:
+      cpu: background
+    stop:
+      grace: 2h
+      kill: mixed
     upgrade:
       reload:
         signal: HUP
@@ -70,7 +75,17 @@ parts:
     in: build-node
     command: [/usr/local/bin/slot, serve]
     run_as:
-      user: deployer
+      user: build
+    prestart:
+    - command: [/bin/sh, /usr/local/libexec/slot-node/provision.sh, start-pre, /etc/slot-node/node.conf]
+      privileged: true
+    limits:
+      open_files: 65536
+    stop:
+      kill: group
+    environment:
+      HOME: /var/lib/slot-build
+      TMPDIR: /srv/slot/tmp
     isolation: none
     upgrade:
       reload:
@@ -85,7 +100,7 @@ parts:
         command: [slot, status]
         port: 22
     volumes:
-    - host_path: ${home}/
+    - host_path: /var/lib/slot-build
       mount: same
       mode: rw
     - host_path: /srv/slot
@@ -133,7 +148,15 @@ parts:
     block: workloads
     kind: process
     in: workstation
-    command: [sh, "${home}/.local/share/slot/toolchains-refresh.sh", build-node, "60"]
+    per: build-node
+    restart:
+      policy: always
+      delay: 10s
+      keep_down_on_exit: [2]
+    environment_files:
+    - path: "${home}/.config/slot/node/toolchains-refresh.env"
+      optional: true
+    command: [/bin/sh, "${home}/.local/share/slot/toolchains-refresh.sh", "${instance}", "60"]
     run_as:
       user: deployer
     isolation: none
