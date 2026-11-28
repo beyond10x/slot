@@ -132,6 +132,11 @@ jobs:
           package="slot-$GITHUB_REF_NAME-$TARGET"
           mkdir -p "dist/$package"
           cp "target/$TARGET/release/slot" LICENSE README.md "dist/$package/"
+          mkdir -p "dist/$package/contrib"
+          cp -R contrib/slot-wrapper contrib/slot-shim contrib/tree-cd.sh contrib/env-names.sh \
+            contrib/refusal-log.sh contrib/rustc-gate contrib/slot.service \
+            contrib/slot-toolchains-refresh@.service contrib/node "dist/$package/contrib/"
+          rm -f "dist/$package/contrib/node/test.sh"
           tar -C dist -czf "dist/$package.tar.gz" "$package"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

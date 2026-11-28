@@ -107,7 +107,9 @@ was partly outside it; S1 and S1a are closed:
   `--here` for a compile, a script under the session scratch directory), `--here`, `--local`, the
   return sync switch, the tree change, the forwarded variables and the refusal log. The wrapper
   has no default node: the route must name one. `contrib/slot-shim` (the `cargo`/`go` shim) and
-  `contrib/node/` were in it already.
+  `contrib/node/` were in it already. Every release archive carries these files under
+  `contrib/` (`.github/workflows/release.yml`, test
+  `every_release_archive_carries_the_workstation_and_node_files`).
 - S1a, closed. The `rsync` wrapper's filters are the client's (`crates/slot/src/sync.rs`): the
   sync sends what git ignores and leaves out only cargo build directories (`<dir>/target/` beside
   each `Cargo.toml`, and any `target` directory holding `CACHEDIR.TAG` or `.rustc_info.json`);
@@ -117,8 +119,10 @@ was partly outside it; S1 and S1a are closed:
   `PATH`; the repository's sync is the deployed sync.
 - S2. The node registry (`cluster.toml`) is written by hand; with gap A it comes from weft's node
   pool.
-- S3. The architecture in this directory is checked by nothing; once cloudspec has a check of an
-  architecture document, `task check` runs it.
+- S3. The architecture in this directory is checked by nothing in slot's gate. cloudspec has
+  `cloudspec check --json <arch>` from cloudspec `8a3e9b1`; against it the file is refused for
+  four link protocols (`unix`, `ssh`, `rsync` twice) until cloudspec's data-link and socket-port
+  constructs land.
 - S4. slot has an ESS system of its cluster (`spec/`, `slot.cluster`, `slot.hostconfig`,
   `slot.provisioning`, `slot.pool`). cloudspec lists an ESS system as an inbound source; whether
   `spec/` translates into the architecture of this directory is not tried.

@@ -936,3 +936,41 @@ fn the_home_path_check_refuses_a_file_that_names_a_home_directory() {
         .expect("run sh");
     assert!(!out.status.success(), "a missing file is refused");
 }
+
+/// The files a workstation and a build node install besides the binary: the node-mode
+/// wrapper and its helpers, the PATH shim, the rustc gate, the user units and the node's
+/// provisioning scripts. A deployment installs from the release archive alone.
+const RELEASE_CONTRIB: [&str; 9] = [
+    "contrib/slot-wrapper",
+    "contrib/slot-shim",
+    "contrib/tree-cd.sh",
+    "contrib/env-names.sh",
+    "contrib/refusal-log.sh",
+    "contrib/rustc-gate",
+    "contrib/slot.service",
+    "contrib/slot-toolchains-refresh@.service",
+    "contrib/node",
+];
+
+#[test]
+fn every_release_archive_carries_the_workstation_and_node_files() {
+    let steps = package_steps();
+    let pack = &steps[place(&steps, "tar -C dist -czf")];
+    let copied: Vec<&str> = pack
+        .lines
+        .iter()
+        .flat_map(|l| l.split_whitespace())
+        .filter(|w| w.starts_with("contrib/"))
+        .collect();
+    for want in RELEASE_CONTRIB {
+        assert!(
+            copied.contains(&want),
+            "release.yml, package step: copies {want} into the archive (copied: {copied:?})"
+        );
+        assert!(root().join(want).exists(), "{want} exists in the repository");
+    }
+    assert!(
+        pack.contains("dist/$package/contrib/"),
+        "the files land under contrib/ of the archive"
+    );
+}

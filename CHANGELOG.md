@@ -23,6 +23,9 @@
   `contrib/env-names.sh` and `contrib/refusal-log.sh`; `task node-wrapper` installs them and
   `contrib/slot-wrapper.test.sh` tests them in `task check`. It names no default node, puts no
   `rsync` wrapper on `PATH`, and keeps a caller's `SLOT_RETURN_SYNC=0`.
+- Release archives carry `contrib/` besides the binary: the node-mode wrapper and its helpers,
+  `slot-shim`, `rustc-gate`, the user units and `contrib/node/` (the build node's provisioning
+  scripts), so a workstation and a node install from the archive alone.
 
 ## 0.43.0 — 2026-11-27
 
