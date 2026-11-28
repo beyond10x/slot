@@ -78,6 +78,8 @@ fn run_app(d: &Daemon, ssh: &Path, cwd: &Path) -> Output {
         .env("SLOT_SOCKET", d.socket())
         .env("SLOT_SYNC_STALL", "20s")
         .env("SLOT_SYNC_LIMIT", "50s")
+        .env("SLOT_UPLOAD_SLOTS", "0")
+        .env("SLOT_UPLOAD_BWLIMIT", "0")
         .env("SLOT_CLUSTER_FILE", "off")
         .env("XDG_CONFIG_HOME", d.dir.path().join("config"))
         .env_remove("SLOT_JOB")

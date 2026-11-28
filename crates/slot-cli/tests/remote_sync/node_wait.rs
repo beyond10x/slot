@@ -347,6 +347,85 @@ const DAEMON_AWAY: &str = "slot shell: daemon not answering: ";
 /// The exit status of that step (sysexits' `EX_TEMPFAIL`).
 const AWAY_EXIT: i32 = 75;
 
+/// The tree-job registry (`$XDG_RUNTIME_DIR/slot-tree-jobs`) names a job
+/// only while it runs on the node: not while it waits for a daemon that
+/// does not answer, nor when it then runs on this machine's daemon. A
+/// sync of the same tree by another job keeps what a named job wrote.
+#[test]
+fn a_job_names_its_tree_only_while_it_runs_on_the_node() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let a = checkout(t.path());
+    let rt = t.path().join("rt");
+    std::fs::create_dir_all(&rt).unwrap();
+    let reg = rt.join("slot-tree-jobs");
+    let list = format!("ls -A {} 2>/dev/null; echo end", reg.display());
+    let seen = t.path().join("seen-during-wait");
+    // Each proxy step records what the registry names, then finds no daemon.
+    let before = format!(
+        "{}\n{}",
+        proxy_step(&format!("{{ {list}; }} >> {}", seen.display())),
+        no_socket(t.path(), &d, ALWAYS)
+    );
+    let ssh = forced_ssh(t.path(), &d, &before);
+    let rt_s = rt.to_str().unwrap();
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &a,
+        &["sh", "-c", &list],
+        &[
+            ("SLOT_NODE_WAIT", "1s"),
+            ("SLOT_REMOTE_FALLBACK", "local"),
+            ("SLOT_SPILLED", ""),
+            NO_RETURN_SYNC,
+            ("XDG_RUNTIME_DIR", rt_s),
+        ],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("running it on this machine's daemon"), "{err}");
+    let during = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert!(during.contains("end"), "no proxy step ran: {err}");
+    assert!(
+        during.lines().all(|l| l == "end"),
+        "named while it waited for the node's daemon: {during}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "end\n",
+        "named while it ran on this machine: {err}"
+    );
+
+    // On the node it is named, by its client's pid, once the client has read
+    // the start frame: the job waits up to 5 s for that.
+    let ssh = forced_ssh(t.path(), &d, "");
+    let named_soon = format!(
+        "i=0; while [ $i -lt 50 ] && [ -z \"$(ls -A {reg} 2>/dev/null)\" ]; do sleep 0.1; i=$((i + 1)); done; {list}",
+        reg = reg.display()
+    );
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &a,
+        &["sh", "-c", &named_soon],
+        &[NO_RETURN_SYNC, ("XDG_RUNTIME_DIR", rt_s)],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let named: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| *l != "end")
+        .map(String::from)
+        .collect();
+    assert_eq!(named.len(), 1, "{named:?}: {err}");
+    assert!(named[0].parse::<u32>().is_ok(), "{named:?}");
+    assert!(
+        std::fs::read_dir(&reg).unwrap().next().is_none(),
+        "the entry stays after the job"
+    );
+}
+
 /// The proxy step of `slot shell` against `socket`, as sshd runs it.
 fn forced_proxy(socket: &Path, state: &Path) -> std::process::Output {
     Command::new(SLOT)

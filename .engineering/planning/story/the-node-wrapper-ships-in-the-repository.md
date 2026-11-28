@@ -6,7 +6,7 @@ status: draft
 title: 'The node mode of the workstation ships in the repository: wrapper, helpers and the sync''s filters'
 relations:
 - serves: vision:O6
-revision: 1
+revision: 2
 ---
 ## Outcome
 
@@ -48,3 +48,9 @@ this host.
   read from `slot`).
 - `crates/slot/src/sync.rs` sends a git-ignored file that is not a cargo build directory, and
   leaves out `<dir>/target/` beside a `Cargo.toml`; a test shows both.
+- The `rsync` wrapper is not needed and does not move to `contrib/`: the client has its cargo
+  build directory list, its `--delete` drop while another job of the same tree runs (a tree-job
+  registry the client keeps itself), and its upload cap and three upload slots
+  (`SLOT_UPLOAD_BWLIMIT`, `SLOT_UPLOAD_SLOTS`, defaults 2000 KiB/s and 3), each with a test in
+  `crates/slot/src/sync.rs`; `contrib/slot-wrapper` puts no `rsync` wrapper on `PATH`, and its
+  shell test checks that.

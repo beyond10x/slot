@@ -291,7 +291,7 @@ impl Toolchain for Cargo {
     }
 
     fn sync_excludes(&self) -> &'static [&'static str] {
-        &["/target/"]
+        &["/target"]
     }
 }
 
@@ -535,7 +535,7 @@ impl Toolchain for Ignite {
     }
 
     fn sync_excludes(&self) -> &'static [&'static str] {
-        &["/target/"]
+        &["/target"]
     }
 }
 
@@ -574,7 +574,7 @@ impl Toolchain for Generic {
     }
 
     fn sync_excludes(&self) -> &'static [&'static str] {
-        &["/target/"]
+        &["/target"]
     }
 }
 

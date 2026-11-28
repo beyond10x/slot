@@ -10,8 +10,8 @@ specification on a placement.
 
 Terms: the **workstation** is the machine whose agent sessions submit jobs; its daemon is the
 **local daemon**. A **build node** is a cloud machine with its own **node daemon**. The
-**wrapper** is the shell script in front of `slot` on the workstation's agent `PATH` that routes
-jobs to nodes.
+**wrapper** is the shell script in front of `slot` on the workstation's agent `PATH`
+(`contrib/slot-wrapper`) that routes jobs to nodes.
 
 ## 1. The architecture
 
@@ -106,24 +106,35 @@ and fetches no artifact. Needed, in order:
 
 ## 5. Gaps in slot
 
-What a deployment can install is what the repository ships. Today the workstation side of node
-mode is partly outside it:
+What a deployment can install is what the repository ships. The workstation side of node mode
+was partly outside it; S1 and S1a are closed:
 
-- S1. The wrapper and its helpers are not in the repository: the `slot` wrapper on the agent
-  `PATH` (node route, hold files, toolchain parity wait, refusals of compiles under the cache
-  directory and of `--here` for compiles, return sync switch), the `--manifest-path` tree change,
-  the list of variables sent to a node, the refusal log and an `rsync` wrapper.
-  `contrib/slot-shim` (the `cargo`/`go` shim) and `contrib/node/` are in it.
-- S1a. The `rsync` wrapper changes what the sync sends: it replaces the client's
-  `--filter=:- .gitignore` (`crates/slot/src/sync.rs:644`) with an exclude list of cargo build
-  directories only (`<dir>/target/` beside each `Cargo.toml`, and any `target` directory holding
-  `CACHEDIR.TAG` or `.rustc_info.json`), so other ignored files (`node_modules`, generated files)
-  reach the node; it adds a bandwidth cap and three upload slots; it drops `--delete` while
-  another job of the same tree runs. The repository's sync and the deployed sync differ.
+- S1, closed. The `slot` wrapper on the agent `PATH` is `contrib/slot-wrapper`, its helpers
+  `contrib/tree-cd.sh` (the `--manifest-path` tree change), `contrib/env-names.sh` (the variables
+  sent to a node) and `contrib/refusal-log.sh` (the refusal log); `task node-wrapper` installs
+  them. `contrib/slot-wrapper.test.sh` (in `task check`) covers the node route, hold files, the
+  toolchain parity wait with its bound, the refusals (a compile under the cache directory,
+  `--here` for a compile, a script under the session scratch directory), `--here`, `--local`, the
+  return sync switch, the tree change, the forwarded variables and the refusal log. The wrapper
+  has no default node: the route must name one. `contrib/slot-shim` (the `cargo`/`go` shim) and
+  `contrib/node/` were in it already. Every release archive carries these files under
+  `contrib/` (`.github/workflows/release.yml`, test
+  `every_release_archive_carries_the_workstation_and_node_files`).
+- S1a, closed. The `rsync` wrapper's filters are the client's (`crates/slot/src/sync.rs`): the
+  sync always leaves out cargo build directories (`<dir>/target` beside each `Cargo.toml`, and
+  any `target` directory holding `CACHEDIR.TAG` or `.rustc_info.json`); it applies every
+  `.gitignore` unless `SLOT_SYNC_IGNORED=1`, which `contrib/slot-wrapper` sets so a node gets
+  what git ignores too; while another job of the same tree runs on the workstation it deletes
+  only the paths its previous sync sent that are gone here (a registry of running jobs in the
+  runtime directory, a list of sent paths per mirror); an upload holds one of `SLOT_UPLOAD_SLOTS` (3) slots
+  and runs under `SLOT_UPLOAD_BWLIMIT` (2000 KiB/s, compressed). No `rsync` wrapper is needed on
+  `PATH`; the repository's sync is the deployed sync.
 - S2. The node registry (`cluster.toml`) is written by hand; with gap A it comes from weft's node
   pool.
-- S3. The architecture in this directory is checked by nothing; once cloudspec has a check of an
-  architecture document, `task check` runs it.
+- S3. The architecture in this directory is checked by nothing in slot's gate. cloudspec has
+  `cloudspec check --json <arch>` from cloudspec `8a3e9b1`; against it the file is refused for
+  four link protocols (`unix`, `ssh`, `rsync` twice) until cloudspec's data-link and socket-port
+  constructs land.
 - S4. slot has an ESS system of its cluster (`spec/`, `slot.cluster`, `slot.hostconfig`,
   `slot.provisioning`, `slot.pool`). cloudspec lists an ESS system as an inbound source; whether
   `spec/` translates into the architecture of this directory is not tried.

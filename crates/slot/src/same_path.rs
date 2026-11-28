@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 /// How one extra path is synced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A directory with the `.gitignore` filter, without its own `target/`.
+    /// A directory without its own `target/` and its cargo build directories.
     Tree,
     /// A git directory: everything but `*.lock` files.
     Git,
@@ -143,9 +143,11 @@ pub fn git_dirs(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether the working directory `cwd` lies under a path the sync of `top`
-/// leaves out: one of the toolchain's `excludes` (`/target/`) or a path git
+/// leaves out: one of the toolchain's `excludes` (`/target`), a cargo build
+/// directory ([`crate::sync::build_dir_paths`]), or, unless the sync sends
+/// what git ignores (`send_ignored`, `SLOT_SYNC_IGNORED`), a path git
 /// ignores.
-pub fn cwd_ignored(top: &Path, cwd: &Path, excludes: &[&str]) -> bool {
+pub fn cwd_ignored(top: &Path, cwd: &Path, excludes: &[&str], send_ignored: bool) -> bool {
     let Ok(rel) = cwd.strip_prefix(top) else {
         return false;
     };
@@ -158,6 +160,15 @@ pub fn cwd_ignored(top: &Path, cwd: &Path, excludes: &[&str]) -> bool {
         .any(|x| !x.is_empty() && !x.contains('/') && rel.starts_with(x))
     {
         return true;
+    }
+    if crate::sync::build_dir_paths(top)
+        .iter()
+        .any(|d| rel.starts_with(d))
+    {
+        return true;
+    }
+    if send_ignored {
+        return false;
     }
     Command::new("git")
         .arg("-C")
@@ -280,7 +291,7 @@ pub fn target_dir(
 /// rsync filter options of a sync of `kind`.
 pub fn filters(kind: Kind) -> &'static [&'static str] {
     match kind {
-        Kind::Tree => &["--filter=:- .gitignore", "--exclude=/target/"],
+        Kind::Tree => &["--exclude=/target"],
         Kind::Git => &["--exclude=*.lock"],
     }
 }
@@ -466,10 +477,19 @@ mod tests {
         std::fs::write(top.join(".gitignore"), "/scratch/\n").unwrap();
         std::fs::create_dir_all(top.join("scratch/a")).unwrap();
         std::fs::create_dir_all(top.join("src")).unwrap();
-        let x = &["/target/"];
-        assert!(cwd_ignored(&top, &top.join("target/ess-scratch/cli"), x));
-        assert!(cwd_ignored(&top, &top.join("scratch/a"), x));
-        assert!(!cwd_ignored(&top, &top.join("src"), x));
-        assert!(!cwd_ignored(&top, &top, x));
+        let x = &["/target"];
+        for ignored in [false, true] {
+            assert!(cwd_ignored(
+                &top,
+                &top.join("target/ess-scratch/cli"),
+                x,
+                ignored
+            ));
+            assert!(!cwd_ignored(&top, &top.join("src"), x, ignored));
+            assert!(!cwd_ignored(&top, &top, x, ignored));
+        }
+        // git's ignore rules leave scratch out only when the sync applies them.
+        assert!(cwd_ignored(&top, &top.join("scratch/a"), x, false));
+        assert!(!cwd_ignored(&top, &top.join("scratch/a"), x, true));
     }
 }

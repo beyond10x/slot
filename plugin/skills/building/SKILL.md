@@ -143,7 +143,8 @@ check whether a failure comes from slot itself. Never use it to skip the queue.
 ## Remote mode
 
 When `SLOT_HOST` names a build server, `slot` syncs the repository to it with `rsync` (without
-`.gitignore`d files, `.git` and `target/`; uncommitted changes are included), runs the command
+`.git`, `target` and cargo build directories, and by default without `.gitignore`d files;
+`SLOT_SYNC_IGNORED=1` sends those too; uncommitted changes are included), runs the command
 there through `ssh <host> slot proxy` and rewrites the server's paths in the output to the local
 ones. If the server cannot be reached, the command runs locally and `slot` says so in one line.
 

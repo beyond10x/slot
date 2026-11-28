@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Remote mode: every sync leaves out cargo's build directories: `<dir>/target` beside every
+  `Cargo.toml` (also a linked one), whether it exists or not, and any directory named `target`
+  that holds `CACHEDIR.TAG` or `.rustc_info.json`, also below a source directory named `target`;
+  `.git` and `node_modules` are not searched for them. The excludes carry no trailing slash, so a
+  `target` that is a link here leaves the node's build directory alone; the rust and other
+  toolchains exclude `/target` the same way (before `/target/`).
+- Remote mode: `SLOT_SYNC_IGNORED=1` sends what git ignores too (generated files,
+  `node_modules`) and leaves out only `.git`, the toolchain's excludes and the cargo build
+  directories. Unset or `0`, every `.gitignore` applies as before, so `.env`, local settings and
+  nested checkouts stay on this machine. A working directory is synced on its own when the tree's
+  sync leaves it out in the mode that runs. Before, a host wrapper of `rsync` replaced the
+  `.gitignore` filter, so the sync the repository described was not the sync that ran.
+- Remote mode: while another remote job of the same tree runs on this machine, a sync deletes on
+  the node only the paths the previous sync of that mirror sent that are gone here, and keeps
+  every other file (`slot: sync keeps the server's extra files: job of pid <n> runs in this tree
+  (<k> file(s) gone here deleted there)`); the sync of a working directory does the same. The
+  list of sent paths is kept in `$XDG_RUNTIME_DIR/slot-sent/`. A remote job names its tree in
+  `$XDG_RUNTIME_DIR/slot-tree-jobs/<pid>` only while it runs on the node, not while it waits for
+  the node or runs here after a fallback.
+- Remote mode: an upload to a node holds one of `SLOT_UPLOAD_SLOTS` slots of this machine
+  (default 3; `0`: no limit) and runs with `--bwlimit=<SLOT_UPLOAD_BWLIMIT> --compress` (default
+  2000 KiB/s; `0`: no cap, not compressed). The wait for a slot does not count against
+  `SLOT_SYNC_LIMIT` or `SLOT_SYNC_STALL`. A copy into the node's cargo git database holds a slot
+  without the cap. Before, a host wrapper of `rsync` did both.
+- `contrib/slot-wrapper`: the `slot` of agent shells on a workstation whose jobs run on build
+  nodes (node route by `slot nodes route`, hold files, the toolchain parity wait, the refusals,
+  `--here` and `--local`, the return sync switch), with its helpers `contrib/tree-cd.sh`,
+  `contrib/env-names.sh` and `contrib/refusal-log.sh`; `task node-wrapper` installs them and
+  `contrib/slot-wrapper.test.sh` tests them in `task check`. It names no default node, puts no
+  `rsync` wrapper on `PATH`, sets `SLOT_SYNC_IGNORED=1` (a caller's `0` wins) and keeps a caller's
+  `SLOT_RETURN_SYNC=0`.
+- Release archives carry `contrib/` besides the binary: the node-mode wrapper and its helpers,
+  `slot-shim`, `rustc-gate`, the user units and `contrib/node/` (the build node's provisioning
+  scripts), so a workstation and a node install from the archive alone.
+
 ## 0.43.0 — 2026-11-27
 
 - Remote mode: the return sync is the client's. After a job that ran on a node, the client lists

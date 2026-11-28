@@ -115,7 +115,9 @@ pub struct Settings {
     /// [`NOT_RUN`].
     pub fallback: bool,
     /// `SLOT_SYNC_STALL` and `SLOT_SYNC_LIMIT`: when a remote sync is
-    /// killed and the job runs on this machine's daemon instead.
+    /// killed and the job runs on this machine's daemon instead;
+    /// `SLOT_UPLOAD_BWLIMIT` and `SLOT_UPLOAD_SLOTS`: the cap of an upload
+    /// and how many run at once.
     pub sync: sync::Bounds,
     /// `SLOT_REMOTE_SAME_PATH` set and not `0`: the server mirrors the
     /// tree at its absolute path here, and the job runs there.
@@ -265,6 +267,12 @@ impl Settings {
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
+                bwlimit: sync::count_of(var(sync::BWLIMIT_ENV).as_deref(), sync::DEFAULT_BWLIMIT),
+                upload_slots: sync::count_of(
+                    var(sync::UPLOAD_SLOTS_ENV).as_deref(),
+                    sync::DEFAULT_UPLOAD_SLOTS,
+                ),
+                send_ignored: var(sync::SYNC_IGNORED_ENV).is_some_and(|v| v != "0"),
             },
             node_wait: NodeWait {
                 // Only the daemon's own client of a handed job skips the
@@ -391,6 +399,16 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         // The tree is synced once; the request is sent until the server's
         // daemon answers, each time with a collector of its own.
         let mut collector = None;
+        // While this job runs on the node, from its start frame to the end
+        // of what comes back, a sync of the same tree by another job deletes
+        // there only what is gone here. Not while the job waits for a daemon
+        // that does not answer or is queued there, nor when it runs here.
+        let mut tree_job: Option<sync::TreeJob> = None;
+        let register = || {
+            top.as_deref()
+                .zip(sync::tree_jobs_dir())
+                .and_then(|(top, dir)| sync::TreeJob::register(&dir, top))
+        };
         let sent = remote(host, top.as_deref(), &cwd, &declared, &mut req, s).and_then(|files| {
             sent_files = files;
             if let Some(top) = top.as_deref().filter(|_| s.return_sync && !s.warm) {
@@ -419,7 +437,12 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
                 |again| proxy(host, s, again),
                 |c| {
                     collector = plan.as_ref().map(|p| artifacts::Collector::new(p.strip));
-                    talk_with(c, &req, collector.as_mut())
+                    // Registered at the start frame: the job then runs there.
+                    talk_with(c, &req, collector.as_mut(), &mut || {
+                        if tree_job.is_none() {
+                            tree_job = register();
+                        }
+                    })
                 },
                 &mut std::io::stderr(),
             )
@@ -489,6 +512,8 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
             }
             Err(e) => format!("{e:#}"),
         };
+        // The job did not run on the node: it names no tree there.
+        drop(tree_job);
         // A job the daemon handed to a node goes back to the daemon's queue.
         if std::env::var_os(crate::server::spill::SPILLED_ENV).is_some_and(|v| !v.is_empty()) {
             eprintln!("slot: remote build on {host} did not start ({why})");
@@ -1306,7 +1331,7 @@ fn same_path_extras(
             path: tree.clone(),
             kind: Kind::Tree,
         };
-        sync::sync_extra(&e, r, &s.sync)
+        sync::sync_extra(&e, r, &s.sync, sync::Delete::All)
             .with_context(|| format!("sync of the declared tree {}", tree.display()))?;
         for g in same_path::git_dirs(tree) {
             if !git_dirs.contains(&g) {
@@ -1319,21 +1344,16 @@ fn same_path_extras(
             path,
             kind: Kind::Git,
         };
-        if let Err(err) = sync::sync_extra(&e, r, &s.sync) {
+        if let Err(err) = sync::sync_extra(&e, r, &s.sync, sync::Delete::All) {
             eprintln!(
                 "slot: git directory {} not synced: {err:#}",
                 e.path.display()
             );
         }
     }
-    if same_path::cwd_ignored(top, cwd, excludes) {
-        let e = Extra {
-            path: cwd.to_path_buf(),
-            kind: Kind::Tree,
-        };
-        sync::sync_extra(&e, r, &s.sync)
-            .with_context(|| format!("sync of the working directory {}", cwd.display()))?;
-    }
+    let jobs = sync::tree_jobs_dir();
+    sync::sync_cwd(top, cwd, excludes, r, &s.sync, jobs.as_deref())
+        .with_context(|| format!("sync of the working directory {}", cwd.display()))?;
     Ok(())
 }
 
@@ -1384,7 +1404,15 @@ fn remote(
         same_path,
     };
     let t0 = Instant::now();
-    let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
+    let jobs = sync::tree_jobs_dir();
+    let synced = sync::sync(
+        top,
+        &id,
+        tc.sync_excludes(),
+        &target,
+        &s.sync,
+        jobs.as_deref(),
+    )?;
     eprintln!("{}", synced.line(host));
     // Where the job builds, for the record, eviction and the products; and
     // whether cargo finds that directory by itself, so the server need not
@@ -1619,12 +1647,17 @@ impl Ended {
 }
 
 fn talk(conn: Conn, req: &Request) -> Ended {
-    talk_with(conn, req, None)
+    talk_with(conn, req, None, &mut || {})
 }
 
 /// Talks to the daemon; the job's stdout goes through `collector` when
-/// given.
-fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Collector>) -> Ended {
+/// given, and `on_start` runs at the daemon's start frame.
+fn talk_with(
+    conn: Conn,
+    req: &Request,
+    mut collector: Option<&mut artifacts::Collector>,
+    on_start: &mut dyn FnMut(),
+) -> Ended {
     let Conn {
         reader,
         mut writer,
@@ -1679,6 +1712,7 @@ fn talk_with(conn: Conn, req: &Request, mut collector: Option<&mut artifacts::Co
                 seeded_from,
             }) => {
                 started = true;
+                on_start();
                 if let Ok(mut t) = JOB_TARGET.lock() {
                     *t = target_dir;
                 }

@@ -25,10 +25,21 @@
 //! the link (a wrapper on `PATH` that adds `--copy-unsafe-links`), the sync is
 //! refused and the job runs on this machine.
 //!
+//! Every `.gitignore` applies by default. With `SLOT_SYNC_IGNORED=1` what
+//! git ignores is sent too (generated files, `node_modules`). In both modes
+//! cargo's build directories stay here: `<dir>/target` beside each
+//! `Cargo.toml` and any `target` holding `CACHEDIR.TAG` or
+//! `.rustc_info.json` ([`build_dirs`]). While another remote job of the
+//! same tree runs on this machine (the tree-job registry, [`TreeJob`]), a
+//! sync deletes on the server only what the previous sync sent and is gone
+//! here. An upload holds one of this machine's upload slots and is capped
+//! and compressed ([`Bounds`]).
+//!
 //! A sync is watched: when rsync neither reads nor writes for the stall
 //! window (`SLOT_SYNC_STALL`, 60 s), or runs past the bound
-//! (`SLOT_SYNC_LIMIT`, 5 min), it is killed and the caller runs the job on
-//! this machine's daemon.
+//! (`SLOT_SYNC_LIMIT`, 5 min, counted from when rsync may start: the wait
+//! for an upload slot is not part of it), it is killed and the caller runs
+//! the job on this machine's daemon.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -97,13 +108,24 @@ impl Remote<'_> {
     }
 }
 
-/// When a sync is given up.
+/// When a sync is given up, and what an upload to a server may use.
 #[derive(Debug, Clone, Copy)]
 pub struct Bounds {
     /// No byte read or written for this long.
     pub stall: Duration,
     /// The whole sync, the sibling step included, runs this long.
     pub limit: Duration,
+    /// `SLOT_UPLOAD_BWLIMIT`: KiB/s one upload sends at most, compressed
+    /// (`--bwlimit`, `--compress`); 0: no cap.
+    pub bwlimit: u32,
+    /// `SLOT_UPLOAD_SLOTS`: uploads from this machine that run at once; one
+    /// more waits for a slot. 0: no limit.
+    pub upload_slots: u32,
+    /// `SLOT_SYNC_IGNORED` set and not `0`: a tree's sync sends what git
+    /// ignores too, and leaves out only cargo's build directories. Off: every
+    /// `.gitignore` applies (`--filter=:- .gitignore`), so a repository's
+    /// ignored files (`.env`, local settings) stay here.
+    pub send_ignored: bool,
 }
 
 impl Default for Bounds {
@@ -111,8 +133,349 @@ impl Default for Bounds {
         Self {
             stall: DEFAULT_STALL,
             limit: DEFAULT_LIMIT,
+            bwlimit: DEFAULT_BWLIMIT,
+            upload_slots: DEFAULT_UPLOAD_SLOTS,
+            send_ignored: false,
         }
     }
+}
+
+/// The variable of [`Bounds::send_ignored`].
+pub const SYNC_IGNORED_ENV: &str = "SLOT_SYNC_IGNORED";
+/// The filter that applies every `.gitignore` of a tree.
+pub const GITIGNORE_FILTER: &str = "--filter=:- .gitignore";
+/// Directory under the runtime directory that holds, per mirror, the files
+/// its last sync sent.
+pub const SENT_DIR: &str = "slot-sent";
+
+/// The variable of [`Bounds::bwlimit`].
+pub const BWLIMIT_ENV: &str = "SLOT_UPLOAD_BWLIMIT";
+/// The variable of [`Bounds::upload_slots`].
+pub const UPLOAD_SLOTS_ENV: &str = "SLOT_UPLOAD_SLOTS";
+/// Default cap of one upload, KiB/s: three at once stay under about
+/// 50 Mbit/s.
+pub const DEFAULT_BWLIMIT: u32 = 2000;
+/// Default count of uploads at once.
+pub const DEFAULT_UPLOAD_SLOTS: u32 = 3;
+/// Directory under the runtime directory that holds the upload slots.
+pub const UPLOAD_SLOTS_DIR: &str = "slot-upload-slots";
+/// Directory under the runtime directory where each running remote job
+/// names its tree.
+pub const TREE_JOBS_DIR: &str = "slot-tree-jobs";
+
+/// A count setting: `v` as a whole number, else `default`.
+pub fn count_of(v: Option<&str>, default: u32) -> u32 {
+    v.and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+/// rsync options of an upload under `b`'s cap.
+fn upload_args(b: &Bounds) -> Vec<String> {
+    if b.bwlimit == 0 {
+        return Vec::new();
+    }
+    vec![format!("--bwlimit={}", b.bwlimit), "--compress".to_string()]
+}
+
+/// One of the upload slots of this machine, held until dropped.
+#[derive(Debug)]
+pub struct UploadSlot {
+    _held: Option<nix::fcntl::Flock<std::fs::File>>,
+}
+
+/// Takes one of `n` upload slots in `dir` (a `flock` on `<dir>/<i>`),
+/// waiting until `deadline`. No directory or `n` 0: no slot is needed.
+pub fn upload_slot(dir: Option<&Path>, n: u32, deadline: Instant) -> Result<UploadSlot> {
+    use nix::errno::Errno;
+    use nix::fcntl::{Flock, FlockArg};
+    let Some(dir) = dir.filter(|_| n > 0) else {
+        return Ok(UploadSlot { _held: None });
+    };
+    std::fs::create_dir_all(dir).map_err(|e| anyhow!("{}: {e}", dir.display()))?;
+    loop {
+        for i in 1..=n {
+            let path = dir.join(i.to_string());
+            let f = std::fs::File::options()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+            match Flock::lock(f, FlockArg::LockExclusiveNonblock) {
+                Ok(held) => return Ok(UploadSlot { _held: Some(held) }),
+                Err((_, Errno::EWOULDBLOCK)) => {}
+                Err((_, e)) => bail!("lock {}: {e}", path.display()),
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            bail!("no upload slot of {n} came free in time");
+        }
+        std::thread::sleep(LOCK_POLL.min(deadline - now));
+    }
+}
+
+/// The upload slots of this machine: `<runtime dir>/slot-upload-slots`.
+pub fn upload_slots_dir() -> Option<std::path::PathBuf> {
+    crate::paths::runtime_dir().map(|d| d.join(UPLOAD_SLOTS_DIR))
+}
+
+/// Takes an upload slot in `dir` under `b`, waiting at most `b.limit` for
+/// it; the slot and `deadline` moved by the time it waited. The wait is not
+/// part of the sync's bound: that counts from when rsync starts.
+pub fn take_upload_slot(
+    b: &Bounds,
+    dir: Option<&Path>,
+    deadline: Instant,
+) -> Result<(UploadSlot, Instant)> {
+    let t0 = Instant::now();
+    let slot = upload_slot(dir, b.upload_slots, t0 + b.limit)?;
+    Ok((slot, deadline + t0.elapsed()))
+}
+
+/// Where the list of the files the last sync of `key` to `host` sent is
+/// kept.
+fn sent_list(key: &str, host: &str) -> Option<std::path::PathBuf> {
+    crate::paths::runtime_dir().map(|d| {
+        d.join(SENT_DIR)
+            .join(format!("{key}-{}", mirror::digest16(host)))
+    })
+}
+
+/// Writes `files` (relative paths) to the sent list `path`. A name with a
+/// line break is left out; a list that cannot be written is no list.
+fn write_sent(path: Option<&Path>, files: &[String]) {
+    let Some(path) = path else { return };
+    let mut body = String::new();
+    for f in files.iter().filter(|f| !f.contains('\n')) {
+        body.push_str(f);
+        body.push('\n');
+    }
+    let ok = path
+        .parent()
+        .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+        && std::fs::write(path, body).is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The files of the sent list `path`; none without one.
+fn read_sent(path: Option<&Path>) -> Vec<String> {
+    path.and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| s.lines().map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// The rsync filters of a sync beside another job of the tree at `top`,
+/// with `--delete`: the files of `sent` (what the previous sync sent) that
+/// are gone here, and each directory above one that is gone here too, are
+/// deleted on the server (`R` rules, ahead of every other filter); anything
+/// else the server has and this tree does not stays (`P *`, after them).
+/// `(ahead, after, count of files deleted)`.
+pub fn keep_rules(top: &Path, sent: &[String]) -> (Vec<String>, Vec<String>, usize) {
+    let gone = |rel: &Path| top.join(rel).symlink_metadata().is_err();
+    let mut files = std::collections::BTreeSet::new();
+    let mut dirs = std::collections::BTreeSet::new();
+    for f in sent {
+        let rel = Path::new(f);
+        if f.is_empty() || rel.is_absolute() || !gone(rel) {
+            continue;
+        }
+        files.insert(f.clone());
+        let mut up = rel.parent();
+        while let Some(d) = up.filter(|d| !d.as_os_str().is_empty()) {
+            if !gone(d) {
+                break;
+            }
+            dirs.insert(d.to_string_lossy().into_owned());
+            up = d.parent();
+        }
+    }
+    let n = files.len();
+    let ahead = files
+        .iter()
+        .map(|f| format!("--filter=R /{}", literal_pattern(f)))
+        .chain(
+            dirs.iter()
+                .map(|d| format!("--filter=R /{}/", literal_pattern(d))),
+        )
+        .collect();
+    (ahead, vec!["--filter=P *".to_string()], n)
+}
+
+/// The tree-job registry of this machine: `<runtime dir>/slot-tree-jobs`.
+pub fn tree_jobs_dir() -> Option<std::path::PathBuf> {
+    crate::paths::runtime_dir().map(|d| d.join(TREE_JOBS_DIR))
+}
+
+/// A running remote job's entry in the tree-job registry: the file
+/// `<dir>/<pid>` holds its tree. Removed when dropped.
+#[derive(Debug)]
+pub struct TreeJob {
+    path: std::path::PathBuf,
+}
+
+impl TreeJob {
+    /// Names `top` as the tree of this process's job in `dir`.
+    pub fn register(dir: &Path, top: &Path) -> Option<Self> {
+        std::fs::create_dir_all(dir).ok()?;
+        let path = dir.join(std::process::id().to_string());
+        std::fs::write(&path, format!("{}\n", top.display())).ok()?;
+        Some(Self { path })
+    }
+}
+
+impl Drop for TreeJob {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Whether the process `pid` exists.
+fn alive(pid: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    matches!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(raw), None),
+        Ok(()) | Err(nix::errno::Errno::EPERM)
+    )
+}
+
+/// The pid of another live job in `dir` whose tree is `top`; `own` is not
+/// another. An entry of a process that ended is removed.
+pub fn other_tree_job(dir: &Path, top: &Path, own: u32) -> Option<u32> {
+    let want = top.to_string_lossy();
+    let mut other = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        if !alive(pid) {
+            let _ = std::fs::remove_file(e.path());
+            continue;
+        }
+        if std::fs::read_to_string(e.path()).is_ok_and(|t| t.trim_end_matches('\n') == want) {
+            other = Some(pid);
+        }
+    }
+    other
+}
+
+/// `rel` as an rsync pattern that matches it literally: a wildcard
+/// character is escaped, and so is a backslash then.
+fn literal_pattern(rel: &str) -> String {
+    if !rel.contains(['*', '?', '[']) {
+        return rel.to_string();
+    }
+    let mut out = String::with_capacity(rel.len() + 4);
+    for c in rel.chars() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// cargo's build directories in the tree at `top`, relative to it, sorted:
+/// `<dir>/target` beside every `Cargo.toml` (also one that is a symbolic
+/// link to a file), whether it exists or not (a `--delete` then keeps the
+/// server's build output there), and every directory named `target` that
+/// holds `CACHEDIR.TAG` or `.rustc_info.json`. `.git` and `node_modules`
+/// are not walked, nor a build directory; a directory named `target` that
+/// is none is walked like any other. Symbolic links to directories are not
+/// followed.
+pub fn build_dir_paths(top: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut stack = vec![top.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let rel = dir.strip_prefix(top).unwrap_or(Path::new("")).to_path_buf();
+        let crate_here = std::fs::metadata(dir.join("Cargo.toml")).is_ok_and(|m| m.is_file());
+        if crate_here {
+            out.insert(rel.join("target"));
+        }
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = e.file_name();
+            match name.to_string_lossy().as_ref() {
+                ".git" | "node_modules" => {}
+                "target" => {
+                    let p = e.path();
+                    if p.join("CACHEDIR.TAG").is_file() || p.join(".rustc_info.json").is_file() {
+                        out.insert(rel.join("target"));
+                    } else if !crate_here {
+                        stack.push(p);
+                    }
+                }
+                _ => stack.push(e.path()),
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// [`build_dir_paths`] as rsync patterns anchored at `top`, without a
+/// trailing slash (`/sub/target`): a symbolic link named `target` here is
+/// left out too, so it never replaces the server's build directory.
+pub fn build_dirs(top: &Path) -> Vec<String> {
+    build_dir_paths(top)
+        .iter()
+        .map(|p| format!("/{}", literal_pattern(&p.to_string_lossy())))
+        .collect()
+}
+
+/// rsync filters of a tree at `top` that leave its cargo build directories
+/// ([`build_dirs`]) out.
+pub fn tree_filters(top: &Path) -> Vec<String> {
+    build_dirs(top)
+        .into_iter()
+        .map(|p| format!("--exclude={p}"))
+        .collect()
+}
+
+/// The filters of a tree at `top` under `b`: every `.gitignore` unless
+/// [`Bounds::send_ignored`], and the cargo build directories in both modes.
+fn tree_mode_filters(top: &Path, b: &Bounds) -> Vec<String> {
+    let mut f = Vec::new();
+    if !b.send_ignored {
+        f.push(GITIGNORE_FILTER.to_string());
+    }
+    f.extend(tree_filters(top));
+    f
+}
+
+/// rsync filters of the extra path `e` of a same-path job under `b`.
+fn extra_filters(e: &same_path::Extra, b: &Bounds) -> Vec<String> {
+    let mut f: Vec<String> = same_path::filters(e.kind)
+        .iter()
+        .map(|f| (*f).to_string())
+        .collect();
+    if e.kind == same_path::Kind::Tree {
+        f.extend(tree_mode_filters(&e.path, b));
+    }
+    f
+}
+
+/// What a sync may delete on the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delete {
+    /// Whatever the tree here does not have (`--delete`).
+    All,
+    /// Only what the previous sync sent and is gone here: another job of
+    /// the tree runs on the server ([`keep_rules`]).
+    OnlyGone,
 }
 
 /// What a finished sync did.
@@ -439,24 +802,26 @@ fn run_watched(rsync: &mut Command, b: &Bounds, deadline: Instant) -> Result<Str
 /// Syncs `e` to its own path on the server, for a same-path job, within
 /// `b`. A git directory is shared by every worktree of its repository, and
 /// a sibling tree a `.slot.toml` declares by every job that declares it:
-/// one sync of a path runs at a time on this machine.
-pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()> {
+/// one sync of a path runs at a time on this machine. With
+/// [`Delete::OnlyGone`] it deletes on the server only what its previous
+/// sync sent and is gone here.
+pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds, delete: Delete) -> Result<()> {
     let kind = match e.kind {
         same_path::Kind::Git => "git",
         same_path::Kind::Tree => "tree",
     };
+    let id = format!("{kind}{}", mirror::digest16(&e.path.to_string_lossy()));
     let _lock = crate::paths::runtime_dir()
-        .map(|dir| {
-            let id = format!("{kind}{}", mirror::digest16(&e.path.to_string_lossy()));
-            lock_workspace(&dir, r.host, &id, b.limit)
-        })
+        .map(|dir| lock_workspace(&dir, r.host, &id, b.limit))
         .transpose()?;
     let deadline = Instant::now() + b.limit;
-    let filters: Vec<String> = same_path::filters(e.kind)
-        .iter()
-        .map(|f| (*f).to_string())
-        .collect();
-    preflight(&e.path, &filters, b, deadline)?;
+    let filters = extra_filters(e, b);
+    let (_, files) = preflight(&e.path, &filters, b, deadline)?;
+    let list = sent_list(&id, r.host);
+    let (ahead, after, _) = match delete {
+        Delete::All => (Vec::new(), Vec::new(), 0),
+        Delete::OnlyGone => keep_rules(&e.path, &read_sent(list.as_deref())),
+    };
     let path = e.path.display();
     let mut rsync = Command::new("rsync");
     rsync.arg("-a");
@@ -466,12 +831,46 @@ pub fn sync_extra(e: &same_path::Extra, r: &Remote<'_>, b: &Bounds) -> Result<()
     }
     rsync
         .args(["--delete", "--mkpath"])
+        .args(upload_args(b))
+        .args(&ahead)
         .args(&filters)
+        .args(&after)
         .arg("-e")
         .arg(r.ssh.join(" "))
         .arg(format!("{path}/"))
         .arg(format!("{}:{path}/", r.host));
-    run_watched(&mut rsync, b, deadline).map(drop)
+    let (_slot, deadline) = take_upload_slot(b, upload_slots_dir().as_deref(), deadline)?;
+    run_watched(&mut rsync, b, deadline)?;
+    write_sent(list.as_deref(), &files);
+    Ok(())
+}
+
+/// Syncs the working directory `cwd` of a same-path job on its own when
+/// the sync of its tree `top` left it out ([`same_path::cwd_ignored`] in
+/// `b`'s mode); whether it did. While another job of `top` is named in the
+/// tree-job registry `jobs`, it deletes on the server only what its
+/// previous sync sent and is gone here.
+pub fn sync_cwd(
+    top: &Path,
+    cwd: &Path,
+    excludes: &[&str],
+    r: &Remote<'_>,
+    b: &Bounds,
+    jobs: Option<&Path>,
+) -> Result<bool> {
+    if !same_path::cwd_ignored(top, cwd, excludes, b.send_ignored) {
+        return Ok(false);
+    }
+    let delete = match jobs.and_then(|d| other_tree_job(d, top, std::process::id())) {
+        Some(_) => Delete::OnlyGone,
+        None => Delete::All,
+    };
+    let e = same_path::Extra {
+        path: cwd.to_path_buf(),
+        kind: same_path::Kind::Tree,
+    };
+    sync_extra(&e, r, b, delete)?;
+    Ok(true)
 }
 
 /// The rsync filter of a git database copy: its objects, refs and `HEAD`,
@@ -493,9 +892,12 @@ pub const DB_ENTRY_FILTER: [&str; 8] = [
 /// Copies the git database `src` to entry `entry` of the server account's
 /// cargo git database (`git_deps::NODE_DB`, relative to its home), within
 /// `b`. Only [`DB_ENTRY_FILTER`] crosses; `-rt` without `-l`: a symbolic
-/// link is not sent. Adds to what the entry holds (no `--delete`).
+/// link is not sent. Adds to what the entry holds (no `--delete`). It
+/// holds an upload slot without the cap: the server's `slot shell` admits
+/// no other option into the database.
 pub fn copy_db_entry(src: &Path, entry: &str, r: &Remote<'_>, b: &Bounds) -> Result<()> {
-    let deadline = Instant::now() + b.limit;
+    let (_slot, deadline) =
+        take_upload_slot(b, upload_slots_dir().as_deref(), Instant::now() + b.limit)?;
     let mut rsync = Command::new("rsync");
     rsync
         .args(["-rt", "--mkpath"])
@@ -630,7 +1032,22 @@ pub fn preflight(
 /// time, or a sibling's file of that size and time, would otherwise be taken
 /// as it is and the job would build the old content. The mirror keeps its
 /// own modification times ([`BY_CONTENT`]).
-pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds) -> Result<Synced> {
+///
+/// Every `.gitignore` applies, unless [`Bounds::send_ignored`]: then what
+/// git ignores is sent too (generated files, `node_modules`). cargo's build
+/// directories stay here in both modes ([`tree_filters`]). While another
+/// live job of the same tree is named in the tree-job registry `jobs`
+/// ([`TreeJob`]), the sync deletes on the server only what the previous
+/// sync of this mirror sent and is gone here ([`keep_rules`]): what that
+/// job wrote there stays, and a file renamed or deleted here does not.
+pub fn sync(
+    top: &Path,
+    id: &str,
+    excludes: &[&str],
+    r: &Remote<'_>,
+    b: &Bounds,
+    jobs: Option<&Path>,
+) -> Result<Synced> {
     let sources = Sources::of(top);
     let asked = Instant::now();
     let _lock = crate::paths::runtime_dir()
@@ -640,17 +1057,34 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
     let deadline = t0 + b.limit;
     // A same-path mirror keeps a linked worktree's `.git` file; the git
     // directories follow in syncs of their own (`sync_extra`).
-    let mut filters = vec![
-        "--filter=:- .gitignore".to_string(),
-        if r.same_path {
-            "--exclude=/.git/"
-        } else {
-            "--exclude=/.git"
-        }
-        .to_string(),
-    ];
+    let git = if r.same_path {
+        "--exclude=/.git/"
+    } else {
+        "--exclude=/.git"
+    };
+    let mut filters = Vec::new();
+    if !b.send_ignored {
+        filters.push(GITIGNORE_FILTER.to_string());
+    }
+    filters.push(git.to_string());
     filters.extend(excludes.iter().map(|x| format!("--exclude={x}")));
+    filters.extend(tree_filters(top));
     let (outside_links, files) = preflight(top, &filters, b, deadline)?;
+    let list = sent_list(id, r.host);
+    let other = jobs.and_then(|d| other_tree_job(d, top, std::process::id()));
+    let (ahead, after) = match other {
+        Some(pid) => {
+            let (ahead, after, gone) = keep_rules(top, &read_sent(list.as_deref()));
+            eprintln!(
+                "slot: sync keeps the server's extra files: job of pid {pid} runs in this tree \
+                 ({gone} file{} gone here deleted there)",
+                if gone == 1 { "" } else { "s" }
+            );
+            (ahead, after)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let listed = files.clone();
     // Stamped before rsync reads them: a file changed after this reads as
     // changed here, never as the copy that was sent.
     let sent = crate::return_sync::Sent::record(top, files);
@@ -663,7 +1097,10 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         .arg("-a")
         .args(BY_CONTENT)
         .args(["--delete", "--mkpath"])
-        .args(&filters);
+        .args(upload_args(b))
+        .args(&ahead)
+        .args(&filters)
+        .args(&after);
     if let Some(sibs) = &siblings {
         rsync.arg("--stats");
         for s in sibs {
@@ -677,7 +1114,10 @@ pub fn sync(top: &Path, id: &str, excludes: &[&str], r: &Remote<'_>, b: &Bounds)
         .arg(r.ssh.join(" "))
         .arg(format!("{}/", top.display()))
         .arg(format!("{}:{}/", r.host, r.dest(top, id)));
+    let (slot, deadline) = take_upload_slot(b, upload_slots_dir().as_deref(), deadline)?;
     let out = run_watched(&mut rsync, b, deadline)?;
+    drop(slot);
+    write_sent(list.as_deref(), &listed);
     Ok(Synced {
         bytes: siblings.as_ref().and_then(|_| stats_bytes_sent(&out)),
         elapsed: t0.elapsed(),
@@ -725,7 +1165,7 @@ mod tests {
             remote_slot: "slot",
             same_path: false,
         };
-        copy_db_entry(src, entry, &r, &Bounds::default()).unwrap();
+        copy_db_entry(src, entry, &r, &test_bounds()).unwrap();
         home
     }
 
@@ -1038,6 +1478,206 @@ mod tests {
         let got = watch(&mut c, Some(Duration::from_millis(700)), t0 + limit, limit);
         assert_eq!(got, Err(Stop::OverLimit(limit)), "not a stall: it wrote");
         assert!(t0.elapsed() >= limit && t0.elapsed() < Duration::from_secs(5));
+    }
+
+    /// Bounds of a test: no host-wide upload slot, no bandwidth cap.
+    fn test_bounds() -> Bounds {
+        Bounds {
+            bwlimit: 0,
+            upload_slots: 0,
+            ..Bounds::default()
+        }
+    }
+
+    /// Syncs `top` to the fake node at `root` as mirror `id`, with the
+    /// tree-job registry `jobs`; the mirror's path.
+    fn sync_to_node(root: &Path, top: &Path, jobs: Option<&Path>, b: &Bounds) -> PathBuf {
+        let (home, ssh) = fake_node(root);
+        // One mirror per tree: tests run beside each other in one process.
+        let id = mirror::digest16(&top.to_string_lossy());
+        let r = Remote {
+            host: "node",
+            ssh: &ssh,
+            ws_root: "ws",
+            // Not a slot: the sibling step fails and the plain sync runs.
+            remote_slot: "false",
+            same_path: false,
+        };
+        sync(top, &id, &["/target"], &r, b, jobs).unwrap();
+        home.join("ws").join(id)
+    }
+
+    fn write(p: &Path, s: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, s).unwrap();
+    }
+
+    #[test]
+    fn asked_to_send_ignored_files_the_sync_leaves_out_only_cargo_build_directories() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let top = root.join("tree");
+        write(&top.join(".gitignore"), "/gen/\n/target/\nnode_modules/\n");
+        write(&top.join("Cargo.toml"), "[workspace]\n");
+        write(&top.join("gen/out.txt"), "generated\n");
+        write(&top.join("target/debug/x"), "build\n");
+        // A crate's own build directory, and one cargo marked.
+        write(&top.join("sub/Cargo.toml"), "[package]\n");
+        write(&top.join("sub/target/y"), "build\n");
+        write(&top.join("tools/target/CACHEDIR.TAG"), "Signature\n");
+        write(&top.join("tools/target/z"), "build\n");
+        write(&top.join("info/target/.rustc_info.json"), "{}\n");
+        // A directory named target that cargo did not make: inputs.
+        write(&top.join("fixtures/target/input"), "fixture\n");
+        // node_modules is not walked: its Cargo.toml excludes nothing.
+        write(&top.join("node_modules/pkg/Cargo.toml"), "[package]\n");
+        write(&top.join("node_modules/pkg/target/w"), "kept\n");
+        let ignored = Bounds {
+            send_ignored: true,
+            ..test_bounds()
+        };
+        let m = sync_to_node(&root, &top, None, &ignored);
+        for f in [
+            "gen/out.txt",
+            "fixtures/target/input",
+            "node_modules/pkg/target/w",
+            "sub/Cargo.toml",
+        ] {
+            assert!(m.join(f).is_file(), "{f} did not reach the node");
+        }
+        for d in ["target", "sub/target", "tools/target", "info/target"] {
+            assert!(!m.join(d).exists(), "{d} reached the node");
+        }
+    }
+
+    #[test]
+    fn the_build_directory_list_skips_git_and_node_modules() {
+        let t = tempfile::tempdir().unwrap();
+        let top = t.path();
+        write(&top.join("Cargo.toml"), "");
+        write(&top.join("a/b/Cargo.toml"), "");
+        write(&top.join(".git/x/Cargo.toml"), "");
+        write(&top.join("node_modules/p/Cargo.toml"), "");
+        write(&top.join("t/target/CACHEDIR.TAG"), "");
+        write(&top.join("we[ird]/Cargo.toml"), "");
+        assert_eq!(
+            build_dirs(top),
+            ["/a/b/target", "/t/target", "/target", "/we\\[ird\\]/target"]
+        );
+    }
+
+    #[test]
+    fn a_sync_keeps_the_nodes_extra_files_while_another_job_of_the_tree_runs() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        let top = root.join("tree");
+        let jobs = root.join("jobs");
+        write(&top.join("a"), "a\n");
+        let m = sync_to_node(&root, &top, Some(&jobs), &test_bounds());
+        write(&m.join("written-by-a-job"), "x\n");
+        // Another job of the same tree runs: its file on the node stays.
+        let mut other = Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::create_dir_all(&jobs).unwrap();
+        std::fs::write(
+            jobs.join(other.id().to_string()),
+            format!("{}\n", top.display()),
+        )
+        .unwrap();
+        // A job of another tree does not count.
+        let mut stranger = Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::write(jobs.join(stranger.id().to_string()), "/elsewhere\n").unwrap();
+        assert_eq!(
+            other_tree_job(&jobs, &top, std::process::id()),
+            Some(other.id())
+        );
+        sync_to_node(&root, &top, Some(&jobs), &test_bounds());
+        assert!(m.join("written-by-a-job").is_file(), "deleted beside a job");
+        // Once it ended, the next sync deletes it, and the entry goes.
+        other.kill().unwrap();
+        other.wait().unwrap();
+        stranger.kill().unwrap();
+        stranger.wait().unwrap();
+        sync_to_node(&root, &top, Some(&jobs), &test_bounds());
+        assert!(!m.join("written-by-a-job").exists(), "kept with no job");
+        assert!(!jobs.join(other.id().to_string()).exists());
+    }
+
+    #[test]
+    fn a_job_names_its_tree_while_it_runs_and_not_after() {
+        let t = tempfile::tempdir().unwrap();
+        let jobs = t.path().join("jobs");
+        let top = Path::new("/w/tree");
+        let me = std::process::id();
+        let held = TreeJob::register(&jobs, top).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(jobs.join(me.to_string())).unwrap(),
+            "/w/tree\n"
+        );
+        assert_eq!(other_tree_job(&jobs, top, me), None, "its own entry");
+        assert_eq!(other_tree_job(&jobs, top, 1), Some(me));
+        drop(held);
+        assert!(!jobs.join(me.to_string()).exists());
+    }
+
+    #[test]
+    fn an_upload_waits_for_one_of_its_slots() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        let soon = || Instant::now() + Duration::from_millis(300);
+        let a = upload_slot(Some(d), 2, soon()).unwrap();
+        let b = upload_slot(Some(d), 2, soon()).unwrap();
+        let t0 = Instant::now();
+        let third = upload_slot(Some(d), 2, soon());
+        assert!(third.is_err(), "a third upload ran beside two");
+        assert!(t0.elapsed() >= Duration::from_millis(300), "it waited");
+        drop(a);
+        assert!(upload_slot(Some(d), 2, soon()).is_ok());
+        drop(b);
+        // No slots: no wait.
+        let _x = upload_slot(Some(d), 0, Instant::now()).unwrap();
+        let _y = upload_slot(Some(d), 0, Instant::now()).unwrap();
+        let _z = upload_slot(None, 3, Instant::now()).unwrap();
+    }
+
+    #[test]
+    fn the_upload_cap_is_a_setting_with_a_default() {
+        let b = Bounds::default();
+        assert_eq!((b.bwlimit, b.upload_slots), (2000, 3));
+        assert!(!b.send_ignored, "ignored files stay here unless asked");
+        assert_eq!(upload_args(&b), ["--bwlimit=2000", "--compress"]);
+        let off = Bounds { bwlimit: 0, ..b };
+        assert_eq!(upload_args(&off), Vec::<String>::new());
+        assert_eq!(count_of(None, 2000), 2000);
+        assert_eq!(count_of(Some(" 500 "), 2000), 500);
+        assert_eq!(count_of(Some("0"), 3), 0);
+        assert_eq!(count_of(Some("lots"), 3), 3);
+    }
+
+    #[test]
+    fn a_tree_of_a_same_path_job_gets_the_build_directory_list() {
+        let t = tempfile::tempdir().unwrap();
+        let top = t.path();
+        write(&top.join("c/Cargo.toml"), "");
+        let e = same_path::Extra {
+            path: top.to_path_buf(),
+            kind: same_path::Kind::Tree,
+        };
+        let ignored = Bounds {
+            send_ignored: true,
+            ..test_bounds()
+        };
+        let f = extra_filters(&e, &ignored);
+        assert!(f.contains(&"--exclude=/c/target".to_string()), "{f:?}");
+        assert!(f.contains(&"--exclude=/target".to_string()), "{f:?}");
+        assert!(!f.iter().any(|x| x.contains(".gitignore")), "{f:?}");
+        let f = extra_filters(&e, &test_bounds());
+        assert!(f.contains(&"--exclude=/c/target".to_string()), "{f:?}");
+        assert!(f.contains(&GITIGNORE_FILTER.to_string()), "{f:?}");
+        let g = same_path::Extra {
+            path: top.to_path_buf(),
+            kind: same_path::Kind::Git,
+        };
+        assert_eq!(extra_filters(&g, &test_bounds()), ["--exclude=*.lock"]);
     }
 
     #[test]

@@ -26,6 +26,8 @@ fn a_remote_cargo_tests_records_name_its_sync_phases_and_seed() {
         .env("SLOT_SOCKET", d.socket())
         .env("SLOT_SYNC_STALL", "20s")
         .env("SLOT_SYNC_LIMIT", "50s")
+        .env("SLOT_UPLOAD_SLOTS", "0")
+        .env("SLOT_UPLOAD_BWLIMIT", "0")
         .env("SLOT_PHASES_FILE", &report)
         .env_remove("SLOT_JOB")
         .env_remove("SLOT_REMOTE_SAME_PATH")
