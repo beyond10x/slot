@@ -1,0 +1,12 @@
+{
+  "at": "2026-11-28T12:12:16Z",
+  "actor": "human:operator",
+  "artifact": "story:the-node-wrapper-ships-in-the-repository",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "slot#142 required checks passed at 29e7458; task check exit 0 at 7ed8516"
+  }
+}

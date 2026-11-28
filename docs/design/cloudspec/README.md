@@ -126,6 +126,18 @@ and fetches no artifact. Needed, in order:
 - C. The local daemon, once cloudspec gaps 5, 7, 8 and 10 are closed; until then it stays a
   systemd user service (`contrib/slot.service`).
 
+Acceptance: `cloudspec generate weft --from slot.architecture.yaml --out <file>` exits 0 (cloudspec
+`59129eb` or later), and weft runs the node daemon on a build node of a pool. On 2026-11-28 it
+exits 1 with 44 refusals under 17 rules: `weft_network_unsupported` 10,
+`weft_deployer_path_unsupported` 8, `weft_process_unsupported` 4, `weft_host_path_unsupported` 4,
+`weft_stop_unsupported`, `weft_socket_unsupported`, `weft_process_environment_unsupported`,
+`weft_placement_unsupported` and `weft_data_link_unsupported` 2 each, and one each for restart,
+priority, prestart, per-instance, parity, limits, instance and environment files. weft plans it as
+`epic:slot-node-daemon` in its own planning store, in this order: a long-lived supervised process
+on a node (process, environment, prestart, stop, restart); placement on a named pool with one
+instance per node (placement, per-instance, instance); host paths and data; network and sockets;
+the single rules. cloudspec maps each rule in `generate weft` once weft runs it.
+
 ## 5. Gaps in slot
 
 What a deployment can install is what the repository ships. The workstation side of node mode
