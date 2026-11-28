@@ -406,9 +406,11 @@ Open, one line each, with where the design lives. A session starts with (e).
   `story:a-nodes-price-is-read-from-the-provider`. The resize procedure is in
   `contrib/node/README.md` § A change of instance size.
 - (ae) Goal: slot deployable from a cloudspec architecture, with weft as the runtime. Design,
-  architecture and gaps: `docs/design/cloudspec/`. cloudspec gaps 1 to 12 and weft gaps A to C
-  are those repositories' work; slot's first gap is
-  `story:the-node-wrapper-ships-in-the-repository`.
+  architecture and gaps: `docs/design/cloudspec/`. cloudspec's gaps are closed (cloudspec
+  `59129eb`): `task architecture` checks the file and compares the systemd units it generates
+  with `contrib/`. slot's own gap closed in 0.44.0 (node mode ships in the release). Open: weft
+  runs no process workload yet; the acceptance is `cloudspec generate weft` exiting 0 on the
+  file (44 refusals on 2026-11-28), planned in weft as `epic:slot-node-daemon`.
 
 ## Never
 
