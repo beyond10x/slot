@@ -76,6 +76,37 @@ command inside a slot job (`SLOT_JOB` set) runs directly, so `slot task check` d
 cargo calls a second time. `SLOT_SHIM_OFF=1` runs one command outside the pool. Without `slot` on
 `PATH` the shim runs the real command.
 
+## Build nodes: the node-mode wrapper
+
+On a workstation whose jobs run on [build nodes](remote-builds.md), a wrapper goes in the same
+shims directory as `slot`, ahead of the real binary in `~/.local/bin`:
+[`contrib/slot-wrapper`](https://github.com/beyond10x/slot/blob/main/contrib/slot-wrapper), with
+its helpers `tree-cd.sh`, `env-names.sh` and `refusal-log.sh` in `~/.local/share/slot/`.
+`task node-wrapper` installs all four from a checkout. Node mode is on while
+`~/.config/slot/remote-node.env` exists; without it every call goes to the real `slot` unchanged.
+
+- A job goes to the node `slot nodes route <dir>` names for its repository. There is no default
+  node: a repository the registry routes nowhere is refused with exit 3, and the job did not run.
+- `~/.config/slot/node-hold.<node>` holds the jobs of that node and `~/.config/slot/node-hold`
+  those of every node: they wait (`slot: waiting for <node>: <reason>`, listed at the end of
+  `slot status`) and never run here instead; a held node past its lease end refuses them with
+  exit 3.
+- A job waits while the rust, go or node toolchain its tree uses differs on the node (the
+  manifests of `contrib/node/toolchains-refresh.sh`), at most `SLOT_PARITY_WAIT_S` (300 s), then
+  exit 3.
+- Refused with exit 3, and one line in `~/.local/state/slot/refusals.log`: a compile under
+  `~/.cache`, `--here` for a compile, and a script under the session scratch directory run on a
+  tree outside it.
+- `--here` keeps a step that needs this machine's credentials in its pool; `--local` runs a job
+  here. Jobs under `~/.cache`, trees listed in `~/.config/slot/remote-deny` and the home
+  directory run here.
+- A `--manifest-path` in another checkout moves the job to that checkout's tree; the job's
+  variables go along (`SLOT_ENV`) except this session's and credential-like ones; the return
+  sync stays on unless the caller set `SLOT_RETURN_SYNC=0`.
+
+The sync itself is the client's: what is sent, the upload slots and cap, and no `--delete` while
+another job of the tree runs. No `rsync` wrapper goes on `PATH`.
+
 ## Builds in a sandbox: the gate
 
 An agent in a sandbox that refuses `socket(AF_UNIX)` and has no network cannot reach the daemon,

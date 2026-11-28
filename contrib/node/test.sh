@@ -4022,7 +4022,7 @@ st=$?
 PATH=$ST/bin sh "$SS" >"$W/out" 2>"$W/err"
 [ $? -eq 2 ] && ok "shell tests: no test named is a usage error" || bad "shell tests without arguments: $(cat "$W/out" "$W/err")"
 tf=$here/../../Taskfile.yml
-grep -qx '      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh' "$tf" && [ "$(grep -c 'contrib/node/test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/slot-shim\.test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/rustc-gate\.test\.sh' "$tf")" -eq 1 ] && ok "the gate runs the three shell tests through shell-tests.sh, each once" || bad "Taskfile: $(grep -n 'contrib/' "$tf" | tr '\n' ' ')"
+grep -qx '      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/slot-wrapper.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh' "$tf" && [ "$(grep -c 'contrib/node/test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/slot-shim\.test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/slot-wrapper\.test\.sh' "$tf")" -eq 1 ] && [ "$(grep -c 'contrib/rustc-gate\.test\.sh' "$tf")" -eq 1 ] && ok "the gate runs the four shell tests through shell-tests.sh, each once" || bad "Taskfile: $(grep -n 'contrib/' "$tf" | tr '\n' ' ')"
 
 # 6z. Firefox on a node: a tool the node installs only when its config names it in EXTRA_TOOLS
 # (its line of EXTRA_ARCHIVE_PINS), with the packages it loads. A consumer's browser tests start

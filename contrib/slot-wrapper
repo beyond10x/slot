@@ -1,0 +1,379 @@
+#!/bin/sh
+# slot-wrapper: the `slot` of agent shells on a workstation whose jobs run on build nodes. It is
+# installed as `slot` in the shims directory that agent shells put first on PATH
+# (~/.local/share/slot/shims/slot), ahead of the real binary (~/.local/bin/slot); its helpers
+# tree-cd.sh, env-names.sh and refusal-log.sh go to ~/.local/share/slot/ (`task node-wrapper`).
+# contrib/slot-wrapper.test.sh checks each behaviour below.
+#
+# While node mode is switched on (~/.config/slot/remote-node.env exists), every job runs on a
+# node. No local rerun.
+# - ~/.config/slot/node-hold present: jobs wait for the node; they never run here instead.
+# - `--here`: the job stays in this host's pool (a step that needs this host's credentials).
+# - `--local`: the job runs here, outside the node.
+# - after a node job, the client copies back what the job wrote and deletes here what it deleted
+#   (SLOT_RETURN_SYNC, on unless the caller set it to 0).
+# - the sync itself (what is sent, the upload cap and slots, no --delete while another job of the
+#   same tree runs) is the client's: no rsync wrapper goes on PATH.
+# A caller started without HOME (a runner that clears the environment) gets the user's home from
+# the passwd entry, for this script and for the job.
+if [ -z "${HOME:-}" ]; then
+  HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
+  export HOME
+fi
+real=$HOME/.local/bin/slot
+lib=$HOME/.local/share/slot
+E=$HOME/.config/slot/remote-node.env
+H=$HOME/.config/slot/node-hold
+# Build nodes come from one registry: the daemon's cluster.toml (`slot nodes list`). A job goes to
+# the node `slot nodes route <dir>` names: the entry whose `repositories` lists the job's
+# repository, else `default_node`. There is no default here: a node that is not registered gets
+# no job, the route fails and the job is refused (exit 3). Every node a job can reach is polled
+# by the daemon, so its jobs show in `slot status`, the web view and `slot usage`.
+#   ~/.config/slot/node-hold.<node>        holds the jobs of that node; node-hold holds every node.
+#   ~/.local/state/slot/node/<node>/slot/  the node's two toolchain manifests, written by
+#       slot-toolchains-refresh@<node> (contrib/node/toolchains-refresh.sh) with
+#       XDG_STATE_HOME=~/.local/state/slot/node/<node>; without that directory the node
+#       remote-node.env names (SLOT_HOST) uses ~/.local/state/slot/.
+# The repository of a job is the name of the directory that holds its checkout's common git
+# directory, without a trailing .git (the `repo` of the job in `slot status`).
+# remote-node.env stays the switch: without it every job runs here. A node that is held, past its
+# end or has another toolchain holds or refuses its own jobs. They never go to another node.
+# The names of this part start with sw_: a variable the caller exported under the same name would
+# reach the job with this script's value.
+sw_route=
+sw_route_err=
+sw_node=
+sw_lnode=
+sw_lnode_read=
+sw_repo=
+# legacy_node: sw_lnode, the node remote-node.env names (SLOT_HOST); empty when it names none.
+legacy_node() {
+  [ -z "$sw_lnode_read" ] || return 0
+  sw_lnode_read=1
+  if [ -f "$E" ]; then
+    sw_lnode=$(unset SLOT_HOST; . "$E" > /dev/null 2>&1; printf '%s' "${SLOT_HOST:-}")
+  fi
+}
+# pick_node "$@": sw_node, the node of this job's repository (sw_repo), looked up once. With
+# --manifest-path the tree is the one tree-cd.sh moves the job to.
+pick_node() {
+  [ -z "$sw_node" ] || return 0
+  case " $* " in
+    *" --manifest-path"*) sw_dir=$(. "$lib/tree-cd.sh" > /dev/null 2>&1; pwd) ;;
+    *) sw_dir=$PWD ;;
+  esac
+  sw_c=$(git -C "$sw_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+  case $sw_c in */.git) sw_c=${sw_c%/.git} ;; esac
+  sw_repo=${sw_c##*/}
+  sw_repo=${sw_repo%.git}
+  # The node comes from the daemon's registry (cluster.toml) and nowhere else.
+  if sw_route=$("$real" nodes route "$sw_dir" 2>&1); then
+    sw_node=$(printf '%s\n' "$sw_route" | sed -n 's/^SLOT_NODE=//p')
+  else
+    sw_route_err=$sw_route
+    sw_route=
+    sw_node=?
+  fi
+}
+# refused <kind> <text>: one line in the refusal log.
+refused() {
+  [ -f "$lib/refusal-log.sh" ] && . "$lib/refusal-log.sh" && refusal_log "$1" "$2"
+}
+# Trees that never go to a node (customer data), listed in ~/.config/slot/remote-deny. Their jobs
+# run in this host's pool, compiles included. A line is either
+#   /abs/path          the working directory, the checkout's top or its git directories
+#                      (a linked worktree's common directory lives in its primary checkout) under it
+#   origin:<pattern>   a shell pattern matched against every remote URL of the checkout
+# origin: lines may also live in ~/.config/slot/remote-deny-origins (the client reads remote-deny
+# itself and skips any line that is not a path); either file may hold either kind.
+if [ -s "$HOME/.config/slot/remote-deny" ] || [ -s "$HOME/.config/slot/remote-deny-origins" ]; then
+  gd=$(git rev-parse --path-format=absolute --show-toplevel --git-dir --git-common-dir 2>/dev/null)
+  ru=$(git remote -v 2>/dev/null | awk '{print $2}' | sort -u)
+  for df in "$HOME/.config/slot/remote-deny" "$HOME/.config/slot/remote-deny-origins"; do
+    [ -f "$df" ] || continue
+    while IFS= read -r d; do
+      case $d in
+        /*)
+          for p in "$PWD" $gd; do
+            case "$p/" in "${d%/}/"*) SLOT_LOCAL_REASON="never sync: ${d%/}" exec "$real" "$@" ;; esac
+          done
+          ;;
+        origin:?*)
+          for u in $ru; do
+            # shellcheck disable=SC2254
+            case $u in ${d#origin:}) SLOT_LOCAL_REASON="never sync: remote $u" exec "$real" "$@" ;; esac
+          done
+          ;;
+      esac
+    done < "$df"
+  done
+fi
+if [ -n "${SLOT_JOB:-}" ] || [ -n "${SLOT_HOST:-}" ]; then exec "$real" "$@"; fi
+# A job whose tree would be the home directory or one above it is never synced: run it here.
+case "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" in
+  / | /home | "$HOME" | "$HOME/") SLOT_LOCAL_REASON="never sync: home directory" exec "$real" "$@" ;;
+esac
+# compiles: the job's command is cargo, rustc or go (after slot's own options and `run`/`--`).
+compiles() {
+  sk=
+  sr=
+  for x in "$@"; do
+    if [ -n "$sk" ]; then sk=; continue; fi
+    case $x in
+      --timeout | --tokens | --priority | --fetch | --memory-max | --label) sk=1 ;;
+      -*) ;;
+      run) if [ -z "$sr" ]; then sr=1; else return 1; fi ;;
+      *) case ${x##*/} in cargo | rustc | go | cargo-nextest) return 0 ;; *) return 1 ;; esac ;;
+    esac
+  done
+  return 1
+}
+if [ -f "$E" ] && compiles "$@"; then
+  case " $* " in
+    *" --here "* | *" --local "*) ;;
+    *)
+      case "$PWD/ $* " in "$HOME/.cache/"* | *" $HOME/.cache/scratch/"* | *"=$HOME/.cache/scratch/"* | *" $HOME/.cache/claude-tmp/"* | *"=$HOME/.cache/claude-tmp/"*)
+        refused wrapper "$*"
+        pick_node "$@"
+        echo "slot: refused: a compile under ~/.cache runs on this host and is not sent to $sw_node; move the tree into a managed worktree (worktree create) and run it there" >&2
+        exit 3 ;;
+      esac ;;
+  esac
+  case " $* " in *" --here "*)
+    refused wrapper "$*"
+    pick_node "$@"
+    echo "slot: refused: --here is for a step that needs this host's credentials, and a compile does not; drop --here and it runs on $sw_node" >&2
+    exit 3 ;;
+  esac
+fi
+case " $* " in
+  *" --here "*)
+    n=$#
+    i=0
+    while [ $i -lt $n ]; do
+      a=$1
+      shift
+      i=$((i + 1))
+      [ "$a" = --here ] || set -- "$@" "$a"
+    done
+    SLOT_LOCAL_REASON="here: needs this host" exec "$real" "$@"
+    ;;
+esac
+if [ ! -f "$E" ]; then exec "$real" "$@"; fi
+cmd=
+skip=
+seen_run=
+for a in "$@"; do
+  if [ -n "$skip" ]; then skip=; continue; fi
+  case $a in
+    --local) SLOT_LOCAL_REASON="local requested" exec "$real" "$@" ;;
+    --timeout | --tokens | --priority | --fetch | --memory-max | --label) skip=1 ;;
+    -*) ;;
+    run) if [ -z "$seen_run" ]; then seen_run=1; else cmd=$a; break; fi ;;
+    *) cmd=$a; break ;;
+  esac
+done
+W=$HOME/.local/state/slot/node-waits
+case $cmd in
+  status)
+    "$real" "$@"
+    rc=$?
+    for f in "$W"/*; do
+      [ -f "$f" ] || continue
+      if kill -0 "${f##*/}" 2>/dev/null; then
+        # time, directory, node, reason. A line without the node (its third field holds a space:
+        # the reason) is of a job that started under an older wrapper.
+        IFS="$(printf '\t')" read -r t d sw_wn why < "$f"
+        case $sw_wn in
+          "" | *" "*)
+            legacy_node
+            why=$sw_wn${why:+"$(printf '\t')$why"}
+            sw_wn=${sw_lnode:-a node} ;;
+        esac
+        echo "waiting for $sw_wn since $t: pid ${f##*/} in $d: $why"
+      else
+        rm -f "$f"
+      fi
+    done
+    exit $rc
+    ;;
+  help | "")
+    case " $* " in *" -h "* | *" --help "* | " help "*) ;; *) exec "$real" "$@" ;; esac
+    "$real" "$@"
+    rc=$?
+    pick_node "$@"
+    sw_h1="On this host the build nodes are on: a job runs on the node of its repository (\`slot nodes list\`, \`slot nodes route\`). This tree's node is $sw_node."
+    sw_h2="~/.config/slot/node-hold or ~/.config/slot/node-hold.$sw_node exists"
+    sw_h3="a node"
+    cat <<EOF
+
+$sw_h1
+  slot --here <cmd>   run in this host's pool (a step that needs this host's credentials)
+  slot --local <cmd>  run here, outside the node
+  Jobs under ~/.cache always run here.
+A job waits, and never runs here instead, while:
+  - $sw_h2 (prints "waiting for $sw_node: <reason>")
+  - its tree's rust, go or node toolchain differs on $sw_node (at most ${SLOT_PARITY_WAIT_S:-300} s, then exit 3)
+\`slot status\` lists the jobs waiting for $sw_h3 at its end.
+EOF
+    exit $rc
+    ;;
+esac
+case $cmd in
+  serve | proxy | shell | gate | status | headroom | priority | run-limit | job-parallel | evict-below | \
+  cpu-limit | admission | cancel | sessions | usage | hook | help | state | "") exec "$real" "$@" ;;
+esac
+# The host's rule: nothing under ~/.cache (session scratch, agent temporary files) goes to a node.
+# A script stored there (~/.cache/scratch, ~/.cache/claude-tmp) and run on a tree outside it: the
+# node cannot see the script and the rule keeps ~/.cache off the node, so the job is refused
+# instead of compiling here.
+case "$PWD/" in "$HOME/.cache/"*) ;; *)
+  case " $* " in *" $HOME/.cache/scratch/"* | *"=$HOME/.cache/scratch/"* | *" $HOME/.cache/claude-tmp/"* | *"=$HOME/.cache/claude-tmp/"*)
+    refused wrapper "$*"
+    pick_node "$@"
+    echo "slot: refused: the job runs a file under ~/.cache/scratch or ~/.cache/claude-tmp on a tree outside it. A probe that compiles nothing needs no slot in front: run it directly. Builds and tests: run them as: slot sh -c '<commands>', or put the script inside the worktree, and they run on $sw_node" >&2
+    exit 3 ;;
+  esac ;;
+esac
+case "$PWD/ $* " in "$HOME/.cache/"* | *" $HOME/.cache/scratch/"* | *"=$HOME/.cache/scratch/"* | *" $HOME/.cache/claude-tmp/"* | *"=$HOME/.cache/claude-tmp/"*) SLOT_LOCAL_REASON="cache rule" exec "$real" "$@" ;; esac
+# The job goes to a node: which one, and that node's terms and hold file.
+pick_node "$@"
+if [ -z "$sw_route" ] || [ -z "$sw_node" ]; then
+  refused wrapper "node route: $*"
+  echo "slot: refused: no registered build node for repository '$sw_repo' (slot nodes route: ${sw_route_err:-no SLOT_NODE}); the job did not run" >&2
+  exit 3
+fi
+sw_hn=$HOME/.config/slot/node-hold.$sw_node
+# held: a hold file of every node or of this node exists; sw_hf is that file.
+held() {
+  if [ -f "$H" ]; then sw_hf=$H; elif [ -f "$sw_hn" ]; then sw_hf=$sw_hn; else return 1; fi
+}
+# ended <epoch>: the line of a job refused because its node's lease ended.
+ended() {
+  echo "slot: build node $sw_node ended $(date -d @"$1" '+%H:%M %Z'), its lease is not renewed yet; the job did not run" >&2
+}
+said=
+if held; then
+  mkdir -p "$W"
+  trap 'rm -f "$W/$$"; exit 143' TERM HUP INT
+  printf '%s\t%s\t%s\t%s\n' "$(date +%T)" "$PWD" "$sw_node" "node hold: $(cat "$sw_hf" 2>/dev/null)" > "$W/$$"
+fi
+ne=$(printf '%s\n' "$sw_route" | sed -n 's/^SLOT_NODE_END=//p')
+while held; do
+  [ -n "$said" ] || echo "slot: waiting for $sw_node: $(cat "$sw_hf" 2>/dev/null)" >&2
+  said=1
+  if [ -n "$ne" ] && [ "$(date +%s)" -ge "$ne" ]; then
+    rm -f "$W/$$"
+    ended "$ne"
+    exit 3
+  fi
+  sleep "${SLOT_HOLD_POLL_S:-5}"
+done
+rm -f "$W/$$"
+. "$E"
+# The node's terms (host, ssh, path of slot, lease end) are the registry's, over the switch file's.
+eval "$sw_route"
+. "$lib/env-names.sh"
+. "$lib/tree-cd.sh"
+root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+# Toolchain parity: the job waits while what its tree resolves to (rustc commit and installed
+# targets, go, node) differs on the node; manifests from toolchains-refresh.sh, every 60 s.
+M=$HOME/.local/state/slot
+W=$M/node-waits
+# The node's manifests: its own directory (what slot-toolchains-refresh@<node> writes under
+# XDG_STATE_HOME=$M/node/<node>); without it, for the node remote-node.env names, $M.
+# Another node without its directory has no manifest: its jobs wait, then end with exit 3.
+sw_mt=$M/node/$sw_node/slot
+legacy_node
+if [ ! -d "$sw_mt" ] && [ -n "$sw_lnode" ] && [ "$sw_node" = "$sw_lnode" ]; then sw_mt=$M; fi
+# rust_gap <toolchain>: what the job can use here and the node lacks, comma separated; empty when
+# none. The rustc commit must match; a component here (clippy, rustfmt, rust-src, llvm-tools) must
+# be on the node; a target here must be on the node only when it is the host's own triple or the
+# tree names it (rust-toolchain(.toml), .cargo/config(.toml), CARGO_BUILD_TARGET). A cross target
+# installed here that no file of the tree names does not hold the job.
+rust_gap() {
+  rl=$(grep "^rust $1 " "$sw_mt/toolchains-local.txt")
+  rn=$(grep "^rust $1 " "$sw_mt/toolchains-node.txt")
+  [ "$rl" = "$rn" ] && return
+  if [ -z "$rn" ] || [ "$(echo "$rl" | cut -d' ' -f3)" != "$(echo "$rn" | cut -d' ' -f3)" ]; then
+    echo "rustc"
+    return
+  fi
+  named=$(cat "$root/rust-toolchain.toml" "$root/rust-toolchain" "$root/.cargo/config.toml" "$root/.cargo/config" 2>/dev/null)
+  host=$(echo "$1" | sed -n 's/^[^-]*-\(.*-.*-.*\)$/\1/p')
+  for i in $(echo "$rl" | cut -d' ' -f4 | tr ',' ' '); do
+    case ",$(echo "$rn" | cut -d' ' -f4)," in *",$i,"*) continue ;; esac
+    case $i in
+      *-*-*) [ "$i" = "$host" ] || [ "$i" = "${CARGO_BUILD_TARGET:-}" ] || case $named in *"$i"*) ;; *) continue ;; esac ;;
+    esac
+    printf '%s,' "$i"
+  done | sed 's/,$//'
+}
+parity() {
+  [ -s "$sw_mt/toolchains-node.txt" ] || { echo "no toolchain manifest of $sw_node yet"; return; }
+  if [ -f "$root/Cargo.toml" ] || [ -f Cargo.toml ]; then
+    tc=$(rustup show active-toolchain 2>/dev/null | cut -d' ' -f1)
+    g=
+    [ -n "$tc" ] && g=$(rust_gap "$tc")
+    if [ -n "$g" ]; then
+      echo "rust toolchain $tc is not the same on $sw_node yet ($sw_node lacks: $g; here: $(grep "^rust $tc " "$sw_mt/toolchains-local.txt" | cut -d' ' -f3-); $sw_node: $(grep "^rust $tc " "$sw_mt/toolchains-node.txt" | cut -d' ' -f3-))"
+      return
+    fi
+  fi
+  for k in go:go.mod node:package.json; do
+    if [ -f "$root/${k#*:}" ] && [ "$(grep "^${k%%:*} " "$sw_mt/toolchains-local.txt")" != "$(grep "^${k%%:*} " "$sw_mt/toolchains-node.txt")" ]; then
+      echo "${k%%:*} is not the same on $sw_node"
+      return
+    fi
+  done
+}
+why=$(parity)
+if [ -n "$why" ]; then
+  mkdir -p "$W"
+  trap 'rm -f "$W/$$"; exit 143' TERM HUP INT
+  said=
+  # A toolchain that does not become equal within SLOT_PARITY_WAIT_S (default 300) ends the job
+  # with exit 3 and the reason: it never runs here instead.
+  pw=${SLOT_PARITY_WAIT_S:-300}
+  pt=$(($(date +%s) + pw))
+  while [ -n "$why" ]; do
+    if [ "$why" != "$said" ]; then
+      echo "slot: waiting for $sw_node: $why" >&2
+      printf '%s\t%s\t%s\t%s\n' "$(date +%T)" "$PWD" "$sw_node" "$why" > "$W/$$"
+      said=$why
+    fi
+    if [ -n "$ne" ] && [ "$(date +%s)" -ge "$ne" ]; then
+      rm -f "$W/$$"
+      ended "$ne"
+      exit 3
+    fi
+    if [ "$(date +%s)" -ge "$pt" ]; then
+      rm -f "$W/$$"
+      refused parity "$why: $*"
+      echo "slot: gave up after ${pw} s, the job did not run: $why. Make the toolchains of $sw_node equal (contrib/node: provision.sh apply), then run the job again" >&2
+      exit 3
+    fi
+    sleep "${SLOT_PARITY_POLL_S:-15}"
+    why=$(parity)
+  done
+  rm -f "$W/$$"
+  trap - TERM HUP INT
+fi
+# Return sync: the client copies back what a node job wrote and deletes here what it deleted. It
+# is on by default; a caller's SLOT_RETURN_SYNC=0 turns it off.
+SLOT_RETURN_SYNC=${SLOT_RETURN_SYNC:-1}
+export SLOT_RETURN_SYNC
+exec 3<&0
+"$real" "$@" <&3 3<&- &
+pid=$!
+trap 'kill -TERM $pid 2>/dev/null' TERM HUP
+wait $pid
+rc=$?
+while kill -0 $pid 2>/dev/null; do
+  wait $pid
+  rc=$?
+done
+if [ $rc -eq 3 ] && [ -n "${SLOT_NODE_END:-}" ] && [ "$(date +%s)" -ge "$SLOT_NODE_END" ]; then
+  ended "$SLOT_NODE_END"
+fi
+exit $rc

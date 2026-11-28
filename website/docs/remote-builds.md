@@ -68,9 +68,17 @@ current directory.
 1. **Workspace id.** The repository root and the workstation's host name are hashed into a
    16-character id. Each worktree has its own root and therefore its own id, so parallel worktrees
    never share a mirror on the server.
-2. **Sync.** rsync copies the repository to `<host>:<SLOT_WSROOT>/<id>/` with `--delete`, a
-   filter that applies every `.gitignore`, and excludes for `.git` and the toolchain's output
-   directories (`/target/`). Uncommitted changes are included. rsync compares every file by its
+2. **Sync.** rsync copies the repository to `<host>:<SLOT_WSROOT>/<id>/` with `--delete` and
+   excludes for `.git`, the toolchain's output directories (`/target/`) and cargo's build
+   directories: `<dir>/target/` beside every `Cargo.toml`, and any directory named `target` that
+   holds `CACHEDIR.TAG` or `.rustc_info.json`. What git ignores is sent too (generated files,
+   `node_modules`), and uncommitted changes are included. While another remote job of the same
+   tree runs on the workstation, the sync drops `--delete`, so it removes nothing that job wrote
+   on the server; it prints `slot: sync keeps the server's extra files: job of pid <n> runs in
+   this tree`. An upload holds one of `SLOT_UPLOAD_SLOTS` (3) slots of the workstation, and
+   waits for one within `SLOT_SYNC_LIMIT`; it is sent compressed at most at
+   `SLOT_UPLOAD_BWLIMIT` (2000 KiB/s), so three at once stay under about 50 Mbit/s. rsync
+   compares every file by its
    content (`--checksum`), not by size and modification time, so a file changed at the same size
    and time is sent too; this reads every file on both sides on each sync. The mirror does not
    take the workstation's modification times (`--no-times`): a file whose content changed gets
@@ -693,7 +701,7 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
   server whose own cargo configuration sets `build.target-dir` would build elsewhere than the
   record says: keep it off the server.
 - A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
-  directory, is synced on its own, with its own `.gitignore` files and without its `target/`.
+  directory, is synced on its own, without its `target/` and its cargo build directories.
 - A directory outside any git checkout (a scratch copy) is the tree itself, unless it is the
   same-path root or above it, lies directly under the same-path root, or holds a repository
   within two levels (`a/.git`, `a/b/.git`). Such a job does not run: `slot: remote build on

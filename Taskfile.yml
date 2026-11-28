@@ -59,7 +59,7 @@ tasks:
     desc: Run the complete offline repository gate.
     cmds:
       - rustc --version
-      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh
+      - sh contrib/shell-tests.sh contrib/slot-shim.test.sh contrib/slot-wrapper.test.sh contrib/rustc-gate.test.sh contrib/node/test.sh
       - task: ui-check
       - task: ui
       - task: ui-ux
@@ -86,6 +86,12 @@ tasks:
     deps: [ui]
     cmds:
       - cargo install --locked --root {{.HOME}}/.local --path crates/slot-cli
+
+  node-wrapper:
+    desc: Install the node-mode wrapper as the `slot` of the agent shims directory, with its helpers, into ~/.local/share/slot.
+    cmds:
+      - install -D -m 0755 contrib/slot-wrapper {{.HOME}}/.local/share/slot/shims/slot
+      - install -m 0644 contrib/tree-cd.sh contrib/env-names.sh contrib/refusal-log.sh {{.HOME}}/.local/share/slot/
 
   service:
     desc: Install and start the systemd user unit.
