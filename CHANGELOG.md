@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.44.0 — 2026-11-28
+
 - Remote mode: every sync leaves out cargo's build directories: `<dir>/target` beside every
   `Cargo.toml` (also a linked one), whether it exists or not, and any directory named `target`
   that holds `CACHEDIR.TAG` or `.rustc_info.json`, also below a source directory named `target`;
