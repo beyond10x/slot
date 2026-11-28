@@ -82,7 +82,7 @@ tasks:
       - ess ui check --path ui/slot.ui.yaml --model . --hosts ui/slot.hosts
 
   architecture:
-    desc: Check slot's cloudspec architecture (docs/design/cloudspec/slot.architecture.yaml) with the cloudspec CLI on PATH, built from cloudspec 9aa52c3 or later.
+    desc: Check slot's cloudspec architecture (docs/design/cloudspec/slot.architecture.yaml) with the cloudspec CLI on PATH, built from cloudspec f573374 or later.
     preconditions:
       - sh: command -v cloudspec
         msg: "cloudspec is not on PATH: cargo install --locked --git https://github.com/beyond10x/cloudspec cloudspec"

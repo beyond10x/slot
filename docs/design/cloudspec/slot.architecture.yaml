@@ -16,34 +16,48 @@ parts:
     block: workloads
     kind: process
     in: workstation
-    command: [slot, serve]
+    command: ["${home}/.local/bin/slot", serve, --tokens, "40", --min-free-disk, "40"]
+    environment:
+      PATH: ${home}/.cargo/bin:${home}/.local/bin:/usr/local/bin:/usr/bin:/bin
     run_as:
       user: deployer
     isolation: none
     upgrade:
       reload:
         signal: HUP
-    claims:
-      cpu_millis: 500
-      memory_mib: 256
     ports:
     - port: 7411
       bind: loopback
       name: web
       protocol: http
     - name: jobs
-      unix: /run/slot/slot.sock
+      unix: ${runtime_dir}/slot.sock
     - name: jobserver
-      fifo: /var/lib/slot/jobserver.fifo
+      fifo: ${home}/.local/state/slot/jobserver.fifo
     checks:
       ready:
         kind: exec
         command: [slot, status]
         port: 7411
     volumes:
-    - host_path: /home
+    - host_path: ${home}/
       mount: same
       mode: rw
+    - host_path: ${home}/.local/state/slot
+      mount: same
+      mode: rw
+    provides:
+    - contract: job_runner
+      port: jobs
+      guarantees:
+        exit_code: passed_unchanged
+        did_not_run_code: reserved
+        run_limit: named_maximum
+        queue_order: priority
+        placement: remote_only_when_asked
+        toolchain_parity: checked_before_remote
+    needs:
+    - contract: compile_cache
     secrets: []
     egress:
     - name: build-node-ssh
@@ -54,16 +68,13 @@ parts:
     block: workloads
     kind: process
     in: build-node
-    command: [slot, serve]
+    command: [/usr/local/bin/slot, serve]
     run_as:
       user: deployer
     isolation: none
     upgrade:
       reload:
         signal: HUP
-    claims:
-      cpu_millis: 32000
-      memory_mib: 65536
     ports:
     - port: 22
       bind: all
@@ -74,9 +85,21 @@ parts:
         command: [slot, status]
         port: 22
     volumes:
-    - host_path: /home
+    - host_path: ${home}/
       mount: same
       mode: rw
+    - host_path: /srv/slot
+      mount: same
+      mode: rw
+    provides:
+    - contract: job_runner
+      guarantees:
+        exit_code: passed_unchanged
+        did_not_run_code: reserved
+        run_limit: named_maximum
+        queue_order: priority
+        placement: local
+        toolchain_parity: none
     secrets: []
     egress:
     - name: crates.io:443
@@ -101,36 +124,21 @@ parts:
         kind: exec
         command: [sccache, --show-stats]
         port: 4226
+    provides:
+    - contract: compile_cache
+      port: cache
     secrets: []
     egress: []
   toolchain-refresh:
     block: workloads
-    kind: agent
-    shape: schedule
-    calendar: "*:*:00"
+    kind: process
     in: workstation
-    package:
-      agent:
-        digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
-        document: toolchains-refresh
-      runtime:
-        image: slot@sha256:1111111111111111111111111111111111111111111111111111111111111111
-  state:
-    block: resources
-    kind: volume
-    per: slot-daemon
-    access: read_write_once
-    size: 10Gi
-    sharing: exclusive
-    mount: /var/lib/slot
-  mirrors:
-    block: resources
-    kind: volume
-    per: node-daemon
-    access: read_write_once
-    size: 500Gi
-    sharing: exclusive
-    mount: /srv/slot
+    command: [sh, "${home}/.local/share/slot/toolchains-refresh.sh", build-node, "60"]
+    run_as:
+      user: deployer
+    isolation: none
+    secrets: []
+    egress: []
   agent-session:
     block: actors
     in: workstation
