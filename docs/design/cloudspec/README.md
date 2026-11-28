@@ -43,6 +43,16 @@ Probes, each a one-field change of the architecture:
 | t4 | `shape: daemon` on a service | exit 0, no coverage entry |
 | t5 | a link `to:` an undeclared part | exit 0, `valid: true` |
 
+State on cloudspec `9aa52c3`: gaps 0 to 11 below are closed there. `slot.architecture.yaml` now
+uses those constructs: the three daemons are `kind: process` with `run_as: {user: deployer}`,
+`isolation: none` and `upgrade: {reload: {signal: HUP}}`; scopes carry `placement`; the job
+socket and the jobserver are `unix` and `fifo` ports; sync and return are `protocol: ssh` links
+with `data: push` and `data: pull`; `parity` names the facts that must match. `task
+architecture` runs `cloudspec check --json` on it: exit 0, no violation. Gap 12 (the systemd
+generator, with ports the process binds itself and paths under the deployer's home and runtime
+directory) is in progress there; the socket, FIFO and home paths in the file are placeholders
+until it lands.
+
 ## 3. Gaps in cloudspec
 
 Sent to cloudspec on 2026-11-28 to implement.
