@@ -4,28 +4,46 @@ summary: One shared pool of build slots on a workstation; agent sessions submit 
 parts:
   workstation:
     block: scope
+    placement:
+      host: workstation
   build-node:
     block: scope
+    placement:
+      pool: build-nodes
+      lease:
+        max_hours: 12
   slot-daemon:
     block: workloads
-    kind: service
+    kind: process
     in: workstation
-    replicas: 1
-    image: slot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    command: [slot, serve]
+    run_as:
+      user: deployer
+    isolation: none
+    upgrade:
+      reload:
+        signal: HUP
     claims:
       cpu_millis: 500
       memory_mib: 256
-    isolation: none
     ports:
     - port: 7411
       bind: loopback
       name: web
       protocol: http
+    - name: jobs
+      unix: /run/slot/slot.sock
+    - name: jobserver
+      fifo: /var/lib/slot/jobserver.fifo
     checks:
       ready:
-        kind: http
-        path: /api/state
+        kind: exec
+        command: [slot, status]
         port: 7411
+    volumes:
+    - host_path: /home
+      mount: same
+      mode: rw
     secrets: []
     egress:
     - name: build-node-ssh
@@ -34,37 +52,45 @@ parts:
       link: slot-daemon -> node-daemon carries job
   node-daemon:
     block: workloads
-    kind: service
+    kind: process
     in: build-node
-    replicas: 1
-    image: slot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    command: [slot, serve]
+    run_as:
+      user: deployer
+    isolation: none
+    upgrade:
+      reload:
+        signal: HUP
     claims:
       cpu_millis: 32000
       memory_mib: 65536
-    isolation: none
     ports:
     - port: 22
       bind: all
       name: ssh
-      protocol: ssh
     checks:
       ready:
         kind: exec
         command: [slot, status]
         port: 22
+    volumes:
+    - host_path: /home
+      mount: same
+      mode: rw
     secrets: []
     egress:
     - name: crates.io:443
   sccache:
     block: workloads
-    kind: service
+    kind: process
     in: workstation
-    replicas: 1
-    image: sccache@sha256:2222222222222222222222222222222222222222222222222222222222222222
+    command: [sccache, --start-server]
+    run_as:
+      user: deployer
+    isolation: none
     claims:
       cpu_millis: 1000
       memory_mib: 1024
-    isolation: none
     ports:
     - port: 4226
       bind: loopback
@@ -104,9 +130,10 @@ parts:
     access: read_write_once
     size: 500Gi
     sharing: exclusive
-    mount: /srv/slot/ws
+    mount: /srv/slot
   agent-session:
     block: actors
+    in: workstation
     kind: agent
     external: true
     reach:
@@ -121,7 +148,7 @@ links:
 - from: agent-session
   to: slot-daemon
   carries: job
-  protocol: unix
+  to_port: jobs
 - from: operator
   to: slot-daemon
   carries: view
@@ -133,14 +160,19 @@ links:
 - from: agent-session
   to: node-daemon
   carries: tree
-  protocol: rsync
+  protocol: ssh
+  data: push
 - from: node-daemon
   to: agent-session
   carries: products
-  protocol: rsync
+  protocol: ssh
+  data: pull
 - from: slot-daemon
   to: sccache
   carries: compile
   protocol: tcp
+parity:
+  scopes: [workstation, build-node]
+  facts: [rustc_commit, rust_targets, rust_components, go_version, node_version]
 border:
 - slot-daemon
