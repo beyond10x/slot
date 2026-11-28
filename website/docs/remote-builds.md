@@ -69,17 +69,21 @@ current directory.
    16-character id. Each worktree has its own root and therefore its own id, so parallel worktrees
    never share a mirror on the server.
 2. **Sync.** rsync copies the repository to `<host>:<SLOT_WSROOT>/<id>/` with `--delete` and
-   excludes for `.git`, the toolchain's output directories (`/target/`) and cargo's build
-   directories: `<dir>/target/` beside every `Cargo.toml`, and any directory named `target` that
-   holds `CACHEDIR.TAG` or `.rustc_info.json`. What git ignores is sent too (generated files,
-   `node_modules`), and uncommitted changes are included. While another remote job of the same
-   tree runs on the workstation, the sync drops `--delete`, so it removes nothing that job wrote
-   on the server; it prints `slot: sync keeps the server's extra files: job of pid <n> runs in
-   this tree`. An upload holds one of `SLOT_UPLOAD_SLOTS` (3) slots of the workstation, and
-   waits for one within `SLOT_SYNC_LIMIT`; it is sent compressed at most at
-   `SLOT_UPLOAD_BWLIMIT` (2000 KiB/s), so three at once stay under about 50 Mbit/s. rsync
-   compares every file by its
-   content (`--checksum`), not by size and modification time, so a file changed at the same size
+   excludes for `.git`, the toolchain's output directories (`/target`) and cargo's build
+   directories: `<dir>/target` beside every `Cargo.toml`, and any directory named `target` that
+   holds `CACHEDIR.TAG` or `.rustc_info.json`. By default every `.gitignore` applies too, so an
+   ignored file (`.env`, a local settings file, a nested checkout) stays on the workstation. With
+   `SLOT_SYNC_IGNORED=1` what git ignores is sent as well (generated files, `node_modules`) and
+   only the excludes above leave files out. Uncommitted changes are included in both modes.
+   While another remote job of the same tree runs on the workstation, the sync deletes on the
+   server only the paths the previous sync of this mirror sent that are gone here, and keeps
+   everything else, so it removes nothing that job wrote; it prints `slot: sync keeps the
+   server's extra files: job of pid <n> runs in this tree (<k> file(s) gone here deleted
+   there)`. An upload holds one of `SLOT_UPLOAD_SLOTS` (3) slots of the workstation and waits
+   at most `SLOT_SYNC_LIMIT` for one; that wait counts against neither the sync's
+   `SLOT_SYNC_LIMIT` nor `SLOT_SYNC_STALL`, which start with rsync. It is sent compressed at
+   most at `SLOT_UPLOAD_BWLIMIT` (2000 KiB/s), so three at once stay under about 50 Mbit/s.
+   rsync compares every file by its content (`--checksum`), not by size and modification time, so a file changed at the same size
    and time is sent too; this reads every file on both sides on each sync. The mirror does not
    take the workstation's modification times (`--no-times`): a file whose content changed gets
    the server's time of the sync, and a file whose content did not change keeps the time it has
@@ -700,8 +704,11 @@ The job then runs as on a CI runner, with everything at the workstation's paths:
   `CARGO_BUILD_TARGET_DIR` either, also not one of the server daemon's own environment. A
   server whose own cargo configuration sets `build.target-dir` would build elsewhere than the
   record says: keep it off the server.
-- A working directory the sync leaves out, such as `target/scratch/cli` or another git-ignored
-  directory, is synced on its own, without its `target/` and its cargo build directories.
+- A working directory the sync leaves out is synced on its own, without its `target` and its
+  cargo build directories: one inside a cargo build directory or a toolchain output directory,
+  such as `target/scratch/cli`, in both modes, and a git-ignored one in the default mode only
+  (with `SLOT_SYNC_IGNORED=1` the tree's sync sends it already). While another remote job of the
+  same tree runs, that sync deletes only the paths gone here, as the tree's sync does.
 - A directory outside any git checkout (a scratch copy) is the tree itself, unless it is the
   same-path root or above it, lies directly under the same-path root, or holds a repository
   within two levels (`a/.git`, `a/b/.git`). Such a job does not run: `slot: remote build on

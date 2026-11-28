@@ -187,11 +187,6 @@ fn a_directory_brings_back_the_files_the_build_wrote_and_no_other() {
     let d = Daemon::start();
     let t = tempfile::tempdir().unwrap();
     let repo = go_module(t.path());
-    // `target/` beside a `Cargo.toml` is a cargo build directory: the sync
-    // leaves it out, so what a job wrote there stays on the node. Any other
-    // directory, git-ignored or not, is synced and loses what only the node
-    // has.
-    std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
     let ssh = forced_ssh(t.path(), &d, "");
     let go = standin_go(t.path(), 0);
     let go = go.to_str().unwrap();
@@ -318,7 +313,7 @@ fn a_symlinked_directory_on_the_output_path_stays_a_symlink() {
     let d = Daemon::start();
     let t = tempfile::tempdir().unwrap();
     let repo = go_module(t.path());
-    // Git ignores the link; the sync sends it all the same, as a link.
+    // `/out` without the slash: the sync leaves the link out too.
     std::fs::write(repo.join(".gitignore"), "/target/\n/out\n").unwrap();
     let elsewhere = t.path().join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
@@ -341,8 +336,8 @@ fn a_symlinked_directory_on_the_output_path_stays_a_symlink() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(
-        node_mirror(&d).join("out").is_symlink(),
-        "the ignored link reached the node as a link"
+        !node_mirror(&d).join("out").is_symlink(),
+        "the link was not synced"
     );
     assert!(
         std::fs::symlink_metadata(repo.join("out"))

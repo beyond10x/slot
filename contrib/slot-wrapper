@@ -12,8 +12,9 @@
 # - `--local`: the job runs here, outside the node.
 # - after a node job, the client copies back what the job wrote and deletes here what it deleted
 #   (SLOT_RETURN_SYNC, on unless the caller set it to 0).
-# - the sync itself (what is sent, the upload cap and slots, no --delete while another job of the
-#   same tree runs) is the client's: no rsync wrapper goes on PATH.
+# - the sync itself (what is sent, the upload cap and slots, which files it deletes while another
+#   job of the same tree runs) is the client's: no rsync wrapper goes on PATH. SLOT_SYNC_IGNORED=1
+#   (a caller's 0 wins) sends ignored files too.
 # A caller started without HOME (a runner that clears the environment) gets the user's home from
 # the passwd entry, for this script and for the job.
 if [ -z "${HOME:-}" ]; then
@@ -363,6 +364,11 @@ fi
 # is on by default; a caller's SLOT_RETURN_SYNC=0 turns it off.
 SLOT_RETURN_SYNC=${SLOT_RETURN_SYNC:-1}
 export SLOT_RETURN_SYNC
+# The node builds what this host builds: the sync sends ignored files too (generated sources, a
+# local config the build reads) and leaves out only cargo build directories. The client's default
+# applies every .gitignore; a caller's SLOT_SYNC_IGNORED=0 keeps it.
+SLOT_SYNC_IGNORED=${SLOT_SYNC_IGNORED:-1}
+export SLOT_SYNC_IGNORED
 exec 3<&0
 "$real" "$@" <&3 3<&- &
 pid=$!

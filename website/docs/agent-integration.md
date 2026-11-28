@@ -104,8 +104,10 @@ its helpers `tree-cd.sh`, `env-names.sh` and `refusal-log.sh` in `~/.local/share
   variables go along (`SLOT_ENV`) except this session's and credential-like ones; the return
   sync stays on unless the caller set `SLOT_RETURN_SYNC=0`.
 
-The sync itself is the client's: what is sent, the upload slots and cap, and no `--delete` while
-another job of the tree runs. No `rsync` wrapper goes on `PATH`.
+The sync itself is the client's: what is sent, the upload slots and cap, and which files it
+deletes while another job of the tree runs. The wrapper sets `SLOT_SYNC_IGNORED=1` (a caller's
+`0` wins), so a node gets what git ignores too and only cargo build directories stay here. No
+`rsync` wrapper goes on `PATH`.
 
 ## Builds in a sandbox: the gate
 

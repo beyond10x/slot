@@ -34,7 +34,7 @@ How a tool shares the pool depends on whether it speaks the jobserver protocol:
   `CARGO_TARGET_DIR=<cache-root>/target/<workspace-id>`.
 - **Crosses to a remote server:** `CARGO_*` except `CARGO_TARGET_DIR`, `CARGO_HOME` and
   `CARGO_BUILD_JOBS`; `RUST*`; `NEXTEST_*`; `INSTA_*`; `SQLX_OFFLINE`.
-- **Not synced:** `/target/`.
+- **Not synced:** `/target`, a directory or a link.
 - **Known, not slot's:** `cargo nextest run --stress-count N` (cargo-nextest 0.9.143) exits by
   its last iteration only: a test that fails in iteration 1 of 3 and passes after gives exit 0;
   one that fails in iteration 3 of 3 gives exit 100. Read 2026-11-25, the same with and without
@@ -51,7 +51,7 @@ How a tool shares the pool depends on whether it speaks the jobserver protocol:
   shared by all workspaces (the Go build cache is safe for concurrent use).
 - **Crosses to a remote server:** `GO*` except `GOCACHE`, `GOPATH`, `GOROOT`, `GOMODCACHE` and
   `GOTMPDIR`; `CGO_ENABLED`.
-- **Not synced:** nothing beyond `.gitignore` and `.git`.
+- **Not synced:** nothing beyond what every sync leaves out (`.git`, cargo build directories, and by default what `.gitignore` names).
 
 ```shell-session
 $ slot go env GOFLAGS
@@ -87,7 +87,7 @@ it.
   read it as the default of `--jobs`; older versions run one test job per core); the test-thread
   variables as for `other`.
 - **Crosses to a remote server:** `IGNITE_*` and the rust list.
-- **Not synced:** `/target/`.
+- **Not synced:** `/target`, a directory or a link.
 
 ## Width on a node
 
@@ -114,7 +114,7 @@ record carries the width as `width`.
   `slot serve --test-threads`, unless already set, so test binaries and go commands inside a
   wrapper are capped too. In remote mode, `CARGO_TARGET_DIR` and `GOCACHE` as for rust and go.
 - **Crosses to a remote server:** the union of the rust and go lists.
-- **Not synced:** `/target/`.
+- **Not synced:** `/target`, a directory or a link.
 
 go reads `GOMAXPROCS` for its default `-p`, so `slot task check` that runs `go test` uses
 `--test-threads` cores rather than all of them, while the wrapper holds one slot. Call

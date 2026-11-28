@@ -6,7 +6,7 @@
 # in for the real slot, git, rustup and rsync. Nothing is built. Run from the repository root.
 set -u
 # A run inside a slot job (SLOT_JOB) or with a node named (SLOT_HOST) would skip the wrapper.
-unset SLOT_JOB SLOT_HOST SLOT_RETURN_SYNC SLOT_SHIM_PID
+unset SLOT_JOB SLOT_HOST SLOT_RETURN_SYNC SLOT_SYNC_IGNORED SLOT_SHIM_PID
 src=${1:-contrib}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
@@ -35,6 +35,7 @@ fi
   echo "host=${SLOT_HOST:-}"
   echo "reason=${SLOT_LOCAL_REASON:-}"
   echo "return=${SLOT_RETURN_SYNC:-}"
+  echo "ignored=${SLOT_SYNC_IGNORED:-}"
   echo "shimpid=${SLOT_SHIM_PID:-}"
   echo "env=${SLOT_ENV:-}"
   echo "path=$PATH"
@@ -104,7 +105,7 @@ run() {
   rm -f "$T/ran"
   d=$1
   shift
-  out=$(cd "$d" && env -u SLOT_HOST -u SLOT_JOB -u SLOT_RETURN_SYNC -u SLOT_SHIM_PID \
+  out=$(cd "$d" && env -u SLOT_HOST -u SLOT_JOB -u SLOT_RETURN_SYNC -u SLOT_SYNC_IGNORED -u SLOT_SHIM_PID \
     SLOT_PARITY_WAIT_S=1 SLOT_PARITY_POLL_S=1 SLOT_HOLD_POLL_S=1 "$W" "$@" 2>&1)
   rc=$?
 }
@@ -128,6 +129,7 @@ unset FOO_SETTING SECRET_TOKEN
   ok "route: the job goes to the node the route names" || bad "route: rc=$rc $out"
 ran "return=1" && ran "shimpid=" &&
   ok "return sync: on, and no wrapper mark turns the client's off" || bad "return sync: $(cat "$T/ran")"
+ran "ignored=1" && ok "sync: ignored files go to the node" || bad "sync ignored: $(cat "$T/ran")"
 { grep -q '^env=.*FOO_SETTING' "$T/ran" && ! grep -q '^env=.*SECRET_TOKEN' "$T/ran" &&
   ! grep -Eq '^env=(.*,)?(PATH|HOME)(,|$)' "$T/ran"; } &&
   ok "env-names: the job's variables go along, credentials and session ones do not" ||
@@ -138,6 +140,9 @@ ran "return=1" && ran "shimpid=" &&
 rm -f "$T/ran"
 (cd "$repo" && env -u SLOT_HOST -u SLOT_JOB SLOT_RETURN_SYNC=0 "$W" cargo build > /dev/null 2>&1)
 ran "return=0" && ok "return sync: a caller's 0 turns it off" || bad "return sync off: $(cat "$T/ran")"
+rm -f "$T/ran"
+(cd "$repo" && env -u SLOT_HOST -u SLOT_JOB SLOT_SYNC_IGNORED=0 "$W" cargo build > /dev/null 2>&1)
+ran "ignored=0" && ok "sync: a caller's 0 keeps every .gitignore" || bad "sync ignored off: $(cat "$T/ran")"
 
 # No route: refused with exit 3, logged.
 rm -f "$T/route"

@@ -111,10 +111,12 @@ was partly outside it; S1 and S1a are closed:
   `contrib/` (`.github/workflows/release.yml`, test
   `every_release_archive_carries_the_workstation_and_node_files`).
 - S1a, closed. The `rsync` wrapper's filters are the client's (`crates/slot/src/sync.rs`): the
-  sync sends what git ignores and leaves out only cargo build directories (`<dir>/target/` beside
-  each `Cargo.toml`, and any `target` directory holding `CACHEDIR.TAG` or `.rustc_info.json`);
-  it drops `--delete` while another job of the same tree runs on the workstation (a registry of
-  running jobs in the runtime directory); an upload holds one of `SLOT_UPLOAD_SLOTS` (3) slots
+  sync always leaves out cargo build directories (`<dir>/target` beside each `Cargo.toml`, and
+  any `target` directory holding `CACHEDIR.TAG` or `.rustc_info.json`); it applies every
+  `.gitignore` unless `SLOT_SYNC_IGNORED=1`, which `contrib/slot-wrapper` sets so a node gets
+  what git ignores too; while another job of the same tree runs on the workstation it deletes
+  only the paths its previous sync sent that are gone here (a registry of running jobs in the
+  runtime directory, a list of sent paths per mirror); an upload holds one of `SLOT_UPLOAD_SLOTS` (3) slots
   and runs under `SLOT_UPLOAD_BWLIMIT` (2000 KiB/s, compressed). No `rsync` wrapper is needed on
   `PATH`; the repository's sync is the deployed sync.
 - S2. The node registry (`cluster.toml`) is written by hand; with gap A it comes from weft's node
