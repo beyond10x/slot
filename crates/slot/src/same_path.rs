@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 /// How one extra path is synced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A directory with the `.gitignore` filter, without its own `target/`.
+    /// A directory without its own `target/` and its cargo build directories.
     Tree,
     /// A git directory: everything but `*.lock` files.
     Git,
@@ -280,7 +280,7 @@ pub fn target_dir(
 /// rsync filter options of a sync of `kind`.
 pub fn filters(kind: Kind) -> &'static [&'static str] {
     match kind {
-        Kind::Tree => &["--filter=:- .gitignore", "--exclude=/target/"],
+        Kind::Tree => &["--exclude=/target/"],
         Kind::Git => &["--exclude=*.lock"],
     }
 }

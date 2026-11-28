@@ -115,7 +115,9 @@ pub struct Settings {
     /// [`NOT_RUN`].
     pub fallback: bool,
     /// `SLOT_SYNC_STALL` and `SLOT_SYNC_LIMIT`: when a remote sync is
-    /// killed and the job runs on this machine's daemon instead.
+    /// killed and the job runs on this machine's daemon instead;
+    /// `SLOT_UPLOAD_BWLIMIT` and `SLOT_UPLOAD_SLOTS`: the cap of an upload
+    /// and how many run at once.
     pub sync: sync::Bounds,
     /// `SLOT_REMOTE_SAME_PATH` set and not `0`: the server mirrors the
     /// tree at its absolute path here, and the job runs there.
@@ -265,6 +267,11 @@ impl Settings {
             sync: sync::Bounds {
                 stall: duration_var("SLOT_SYNC_STALL", sync::DEFAULT_STALL),
                 limit: duration_var("SLOT_SYNC_LIMIT", sync::DEFAULT_LIMIT),
+                bwlimit: sync::count_of(var(sync::BWLIMIT_ENV).as_deref(), sync::DEFAULT_BWLIMIT),
+                upload_slots: sync::count_of(
+                    var(sync::UPLOAD_SLOTS_ENV).as_deref(),
+                    sync::DEFAULT_UPLOAD_SLOTS,
+                ),
             },
             node_wait: NodeWait {
                 // Only the daemon's own client of a handed job skips the
@@ -391,6 +398,12 @@ pub fn run(argv: &[String], s: &Settings) -> i32 {
         // The tree is synced once; the request is sent until the server's
         // daemon answers, each time with a collector of its own.
         let mut collector = None;
+        // While this job runs, a sync of the same tree by another job
+        // deletes nothing this one wrote on the node.
+        let _tree_job = top
+            .as_deref()
+            .zip(sync::tree_jobs_dir())
+            .and_then(|(top, dir)| sync::TreeJob::register(&dir, top));
         let sent = remote(host, top.as_deref(), &cwd, &declared, &mut req, s).and_then(|files| {
             sent_files = files;
             if let Some(top) = top.as_deref().filter(|_| s.return_sync && !s.warm) {
@@ -1384,7 +1397,15 @@ fn remote(
         same_path,
     };
     let t0 = Instant::now();
-    let synced = sync::sync(top, &id, tc.sync_excludes(), &target, &s.sync)?;
+    let jobs = sync::tree_jobs_dir();
+    let synced = sync::sync(
+        top,
+        &id,
+        tc.sync_excludes(),
+        &target,
+        &s.sync,
+        jobs.as_deref(),
+    )?;
     eprintln!("{}", synced.line(host));
     // Where the job builds, for the record, eviction and the products; and
     // whether cargo finds that directory by itself, so the server need not

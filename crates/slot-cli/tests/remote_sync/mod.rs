@@ -148,6 +148,9 @@ fn remote_command(
         .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
         .env("XDG_CONFIG_HOME", d.dir.path().join("config"))
         .env("SLOT_CLUSTER_FILE", "off")
+        // The host's upload slots are not a test's; a test may set its own.
+        .env("SLOT_UPLOAD_SLOTS", "0")
+        .env("SLOT_UPLOAD_BWLIMIT", "0")
         .envs(env.iter().copied())
         .current_dir(cwd)
         .env("SLOT_HOST", "node")
@@ -202,6 +205,40 @@ fn a_new_worktree_sends_only_what_differs_from_its_sibling_mirror() {
     );
     assert!(err.contains("1 sibling mirror as base"), "{err}");
     eprintln!("first sync {full} bytes, the sibling's first sync {seeded} bytes, tree {tree}");
+}
+
+/// An upload under the cap (`SLOT_UPLOAD_BWLIMIT`) is compressed, and the
+/// node's `slot shell` admits it.
+#[test]
+fn a_capped_upload_is_compressed_and_admitted_by_the_node() {
+    let d = Daemon::start();
+    let t = tempfile::tempdir().unwrap();
+    let (a, _) = repository(t.path());
+    let ssh = forced_ssh(t.path(), &d, "");
+    let out = remote_call_env(
+        &d,
+        &ssh,
+        &a,
+        &["wc", "-c", "f00.bin"],
+        &[("SLOT_UPLOAD_BWLIMIT", "20000")],
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{FILE_BYTES} f00.bin\n"),
+        "{err}"
+    );
+    let log = std::fs::read_to_string(t.path().join("ssh.log")).unwrap();
+    let sync = log
+        .lines()
+        .find(|l| l.starts_with("rsync --server ") && l.contains("--delete"))
+        .unwrap_or_else(|| panic!("no sync in {log}"));
+    let flags = sync.split_whitespace().nth(2).unwrap_or("");
+    assert!(
+        flags.split('.').next().unwrap_or("").contains('z'),
+        "{sync}"
+    );
 }
 
 /// Writes `content` to `path` and gives it modification time `mtime`.
@@ -529,6 +566,8 @@ fn remote_cargo_env(
         .env("SLOT_SOCKET", d.socket())
         .env("SLOT_SYNC_STALL", "20s")
         .env("SLOT_SYNC_LIMIT", "50s")
+        .env("SLOT_UPLOAD_SLOTS", "0")
+        .env("SLOT_UPLOAD_BWLIMIT", "0")
         .env_remove("SLOT_JOB")
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET")
@@ -978,6 +1017,8 @@ fn a_same_path_cargo_build_uses_the_clients_target_dir() {
             .env("SLOT_REMOTE_SAME_PATH_ROOT", temp_root())
             .env("SLOT_SYNC_STALL", "20s")
             .env("SLOT_SYNC_LIMIT", "50s")
+            .env("SLOT_UPLOAD_SLOTS", "0")
+            .env("SLOT_UPLOAD_BWLIMIT", "0")
             .env_remove("SLOT_JOB")
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("CARGO_BUILD_TARGET_DIR")
