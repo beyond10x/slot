@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `task architecture` generates the systemd units of both scopes from slot's cloudspec
+  architecture (`docs/design/cloudspec/slot.architecture.yaml`, cloudspec 59129eb or later) and
+  compares the workstation's with `contrib/slot.service` and
+  `contrib/slot-toolchains-refresh@.service` key by key (`contrib/unit-keys.sh`, tested by
+  `contrib/unit-keys.test.sh` in `task check`).
+
 ## 0.44.0 — 2026-11-28
 
 - Remote mode: every sync leaves out cargo's build directories: `<dir>/target` beside every
