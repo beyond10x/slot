@@ -53,6 +53,19 @@ generator, with ports the process binds itself and paths under the deployer's ho
 directory) is in progress there; the socket, FIFO and home paths in the file are placeholders
 until it lands.
 
+State on cloudspec `f573374`: slot's API is a contract of cloudspec's `ci` pack
+(`contracts/ci/job_runner.yaml`, `cloudspec-contract/1`), not one of slot's own: a hosted CI
+service or a runner farm plays the same contract. The local daemon `provides` `job_runner` on its
+`jobs` port with the guarantees `exit_code: passed_unchanged`, `did_not_run_code: reserved`,
+`run_limit: named_maximum`, `queue_order: priority`, `placement: remote_only_when_asked` and
+`toolchain_parity: checked_before_remote`; the node daemon provides it with `placement: local`;
+the compile cache server provides `compile_cache`, which the local daemon needs. slot's ESS
+domain `slot.pool` (`spec/domains/pool.yaml`) is the binding's side of `job_runner`. The
+systemd units generated from this file do not yet equal `contrib/slot.service` and the node's
+unit; the differences went to cloudspec as eight generator gaps (`${home}` in a command, claims
+as cgroup ceilings, the stop and kill mode, a system unit with a build user, a template unit per
+node, a pass-through in the binding) and are in progress there.
+
 ## 3. Gaps in cloudspec
 
 Sent to cloudspec on 2026-11-28 to implement.
