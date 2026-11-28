@@ -967,7 +967,10 @@ fn every_release_archive_carries_the_workstation_and_node_files() {
             copied.contains(&want),
             "release.yml, package step: copies {want} into the archive (copied: {copied:?})"
         );
-        assert!(root().join(want).exists(), "{want} exists in the repository");
+        assert!(
+            root().join(want).exists(),
+            "{want} exists in the repository"
+        );
     }
     assert!(
         pack.contains("dist/$package/contrib/"),
