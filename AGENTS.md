@@ -405,6 +405,10 @@ Open, one line each, with where the design lives. A session starts with (e).
   instance size it was halved, not read (2026-11-24):
   `story:a-nodes-price-is-read-from-the-provider`. The resize procedure is in
   `contrib/node/README.md` § A change of instance size.
+- (ae) Goal: slot deployable from a cloudspec architecture, with weft as the runtime. Design,
+  architecture and gaps: `docs/design/cloudspec/`. cloudspec gaps 1 to 12 and weft gaps A to C
+  are those repositories' work; slot's first gap is
+  `story:the-node-wrapper-ships-in-the-repository`.
 
 ## Never
 

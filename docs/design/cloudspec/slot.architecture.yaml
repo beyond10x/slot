@@ -1,0 +1,146 @@
+format: cloudspec-architecture/1
+architecture: slot
+summary: One shared pool of build slots on a workstation; agent sessions submit build jobs over a unix socket; the daemon queues them on one jobserver and runs them here or on a cloud build node, syncing the tree there over ssh and copying what the job wrote back.
+parts:
+  workstation:
+    block: scope
+  build-node:
+    block: scope
+  slot-daemon:
+    block: workloads
+    kind: service
+    in: workstation
+    replicas: 1
+    image: slot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    claims:
+      cpu_millis: 500
+      memory_mib: 256
+    isolation: none
+    ports:
+    - port: 7411
+      bind: loopback
+      name: web
+      protocol: http
+    checks:
+      ready:
+        kind: http
+        path: /api/state
+        port: 7411
+    secrets: []
+    egress:
+    - name: build-node-ssh
+      to: node-daemon
+      carries: job
+      link: slot-daemon -> node-daemon carries job
+  node-daemon:
+    block: workloads
+    kind: service
+    in: build-node
+    replicas: 1
+    image: slot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+    claims:
+      cpu_millis: 32000
+      memory_mib: 65536
+    isolation: none
+    ports:
+    - port: 22
+      bind: all
+      name: ssh
+      protocol: ssh
+    checks:
+      ready:
+        kind: exec
+        command: [slot, status]
+        port: 22
+    secrets: []
+    egress:
+    - name: crates.io:443
+  sccache:
+    block: workloads
+    kind: service
+    in: workstation
+    replicas: 1
+    image: sccache@sha256:2222222222222222222222222222222222222222222222222222222222222222
+    claims:
+      cpu_millis: 1000
+      memory_mib: 1024
+    isolation: none
+    ports:
+    - port: 4226
+      bind: loopback
+      name: cache
+      protocol: tcp
+    checks:
+      ready:
+        kind: exec
+        command: [sccache, --show-stats]
+        port: 4226
+    secrets: []
+    egress: []
+  toolchain-refresh:
+    block: workloads
+    kind: agent
+    shape: schedule
+    calendar: "*:*:00"
+    in: workstation
+    package:
+      agent:
+        digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
+        document: toolchains-refresh
+      runtime:
+        image: slot@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  state:
+    block: resources
+    kind: volume
+    per: slot-daemon
+    access: read_write_once
+    size: 10Gi
+    sharing: exclusive
+    mount: /var/lib/slot
+  mirrors:
+    block: resources
+    kind: volume
+    per: node-daemon
+    access: read_write_once
+    size: 500Gi
+    sharing: exclusive
+    mount: /srv/slot/ws
+  agent-session:
+    block: actors
+    kind: agent
+    external: true
+    reach:
+      name: agent-session
+  operator:
+    block: actors
+    kind: human
+    external: true
+    reach:
+      name: operator
+links:
+- from: agent-session
+  to: slot-daemon
+  carries: job
+  protocol: unix
+- from: operator
+  to: slot-daemon
+  carries: view
+  protocol: http
+- from: slot-daemon
+  to: node-daemon
+  carries: job
+  protocol: ssh
+- from: agent-session
+  to: node-daemon
+  carries: tree
+  protocol: rsync
+- from: node-daemon
+  to: agent-session
+  carries: products
+  protocol: rsync
+- from: slot-daemon
+  to: sccache
+  carries: compile
+  protocol: tcp
+border:
+- slot-daemon
